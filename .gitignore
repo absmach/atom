@@ -1,0 +1,22 @@
+# Rust build output
+/target/
+
+# Environment files — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# SQLx offline query cache (commit this if you use `cargo sqlx prepare`)
+# .sqlx/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

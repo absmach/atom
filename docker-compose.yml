@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: atom
+      POSTGRES_PASSWORD: atom
+      POSTGRES_DB: atom
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atom"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  atom:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://atom:atom@postgres:5432/atom
+      LISTEN_ADDR: 0.0.0.0:8080
+      JWT_SECRET: change-me-in-production
+      JWT_EXPIRY_SECS: 3600
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:
