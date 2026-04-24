@@ -12,6 +12,7 @@ use crate::{
     auth::{encode_jwt, make_api_key},
     config::Config,
     error::{db_err, AppError},
+    keys::LoadedKey,
     models::{
         enums::{AuditOutcome, CredentialKind, CredentialStatus},
         session::LoginResponse,
@@ -37,10 +38,11 @@ pub fn verify_secret(secret: &[u8], hash: &str) -> bool {
 pub async fn login_password(
     pool: &PgPool,
     cfg: &Config,
+    primary_key: &LoadedKey,
     identifier: &str,
     secret: &str,
 ) -> Result<LoginResponse, AppError> {
-    let result = do_login_password(pool, cfg, identifier, secret).await;
+    let result = do_login_password(pool, cfg, primary_key, identifier, secret).await;
 
     let (entity_id_opt, outcome) = match &result {
         Ok(r) => (Some(r.entity_id), AuditOutcome::Allow),
@@ -63,6 +65,7 @@ pub async fn login_password(
 async fn do_login_password(
     pool: &PgPool,
     cfg: &Config,
+    primary_key: &LoadedKey,
     identifier: &str,
     secret: &str,
 ) -> Result<LoginResponse, AppError> {
@@ -108,8 +111,7 @@ async fn do_login_password(
     }
 
     let session = super::repo::create_session(pool, entity_id, cfg.jwt_expiry_secs).await?;
-    let token =
-        encode_jwt(entity_id, session.id, tenant_id, &cfg.jwt_secret, cfg.jwt_expiry_secs)?;
+    let token = encode_jwt(entity_id, session.id, tenant_id, primary_key, cfg.jwt_expiry_secs)?;
 
     Ok(LoginResponse {
         token,

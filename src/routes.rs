@@ -10,6 +10,7 @@ use tower_http::{
 use crate::{
     authz::handlers as authz,
     identity::handlers as identity,
+    keys,
     state::AppState,
 };
 
@@ -20,12 +21,15 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers(Any);
 
     Router::new()
+        // JWKS — unauthenticated, consumed by external verifiers
+        .route("/.well-known/jwks.json", get(keys::jwks))
         // Health
         .route("/health", get(identity::health))
         // Auth
         .route("/auth/login", post(identity::login))
         .route("/auth/logout", post(identity::logout))
         .route("/auth/sessions/:id", get(identity::get_session))
+        .route("/auth/keys/rotate", post(keys::rotate_keys))
         // Entities
         .route("/entities", get(identity::list_entities).post(identity::create_entity))
         .route(

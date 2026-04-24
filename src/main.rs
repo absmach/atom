@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod error;
 mod identity;
+mod keys;
 mod models;
 mod routes;
 mod state;
@@ -30,7 +31,10 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_admin_credentials(&pool, cfg.admin_entity_id, secret).await?;
     }
 
-    let state = state::AppState::new(pool, cfg.clone());
+    keys::bootstrap_if_needed(&pool).await?;
+    let active_keys = keys::load_active_keys(&pool).await?;
+
+    let state = state::AppState::new(pool, cfg.clone(), active_keys);
     let app = routes::create_router(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;

@@ -41,9 +41,11 @@ pub async fn login(
     use crate::models::enums::CredentialKind;
     match req.kind {
         CredentialKind::Password => {
+            let keys = state.keys.read().await;
             let resp = service::login_password(
                 &state.pool,
                 &state.config,
+                &keys.primary,
                 &req.identifier,
                 &req.secret,
             )

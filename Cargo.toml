@@ -28,6 +28,8 @@ anyhow = "1"
 dotenvy = "0.15"
 rand = "0.8"
 hex = "0.4"
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
+base64 = "0.22"
 
 [dev-dependencies]
 insta = "1"

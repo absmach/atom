@@ -4,13 +4,14 @@ use axum::{
     http::{header, request::Parts},
 };
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
     error::{db_err, AppError},
+    keys::{ActiveKeys, LoadedKey},
     models::enums::{CredentialKind, CredentialStatus},
     state::AppState,
 };
@@ -37,13 +38,21 @@ pub struct AuthContext {
 #[allow(dead_code)]
 pub struct RequireManage(pub AuthContext);
 
+// ─── JWT ──────────────────────────────────────────────────────────────────────
+
 pub fn encode_jwt(
     entity_id: Uuid,
     session_id: Uuid,
     tenant_id: Option<Uuid>,
-    secret: &str,
+    primary: &LoadedKey,
     expiry_secs: u64,
 ) -> Result<String, AppError> {
+    let header = Header {
+        alg: Algorithm::ES256,
+        kid: Some(primary.kid.clone()),
+        ..Header::default()
+    };
+
     let now = Utc::now().timestamp() as usize;
     let claims = Claims {
         sub: entity_id.to_string(),
@@ -52,25 +61,39 @@ pub fn encode_jwt(
         iat: now,
         exp: now + expiry_secs as usize,
     };
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|e| AppError::bad_request(format!("jwt encode error: {e}")))
+
+    let encoding_key = EncodingKey::from_ec_pem(primary.private_key_pem.as_bytes())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))?;
+
+    encode(&header, &claims, &encoding_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))
 }
 
-fn decode_jwt(token: &str, secret: &str) -> Result<Claims, AppError> {
-    decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )
-    .map(|d| d.claims)
-    .map_err(|e| AppError::unauthorized(format!("invalid token: {e}")))
+fn decode_jwt(token: &str, keys: &ActiveKeys) -> Result<Claims, AppError> {
+    let header =
+        decode_header(token).map_err(|e| AppError::unauthorized(format!("invalid token: {e}")))?;
+
+    let kid = header
+        .kid
+        .ok_or_else(|| AppError::unauthorized("token missing kid claim"))?;
+
+    let key = keys
+        .key_for(&kid)
+        .ok_or_else(|| AppError::unauthorized("token signed with unknown or retired key"))?;
+
+    let decoding_key = DecodingKey::from_ec_pem(key.public_key_pem.as_bytes())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("decode key parse: {e}")))?;
+
+    let mut validation = Validation::new(Algorithm::ES256);
+    validation.validate_exp = true;
+
+    decode::<Claims>(token, &decoding_key, &validation)
+        .map(|d| d.claims)
+        .map_err(|e| AppError::unauthorized(format!("invalid token: {e}")))
 }
 
-// API key format: atom_<32-hex-cred-id>_<64-hex-secret>
+// ─── API key ──────────────────────────────────────────────────────────────────
+
 pub fn make_api_key(cred_id: Uuid, secret_bytes: &[u8; 32]) -> String {
     let id_hex = hex::encode(cred_id.as_bytes());
     let secret_hex = hex::encode(secret_bytes);
@@ -95,6 +118,8 @@ fn parse_api_key(key: &str) -> Option<(Uuid, [u8; 32])> {
     Some((cred_id, secret))
 }
 
+// ─── Token dispatch ───────────────────────────────────────────────────────────
+
 async fn auth_from_token(state: &AppState, token: &str) -> Result<AuthContext, AppError> {
     if token.starts_with("atom_") {
         return auth_from_api_key(state, token).await;
@@ -103,7 +128,9 @@ async fn auth_from_token(state: &AppState, token: &str) -> Result<AuthContext, A
 }
 
 async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, AppError> {
-    let claims = decode_jwt(token, &state.config.jwt_secret)?;
+    let keys = state.keys.read().await;
+    let claims = decode_jwt(token, &keys)?;
+    drop(keys);
 
     let entity_id: Uuid = claims
         .sub
@@ -211,8 +238,9 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     })
 }
 
-/// Returns true if `entity_id` holds an allow policy with scope=all that
-/// covers the `manage` capability (directly or via a role).
+// ─── Admin authorization ──────────────────────────────────────────────────────
+
+/// Returns true if `entity_id` holds an allow+scope=all binding covering `manage`.
 pub async fn has_global_manage(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppError> {
     sqlx::query_scalar(
         r#"SELECT EXISTS (
@@ -243,6 +271,8 @@ pub async fn has_global_manage(pool: &PgPool, entity_id: Uuid) -> Result<bool, A
     .await
     .map_err(db_err)
 }
+
+// ─── Axum extractors ──────────────────────────────────────────────────────────
 
 #[async_trait]
 impl<S> FromRequestParts<S> for AuthContext
