@@ -30,6 +30,11 @@ rand = "0.8"
 hex = "0.4"
 p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 base64 = "0.22"
+tonic = "0.12"
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"
 
 [dev-dependencies]
 insta = "1"

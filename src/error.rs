@@ -68,6 +68,26 @@ impl IntoResponse for AppError {
     }
 }
 
+impl From<AppError> for tonic::Status {
+    fn from(err: AppError) -> Self {
+        match err {
+            AppError::NotFound(msg) => tonic::Status::not_found(msg),
+            AppError::BadRequest(msg) => tonic::Status::invalid_argument(msg),
+            AppError::Unauthorized(msg) => tonic::Status::unauthenticated(msg),
+            AppError::Forbidden => tonic::Status::permission_denied("forbidden"),
+            AppError::Conflict(msg) => tonic::Status::already_exists(msg),
+            AppError::Database(e) => {
+                tracing::error!("db error: {e}");
+                tonic::Status::internal("database error")
+            }
+            AppError::Internal(e) => {
+                tracing::error!("internal error: {e}");
+                tonic::Status::internal("internal error")
+            }
+        }
+    }
+}
+
 pub fn db_err(e: sqlx::Error) -> AppError {
     match e {
         sqlx::Error::RowNotFound => AppError::NotFound("not found".to_string()),

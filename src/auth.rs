@@ -238,6 +238,12 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     })
 }
 
+/// Validate a Bearer token (JWT or API key) and return the authenticated context.
+/// Used by the gRPC layer, which bypasses the Axum extractor.
+pub async fn authenticate_token(state: &AppState, token: &str) -> Result<AuthContext, AppError> {
+    auth_from_token(state, token).await
+}
+
 // ─── Admin authorization ──────────────────────────────────────────────────────
 
 /// Returns true if `entity_id` holds an allow+scope=all binding covering `manage`.

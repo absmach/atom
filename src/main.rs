@@ -4,6 +4,7 @@ mod authz;
 mod config;
 mod db;
 mod error;
+mod grpc;
 mod identity;
 mod keys;
 mod models;
@@ -35,8 +36,17 @@ async fn main() -> anyhow::Result<()> {
     let active_keys = keys::load_active_keys(&pool).await?;
 
     let state = state::AppState::new(pool, cfg.clone(), active_keys);
-    let app = routes::create_router(state);
 
+    // Spawn gRPC server on a separate port; runs concurrently with HTTP.
+    let grpc_addr = cfg.grpc_addr.parse()?;
+    let grpc_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = grpc::serve(grpc_addr, grpc_state).await {
+            tracing::error!("grpc server exited: {e}");
+        }
+    });
+
+    let app = routes::create_router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;
     tracing::info!("atom listening on {}", cfg.listen_addr);
 

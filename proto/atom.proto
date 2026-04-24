@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package atom.v1;
+
+// AuthzService evaluates authorization decisions.
+// Call this on every request to protected downstream resources.
+service AuthzService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+// AuthService validates tokens and returns caller identity.
+// Use this to authenticate incoming requests without decoding JWTs locally.
+service AuthService {
+  rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+}
+
+message CheckRequest {
+  string subject_id  = 1;
+  string action      = 2;  // capability name, e.g. "publish"
+  string resource_id = 3;
+  // Optional ABAC context — flat string key/value pairs injected into the
+  // evaluation context under the "context" key.
+  // Note: only string values are supported over gRPC; use REST for nested JSON.
+  map<string, string> context = 4;
+}
+
+message CheckResponse {
+  bool   allowed = 1;
+  string reason  = 2;
+}
+
+message AuthenticateRequest {
+  // JWT ("eyJ...") or API key ("atom_...") — same as the HTTP Bearer value.
+  string token = 1;
+}
+
+message AuthenticateResponse {
+  string entity_id  = 1;
+  string tenant_id  = 2;  // empty string if entity has no tenant
+  string session_id = 3;  // empty string for API key authentication
+}
