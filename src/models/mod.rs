@@ -1,5 +1,6 @@
 pub mod capability;
 pub mod entity;
+pub mod enums;
 pub mod group;
 pub mod policy;
 pub mod resource;

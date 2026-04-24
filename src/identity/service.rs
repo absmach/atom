@@ -8,10 +8,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
+    audit,
     auth::{encode_jwt, make_api_key},
     config::Config,
     error::{db_err, AppError},
     models::{
+        enums::{AuditOutcome, CredentialKind, CredentialStatus},
         session::LoginResponse,
         token::{ApiKeyResponse, CreateApiKey},
     },
@@ -38,31 +40,59 @@ pub async fn login_password(
     identifier: &str,
     secret: &str,
 ) -> Result<LoginResponse, AppError> {
+    let result = do_login_password(pool, cfg, identifier, secret).await;
+
+    let (entity_id_opt, outcome) = match &result {
+        Ok(r) => (Some(r.entity_id), AuditOutcome::Allow),
+        Err(AppError::Unauthorized(_)) => (None, AuditOutcome::Deny),
+        Err(_) => return result,
+    };
+
+    audit::write(
+        pool,
+        entity_id_opt,
+        "auth.login",
+        outcome,
+        serde_json::json!({"identifier": identifier}),
+    )
+    .await;
+
+    result
+}
+
+async fn do_login_password(
+    pool: &PgPool,
+    cfg: &Config,
+    identifier: &str,
+    secret: &str,
+) -> Result<LoginResponse, AppError> {
     use sqlx::Row;
 
-    let entity_row = sqlx::query(
-        "SELECT id, tenant_id, status FROM entities WHERE name = $1"
-    )
-    .bind(identifier)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::unauthorized("invalid credentials"),
-        other => AppError::Database(other),
-    })?;
+    let entity_row =
+        sqlx::query("SELECT id, tenant_id, status FROM entities WHERE name = $1")
+            .bind(identifier)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::RowNotFound => AppError::unauthorized("invalid credentials"),
+                other => AppError::Database(other),
+            })?;
 
     let entity_id: Uuid = entity_row.try_get("id").map_err(db_err)?;
     let tenant_id: Option<Uuid> = entity_row.try_get("tenant_id").unwrap_or(None);
-    let status: String = entity_row.try_get("status").map_err(db_err)?;
+    let status: crate::models::enums::EntityStatus =
+        entity_row.try_get("status").map_err(db_err)?;
 
-    if status != "active" {
+    if status != crate::models::enums::EntityStatus::Active {
         return Err(AppError::unauthorized("entity is not active"));
     }
 
     let cred_row = sqlx::query(
-        "SELECT secret_hash FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active' LIMIT 1"
+        "SELECT secret_hash FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = $3 LIMIT 1",
     )
     .bind(entity_id)
+    .bind(CredentialKind::Password)
+    .bind(CredentialStatus::Active)
     .fetch_one(pool)
     .await
     .map_err(|e| match e {
@@ -78,7 +108,8 @@ pub async fn login_password(
     }
 
     let session = super::repo::create_session(pool, entity_id, cfg.jwt_expiry_secs).await?;
-    let token = encode_jwt(entity_id, session.id, tenant_id, &cfg.jwt_secret, cfg.jwt_expiry_secs)?;
+    let token =
+        encode_jwt(entity_id, session.id, tenant_id, &cfg.jwt_secret, cfg.jwt_expiry_secs)?;
 
     Ok(LoginResponse {
         token,
@@ -88,19 +119,16 @@ pub async fn login_password(
     })
 }
 
-pub async fn create_password(
-    pool: &PgPool,
-    entity_id: Uuid,
-    password: &str,
-) -> Result<(), AppError> {
+pub async fn create_password(pool: &PgPool, entity_id: Uuid, password: &str) -> Result<(), AppError> {
     let hash = hash_secret(password.as_bytes())?;
     let id = Uuid::new_v4();
 
     sqlx::query(
-        "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)"
+        "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, $3, $4)",
     )
     .bind(id)
     .bind(entity_id)
+    .bind(CredentialKind::Password)
     .bind(hash)
     .execute(pool)
     .await
@@ -126,10 +154,11 @@ pub async fn create_api_key(
 
     sqlx::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, expires_at, metadata)
-           VALUES ($1, $2, 'api_key', $3, $4, $5, $6)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
     )
     .bind(cred_id)
     .bind(entity_id)
+    .bind(CredentialKind::ApiKey)
     .bind(key_prefix)
     .bind(hash)
     .bind(req.expires_at)
@@ -145,12 +174,17 @@ pub async fn create_api_key(
     })
 }
 
-pub async fn revoke_credential(pool: &PgPool, entity_id: Uuid, cred_id: Uuid) -> Result<(), AppError> {
+pub async fn revoke_credential(
+    pool: &PgPool,
+    entity_id: Uuid,
+    cred_id: Uuid,
+) -> Result<(), AppError> {
     let result = sqlx::query(
-        "UPDATE credentials SET status = 'revoked' WHERE id = $1 AND entity_id = $2"
+        "UPDATE credentials SET status = $3 WHERE id = $1 AND entity_id = $2",
     )
     .bind(cred_id)
     .bind(entity_id)
+    .bind(CredentialStatus::Revoked)
     .execute(pool)
     .await
     .map_err(db_err)?;
@@ -160,11 +194,14 @@ pub async fn revoke_credential(pool: &PgPool, entity_id: Uuid, cred_id: Uuid) ->
     Ok(())
 }
 
-pub async fn list_credentials(pool: &PgPool, entity_id: Uuid) -> Result<Vec<CredentialSummary>, AppError> {
+pub async fn list_credentials(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Vec<CredentialSummary>, AppError> {
     use sqlx::Row;
 
     let rows = sqlx::query(
-        "SELECT id, kind, identifier, status, expires_at, created_at FROM credentials WHERE entity_id = $1 ORDER BY created_at DESC"
+        "SELECT id, kind, identifier, status, expires_at, created_at FROM credentials WHERE entity_id = $1 ORDER BY created_at DESC",
     )
     .bind(entity_id)
     .fetch_all(pool)
@@ -189,9 +226,9 @@ pub async fn list_credentials(pool: &PgPool, entity_id: Uuid) -> Result<Vec<Cred
 #[derive(serde::Serialize)]
 pub struct CredentialSummary {
     pub id: Uuid,
-    pub kind: String,
+    pub kind: CredentialKind,
     pub identifier: Option<String>,
-    pub status: String,
+    pub status: CredentialStatus,
     pub expires_at: Option<chrono::DateTime<Utc>>,
     pub created_at: chrono::DateTime<Utc>,
 }

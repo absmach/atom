@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -50,7 +52,7 @@ pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError>
 }
 
 pub async fn list_resources(pool: &PgPool, params: ListResources) -> Result<ResourceList, AppError> {
-    let limit = params.limit.min(100).max(1);
+    let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
 
     let kind = params.kind;
@@ -150,7 +152,7 @@ pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
 }
 
 pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, AppError> {
-    let limit = params.limit.min(100).max(1);
+    let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
 
     let items = sqlx::query_as::<_, Role>(
@@ -324,7 +326,7 @@ pub async fn get_policy(pool: &PgPool, id: Uuid) -> Result<PolicyBinding, AppErr
 }
 
 pub async fn list_policies(pool: &PgPool, params: ListPolicies) -> Result<PolicyList, AppError> {
-    let limit = params.limit.min(100).max(1);
+    let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let subject_id = params.subject_id;
     let subject_kind = params.subject_kind;
@@ -394,12 +396,32 @@ pub async fn load_bindings_for_entity(
     .map_err(db_err)
 }
 
-pub async fn capability_ids_for_role(pool: &PgPool, role_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT capability_id FROM role_capabilities WHERE role_id = $1")
-        .bind(role_id)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)
+/// Batch load capability IDs for multiple roles in a single query.
+/// Returns a map of role_id → Vec<capability_id>.
+pub async fn capability_ids_for_roles(
+    pool: &PgPool,
+    role_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<Uuid>>, AppError> {
+    if role_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    use sqlx::Row;
+    let rows =
+        sqlx::query("SELECT role_id, capability_id FROM role_capabilities WHERE role_id = ANY($1::uuid[])")
+            .bind(role_ids)
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)?;
+
+    let mut map: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for row in rows {
+        let role_id: Uuid = row.try_get("role_id").map_err(db_err)?;
+        let cap_id: Uuid = row.try_get("capability_id").map_err(db_err)?;
+        map.entry(role_id).or_default().push(cap_id);
+    }
+
+    Ok(map)
 }
 
 pub async fn find_capability_by_name(

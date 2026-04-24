@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::enums::CredentialKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Session {
     pub id: Uuid,
@@ -21,13 +23,12 @@ pub struct LoginResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
-    /// entity name (for password auth) or ignored (for api_key auth)
     pub identifier: String,
     pub secret: String,
     #[serde(default = "default_kind")]
-    pub kind: String,
+    pub kind: CredentialKind,
 }
 
-fn default_kind() -> String {
-    "password".to_string()
+fn default_kind() -> CredentialKind {
+    CredentialKind::Password
 }

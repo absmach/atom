@@ -7,10 +7,12 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    audit,
+    auth::{has_global_manage, AuthContext},
     error::AppError,
     models::{
         entity::{CreateEntity, CreateOwnership, ListEntities, UpdateEntity},
+        enums::AuditOutcome,
         group::{AddMember, CreateGroup, ListGroups},
         session::LoginRequest,
         token::CreateApiKey,
@@ -36,13 +38,22 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let resp = match req.kind.as_str() {
-        "password" => {
-            service::login_password(&state.pool, &state.config, &req.identifier, &req.secret).await?
+    use crate::models::enums::CredentialKind;
+    match req.kind {
+        CredentialKind::Password => {
+            let resp = service::login_password(
+                &state.pool,
+                &state.config,
+                &req.identifier,
+                &req.secret,
+            )
+            .await?;
+            Ok((StatusCode::OK, Json(resp)))
         }
-        _ => return Err(AppError::bad_request(format!("unsupported credential kind: {}", req.kind))),
-    };
-    Ok((StatusCode::OK, Json(resp)))
+        other => Err(AppError::bad_request(format!(
+            "unsupported credential kind: {other:?}"
+        ))),
+    }
 }
 
 pub async fn logout(
@@ -52,6 +63,14 @@ pub async fn logout(
     if let Some(session_id) = auth.session_id {
         repo::revoke_session(&state.pool, session_id).await?;
     }
+    audit::write(
+        &state.pool,
+        Some(auth.entity_id),
+        "auth.logout",
+        AuditOutcome::Allow,
+        serde_json::json!({}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -71,7 +90,6 @@ pub async fn create_entity(
     _auth: AuthContext,
     Json(req): Json<CreateEntity>,
 ) -> Result<impl IntoResponse, AppError> {
-    validate_entity_kind(&req.kind)?;
     let entity = repo::create_entity(&state.pool, req).await?;
     Ok((StatusCode::CREATED, Json(entity)))
 }
@@ -100,18 +118,19 @@ pub async fn update_entity(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateEntity>,
 ) -> Result<impl IntoResponse, AppError> {
-    if let Some(ref s) = req.status {
-        validate_entity_status(s)?;
-    }
-    let entity = repo::update_entity(&state.pool, id, req.name, req.status, req.attributes).await?;
+    let entity =
+        repo::update_entity(&state.pool, id, req.name, req.status, req.attributes).await?;
     Ok(Json(entity))
 }
 
 pub async fn delete_entity(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
+    if auth.entity_id != id && !has_global_manage(&state.pool, auth.entity_id).await? {
+        return Err(AppError::Forbidden);
+    }
     repo::delete_entity(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -129,6 +148,14 @@ pub async fn create_password(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("missing 'password' field"))?;
     service::create_password(&state.pool, entity_id, password).await?;
+    audit::write(
+        &state.pool,
+        Some(entity_id),
+        "credential.create",
+        AuditOutcome::Allow,
+        serde_json::json!({"kind": "password"}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -139,6 +166,14 @@ pub async fn create_api_key(
     Json(req): Json<CreateApiKey>,
 ) -> Result<impl IntoResponse, AppError> {
     let resp = service::create_api_key(&state.pool, entity_id, req).await?;
+    audit::write(
+        &state.pool,
+        Some(entity_id),
+        "credential.create",
+        AuditOutcome::Allow,
+        serde_json::json!({"kind": "api_key", "credential_id": resp.credential_id}),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -153,10 +188,18 @@ pub async fn list_credentials(
 
 pub async fn revoke_credential(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Path((entity_id, cred_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, AppError> {
     service::revoke_credential(&state.pool, entity_id, cred_id).await?;
+    audit::write(
+        &state.pool,
+        Some(auth.entity_id),
+        "credential.revoke",
+        AuditOutcome::Allow,
+        serde_json::json!({"entity_id": entity_id, "credential_id": cred_id}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -243,7 +286,8 @@ pub async fn add_ownership(
     Path(owner_id): Path<Uuid>,
     Json(req): Json<CreateOwnership>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ownership = repo::create_ownership(&state.pool, owner_id, req.owned_id, req.relation).await?;
+    let ownership =
+        repo::create_ownership(&state.pool, owner_id, req.owned_id, req.relation).await?;
     Ok((StatusCode::CREATED, Json(ownership)))
 }
 
@@ -263,24 +307,4 @@ pub async fn remove_ownership(
 ) -> Result<impl IntoResponse, AppError> {
     repo::delete_ownership(&state.pool, owner_id, owned_id).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-// ─── Validators ───────────────────────────────────────────────────────────────
-
-fn validate_entity_kind(kind: &str) -> Result<(), AppError> {
-    match kind {
-        "human" | "device" | "service" | "workload" | "application" => Ok(()),
-        other => Err(AppError::bad_request(format!(
-            "invalid entity kind '{other}'; expected human, device, service, workload, or application"
-        ))),
-    }
-}
-
-fn validate_entity_status(status: &str) -> Result<(), AppError> {
-    match status {
-        "active" | "inactive" | "suspended" => Ok(()),
-        other => Err(AppError::bad_request(format!(
-            "invalid status '{other}'; expected active, inactive, or suspended"
-        ))),
-    }
 }

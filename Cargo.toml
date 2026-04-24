@@ -29,6 +29,9 @@ dotenvy = "0.15"
 rand = "0.8"
 hex = "0.4"
 
+[dev-dependencies]
+insta = "1"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -7,10 +7,12 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthContext,
+    audit,
+    auth::{AuthContext, RequireManage},
     error::AppError,
     models::{
         capability::{CreateCapability, ListCapabilities},
+        enums::AuditOutcome,
         policy::{AuthzRequest, CreatePolicyBinding, ListPolicies},
         resource::{CreateResource, ListResources, UpdateResource},
         role::{AddRoleCapability, CreateRole, ListRoles},
@@ -134,11 +136,11 @@ pub async fn get_role_capabilities(
     Ok(Json(serde_json::json!({"items": caps})))
 }
 
-// ─── Capabilities ─────────────────────────────────────────────────────────────
+// ─── Capabilities (RequireManage) ─────────────────────────────────────────────
 
 pub async fn create_capability(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    _auth: RequireManage,
     Json(req): Json<CreateCapability>,
 ) -> Result<impl IntoResponse, AppError> {
     let cap = repo::create_capability(&state.pool, req).await?;
@@ -165,24 +167,20 @@ pub async fn list_capabilities(
 
 pub async fn delete_capability(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    _auth: RequireManage,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     repo::delete_capability(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ─── Policy Bindings ──────────────────────────────────────────────────────────
+// ─── Policy Bindings (RequireManage) ──────────────────────────────────────────
 
 pub async fn create_policy(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    _auth: RequireManage,
     Json(req): Json<CreatePolicyBinding>,
 ) -> Result<impl IntoResponse, AppError> {
-    validate_subject_kind(&req.subject_kind)?;
-    validate_grant_kind(&req.grant_kind)?;
-    validate_scope_kind(&req.scope_kind)?;
-    validate_effect(&req.effect)?;
     let policy = repo::create_policy(&state.pool, req).await?;
     Ok((StatusCode::CREATED, Json(policy)))
 }
@@ -207,7 +205,7 @@ pub async fn list_policies(
 
 pub async fn delete_policy(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    _auth: RequireManage,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     repo::delete_policy(&state.pool, id).await?;
@@ -222,35 +220,23 @@ pub async fn check(
     Json(req): Json<AuthzRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let response = engine::evaluate(&state.pool, &req).await?;
+
+    audit::write(
+        &state.pool,
+        Some(req.subject_id),
+        "authz.check",
+        if response.allowed {
+            AuditOutcome::Allow
+        } else {
+            AuditOutcome::Deny
+        },
+        serde_json::json!({
+            "action": req.action,
+            "resource_id": req.resource_id,
+            "reason": response.reason,
+        }),
+    )
+    .await;
+
     Ok(Json(response))
-}
-
-// ─── Validators ───────────────────────────────────────────────────────────────
-
-fn validate_subject_kind(kind: &str) -> Result<(), AppError> {
-    match kind {
-        "entity" | "group" => Ok(()),
-        other => Err(AppError::bad_request(format!("invalid subject_kind '{other}'"))),
-    }
-}
-
-fn validate_grant_kind(kind: &str) -> Result<(), AppError> {
-    match kind {
-        "capability" | "role" => Ok(()),
-        other => Err(AppError::bad_request(format!("invalid grant_kind '{other}'"))),
-    }
-}
-
-fn validate_scope_kind(kind: &str) -> Result<(), AppError> {
-    match kind {
-        "all" | "resource_kind" | "resource" => Ok(()),
-        other => Err(AppError::bad_request(format!("invalid scope_kind '{other}'"))),
-    }
-}
-
-fn validate_effect(effect: &str) -> Result<(), AppError> {
-    match effect {
-        "allow" | "deny" => Ok(()),
-        other => Err(AppError::bad_request(format!("invalid effect '{other}'"))),
-    }
 }

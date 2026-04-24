@@ -1,3 +1,4 @@
+mod audit;
 mod auth;
 mod authz;
 mod config;
@@ -9,6 +10,7 @@ mod routes;
 mod state;
 
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,6 +26,10 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
+    if let Some(ref secret) = cfg.admin_secret {
+        bootstrap_admin_credentials(&pool, cfg.admin_entity_id, secret).await?;
+    }
+
     let state = state::AppState::new(pool, cfg.clone());
     let app = routes::create_router(state);
 
@@ -31,6 +37,35 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("atom listening on {}", cfg.listen_addr);
 
     axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn bootstrap_admin_credentials(
+    pool: &sqlx::PgPool,
+    admin_entity_id: Uuid,
+    secret: &str,
+) -> anyhow::Result<()> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
+    )
+    .bind(admin_entity_id)
+    .fetch_one(pool)
+    .await?;
+
+    if count == 0 {
+        let hash = identity::service::hash_secret(secret.as_bytes())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        sqlx::query(
+            "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(admin_entity_id)
+        .bind(hash)
+        .execute(pool)
+        .await?;
+        tracing::info!("admin password bootstrapped");
+    }
 
     Ok(())
 }

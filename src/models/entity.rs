@@ -3,13 +3,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::enums::{EntityKind, EntityStatus};
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Entity {
     pub id: Uuid,
-    pub kind: String,
+    pub kind: EntityKind,
     pub name: String,
     pub tenant_id: Option<Uuid>,
-    pub status: String,
+    pub status: EntityStatus,
     pub attributes: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -17,7 +19,7 @@ pub struct Entity {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEntity {
-    pub kind: String,
+    pub kind: EntityKind,
     pub name: String,
     pub tenant_id: Option<Uuid>,
     #[serde(default)]
@@ -27,15 +29,15 @@ pub struct CreateEntity {
 #[derive(Debug, Deserialize)]
 pub struct UpdateEntity {
     pub name: Option<String>,
-    pub status: Option<String>,
+    pub status: Option<EntityStatus>,
     pub attributes: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ListEntities {
-    pub kind: Option<String>,
+    pub kind: Option<EntityKind>,
     pub tenant_id: Option<Uuid>,
-    pub status: Option<String>,
+    pub status: Option<EntityStatus>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
@@ -52,7 +54,6 @@ pub struct EntityList {
     pub total: i64,
 }
 
-// Ownership
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Ownership {
     pub owner_id: Uuid,

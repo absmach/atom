@@ -6,10 +6,12 @@ use axum::{
 use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    error::{AppError, db_err},
+    error::{db_err, AppError},
+    models::enums::{CredentialKind, CredentialStatus},
     state::AppState,
 };
 
@@ -29,6 +31,11 @@ pub struct AuthContext {
     pub tenant_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
 }
+
+/// Extractor that requires the authenticated entity to hold a `manage` policy
+/// binding with scope `all`. Returns 403 if the check fails.
+#[allow(dead_code)]
+pub struct RequireManage(pub AuthContext);
 
 pub fn encode_jwt(
     entity_id: Uuid,
@@ -113,18 +120,16 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
         .transpose()
         .map_err(|_| AppError::unauthorized("invalid tenant id in token"))?;
 
-    let row = sqlx::query(
-        "SELECT revoked_at, expires_at FROM sessions WHERE id = $1"
-    )
-    .bind(session_id)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::unauthorized("session not found"),
-        other => AppError::Database(other),
-    })?;
-
     use sqlx::Row;
+    let row = sqlx::query("SELECT revoked_at, expires_at FROM sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::unauthorized("session not found"),
+            other => AppError::Database(other),
+        })?;
+
     let revoked_at: Option<chrono::DateTime<Utc>> = row.try_get("revoked_at").unwrap_or(None);
     let expires_at: chrono::DateTime<Utc> = row
         .try_get("expires_at")
@@ -151,9 +156,10 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     use sqlx::Row;
 
     let row = sqlx::query(
-        "SELECT entity_id, secret_hash, status, expires_at FROM credentials WHERE id = $1 AND kind = 'api_key'"
+        "SELECT entity_id, secret_hash, status, expires_at FROM credentials WHERE id = $1 AND kind = $2",
     )
     .bind(cred_id)
+    .bind(CredentialKind::ApiKey)
     .fetch_one(&state.pool)
     .await
     .map_err(|e| match e {
@@ -161,8 +167,8 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         other => AppError::Database(other),
     })?;
 
-    let status: String = row.try_get("status").map_err(db_err)?;
-    if status != "active" {
+    let status: CredentialStatus = row.try_get("status").map_err(db_err)?;
+    if status != CredentialStatus::Active {
         return Err(AppError::unauthorized("api key revoked"));
     }
 
@@ -180,8 +186,8 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         password_hash::{PasswordHash, PasswordVerifier},
         Argon2,
     };
-    let parsed = PasswordHash::new(&hash)
-        .map_err(|_| AppError::unauthorized("invalid credential"))?;
+    let parsed =
+        PasswordHash::new(&hash).map_err(|_| AppError::unauthorized("invalid credential"))?;
     Argon2::default()
         .verify_password(&secret_bytes, &parsed)
         .map_err(|_| AppError::unauthorized("invalid api key"))?;
@@ -203,6 +209,39 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         tenant_id,
         session_id: None,
     })
+}
+
+/// Returns true if `entity_id` holds an allow policy with scope=all that
+/// covers the `manage` capability (directly or via a role).
+pub async fn has_global_manage(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppError> {
+    sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1
+            FROM policy_bindings pb
+            WHERE (
+                (pb.subject_kind = 'entity' AND pb.subject_id = $1)
+                OR (pb.subject_kind = 'group' AND pb.subject_id IN (
+                    SELECT group_id FROM group_members WHERE entity_id = $1
+                ))
+            )
+            AND pb.effect = 'allow'
+            AND pb.scope_kind = 'all'
+            AND (
+                (pb.grant_kind = 'capability' AND pb.grant_id IN (
+                    SELECT id FROM capabilities WHERE name = 'manage'
+                ))
+                OR (pb.grant_kind = 'role' AND pb.grant_id IN (
+                    SELECT rc.role_id FROM role_capabilities rc
+                    JOIN capabilities c ON c.id = rc.capability_id
+                    WHERE c.name = 'manage'
+                ))
+            )
+        )"#,
+    )
+    .bind(entity_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)
 }
 
 #[async_trait]
@@ -227,5 +266,25 @@ where
             .ok_or_else(|| AppError::unauthorized("expected Bearer token"))?;
 
         auth_from_token(&app_state, token).await
+    }
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for RequireManage
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+        let auth = AuthContext::from_request_parts(parts, state).await?;
+
+        if !has_global_manage(&app_state.pool, auth.entity_id).await? {
+            return Err(AppError::Forbidden);
+        }
+
+        Ok(RequireManage(auth))
     }
 }

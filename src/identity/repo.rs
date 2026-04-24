@@ -7,6 +7,7 @@ use crate::{
     error::{db_err, AppError},
     models::{
         entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership},
+        enums::EntityStatus,
         group::{CreateGroup, Group, GroupList, ListGroups},
         session::Session,
     },
@@ -50,7 +51,7 @@ pub async fn get_entity(pool: &PgPool, id: Uuid) -> Result<Entity, AppError> {
 }
 
 pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<EntityList, AppError> {
-    let limit = params.limit.min(100).max(1);
+    let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let kind = params.kind;
     let tenant_id = params.tenant_id;
@@ -94,7 +95,7 @@ pub async fn update_entity(
     pool: &PgPool,
     id: Uuid,
     name: Option<String>,
-    status: Option<String>,
+    status: Option<EntityStatus>,
     attributes: Option<Value>,
 ) -> Result<Entity, AppError> {
     sqlx::query_as::<_, Entity>(
@@ -214,7 +215,7 @@ pub async fn get_group(pool: &PgPool, id: Uuid) -> Result<Group, AppError> {
 }
 
 pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList, AppError> {
-    let limit = params.limit.min(100).max(1);
+    let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
 
     let items = sqlx::query_as::<_, Group>(
