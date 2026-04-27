@@ -66,8 +66,10 @@
 | ----- | ---- | ----- | ----------- |
 | subject_id | [string](#string) |  |  |
 | action | [string](#string) |  | capability name, e.g. &#34;publish&#34; |
-| resource_id | [string](#string) |  |  |
+| resource_id | [string](#string) |  | Legacy form: identifies a row in the `resources` table. Resolved with kind = `resources.kind`. Mutually exclusive with object_kind/object_id; if both are supplied, object_kind/object_id win. |
 | context | [CheckRequest.ContextEntry](#atom-v1-CheckRequest-ContextEntry) | repeated | Optional ABAC context — flat string key/value pairs injected into the evaluation context under the &#34;context&#34; key. Note: only string values are supported over gRPC; use REST for nested JSON. |
+| object_kind | [string](#string) |  | Explicit form. Supported values: `resource` (same as `resource_id`) or `tenant` (resolved from the `tenants` table; kind = `"tenant"`). Both fields must be set together, or both empty. |
+| object_id | [string](#string) |  | UUID of the protected object identified by `object_kind`. |
 
 
 

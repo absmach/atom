@@ -3,6 +3,8 @@
 ## Status: Draft
 ## Date: 2026-04-24
 
+This document details query and search endpoints. For the top-level project requirements, see [Atom Product Requirements Document](./PRD.md).
+
 ---
 
 ## Problem
@@ -114,3 +116,4 @@ Each endpoint is specified in its own document:
 7. [GET /groups/:id/access](./07-group-access.md)
 8. [GET /entities/:id/effective-capabilities](./08-effective-capabilities.md)
 9. [Admin hygiene endpoints](./09-admin-hygiene.md)
+10. [Building Magistrala on Atom](./10-magistrala-on-atom.md)

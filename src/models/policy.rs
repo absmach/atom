@@ -56,11 +56,27 @@ pub struct PolicyList {
     pub total: i64,
 }
 
+/// Authorization check request.
+///
+/// Two equivalent ways to identify the protected object:
+/// - `resource_id`: legacy form. Resolves the object from the `resources` table
+///   with kind = `resources.kind`. Backwards compatible.
+/// - `object_kind` + `object_id`: explicit form. Currently supports
+///   `object_kind = "resource"` (same as `resource_id`) and
+///   `object_kind = "tenant"` (resolves from `tenants`, kind = `"tenant"`).
+///
+/// At least one form must be supplied. If both are supplied, the explicit
+/// `object_kind`/`object_id` pair takes precedence.
 #[derive(Debug, Deserialize)]
 pub struct AuthzRequest {
     pub subject_id: Uuid,
     pub action: String,
-    pub resource_id: Uuid,
+    #[serde(default)]
+    pub resource_id: Option<Uuid>,
+    #[serde(default)]
+    pub object_kind: Option<String>,
+    #[serde(default)]
+    pub object_id: Option<Uuid>,
     #[serde(default)]
     pub context: Value,
 }

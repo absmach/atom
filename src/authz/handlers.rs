@@ -259,6 +259,8 @@ pub async fn check(
         serde_json::json!({
             "action": req.action,
             "resource_id": req.resource_id,
+            "object_kind": req.object_kind,
+            "object_id": req.object_id,
             "reason": response.reason,
         }),
     )
@@ -286,6 +288,8 @@ pub async fn explain(
         serde_json::json!({
             "action": req.action,
             "resource_id": req.resource_id,
+            "object_kind": req.object_kind,
+            "object_id": req.object_id,
             "reason": response.reason,
         }),
     )
@@ -318,7 +322,9 @@ pub async fn bulk_check(
         let check_req = AuthzRequest {
             subject_id: req.subject_id,
             action: action.clone(),
-            resource_id: req.resource_id,
+            resource_id: Some(req.resource_id),
+            object_kind: None,
+            object_id: None,
             context: req.context.clone(),
         };
         let response = engine::evaluate(&state.pool, &check_req).await?;

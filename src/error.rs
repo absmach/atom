@@ -50,14 +50,25 @@ impl IntoResponse for AppError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::Database(e) => {
-                // Postgres unique violation
                 if let sqlx::Error::Database(db) = e {
-                    if db.code().as_deref() == Some("23505") {
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({"error": "already exists"})),
-                        )
-                            .into_response();
+                    match db.code().as_deref() {
+                        // Unique violation
+                        Some("23505") => {
+                            return (
+                                StatusCode::CONFLICT,
+                                Json(json!({"error": "already exists"})),
+                            )
+                                .into_response();
+                        }
+                        // Foreign-key violation — most commonly an unknown tenant_id
+                        Some("23503") => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"error": db.message()})),
+                            )
+                                .into_response();
+                        }
+                        _ => {}
                     }
                 }
                 tracing::error!("db error: {}", e);

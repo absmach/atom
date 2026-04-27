@@ -678,7 +678,10 @@ components:
 
     AuthzRequest:
       type: object
-      required: [subject_id, action, resource_id]
+      required: [subject_id, action]
+      description: |
+        At least one of `resource_id` or (`object_kind` + `object_id`) must
+        be supplied. When both are present, the explicit object form wins.
       properties:
         subject_id:
           type: string
@@ -690,6 +693,18 @@ components:
         resource_id:
           type: string
           format: uuid
+          description: Legacy form. Resolves the protected object from `resources`.
+        object_kind:
+          type: string
+          enum: [resource, tenant]
+          description: |
+            Explicit form. `resource` resolves from the `resources` table
+            (same as `resource_id`); `tenant` resolves from the `tenants`
+            table with kind = `"tenant"`.
+        object_id:
+          type: string
+          format: uuid
+          description: UUID of the protected object identified by `object_kind`.
         context:
           type: object
           description: >
@@ -711,8 +726,94 @@ components:
             - subject not found
             - subject is not active
             - resource not found
+            - tenant not found
             - "unknown action '<name>'"
             - "explicitly denied by policy <id>"
+
+    # ── Tenants ───────────────────────────────────────────────────────────
+
+    TenantStatus:
+      type: string
+      enum: [active, inactive, frozen, deleted]
+      default: active
+
+    Tenant:
+      type: object
+      required: [id, name, status, tags, attributes, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        route:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/TenantStatus'
+        tags:
+          type: array
+          items:
+            type: string
+        attributes:
+          type: object
+          description: Arbitrary JSONB metadata; reusable for Magistrala domain metadata.
+        created_by:
+          type: string
+          format: uuid
+          nullable: true
+        updated_by:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateTenant:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: factory-1
+        route:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        attributes:
+          type: object
+
+    UpdateTenant:
+      type: object
+      properties:
+        name:
+          type: string
+        route:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        attributes:
+          type: object
+          description: Replaces all existing attributes when provided
+
+    TenantList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tenant'
+        total:
+          type: integer
 
   # ── Reusable responses ───────────────────────────────────────────────────
 
@@ -1944,6 +2045,237 @@ paths:
         "404":
           $ref: '#/components/responses/NotFound'
 
+  # ── Tenants ────────────────────────────────────────────────────────────
+
+  /tenants:
+    get:
+      operationId: listTenants
+      summary: List tenants
+      tags: [Tenants]
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+        - name: route
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TenantStatus'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Tenant list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantList'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createTenant
+      summary: Create a tenant
+      description: "**RequireManage.** A tenant is an isolation boundary, not a principal."
+      tags: [Tenants]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenant'
+            example:
+              name: factory-1
+              route: factory-1
+              tags: [pilot]
+              attributes:
+                magistrala:
+                  region: eu
+      responses:
+        "201":
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "409":
+          $ref: '#/components/responses/Conflict'
+
+  /tenants/{id}:
+    get:
+      operationId: getTenant
+      summary: Get a tenant
+      tags: [Tenants]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      operationId: updateTenant
+      summary: Update a tenant
+      description: "**RequireManage.**"
+      tags: [Tenants]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenant'
+      responses:
+        "200":
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteTenant
+      summary: Soft-delete a tenant (status = deleted)
+      description: "**RequireManage.** Sets status = `deleted`; the row is retained."
+      tags: [Tenants]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /tenants/{id}/enable:
+    post:
+      operationId: enableTenant
+      summary: Set tenant status to active
+      description: "**RequireManage.**"
+      tags: [Tenants]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /tenants/{id}/disable:
+    post:
+      operationId: disableTenant
+      summary: Set tenant status to inactive
+      description: "**RequireManage.**"
+      tags: [Tenants]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  /tenants/{id}/freeze:
+    post:
+      operationId: freezeTenant
+      summary: Set tenant status to frozen
+      description: "**RequireManage.**"
+      tags: [Tenants]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
   # ── Authorization check ────────────────────────────────────────────────
 
   /authz/check:
@@ -1984,6 +2316,13 @@ paths:
                   resource_id: "7c4b7f1e-4b9e-4b7f-8b4b-7f1e4b9e4b7f"
                   context:
                     ip_trusted: "true"
+              tenantObject:
+                summary: Authorize against a tenant (object_kind form)
+                value:
+                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
+                  action: manage
+                  object_kind: tenant
+                  object_id: "11111111-1111-1111-1111-111111111111"
       responses:
         "200":
           description: Authorization decision — always 200, check `allowed` field
@@ -2025,6 +2364,8 @@ tags:
     description: Parent–child relationships between entities
   - name: Resources
     description: Protected resources registered for authorization decisions
+  - name: Tenants
+    description: First-class tenant boundaries — Magistrala domains map here
   - name: Roles
     description: Named capability bundles for RBAC
   - name: Capabilities

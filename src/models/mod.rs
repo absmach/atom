@@ -7,4 +7,5 @@ pub mod policy;
 pub mod resource;
 pub mod role;
 pub mod session;
+pub mod tenant;
 pub mod token;

@@ -7,7 +7,10 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{authz::handlers as authz, identity::handlers as identity, keys, state::AppState};
+use crate::{
+    authz::handlers as authz, identity::handlers as identity, keys, state::AppState,
+    tenants::handlers as tenants,
+};
 
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -130,6 +133,20 @@ pub fn create_router(state: AppState) -> Router {
             "/policies/:id",
             get(authz::get_policy).delete(authz::delete_policy),
         )
+        // Tenants
+        .route(
+            "/tenants",
+            get(tenants::list_tenants).post(tenants::create_tenant),
+        )
+        .route(
+            "/tenants/:id",
+            get(tenants::get_tenant)
+                .put(tenants::update_tenant)
+                .delete(tenants::delete_tenant),
+        )
+        .route("/tenants/:id/enable", post(tenants::enable_tenant))
+        .route("/tenants/:id/disable", post(tenants::disable_tenant))
+        .route("/tenants/:id/freeze", post(tenants::freeze_tenant))
         // Authorization check (PDP)
         .route("/authz/check", post(authz::check))
         .route("/authz/check/bulk", post(authz::bulk_check))

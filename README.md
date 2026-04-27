@@ -15,7 +15,7 @@ Built for [Magistrala](https://github.com/absmach/magistrala) IoT platform, but 
 - **Authorization** — policy-based decision engine (PDP) supporting RBAC, ABAC, and hybrid.
 - **Grouping** — entities belong to groups; policies apply to groups.
 - **Ownership** — parent/child relationships between entities.
-- **Multi-tenancy** — all resources are tenant-scoped.
+- **Multi-tenancy** — first-class tenants; entities, groups, resources, and roles can be scoped to a tenant. Magistrala domains map directly to Atom tenants.
 
 ---
 
@@ -274,6 +274,40 @@ PUT    /resources/:id                      {name?, attributes?}
 DELETE /resources/:id
 ```
 
+### Tenants
+```
+POST   /tenants                            {name, route?, tags?, attributes?}     # RequireManage
+GET    /tenants?name=&route=&status=&limit=&offset=
+GET    /tenants/:id
+PUT    /tenants/:id                        {name?, route?, tags?, attributes?}    # RequireManage
+POST   /tenants/:id/enable                                                        # RequireManage → status=active
+POST   /tenants/:id/disable                                                       # RequireManage → status=inactive
+POST   /tenants/:id/freeze                                                        # RequireManage → status=frozen
+DELETE /tenants/:id                                                               # RequireManage → status=deleted (soft)
+```
+
+A tenant is an isolation boundary, not a principal. Other rows
+reference it via `tenant_id` (NULL for platform/global objects).
+Tenant status values: `active | inactive | frozen | deleted`.
+
+#### Magistrala Domain → Atom Tenant mapping
+
+| Magistrala field | Atom field          |
+|------------------|---------------------|
+| domain `id`      | `tenants.id`        |
+| domain `name`    | `tenants.name`      |
+| `route`          | `tenants.route`     |
+| `metadata`       | `tenants.attributes`|
+| `tags`           | `tenants.tags`      |
+| `enabled`        | `status = active`   |
+| `disabled`       | `status = inactive` |
+| `freezed`        | `status = frozen`   |
+| `deleted`        | `status = deleted`  |
+
+Reuse the Magistrala domain UUID as the Atom `tenants.id`. All Atom
+objects in that domain (entities, groups, resources, roles) carry
+the same UUID in their `tenant_id` column.
+
 ### Roles
 ```
 POST   /roles                              {name, tenant_id?, description?}
@@ -315,11 +349,39 @@ POST /authz/check
 → {"allowed": true, "reason": "allowed"}
 ```
 
+The protected object can also be addressed explicitly via
+`object_kind` + `object_id`. This is required for non-resource
+objects such as tenants:
+
+```
+POST /authz/check
+{
+  "subject_id":  "uuid",
+  "action":      "manage",
+  "object_kind": "tenant",
+  "object_id":   "uuid",
+  "context":     {}
+}
+```
+
+Supported `object_kind` values: `resource`, `tenant`. When
+`object_kind`/`object_id` are supplied they win over `resource_id`;
+otherwise the legacy `resource_id` form is used unchanged.
+
+Policy bindings continue to apply against tenant objects:
+
+- `scope_kind = all` — covers every protected object including tenants.
+- `scope_kind = resource_kind`, `scope_ref = "tenant"` — covers all tenants.
+- `scope_kind = resource`, `scope_ref = <tenant UUID>` — covers one tenant.
+
 ---
 
 ## Data Model Summary
 
 ```
+Tenant ─── isolation boundary; tenant_id on Entity, Group, Resource, Role
+       ─── status: active | inactive | frozen | deleted
+
 Entity ─── has many ─── Credentials (password, api_key, certificate)
 Entity ─── has many ─── Sessions
 Entity ─── member of ── Groups

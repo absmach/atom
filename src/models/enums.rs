@@ -80,3 +80,14 @@ pub enum AuditOutcome {
     Deny,
     Error,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum TenantStatus {
+    #[default]
+    Active,
+    Inactive,
+    Frozen,
+    Deleted,
+}

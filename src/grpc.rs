@@ -34,8 +34,29 @@ impl AuthzService for AtomAuthz {
 
         let subject_id = Uuid::parse_str(&req.subject_id)
             .map_err(|_| Status::invalid_argument("invalid subject_id: expected UUID"))?;
-        let resource_id = Uuid::parse_str(&req.resource_id)
-            .map_err(|_| Status::invalid_argument("invalid resource_id: expected UUID"))?;
+
+        let resource_id = if req.resource_id.is_empty() {
+            None
+        } else {
+            Some(
+                Uuid::parse_str(&req.resource_id)
+                    .map_err(|_| Status::invalid_argument("invalid resource_id: expected UUID"))?,
+            )
+        };
+
+        let object_kind = if req.object_kind.is_empty() {
+            None
+        } else {
+            Some(req.object_kind)
+        };
+        let object_id = if req.object_id.is_empty() {
+            None
+        } else {
+            Some(
+                Uuid::parse_str(&req.object_id)
+                    .map_err(|_| Status::invalid_argument("invalid object_id: expected UUID"))?,
+            )
+        };
 
         let context = if req.context.is_empty() {
             serde_json::Value::Object(Default::default())
@@ -47,6 +68,8 @@ impl AuthzService for AtomAuthz {
             subject_id,
             action: req.action,
             resource_id,
+            object_kind,
+            object_id,
             context,
         };
 

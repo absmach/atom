@@ -17,11 +17,20 @@ service AuthService {
 message CheckRequest {
   string subject_id  = 1;
   string action      = 2;  // capability name, e.g. "publish"
+  // Legacy form: identifies a row in the `resources` table. Resolved with
+  // kind = `resources.kind`. Mutually exclusive with object_kind/object_id;
+  // if both are supplied, object_kind/object_id win.
   string resource_id = 3;
   // Optional ABAC context — flat string key/value pairs injected into the
   // evaluation context under the "context" key.
   // Note: only string values are supported over gRPC; use REST for nested JSON.
   map<string, string> context = 4;
+  // Explicit form: identifies any first-class protected object.
+  // Supported object_kind values: "resource" (same as resource_id) or
+  // "tenant" (resolved from the `tenants` table; kind = "tenant").
+  // Both fields must be set together, or both empty.
+  string object_kind = 5;
+  string object_id   = 6;
 }
 
 message CheckResponse {

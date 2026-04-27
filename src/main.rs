@@ -10,6 +10,7 @@ mod keys;
 mod models;
 mod routes;
 mod state;
+mod tenants;
 
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
