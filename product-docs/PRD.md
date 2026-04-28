@@ -194,6 +194,18 @@ tenant is frozen
 tenant is deleted
 ```
 
+### Platform Policy Inheritance
+
+`platform` is the top of the scope hierarchy. A grant with `scope_kind = platform` inherits into every tenant for the same capability, just as a tenant grant inherits into objects whose `tenant_id` matches the tenant.
+
+Examples:
+
+- `platform` + `manage` → super admin. Manage every platform-level object and, through inheritance, every object in every tenant.
+- `platform` + `tenant.manage` → tenant lifecycle manager. Create, update, freeze, and delete any tenant. Does not inherit into objects inside tenants.
+- `platform` + `audit.read` → read every audit log across the platform and every tenant.
+
+Platform inheritance applies per capability. A platform grant of one capability does not extend to other capabilities through inheritance.
+
 ### Tenant Policy Inheritance
 
 A tenant policy can be used to grant access over objects inside a tenant.
@@ -317,6 +329,8 @@ This means the generated `tenant-admin` role should include:
 - `policy.manage` for tenant-owned policies;
 - `role.manage` for tenant-scoped roles.
 
+The seeded `tenant-admin` role intentionally does not include `tenant.manage`. A tenant admin cannot rename, freeze, or delete their own tenant; those operations require a platform admin holding `tenant.manage` with `scope_kind = platform`. If self-service tenant metadata management is needed later, `tenant.manage` can be added to the role with scope set to the role's owning tenant.
+
 With those capabilities, a tenant admin can manage:
 
 - entities in the tenant through `manage`;
@@ -401,11 +415,11 @@ Alice has tenant-admin on factory-1
 Alice has tenant-viewer on factory-2
 ```
 
-The MVP should not duplicate the same human as separate tenant-local entities by default. Duplicating humans creates login ambiguity, split audit history, duplicate credentials, and confusing policy behavior.
+The MVP must not duplicate the same human as separate tenant-local entities. Duplicating humans creates login ambiguity, split audit history, duplicate credentials, and confusing policy behavior.
 
-If an application needs tenant-local human profile, invitation, or membership status later, Atom should add a dedicated tenant membership model for humans rather than replacing `tenant_id` everywhere.
+For tenant-local human profile, invitation, and membership status, Atom uses a dedicated tenant membership table rather than replacing `tenant_id` everywhere.
 
-Future tenant membership shape:
+Tenant membership shape:
 
 ```sql
 tenant_memberships (
@@ -419,7 +433,7 @@ tenant_memberships (
 )
 ```
 
-This table should be used for human participation, tenant-local profile, tenant-local status, and invitation lifecycle. It should not replace direct `tenant_id` ownership for devices, resources, groups, roles, policies, or audit logs.
+This table is used for human participation, tenant-local profile, tenant-local status, and invitation lifecycle. It does not replace direct `tenant_id` ownership for devices, resources, groups, roles, policies, or audit logs.
 
 Entity is the principal model. Some entities can also be protected objects when another entity manages them.
 
@@ -494,6 +508,14 @@ The plaintext API key is revealed once and must not be recoverable later.
 
 Certificate credentials are schema-supported but behavior-deferred for now. The MVP should not build full certificate issuance, verification, rotation, or mTLS identity flows. Full certificate credentials remain a future extension.
 
+Credential management authority follows the entity's `tenant_id`, not tenant membership:
+
+- A tenant admin may manage credentials only for entities owned by that tenant (`entity.tenant_id = <tenant>`).
+- A tenant admin must not manage credentials for entities owned by another tenant.
+- A tenant admin must not manage credentials for global entities (`tenant_id = null`), even if the global entity participates in that tenant through `tenant_memberships`. Membership grants presence and access in a tenant; it does not grant the tenant's admin credential authority over the member.
+- Credentials of global entities can be managed only by a platform admin, unless platform policy explicitly delegates credential authority over a specific global entity to a specific tenant admin.
+- This rule applies to all credential operations: create, rotate, revoke, and read.
+
 ### Session and JWT
 
 Login creates a session and returns a JWT. JWTs identify the entity and session. JWTs may include tenant context, but must not carry permissions.
@@ -522,10 +544,10 @@ A capability is an atomic permission such as:
 - `execute`
 - `manage`
 - `list`
-- `revoke`
-- `rotate`
-- `audit.read`
 - `credential.manage`
+- `credential.revoke`
+- `signing_key.rotate`
+- `audit.read`
 - `policy.manage`
 - `role.manage`
 - `tenant.manage`
@@ -540,12 +562,40 @@ Recommended capability groups:
 |---|---|---|
 | General object access | `read`, `list`, `create`, `write`, `update`, `delete`, `manage` | Administrative CRUD and object management |
 | Messaging/runtime | `publish`, `subscribe`, `execute` | Device, workload, and service runtime operations |
-| Credentials and keys | `credential.manage`, `revoke`, `rotate` | Credential lifecycle and key rotation |
+| Credentials and keys | `credential.manage`, `credential.revoke`, `signing_key.rotate` | Credential lifecycle and key rotation |
 | Access control | `policy.manage`, `role.manage` | Policy and role administration |
 | Tenant administration | `tenant.manage`, `manage` | Tenant lifecycle and tenant-scoped administration |
 | Audit | `audit.read` | Audit log access |
 
 Devices should normally receive only runtime-oriented capabilities such as `publish`, `subscribe`, and limited `read` for configuration or state. Devices should not receive administrative capabilities such as `manage`, `create`, `write`, `update`, or `delete` by default.
+
+### Object Kinds
+
+Every protected object is described by a (kind, type) pair.
+
+The **kind** (`object_kind`) is the broad category. The canonical set is:
+
+- `entity`
+- `resource`
+- `group`
+- `tenant`
+- `role`
+- `policy`
+- `credential`
+- `audit_log`
+
+`capability` is a definition rather than a protected runtime object and is not in this set; capability mutation is governed by `policy.manage` and `role.manage`.
+
+The **type** (`object_type`) is the finer sub-kind, written as `<kind>:<sub-kind>`:
+
+- entity sub-kinds: `entity:human`, `entity:device`, `entity:service`, `entity:workload`, `entity:application`
+- resource sub-kinds: `resource:channel`, `resource:<app-defined>`
+
+For kinds without sub-kinds (`group`, `tenant`, `role`, `policy`, `credential`, `audit_log`), `object_type` is null.
+
+The kind prefix on `object_type` is intentionally redundant with `object_kind` so that audit logs and explain output are self-describing. Bare values such as `device` or `channel` must not appear as `scope_ref`, as a stored `object_type`, or in audit records.
+
+These values must be used consistently across policy scopes, guardrail rules, authorization checks, and audit logs.
 
 ### Role
 
@@ -562,7 +612,7 @@ Policy fields:
 - `subject_id`: entity or group UUID
 - `grant_kind`: `capability` or `role`
 - `grant_id`: capability or role UUID
-- `scope_kind`: `all`, `tenant`, `object_kind`, `object_type`, or `object`
+- `scope_kind`: `platform`, `tenant`, `object_kind`, `object_type`, or `object`
 - `scope_ref`: tenant UUID, object kind, object type, or object UUID when needed
 - `effect`: `allow` or `deny`
 - `conditions`: flat JSON object of ABAC dot-path conditions
@@ -581,13 +631,13 @@ Policy scope meanings:
 
 | Scope kind | Meaning | Example |
 |---|---|---|
-| `all` | Applies to every protected object in the policy boundary | platform admin over all objects |
+| `platform` | Top of the scope hierarchy. Applies to platform-level objects and inherits into every tenant for the same capability. | platform admin (`manage`), tenant lifecycle manager (`tenant.manage`) |
 | `tenant` | Applies to one tenant and, through tenant inheritance, tenant-scoped objects | manage tenant `factory-1` |
 | `object_kind` | Applies to all objects of a kind in the policy boundary | manage all entities in tenant A |
 | `object_type` | Applies to a subtype of an object kind | manage all `entity:device` objects in tenant A |
 | `object` | Applies to one specific object ID | manage one device entity |
 
-For entity subtypes, `object_type` should use the format:
+`object_type` is always namespaced with its kind as the prefix, joined by a colon:
 
 ```text
 entity:human
@@ -595,7 +645,11 @@ entity:device
 entity:service
 entity:workload
 entity:application
+resource:channel
+resource:<app-defined>
 ```
+
+Bare values such as `device` or `channel` must not appear as `scope_ref` or as a stored `object_type`. For kinds without sub-kinds (`group`, `tenant`, `role`, `policy`, `credential`, `audit_log`), `object_type` is null.
 
 Examples:
 
@@ -621,7 +675,28 @@ scope_ref = <device entity UUID>
 
 ### ABAC Conditions
 
-Policy bindings may include `conditions`. Conditions are a flat JSON object where keys are dot-paths and values must match exactly. All conditions must match for the policy binding to apply.
+Policy bindings may include `conditions`. Conditions are a flat JSON object where keys are dot-paths. Each value is either a literal (treated as `eq`) or an object specifying an operator. All conditions must match for the policy binding to apply.
+
+Supported operators:
+
+- `eq` — value equals the operand (default for a literal value).
+- `neq` — value does not equal the operand.
+- `contains` — for strings, substring match; for arrays, element membership.
+- `in` — value is one of the operands (operand is an array).
+- `gt`, `gte`, `lt`, `lte` — numeric or timestamp comparison.
+
+Operator example:
+
+```json
+{
+  "context.mfa_verified": true,
+  "object.attributes.tags": { "contains": "production" },
+  "context.time": { "gte": "2026-01-01T00:00:00Z" },
+  "entity.attributes.department": { "in": ["operations", "security"] }
+}
+```
+
+If a referenced field is missing on the subject, object, tenant, or context, the condition does not match and the policy binding does not apply.
 
 ABAC conditions may reference three categories of data:
 
@@ -744,7 +819,7 @@ capability_assignment_rules (
   entity_kind     text not null,
   capability_name text not null,
   object_kind     text not null,
-  resource_kind   text null,
+  object_type     text null,
   decision        text not null check (decision in ('allow', 'deny', 'require_override')),
   is_absolute     boolean not null default false,
   created_at      timestamptz not null default now()
@@ -758,7 +833,7 @@ Field meaning:
 - `entity_kind` is the kind of the subject receiving access.
 - `capability_name` is the action being granted.
 - `object_kind` is the protected object type, such as `resource`, `entity`, `group`, `tenant`, `role`, `policy`, `credential`, or `audit_log`.
-- `resource_kind` narrows the rule for resources, such as `channel`.
+- `object_type` narrows the rule to a specific sub-kind such as `resource:channel` or `entity:device`. Always namespaced with its kind. Null means the rule applies to every sub-kind under the given `object_kind`.
 - `decision = allow` means the assignment is allowed.
 - `decision = deny` means the assignment is rejected.
 - `decision = require_override` means only a platform admin can force the assignment, and the override must be audited.
@@ -774,20 +849,20 @@ Guardrail management rules:
 
 Example global rules:
 
-| Entity kind | Capability | Object kind | Resource kind | Decision |
+| Entity kind | Capability | Object kind | Object type | Decision |
 |---|---|---|---|---|
-| `device` | `publish` | `resource` | `channel` | `allow` |
-| `device` | `subscribe` | `resource` | `channel` | `allow` |
-| `device` | `manage` | `resource` | `channel` | `deny` |
-| `device` | `delete` | `resource` | `channel` | `deny` |
-| `human` | `manage` | `resource` | `channel` | `allow` |
-| `service` | `manage` | `resource` | `channel` | `allow` |
+| `device` | `publish` | `resource` | `resource:channel` | `allow` |
+| `device` | `subscribe` | `resource` | `resource:channel` | `allow` |
+| `device` | `manage` | `resource` | `resource:channel` | `deny` |
+| `device` | `delete` | `resource` | `resource:channel` | `deny` |
+| `human` | `manage` | `resource` | `resource:channel` | `allow` |
+| `service` | `manage` | `resource` | `resource:channel` | `allow` |
 
 Example tenant-specific rule:
 
-| Tenant | Entity kind | Capability | Object kind | Resource kind | Decision |
+| Tenant | Entity kind | Capability | Object kind | Object type | Decision |
 |---|---|---|---|---|---|
-| `factory-1` | `device` | `read` | `resource` | `device_config` | `allow` |
+| `factory-1` | `device` | `read` | `resource` | `resource:device_config` | `allow` |
 
 Recommended rule precedence:
 
@@ -811,8 +886,8 @@ Example rejected policy:
   "subject_id": "device-id",
   "grant_kind": "capability",
   "grant_id": "delete-channel-capability-id",
-  "scope_kind": "resource_kind",
-  "scope_ref": "channel"
+  "scope_kind": "object_type",
+  "scope_ref": "resource:channel"
 }
 ```
 
@@ -855,6 +930,8 @@ MVP recommendation:
 
 ## Functional Requirements
 
+Priority levels: "Must" items are required for general availability and ship across the phases below; "Should" items are strongly desired but may slip past GA without blocking release.
+
 ### Identity
 
 | ID | Requirement | Priority |
@@ -868,7 +945,7 @@ MVP recommendation:
 | ID-7 | Entity `tenant_id` must represent ownership or home tenant, not access membership. | Must |
 | ID-8 | Human users must be global by default, with tenant access granted through policies. | Must |
 | ID-9 | The MVP must not require duplicate tenant-local human entities for the same person. | Must |
-| ID-10 | A future tenant membership model should be used for human tenant participation, tenant-local profile, tenant-local status, and invitations if needed. | Should |
+| ID-10 | Atom must provide a tenant membership table for human tenant participation, tenant-local profile, tenant-local status, and invitations. | Must |
 
 ### Credentials and Authentication
 
@@ -883,7 +960,7 @@ MVP recommendation:
 | AUTH-7 | JWT signing keys must support JWKS publication for external verifiers. | Should |
 | AUTH-8 | Signing keys must be rotatable through a manage-protected endpoint. | Should |
 | AUTH-9 | Tenant admins may manage credentials for tenant-scoped entities in their tenant. | Must |
-| AUTH-10 | Tenant admins must not manage credentials for global human users or platform admins unless separately allowed by platform policy. | Must |
+| AUTH-10 | Tenant admins must not manage credentials for any entity not owned by their tenant, including global entities (`tenant_id = null`), entities owned by other tenants, and platform admins. Platform policy may explicitly delegate credential authority over a specific entity to a specific tenant admin. | Must |
 | AUTH-11 | Certificate credentials should remain schema-supported but behavior-deferred for now. | Should |
 
 ### Tenants
@@ -893,7 +970,7 @@ MVP recommendation:
 | TEN-1 | The system must expose first-class tenant CRUD and lifecycle APIs. | Must |
 | TEN-2 | Tenant lifecycle must support active, inactive, frozen, and deleted states. | Must |
 | TEN-3 | Tenant deletion must be soft delete by setting status to `deleted`. | Must |
-| TEN-4 | Tenant create, update, and lifecycle changes must require global manage permission. | Must |
+| TEN-4 | Tenant create, update, freeze, and delete operations must require `tenant.manage` with `scope_kind = platform`. | Must |
 | TEN-5 | Entities, groups, resources, and roles must be able to reference tenants by `tenant_id`. | Must |
 | TEN-6 | Magistrala domains must map directly to Atom tenants. | Must |
 | TEN-7 | Authorization checks must support tenant objects through `object_kind = "tenant"` and `object_id`. | Must |
@@ -904,7 +981,7 @@ MVP recommendation:
 | TEN-12 | Atom must create a tenant-scoped `tenant-admin` role for every new tenant. | Must |
 | TEN-13 | The tenant creator must receive the generated `tenant-admin` role. | Must |
 | TEN-14 | Authorization checks for inactive, frozen, or deleted tenants must be denied with a reason that includes tenant state. | Must |
-| TEN-15 | Atom should support a future tenant membership model for applications that require tenant-local human profile or membership state, while keeping global humans as the default MVP model. | Should |
+| TEN-15 | Atom must provide a tenant membership table for tenant-local human profile and membership state, while humans remain global by default in the entity model. | Must |
 | TEN-16 | The generated `tenant-admin` role must include `manage`, `audit.read`, `credential.manage`, `policy.manage`, and `role.manage` for the tenant. | Must |
 
 ### Authorization
@@ -920,7 +997,7 @@ MVP recommendation:
 | AZ-7 | The PDP must evaluate group policy bindings inherited through membership. | Must |
 | AZ-8 | The PDP must support role grants by resolving role capabilities. | Must |
 | AZ-9 | The PDP must batch-load role capabilities before evaluating policy bindings. | Must |
-| AZ-10 | The PDP must support scopes `all`, `tenant`, `object_kind`, `object_type`, and `object`. | Must |
+| AZ-10 | The PDP must support scopes `platform`, `tenant`, `object_kind`, `object_type`, and `object`. | Must |
 | AZ-11 | The PDP must support ABAC conditions against top-level fields, attributes, and request context. | Must |
 | AZ-12 | A matching deny must override any allow. | Must |
 | AZ-13 | No matching allow must return denied. | Must |
@@ -928,7 +1005,7 @@ MVP recommendation:
 | AZ-15 | The system must expose gRPC authorization check APIs for runtime integrations. gRPC is runtime-only for now; management APIs remain HTTP-only. Management APIs may be added to gRPC later if needed. | Should |
 | AZ-16 | Authorization checks must evaluate tenant lifecycle state for tenant-scoped objects. | Must |
 | AZ-17 | Entity subtypes must be represented as `object_kind = entity` with an entity-kind/object-type filter, not as separate protected object kinds. | Must |
-| AZ-18 | Policy scopes must support `all`, `tenant`, `object_kind`, `object_type`, and `object`. | Must |
+| AZ-18 | Policy scopes must support `platform`, `tenant`, `object_kind`, `object_type`, and `object`. | Must |
 | AZ-19 | Entity subtype policy scopes must use object type values such as `entity:device` and `entity:human`. | Must |
 | AZ-20 | ABAC conditions must support top-level fields such as `entity.kind`, `entity.tenant_id`, `tenant.status`, `object.kind`, and `object.type`. | Must |
 | AZ-21 | ABAC conditions must support JSON attributes such as `entity.attributes.*`, `resource.attributes.*`, `tenant.attributes.*`, and `object.attributes.*`. | Must |
@@ -1094,6 +1171,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 
 - Existing `resource_id` authorization checks must remain supported.
 - New `object_kind` and `object_id` authorization checks must not break the legacy shape.
+- Legacy callers may send `resource_kind = "channel"` over HTTP; the API translates this to `object_type = "resource:channel"` at the edge before storing or evaluating. The legacy form must not appear in stored policy bindings, guardrail rules, or audit records.
 - HTTP and gRPC authorization semantics must match.
 
 ---
@@ -1145,6 +1223,7 @@ Atom is successful when:
 - Tenant foreign keys from scoped objects
 - Tenant admin role bootstrap on tenant creation
 - Tenant creator receives the generated `tenant-admin` role
+- Tenant memberships table for human tenant participation
 - `tenant_id` on policy bindings
 - `tenant_id` on audit logs
 - Tenant lifecycle enforcement in authorization checks
@@ -1170,7 +1249,6 @@ Atom is successful when:
 - OIDC federation
 - Workload identity with SPIFFE or X.509
 - Full certificate credential lifecycle
-- Tenant memberships for human tenant participation and local profile/status
 - Token introspection
 - Audit webhooks
 - Prometheus metrics
@@ -1180,7 +1258,13 @@ Atom is successful when:
 
 ## Open Questions
 
-No open product questions remain in this PRD draft. Future implementation work may still uncover API or schema details that need separate design notes.
+1. **Guardrail validation on large groups (GR-8, GR-9).** When a policy or membership change requires re-validating all existing group members, and the group has tens or hundreds of thousands of members, should validation be synchronous (transactional, but slow) or asynchronous (fast, but unsafe state can exist briefly)? Decide the model and any size threshold.
+
+2. **`require_override` workflow (GR-10).** Is `require_override` a synchronous flag a platform admin sets on the request, or a multi-step approval workflow (request → approval → apply)? Define the API shape and the audit trail.
+
+3. **Session validation on the authz path (AUTH-6).** Validating session liveness in the database on every `/authz/check` is expensive at high QPS. Options: (a) DB lookup per check, (b) short-lived JWT plus refresh token with no per-check DB hit, (c) in-process revocation set refreshed by polling or Postgres `LISTEN/NOTIFY` for bounded-staleness revocation. Recommendation: (c) with a documented staleness bound (e.g., 1–5 s).
+
+4. **Migrations on startup with multiple replicas.** When N replicas start concurrently, how are migrations serialized? Options: Postgres advisory lock around the migration step, leader-only migration via deployment ordering, or first-replica-wins with retries on the others. Decide.
 
 ---
 
