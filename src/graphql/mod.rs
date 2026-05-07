@@ -1,6 +1,16 @@
+pub mod admin;
+pub mod auth;
+pub mod authz;
+pub mod credentials;
+pub mod entities;
+pub mod groups;
 pub mod mutation;
+pub mod policies;
+pub mod profiles;
 pub mod query;
+pub mod resources;
 pub mod schema;
+pub mod tenants;
 pub mod types;
 
 use async_graphql::{Response, ServerError};
@@ -183,7 +193,7 @@ fn playground_html() -> String {
                     "Authorization": "Bearer paste-jwt-or-api-key-here"
                 },
                 "query": concat!(
-                    "query ViewEntities($kind: String, $limit: Int = 20, $offset: Int = 0) {\n",
+                    "query ViewEntities($kind: EntityKind, $limit: Int = 20, $offset: Int = 0) {\n",
                     "  entities(kind: $kind, limit: $limit, offset: $offset) {\n",
                     "    items {\n",
                     "      id\n",
@@ -304,5 +314,8 @@ mod tests {
         assert!(html.contains("View Resources"));
         assert!(html.contains("paste-jwt-or-api-key-here"));
         assert!(!html.contains("request.globalHeaders"));
+        for suffix in ["Domain", "Client", "Channel"] {
+            assert!(!html.contains(&format!("create{suffix}")));
+        }
     }
 }

@@ -1,4 +1,4 @@
-use async_graphql::{InputObject, Object, ID};
+use async_graphql::{Enum, InputObject, Object, ID};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
@@ -15,6 +15,80 @@ use crate::{
         role as role_model, session as session_model, tenant as tenant_model, token as token_model,
     },
 };
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "EntityKind", rename_items = "snake_case")]
+pub enum GqlEntityKind {
+    Human,
+    Device,
+    Service,
+    Workload,
+    Application,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "EntityStatus", rename_items = "snake_case")]
+pub enum GqlEntityStatus {
+    Active,
+    Inactive,
+    Suspended,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "TenantStatus", rename_items = "snake_case")]
+pub enum GqlTenantStatus {
+    Active,
+    Inactive,
+    Frozen,
+    Deleted,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "SubjectKind", rename_items = "snake_case")]
+pub enum GqlSubjectKind {
+    Entity,
+    Group,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "GrantKind", rename_items = "snake_case")]
+pub enum GqlGrantKind {
+    Capability,
+    Role,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "ScopeKind", rename_items = "snake_case")]
+pub enum GqlScopeKind {
+    Platform,
+    Tenant,
+    ObjectKind,
+    ObjectType,
+    Object,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "Effect", rename_items = "snake_case")]
+pub enum GqlEffect {
+    Allow,
+    Deny,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "CredentialKind", rename_items = "snake_case")]
+pub enum GqlCredentialKind {
+    Password,
+    ApiKey,
+    Certificate,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "AuditOutcome", rename_items = "snake_case")]
+pub enum GqlAuditOutcome {
+    Allow,
+    Deny,
+    Error,
+}
 
 pub struct Profile(pub profile_model::Profile);
 
@@ -102,8 +176,8 @@ impl Entity {
         id(self.0.id)
     }
 
-    async fn kind(&self) -> &'static str {
-        entity_kind_as_str(&self.0.kind)
+    async fn kind(&self) -> GqlEntityKind {
+        GqlEntityKind::from(&self.0.kind)
     }
 
     async fn profile_id(&self) -> Option<ID> {
@@ -122,8 +196,8 @@ impl Entity {
         self.0.tenant_id.map(id)
     }
 
-    async fn status(&self) -> &'static str {
-        entity_status_as_str(&self.0.status)
+    async fn status(&self) -> GqlEntityStatus {
+        GqlEntityStatus::from(&self.0.status)
     }
 
     async fn attributes(&self) -> &Value {
@@ -201,8 +275,8 @@ impl Tenant {
         self.0.route.as_deref()
     }
 
-    async fn status(&self) -> &'static str {
-        tenant_status_as_str(&self.0.status)
+    async fn status(&self) -> GqlTenantStatus {
+        GqlTenantStatus::from(&self.0.status)
     }
 
     async fn tags(&self) -> &[String] {
@@ -318,8 +392,8 @@ impl Credential {
         self.0.entity_id.map(id)
     }
 
-    async fn kind(&self) -> &'static str {
-        credential_kind_as_str(&self.0.kind)
+    async fn kind(&self) -> GqlCredentialKind {
+        GqlCredentialKind::from(&self.0.kind)
     }
 
     async fn identifier(&self) -> Option<&str> {
@@ -449,32 +523,32 @@ impl PolicyBinding {
         self.0.tenant_id.map(id)
     }
 
-    async fn subject_kind(&self) -> &'static str {
-        subject_kind_as_str(&self.0.subject_kind)
+    async fn subject_kind(&self) -> GqlSubjectKind {
+        GqlSubjectKind::from(&self.0.subject_kind)
     }
 
     async fn subject_id(&self) -> ID {
         id(self.0.subject_id)
     }
 
-    async fn grant_kind(&self) -> &'static str {
-        grant_kind_as_str(&self.0.grant_kind)
+    async fn grant_kind(&self) -> GqlGrantKind {
+        GqlGrantKind::from(&self.0.grant_kind)
     }
 
     async fn grant_id(&self) -> ID {
         id(self.0.grant_id)
     }
 
-    async fn scope_kind(&self) -> &'static str {
-        scope_kind_as_str(&self.0.scope_kind)
+    async fn scope_kind(&self) -> GqlScopeKind {
+        GqlScopeKind::from(&self.0.scope_kind)
     }
 
     async fn scope_ref(&self) -> Option<&str> {
         self.0.scope_ref.as_deref()
     }
 
-    async fn effect(&self) -> &'static str {
-        effect_as_str(&self.0.effect)
+    async fn effect(&self) -> GqlEffect {
+        GqlEffect::from(&self.0.effect)
     }
 
     async fn conditions(&self) -> &Value {
@@ -564,8 +638,8 @@ impl AuditLog {
         &self.0.event
     }
 
-    async fn outcome(&self) -> &'static str {
-        audit_outcome_as_str(&self.0.outcome)
+    async fn outcome(&self) -> GqlAuditOutcome {
+        GqlAuditOutcome::from(&self.0.outcome)
     }
 
     async fn details(&self) -> &Value {
@@ -608,7 +682,7 @@ pub struct CreateProfileVersionInput {
 pub struct CreateEntityInput {
     pub profile_id: Option<ID>,
     pub profile_version_id: Option<ID>,
-    pub kind: Option<String>,
+    pub kind: Option<GqlEntityKind>,
     pub name: String,
     pub tenant_id: Option<ID>,
     pub attributes: Value,
@@ -675,13 +749,13 @@ pub struct CreateCapabilityInput {
 #[derive(InputObject)]
 pub struct CreatePolicyInput {
     pub tenant_id: Option<ID>,
-    pub subject_kind: String,
+    pub subject_kind: GqlSubjectKind,
     pub subject_id: ID,
-    pub grant_kind: String,
+    pub grant_kind: GqlGrantKind,
     pub grant_id: ID,
-    pub scope_kind: String,
+    pub scope_kind: GqlScopeKind,
     pub scope_ref: Option<String>,
-    pub effect: Option<String>,
+    pub effect: Option<GqlEffect>,
     pub conditions: Option<Value>,
 }
 
@@ -1060,222 +1134,227 @@ pub fn parse_optional_timestamp(
         .transpose()
 }
 
-pub fn parse_optional_entity_kind(
-    value: Option<String>,
-) -> async_graphql::Result<Option<EntityKind>> {
-    value.as_deref().map(parse_entity_kind).transpose()
+pub fn parse_optional_entity_kind(value: Option<GqlEntityKind>) -> Option<EntityKind> {
+    value.map(EntityKind::from)
 }
 
-pub fn parse_entity_kind(value: &str) -> async_graphql::Result<EntityKind> {
-    match value {
-        "human" => Ok(EntityKind::Human),
-        "device" => Ok(EntityKind::Device),
-        "service" => Ok(EntityKind::Service),
-        "workload" => Ok(EntityKind::Workload),
-        "application" => Ok(EntityKind::Application),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid entity kind '{other}'"
-        ))),
+pub fn parse_optional_entity_status(value: Option<GqlEntityStatus>) -> Option<EntityStatus> {
+    value.map(EntityStatus::from)
+}
+
+pub fn parse_optional_subject_kind(value: Option<GqlSubjectKind>) -> Option<SubjectKind> {
+    value.map(SubjectKind::from)
+}
+
+pub fn parse_subject_kind(value: GqlSubjectKind) -> SubjectKind {
+    SubjectKind::from(value)
+}
+
+pub fn parse_grant_kind(value: GqlGrantKind) -> GrantKind {
+    GrantKind::from(value)
+}
+
+pub fn parse_effect_or_default(value: Option<GqlEffect>) -> Effect {
+    value.map(Effect::from).unwrap_or_default()
+}
+
+pub fn parse_optional_audit_outcome(value: Option<GqlAuditOutcome>) -> Option<AuditOutcome> {
+    value.map(AuditOutcome::from)
+}
+
+pub fn parse_optional_credential_kind(value: Option<GqlCredentialKind>) -> Option<CredentialKind> {
+    value.map(CredentialKind::from)
+}
+
+pub fn parse_scope_kind(value: GqlScopeKind) -> ScopeKind {
+    ScopeKind::from(value)
+}
+
+pub fn parse_optional_tenant_status(value: Option<GqlTenantStatus>) -> Option<TenantStatus> {
+    value.map(TenantStatus::from)
+}
+
+impl From<GqlEntityKind> for EntityKind {
+    fn from(kind: GqlEntityKind) -> Self {
+        match kind {
+            GqlEntityKind::Human => EntityKind::Human,
+            GqlEntityKind::Device => EntityKind::Device,
+            GqlEntityKind::Service => EntityKind::Service,
+            GqlEntityKind::Workload => EntityKind::Workload,
+            GqlEntityKind::Application => EntityKind::Application,
+        }
     }
 }
 
-pub fn parse_optional_entity_status(
-    value: Option<String>,
-) -> async_graphql::Result<Option<EntityStatus>> {
-    value.as_deref().map(parse_entity_status).transpose()
-}
-
-pub fn parse_optional_subject_kind(
-    value: Option<String>,
-) -> async_graphql::Result<Option<SubjectKind>> {
-    value.as_deref().map(parse_subject_kind).transpose()
-}
-
-pub fn parse_subject_kind(value: &str) -> async_graphql::Result<SubjectKind> {
-    match value {
-        "entity" => Ok(SubjectKind::Entity),
-        "group" => Ok(SubjectKind::Group),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid subject kind '{other}'"
-        ))),
+impl From<&EntityKind> for GqlEntityKind {
+    fn from(kind: &EntityKind) -> Self {
+        match kind {
+            EntityKind::Human => GqlEntityKind::Human,
+            EntityKind::Device => GqlEntityKind::Device,
+            EntityKind::Service => GqlEntityKind::Service,
+            EntityKind::Workload => GqlEntityKind::Workload,
+            EntityKind::Application => GqlEntityKind::Application,
+        }
     }
 }
 
-pub fn parse_grant_kind(value: &str) -> async_graphql::Result<GrantKind> {
-    match value {
-        "capability" => Ok(GrantKind::Capability),
-        "role" => Ok(GrantKind::Role),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid grant kind '{other}'"
-        ))),
+impl From<GqlEntityStatus> for EntityStatus {
+    fn from(status: GqlEntityStatus) -> Self {
+        match status {
+            GqlEntityStatus::Active => EntityStatus::Active,
+            GqlEntityStatus::Inactive => EntityStatus::Inactive,
+            GqlEntityStatus::Suspended => EntityStatus::Suspended,
+        }
     }
 }
 
-pub fn parse_effect_or_default(value: Option<String>) -> async_graphql::Result<Effect> {
-    value
-        .as_deref()
-        .map(parse_effect)
-        .transpose()
-        .map(Option::unwrap_or_default)
-}
-
-pub fn parse_optional_audit_outcome(
-    value: Option<String>,
-) -> async_graphql::Result<Option<AuditOutcome>> {
-    value.as_deref().map(parse_audit_outcome).transpose()
-}
-
-pub fn parse_optional_credential_kind(
-    value: Option<String>,
-) -> async_graphql::Result<Option<CredentialKind>> {
-    value.as_deref().map(parse_credential_kind).transpose()
-}
-
-pub fn parse_scope_kind(value: &str) -> async_graphql::Result<ScopeKind> {
-    match value {
-        "platform" => Ok(ScopeKind::Platform),
-        "tenant" => Ok(ScopeKind::Tenant),
-        "object_kind" => Ok(ScopeKind::ObjectKind),
-        "object_type" => Ok(ScopeKind::ObjectType),
-        "object" => Ok(ScopeKind::Object),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid scope kind '{other}'"
-        ))),
+impl From<&EntityStatus> for GqlEntityStatus {
+    fn from(status: &EntityStatus) -> Self {
+        match status {
+            EntityStatus::Active => GqlEntityStatus::Active,
+            EntityStatus::Inactive => GqlEntityStatus::Inactive,
+            EntityStatus::Suspended => GqlEntityStatus::Suspended,
+        }
     }
 }
 
-fn parse_effect(value: &str) -> async_graphql::Result<Effect> {
-    match value {
-        "allow" => Ok(Effect::Allow),
-        "deny" => Ok(Effect::Deny),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid effect '{other}'"
-        ))),
+impl From<GqlTenantStatus> for TenantStatus {
+    fn from(status: GqlTenantStatus) -> Self {
+        match status {
+            GqlTenantStatus::Active => TenantStatus::Active,
+            GqlTenantStatus::Inactive => TenantStatus::Inactive,
+            GqlTenantStatus::Frozen => TenantStatus::Frozen,
+            GqlTenantStatus::Deleted => TenantStatus::Deleted,
+        }
     }
 }
 
-fn parse_audit_outcome(value: &str) -> async_graphql::Result<AuditOutcome> {
-    match value {
-        "allow" => Ok(AuditOutcome::Allow),
-        "deny" => Ok(AuditOutcome::Deny),
-        "error" => Ok(AuditOutcome::Error),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid audit outcome '{other}'"
-        ))),
+impl From<&TenantStatus> for GqlTenantStatus {
+    fn from(status: &TenantStatus) -> Self {
+        match status {
+            TenantStatus::Active => GqlTenantStatus::Active,
+            TenantStatus::Inactive => GqlTenantStatus::Inactive,
+            TenantStatus::Frozen => GqlTenantStatus::Frozen,
+            TenantStatus::Deleted => GqlTenantStatus::Deleted,
+        }
     }
 }
 
-fn parse_credential_kind(value: &str) -> async_graphql::Result<CredentialKind> {
-    match value {
-        "password" => Ok(CredentialKind::Password),
-        "api_key" => Ok(CredentialKind::ApiKey),
-        "certificate" => Ok(CredentialKind::Certificate),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid credential kind '{other}'"
-        ))),
+impl From<GqlSubjectKind> for SubjectKind {
+    fn from(kind: GqlSubjectKind) -> Self {
+        match kind {
+            GqlSubjectKind::Entity => SubjectKind::Entity,
+            GqlSubjectKind::Group => SubjectKind::Group,
+        }
     }
 }
 
-fn parse_entity_status(value: &str) -> async_graphql::Result<EntityStatus> {
-    match value {
-        "active" => Ok(EntityStatus::Active),
-        "inactive" => Ok(EntityStatus::Inactive),
-        "suspended" => Ok(EntityStatus::Suspended),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid entity status '{other}'"
-        ))),
+impl From<&SubjectKind> for GqlSubjectKind {
+    fn from(kind: &SubjectKind) -> Self {
+        match kind {
+            SubjectKind::Entity => GqlSubjectKind::Entity,
+            SubjectKind::Group => GqlSubjectKind::Group,
+        }
     }
 }
 
-fn entity_kind_as_str(kind: &EntityKind) -> &'static str {
-    match kind {
-        EntityKind::Human => "human",
-        EntityKind::Device => "device",
-        EntityKind::Service => "service",
-        EntityKind::Workload => "workload",
-        EntityKind::Application => "application",
+impl From<GqlGrantKind> for GrantKind {
+    fn from(kind: GqlGrantKind) -> Self {
+        match kind {
+            GqlGrantKind::Capability => GrantKind::Capability,
+            GqlGrantKind::Role => GrantKind::Role,
+        }
     }
 }
 
-fn entity_status_as_str(status: &EntityStatus) -> &'static str {
-    match status {
-        EntityStatus::Active => "active",
-        EntityStatus::Inactive => "inactive",
-        EntityStatus::Suspended => "suspended",
+impl From<&GrantKind> for GqlGrantKind {
+    fn from(kind: &GrantKind) -> Self {
+        match kind {
+            GrantKind::Capability => GqlGrantKind::Capability,
+            GrantKind::Role => GqlGrantKind::Role,
+        }
     }
 }
 
-pub fn parse_optional_tenant_status(
-    value: Option<String>,
-) -> async_graphql::Result<Option<TenantStatus>> {
-    value.as_deref().map(parse_tenant_status).transpose()
-}
-
-fn parse_tenant_status(value: &str) -> async_graphql::Result<TenantStatus> {
-    match value {
-        "active" => Ok(TenantStatus::Active),
-        "inactive" => Ok(TenantStatus::Inactive),
-        "frozen" => Ok(TenantStatus::Frozen),
-        "deleted" => Ok(TenantStatus::Deleted),
-        other => Err(async_graphql::Error::new(format!(
-            "invalid tenant status '{other}'"
-        ))),
+impl From<GqlScopeKind> for ScopeKind {
+    fn from(kind: GqlScopeKind) -> Self {
+        match kind {
+            GqlScopeKind::Platform => ScopeKind::Platform,
+            GqlScopeKind::Tenant => ScopeKind::Tenant,
+            GqlScopeKind::ObjectKind => ScopeKind::ObjectKind,
+            GqlScopeKind::ObjectType => ScopeKind::ObjectType,
+            GqlScopeKind::Object => ScopeKind::Object,
+        }
     }
 }
 
-fn tenant_status_as_str(status: &TenantStatus) -> &'static str {
-    match status {
-        TenantStatus::Active => "active",
-        TenantStatus::Inactive => "inactive",
-        TenantStatus::Frozen => "frozen",
-        TenantStatus::Deleted => "deleted",
+impl From<&ScopeKind> for GqlScopeKind {
+    fn from(kind: &ScopeKind) -> Self {
+        match kind {
+            ScopeKind::Platform => GqlScopeKind::Platform,
+            ScopeKind::Tenant => GqlScopeKind::Tenant,
+            ScopeKind::ObjectKind => GqlScopeKind::ObjectKind,
+            ScopeKind::ObjectType => GqlScopeKind::ObjectType,
+            ScopeKind::Object => GqlScopeKind::Object,
+        }
     }
 }
 
-fn subject_kind_as_str(kind: &SubjectKind) -> &'static str {
-    match kind {
-        SubjectKind::Entity => "entity",
-        SubjectKind::Group => "group",
+impl From<GqlEffect> for Effect {
+    fn from(effect: GqlEffect) -> Self {
+        match effect {
+            GqlEffect::Allow => Effect::Allow,
+            GqlEffect::Deny => Effect::Deny,
+        }
     }
 }
 
-fn grant_kind_as_str(kind: &GrantKind) -> &'static str {
-    match kind {
-        GrantKind::Capability => "capability",
-        GrantKind::Role => "role",
+impl From<&Effect> for GqlEffect {
+    fn from(effect: &Effect) -> Self {
+        match effect {
+            Effect::Allow => GqlEffect::Allow,
+            Effect::Deny => GqlEffect::Deny,
+        }
     }
 }
 
-fn scope_kind_as_str(kind: &ScopeKind) -> &'static str {
-    match kind {
-        ScopeKind::Platform => "platform",
-        ScopeKind::Tenant => "tenant",
-        ScopeKind::ObjectKind => "object_kind",
-        ScopeKind::ObjectType => "object_type",
-        ScopeKind::Object => "object",
+impl From<GqlAuditOutcome> for AuditOutcome {
+    fn from(outcome: GqlAuditOutcome) -> Self {
+        match outcome {
+            GqlAuditOutcome::Allow => AuditOutcome::Allow,
+            GqlAuditOutcome::Deny => AuditOutcome::Deny,
+            GqlAuditOutcome::Error => AuditOutcome::Error,
+        }
     }
 }
 
-fn effect_as_str(effect: &Effect) -> &'static str {
-    match effect {
-        Effect::Allow => "allow",
-        Effect::Deny => "deny",
+impl From<&AuditOutcome> for GqlAuditOutcome {
+    fn from(outcome: &AuditOutcome) -> Self {
+        match outcome {
+            AuditOutcome::Allow => GqlAuditOutcome::Allow,
+            AuditOutcome::Deny => GqlAuditOutcome::Deny,
+            AuditOutcome::Error => GqlAuditOutcome::Error,
+        }
     }
 }
 
-fn audit_outcome_as_str(outcome: &AuditOutcome) -> &'static str {
-    match outcome {
-        AuditOutcome::Allow => "allow",
-        AuditOutcome::Deny => "deny",
-        AuditOutcome::Error => "error",
+impl From<GqlCredentialKind> for CredentialKind {
+    fn from(kind: GqlCredentialKind) -> Self {
+        match kind {
+            GqlCredentialKind::Password => CredentialKind::Password,
+            GqlCredentialKind::ApiKey => CredentialKind::ApiKey,
+            GqlCredentialKind::Certificate => CredentialKind::Certificate,
+        }
     }
 }
 
-fn credential_kind_as_str(kind: &CredentialKind) -> &'static str {
-    match kind {
-        CredentialKind::Password => "password",
-        CredentialKind::ApiKey => "api_key",
-        CredentialKind::Certificate => "certificate",
+impl From<&CredentialKind> for GqlCredentialKind {
+    fn from(kind: &CredentialKind) -> Self {
+        match kind {
+            CredentialKind::Password => GqlCredentialKind::Password,
+            CredentialKind::ApiKey => GqlCredentialKind::ApiKey,
+            CredentialKind::Certificate => GqlCredentialKind::Certificate,
+        }
     }
 }
 

@@ -52,6 +52,14 @@ fn authed(query: impl Into<String>) -> Request {
     })
 }
 
+fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
+    Request::new(query).data(AuthContext {
+        entity_id,
+        tenant_id: None,
+        session_id: None,
+    })
+}
+
 async fn entity(pool: &PgPool, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
@@ -144,6 +152,66 @@ async fn create_capability_and_list_it() {
 
 #[tokio::test]
 #[ignore]
+async fn unauthenticated_protected_query_fails() {
+    let pool = common::pool().await;
+    let schema = build_schema(state(pool));
+
+    let response = schema
+        .execute(Request::new(
+            r#"
+            {
+              tenants {
+                total
+              }
+            }
+            "#,
+        ))
+        .await;
+
+    assert!(!response.errors.is_empty());
+    assert!(response.errors[0]
+        .message
+        .contains("missing authentication"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn unauthorized_read_query_fails_and_admin_read_succeeds() {
+    let pool = common::pool().await;
+    let reader_id = entity(&pool, "human").await;
+    let schema = build_schema(state(pool));
+
+    let unauthorized = schema
+        .execute(authed_as(
+            reader_id,
+            r#"
+            {
+              resources {
+                total
+              }
+            }
+            "#,
+        ))
+        .await;
+    assert!(!unauthorized.errors.is_empty());
+    assert!(unauthorized.errors[0].message.contains("forbidden"));
+
+    let authorized = schema
+        .execute(authed(
+            r#"
+            {
+              resources(limit: 1) {
+                total
+              }
+            }
+            "#,
+        ))
+        .await;
+    assert!(authorized.errors.is_empty(), "{:?}", authorized.errors);
+}
+
+#[tokio::test]
+#[ignore]
 async fn create_role_and_attach_capability() {
     let pool = common::pool().await;
     let publish_id = seeded_capability(&pool, "publish").await;
@@ -228,13 +296,13 @@ async fn create_policy_and_authz_check_allow_and_deny() {
             r#"
             mutation {{
               createPolicy(input: {{
-                subjectKind: "entity",
+                subjectKind: entity,
                 subjectId: "{device_id}",
-                grantKind: "capability",
+                grantKind: capability,
                 grantId: "{publish_id}",
-                scopeKind: "object",
+                scopeKind: object,
                 scopeRef: "{channel_id}",
-                effect: "allow"
+                effect: allow
               }}) {{
                 id
                 subjectKind
@@ -285,7 +353,7 @@ async fn create_policy_and_authz_check_allow_and_deny() {
         .execute(authed(format!(
             r#"
             {{
-              policies(subjectId: "{device_id}", subjectKind: "entity") {{
+              policies(subjectId: "{device_id}", subjectKind: entity) {{
                 items {{ id subjectId }}
                 total
               }}
@@ -318,11 +386,11 @@ async fn authz_explain_returns_decision_details() {
             r#"
             mutation {{
               createPolicy(input: {{
-                subjectKind: "entity",
+                subjectKind: entity,
                 subjectId: "{device_id}",
-                grantKind: "capability",
+                grantKind: capability,
                 grantId: "{publish_id}",
-                scopeKind: "object",
+                scopeKind: object,
                 scopeRef: "{channel_id}"
               }}) {{
                 id
@@ -362,6 +430,84 @@ async fn authz_explain_returns_decision_details() {
     assert!(explain["evaluatedBindings"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
+}
+
+#[tokio::test]
+#[ignore]
+async fn authz_explain_requires_stronger_permission_than_check() {
+    let pool = common::pool().await;
+    let device_id = entity(&pool, "device").await;
+    let channel_id = channel(&pool).await;
+    let schema = build_schema(state(pool));
+
+    let check = schema
+        .execute(authed_as(
+            device_id,
+            format!(
+                r#"
+                mutation {{
+                  authzCheck(input: {{
+                    subjectId: "{device_id}",
+                    action: "publish",
+                    resourceId: "{channel_id}"
+                  }}) {{
+                    allowed
+                  }}
+                }}
+                "#
+            ),
+        ))
+        .await;
+    assert!(check.errors.is_empty(), "{:?}", check.errors);
+
+    let explain = schema
+        .execute(authed_as(
+            device_id,
+            format!(
+                r#"
+                mutation {{
+                  authzExplain(input: {{
+                    subjectId: "{device_id}",
+                    action: "publish",
+                    resourceId: "{channel_id}"
+                  }}) {{
+                    allowed
+                  }}
+                }}
+                "#
+            ),
+        ))
+        .await;
+    assert!(!explain.errors.is_empty());
+    assert!(explain.errors[0].message.contains("forbidden"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn ownership_mutation_requires_manage_permission() {
+    let pool = common::pool().await;
+    let owner_id = entity(&pool, "human").await;
+    let owned_id = entity(&pool, "device").await;
+    let schema = build_schema(state(pool));
+
+    let response = schema
+        .execute(authed_as(
+            owner_id,
+            format!(
+                r#"
+                mutation {{
+                  addOwnership(ownerId: "{owner_id}", ownedId: "{owned_id}") {{
+                    ownerId
+                    ownedId
+                  }}
+                }}
+                "#
+            ),
+        ))
+        .await;
+
+    assert!(!response.errors.is_empty());
+    assert!(response.errors[0].message.contains("forbidden"));
 }
 
 #[tokio::test]

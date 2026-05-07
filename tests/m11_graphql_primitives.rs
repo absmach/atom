@@ -334,6 +334,39 @@ async fn create_entity_with_profile_still_derives_kind() {
 
 #[tokio::test]
 #[ignore]
+async fn create_entity_with_kind_enum_still_works() {
+    let pool = common::pool().await;
+    let schema = build_schema(state(pool).await);
+    let name = format!("graphql-service-{}", Uuid::new_v4());
+
+    let response = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createEntity(input: {{
+                kind: service,
+                name: "{name}",
+                attributes: {{ role: "worker" }}
+              }}) {{
+                id
+                kind
+                name
+                attributes
+              }}
+            }}
+            "#
+        )))
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let entity = &response.data.into_json().expect("json data")["createEntity"];
+    assert_eq!(entity["kind"], "service");
+    assert_eq!(entity["name"], name);
+    assert_eq!(entity["attributes"]["role"], "worker");
+}
+
+#[tokio::test]
+#[ignore]
 async fn create_entity_schema_validation_failure_still_errors() {
     let pool = common::pool().await;
     let profile_id = profile_with_schema(

@@ -202,7 +202,7 @@ async fn create_entity_with_conflicting_kind_and_profile_returns_error() {
             mutation {{
               createEntity(input: {{
                 profileId: "{profile_id}",
-                kind: "human",
+                kind: human,
                 name: "{name}",
                 attributes: {{}}
               }}) {{

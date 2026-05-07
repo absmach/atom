@@ -62,6 +62,10 @@ Authenticated playground tabs include an `Authorization: Bearer ...` placeholder
 
 The GraphQL schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, capabilities, policies, authz checks, audit logs, and profile-driven entity creation. REST remains available and unchanged.
 
+Atom GraphQL is generic. No Magistrala-specific GraphQL aliases exist; use the domain, client, and channel mappings below.
+
+GraphQL uses typed enums for Atom's fixed vocabularies, including `EntityKind`, `EntityStatus`, `TenantStatus`, `SubjectKind`, `GrantKind`, `ScopeKind`, `Effect`, `CredentialKind`, and `AuditOutcome`. Inline GraphQL uses enum values without quotes, such as `kind: device` or `scopeKind: object`. When using variables, send the same value as a JSON string, such as `"device"`.
+
 Profiles keep Atom's internal runtime/authz kind separate from user/domain subtypes:
 
 - `kind` is the internal Atom entity kind used by authorization (`human`, `device`, `service`, `workload`, `application`).
@@ -127,13 +131,13 @@ mutation {
 
 mutation {
   createPolicy(input: {
-    subjectKind: "entity",
+    subjectKind: entity,
     subjectId: "client-entity-id",
-    grantKind: "capability",
+    grantKind: capability,
     grantId: "publish-capability-id",
-    scopeKind: "object",
+    scopeKind: object,
     scopeRef: "channel-resource-id",
-    effect: "allow"
+    effect: allow
   }) {
     id
     effect
@@ -157,6 +161,7 @@ Magistrala mapping uses generic Atom operations:
 - a Magistrala domain calls `createTenant`
 - a Magistrala client calls `createEntity` with `kind=device` via the `client` profile
 - a Magistrala channel calls `createResource` with `kind="channel"`
+- publish/subscribe permissions use `createPolicy` over entity subjects and resource objects
 
 ---
 
