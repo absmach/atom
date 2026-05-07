@@ -32,13 +32,28 @@ docker-compose up postgres -d
 # 3. Run (migrations apply automatically on startup)
 cargo run
 
-# or with Docker
-docker-compose up
+# or with Docker (release image on :8080)
+docker-compose up atom
+
+# or with the dev image (debug build with GraphQL playground on :8081)
+docker-compose --profile dev up atom-dev
 ```
 
 The service starts on `http://localhost:8080`.
 
-GraphQL is available at `POST /graphql`; a playground is available at `/graphql/playground` in debug builds. GraphQL uses the same Bearer token authentication as REST.
+The release Docker image serves Atom on `http://localhost:8080`.
+
+The dev Docker image serves Atom on `http://localhost:8081`; because it is built in debug mode, the GraphQL playground is available at `http://localhost:8081/graphql/playground`.
+
+GraphQL is available at `POST /graphql` in both images. GraphQL uses the same Bearer token authentication as REST.
+
+The dev playground is preloaded with helper tabs for:
+
+- logging in via the REST `/auth/login` endpoint
+- listing profiles
+- creating an entity from a profile
+
+It also seeds the HTTP headers editor with an `Authorization: Bearer ...` placeholder so you can paste a JWT or API key once and reuse it across tabs.
 
 The initial GraphQL schema covers health, profiles, profile versions, entities, and profile-driven entity creation. REST remains the primary API for full administration.
 

@@ -16,7 +16,9 @@ services:
       retries: 5
 
   atom:
-    build: .
+    build:
+      context: .
+      target: release
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,6 +31,25 @@ services:
       RUST_LOG: info
     ports:
       - "8080:8080"
+
+  atom-dev:
+    build:
+      context: .
+      target: dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://atom:atom@postgres:5432/atom
+      LISTEN_ADDR: 0.0.0.0:8080
+      JWT_SECRET: change-me-in-production
+      JWT_EXPIRY_SECS: 3600
+      ADMIN_SECRET: change-me
+      RUST_LOG: info
+    ports:
+      - "8081:8080"
+    profiles:
+      - dev
 
 volumes:
   postgres_data:
