@@ -10,7 +10,7 @@ pub(crate) fn console_html() -> &'static str {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Atom API Builder</title>
+  <title>Atom GraphQL Console</title>
   <style>
     :root {
       color-scheme: light;
@@ -173,7 +173,7 @@ pub(crate) fn console_html() -> &'static str {
 
     .app-shell {
       display: grid;
-      grid-template-columns: 292px minmax(0, 1fr);
+      grid-template-columns: 292px minmax(0, 1fr) 292px;
       min-height: 100vh;
     }
 
@@ -183,7 +183,13 @@ pub(crate) fn console_html() -> &'static str {
       min-width: 0;
     }
 
-    .side-scroll {
+    .docs-panel {
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      min-width: 0;
+    }
+
+    .side-scroll, .docs-scroll {
       height: 100vh;
       overflow: auto;
     }
@@ -441,6 +447,43 @@ pub(crate) fn console_html() -> &'static str {
       text-overflow: ellipsis;
     }
 
+    .schema-docs {
+      display: grid;
+      gap: 10px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .schema-docs dt {
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .schema-docs dd {
+      margin: 2px 0 8px;
+      color: var(--muted);
+    }
+
+    .type-list {
+      max-height: 220px;
+      overflow: auto;
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--soft);
+      margin: 1px;
+    }
+
     .field-list {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -484,13 +527,14 @@ pub(crate) fn console_html() -> &'static str {
 
     @media (max-width: 1040px) {
       .app-shell { grid-template-columns: 260px minmax(0, 1fr); }
+      .docs-panel { display: none; }
       .task-grid, .builder-sections, .wizard-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .topbar { grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr); }
     }
 
     @media (max-width: 760px) {
       .app-shell { display: block; }
-      .side-scroll, .main { height: auto; }
+      .side-scroll, .docs-scroll, .main { height: auto; }
       .side-nav { border-right: 0; border-bottom: 1px solid var(--border); }
       .workspace { height: auto; }
       .grid, .grid-3, .split, .task-grid, .builder-sections, .wizard-nav, .recipe-preview { grid-template-columns: 1fr; }
@@ -502,8 +546,8 @@ pub(crate) fn console_html() -> &'static str {
     <aside class="side-nav">
       <div class="side-scroll">
         <div class="brand">
-          <h1>Atom API Builder</h1>
-          <div class="subtitle">Task-first console for generic Atom GraphQL.</div>
+          <h1>Atom GraphQL Console</h1>
+          <div class="subtitle">Hasura-like developer console and API Builder for generic Atom GraphQL.</div>
         </div>
 
         <section class="nav-section">
@@ -512,7 +556,7 @@ pub(crate) fn console_html() -> &'static str {
             <button class="nav-button active" data-screen="start"><strong>What do you want to do?</strong><span>Pick a task</span></button>
             <button class="nav-button" data-screen="guided"><strong>Guided setup</strong><span>Tenant to authz check</span></button>
             <button class="nav-button" data-screen="api-builder"><strong>API Builder</strong><span>Reusable recipes</span></button>
-            <button class="nav-button" data-screen="login"><strong>Login helper</strong><span>Get a token</span></button>
+            <button class="nav-button" data-screen="login"><strong>login helper</strong><span>Get a token</span></button>
           </div>
         </section>
 
@@ -532,8 +576,8 @@ pub(crate) fn console_html() -> &'static str {
         <section class="nav-section">
           <h2>Advanced</h2>
           <div class="nav-list">
-            <button class="nav-button" data-screen="advanced"><strong>Advanced GraphQL</strong><span>Operation explorer</span></button>
-            <button class="nav-button" data-screen="assistant"><strong>AI Assistant</strong><span>Copyable prompt only</span></button>
+            <button class="nav-button" data-screen="advanced"><strong>Advanced GraphQL</strong><span>operation explorer</span></button>
+            <button class="nav-button" data-screen="assistant"><strong>AI Assistant placeholder</strong><span>Copyable prompt only</span></button>
           </div>
         </section>
 
@@ -567,6 +611,7 @@ pub(crate) fn console_html() -> &'static str {
           <div class="panel tint">
             <h1>What do you want to do?</h1>
             <p class="help">Use plain mode by default. Each task generates generic Atom GraphQL, shows variables, and keeps the advanced query view collapsed until you need it.</p>
+            <p class="help">Includes login helper, operation explorer, entity builder, resource builder, policy builder, authz builder, and AI Assistant placeholder.</p>
           </div>
           <div class="task-grid">
             <button class="task-card" data-screen="guided"><strong>Set up a tenant</strong><span class="help">Create a tenant, entity, resource, policy, and access test in one guided flow.</span></button>
@@ -582,7 +627,7 @@ pub(crate) fn console_html() -> &'static str {
 
         <section id="screen-login" class="screen">
           <div class="panel">
-            <h1>Login helper</h1>
+            <h1>login helper</h1>
             <p class="help">Login is public. Tokens can be stored in localStorage for this browser, and Authorization is sent only to same-origin <code>/graphql</code>.</p>
             <div class="grid-3">
               <label>Identifier<input id="loginIdentifier" value="atom-admin" autocomplete="username" /></label>
@@ -978,7 +1023,7 @@ pub(crate) fn console_html() -> &'static str {
         <section id="screen-advanced" class="screen">
           <div class="panel">
             <h1>Advanced GraphQL</h1>
-            <p class="help">GraphQL Operation Explorer for direct schema inspection and execution. This advanced section uses introspection only.</p>
+            <p class="help">GraphQL operation explorer for direct schema inspection and execution. This advanced section uses introspection only.</p>
             <div class="grid">
               <label>Search operations and types<input id="schemaSearch" placeholder="filter operations and types" autocomplete="off" /></label>
               <label>Saved examples<select id="savedExamples"></select></label>
@@ -1030,8 +1075,9 @@ pub(crate) fn console_html() -> &'static str {
 
         <section id="screen-assistant" class="screen">
           <div class="panel">
-            <h1>AI Assistant</h1>
+            <h1>AI Assistant placeholder</h1>
             <div class="notice">No external LLM calls are made. Review generated GraphQL before running.</div>
+            <p class="help">LLM execution is not wired yet. Copy this prompt into your AI tool.</p>
             <p class="help">Describe a request. The console will build a copyable prompt with the current schema summary, available operations, selected context, Atom model rules, and your request.</p>
             <label>Natural-language request<textarea id="assistantRequest" spellcheck="false" placeholder="Example: create a device from the client profile and let it publish to a channel resource"></textarea></label>
             <div class="actions">
@@ -1053,6 +1099,45 @@ Explanation:
         </section>
       </div>
     </main>
+
+    <aside class="docs-panel">
+      <div class="docs-scroll">
+        <div class="brand">
+          <h1>Schema Docs</h1>
+          <div class="subtitle">Core Atom model reference from GraphQL introspection.</div>
+        </div>
+        <section class="nav-section">
+          <dl class="schema-docs">
+            <dt>Tenant</dt><dd>Isolation boundary.</dd>
+            <dt>Entity</dt><dd>Principal; human/device/service/workload/application.</dd>
+            <dt>Resource</dt><dd>Protected object, for example channel/rule/report.</dd>
+            <dt>Group</dt><dd>Collection of entities.</dd>
+            <dt>Profile</dt><dd>User/domain subtype/schema.</dd>
+            <dt>ProfileVersion</dt><dd>JSON Schema validation/history.</dd>
+            <dt>Policy</dt><dd>Grants capability/role over scope.</dd>
+          </dl>
+        </section>
+        <section class="nav-section">
+          <h2>External Mapping</h2>
+          <p class="help">Magistrala or any external system should use generic Atom operations:</p>
+          <ul class="help">
+            <li>domain -> createTenant</li>
+            <li>client -> createEntity with profile client under kind device</li>
+            <li>channel -> createResource with kind "channel"</li>
+            <li>connection -> createPolicy for publish/subscribe</li>
+          </ul>
+          <p class="help">Do not add GraphQL aliases for these.</p>
+        </section>
+        <section class="nav-section">
+          <h2>Types</h2>
+          <div id="objectTypes" class="type-list"></div>
+          <h3>Input types</h3>
+          <div id="inputTypes" class="type-list"></div>
+          <h3>Enums</h3>
+          <div id="enumTypes" class="type-list"></div>
+        </section>
+      </div>
+    </aside>
   </div>
 
   <script>
@@ -1330,10 +1415,34 @@ fragment TypeRef on __Type {
       }
     }
 
+    function typeMatches(type, search) {
+      if (!search) return true;
+      return type.name?.toLowerCase().includes(search.toLowerCase());
+    }
+
+    function renderTypeLists() {
+      const search = $("schemaSearch").value.trim();
+      const types = Array.from(state.typeMap.values())
+        .filter((type) => type.name && !type.name.startsWith("__") && typeMatches(type, search));
+      $("objectTypes").innerHTML = types
+        .filter((type) => type.kind === "OBJECT")
+        .map((type) => `<span class="pill">${escapeHtml(type.name)}</span>`)
+        .join("");
+      $("inputTypes").innerHTML = types
+        .filter((type) => type.kind === "INPUT_OBJECT")
+        .map((type) => `<span class="pill">${escapeHtml(type.name)}</span>`)
+        .join("");
+      $("enumTypes").innerHTML = types
+        .filter((type) => type.kind === "ENUM")
+        .map((type) => `<span class="pill">${escapeHtml(type.name)}</span>`)
+        .join("");
+    }
+
     function renderSchema() {
       if (!state.schema) return;
       renderOperationList("queryOps", "query", state.schema.queryType.name);
       renderOperationList("mutationOps", "mutation", state.schema.mutationType.name);
+      renderTypeLists();
     }
 
     function selectOperation(kind, op) {
@@ -2562,14 +2671,25 @@ mod tests {
         let html = console_html();
 
         for text in [
+            "Atom GraphQL Console",
+            "operation explorer",
+            "login helper",
             "What do you want to do?",
             "API Builder",
+            "entity builder",
+            "resource builder",
+            "policy builder",
+            "authz builder",
             "Entity builder",
             "Resource builder",
             "Policy builder",
             "Authz builder",
             "Advanced GraphQL",
-            "AI Assistant",
+            "AI Assistant placeholder",
+            "Schema Docs",
+            "Types",
+            "Input types",
+            "Enums",
             "Guided setup wizard",
             "Manage credentials",
         ] {

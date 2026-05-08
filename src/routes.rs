@@ -245,7 +245,7 @@ mod tests {
             .await
             .expect("body");
         let html = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(html.contains("Atom API Builder"));
+        assert!(html.contains("Atom GraphQL Console"));
         assert!(html.contains("What do you want to do?"));
         assert!(html.contains("Advanced GraphQL"));
     }

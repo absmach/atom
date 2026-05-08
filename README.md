@@ -47,7 +47,7 @@ The dev Docker image serves Atom on `http://localhost:8081`; because it is built
 
 GraphQL is available at `POST /graphql` in both images. GraphQL uses the same Bearer token authentication as REST.
 
-`/graphql/playground` is the simple debug playground. `/graphql/console` is the generic Atom API Builder: a task-first console for guided tenant setup, profile-driven entity creation, protected resource creation, policy grants, credential management, authorization checks, and reusable GraphQL recipes. Enable it explicitly with:
+`/graphql/playground` is the simple debug playground. `/graphql/console` is the Atom GraphQL Console: a generic task-first API Builder for GraphQL introspection, operation exploration, guided tenant setup, profile-driven entity creation, protected resource creation, policy grants, credential management, authorization checks, and reusable GraphQL recipes. Enable it explicitly with:
 
 ```bash
 ATOM_GRAPHQL_CONSOLE_ENABLED=true
@@ -183,7 +183,7 @@ Generic application mapping:
 | `JWT_EXPIRY_SECS`| `3600`                                     | JWT lifetime in seconds         |
 | `ADMIN_SECRET`   | *(optional)*                               | Seeds admin password on first boot |
 | `ADMIN_ENTITY_ID`| `00000000-0000-0000-0000-000000000001`     | Override seeded admin UUID      |
-| `ATOM_GRAPHQL_CONSOLE_ENABLED` | `false`                     | Enables `/graphql/console` API Builder console |
+| `ATOM_GRAPHQL_CONSOLE_ENABLED` | `false`                     | Enables `/graphql/console` Atom GraphQL Console |
 | `RUST_LOG`       | `info`                                     | Log level filter                |
 
 ---
