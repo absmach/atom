@@ -30,6 +30,7 @@ FROM alpine:3.20 AS release
 RUN apk add --no-cache ca-certificates libgcc
 WORKDIR /app
 COPY --from=builder-release /app/target/release/atom /usr/local/bin/atom
+COPY --from=builder-release /app/migrations /app/migrations
 COPY --from=console-builder /app/console/dist /app/console/dist
 COPY migrations ./migrations
 EXPOSE 8080
@@ -39,6 +40,7 @@ FROM alpine:3.20 AS dev
 RUN apk add --no-cache ca-certificates libgcc
 WORKDIR /app
 COPY --from=builder-dev /app/target/debug/atom /usr/local/bin/atom
+COPY --from=builder-dev /app/migrations /app/migrations
 COPY --from=console-builder /app/console/dist /app/console/dist
 COPY migrations ./migrations
 EXPOSE 8080

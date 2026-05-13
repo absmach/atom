@@ -25,6 +25,11 @@ import {
   type GroupFormInitialValues,
 } from "@/components/groups/group-edit-form";
 import { GroupMembersPanel } from "@/components/groups/group-members-panel";
+import {
+  PolicyCreateForm,
+  type PolicyRow,
+} from "@/components/policy/policy-create-form";
+import { PolicyInspectDetails } from "@/components/policy/policy-inspect-details";
 import { ProfileCreateForm } from "@/components/profiles/profile-create-form";
 import {
   ProfileEditForm,
@@ -150,6 +155,7 @@ export function CrudTable({
     null,
   );
   const [editingRole, setEditingRole] = React.useState<Row | null>(null);
+  const [editingPolicy, setEditingPolicy] = React.useState<Row | null>(null);
   const [editingCapability, setEditingCapability] = React.useState<Row | null>(
     null,
   );
@@ -384,6 +390,20 @@ export function CrudTable({
                 }
               }}
             />
+          ) : resource.key === "policies" ? (
+            <PolicyActionButtons
+              isDestroyPending={destroy.isPending}
+              onEdit={() => defer(() => setEditingPolicy(row.original))}
+              onDelete={() => {
+                if (
+                  window.confirm(
+                    `Delete this policy binding? This cannot be undone.`,
+                  )
+                ) {
+                  destroy.mutate(row.original);
+                }
+              }}
+            />
           ) : (
             <>
               <Button
@@ -514,12 +534,22 @@ export function CrudTable({
                 }}
               />
             ) : null}
+            {resource.key === "policies" ? (
+              <PolicyCreateForm
+                onCancel={() => setOpen(false)}
+                onSaved={() => {
+                  setOpen(false);
+                  router.refresh();
+                }}
+              />
+            ) : null}
             {resource.key !== "entities" &&
             resource.key !== "profiles" &&
             resource.key !== "tenants" &&
             resource.key !== "resources" &&
             resource.key !== "roles" &&
-            resource.key !== "capabilities" ? (
+            resource.key !== "capabilities" &&
+            resource.key !== "policies" ? (
               <form className="grid gap-4" onSubmit={submit}>
                 {resource.key !== "tenants" ? (
                   <QuickField name="name" label="Name" required />
@@ -769,6 +799,49 @@ export function CrudTable({
       </Sheet>
 
       <Sheet
+        open={Boolean(editingPolicy)}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setEditingPolicy(null);
+        }}
+      >
+        <SheetContent className="w-full overflow-y-auto sm:w-[min(90vw,64rem)]! sm:max-w-2xl!">
+          <SheetHeader>
+            <SheetTitle>Edit policy binding</SheetTitle>
+            <SheetDescription>
+              Modify this binding. The existing record will be replaced with the
+              new one.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="px-4 pb-4">
+            {editingPolicy ? (
+              <PolicyCreateForm
+                key={String(editingPolicy.id)}
+                initialPolicy={{
+                  id: String(editingPolicy.id ?? ""),
+                  effect: String(editingPolicy.effect ?? "allow"),
+                  subjectKind: String(editingPolicy.subjectKind ?? "entity"),
+                  subjectId: String(editingPolicy.subjectId ?? ""),
+                  grantKind: String(editingPolicy.grantKind ?? "capability"),
+                  grantId: String(editingPolicy.grantId ?? ""),
+                  scopeKind: String(editingPolicy.scopeKind ?? "platform"),
+                  scopeRef:
+                    editingPolicy.scopeRef != null
+                      ? String(editingPolicy.scopeRef)
+                      : null,
+                  conditions: editingPolicy.conditions,
+                }}
+                onCancel={() => setEditingPolicy(null)}
+                onSaved={() => {
+                  setEditingPolicy(null);
+                  router.refresh();
+                }}
+              />
+            ) : null}
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet
         open={Boolean(inspected)}
         onOpenChange={(nextOpen) => {
           if (!nextOpen) setInspected(null);
@@ -780,7 +853,8 @@ export function CrudTable({
             resource.key === "tenants" ||
             resource.key === "entities" ||
             resource.key === "groups" ||
-            resource.key === "roles"
+            resource.key === "roles" ||
+            resource.key === "policies"
               ? "w-full overflow-y-auto sm:w-[min(90vw,64rem)]! sm:max-w-2xl!"
               : "w-full overflow-y-auto sm:max-w-xl"
           }
@@ -794,7 +868,9 @@ export function CrudTable({
             </SheetDescription>
           </SheetHeader>
           <div className="grid min-w-0 gap-3 px-4 pb-4">
-            {resource.key === "profiles" ? (
+            {resource.key === "policies" ? (
+              <PolicyInspectDetails row={inspected} />
+            ) : resource.key === "profiles" ? (
               <ProfileInspectDetails row={inspected} />
             ) : resource.key === "entities" ? (
               <>
@@ -1050,6 +1126,33 @@ function RoleActionButtons({
 }
 
 function CapabilityActionButtons({
+  isDestroyPending,
+  onEdit,
+  onDelete,
+}: {
+  isDestroyPending: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <>
+      <Button onClick={onEdit} size="sm" variant="outline">
+        Edit
+      </Button>
+      <Button
+        disabled={isDestroyPending}
+        onClick={onDelete}
+        size="sm"
+        variant="outline"
+        className="border-red-500/50 text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:border-red-500/40 dark:text-red-400"
+      >
+        Delete
+      </Button>
+    </>
+  );
+}
+
+function PolicyActionButtons({
   isDestroyPending,
   onEdit,
   onDelete,
@@ -1474,6 +1577,15 @@ function renderCell(value: unknown, key?: string) {
       <span className="block max-w-72 whitespace-normal wrap-break-word text-sm">
         {String(value)}
       </span>
+    );
+  }
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      String(value),
+    )
+  ) {
+    return (
+      <span className="font-mono text-xs">{String(value).slice(0, 8)}…</span>
     );
   }
   if (String(value).length > 44) {
