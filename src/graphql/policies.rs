@@ -10,10 +10,10 @@ use crate::{
     identity::repo as identity_repo,
     models::{
         access::RoleHoldersQuery,
-        capability::{CreateCapability, ListCapabilities},
+        capability::{CreateCapability, ListCapabilities, UpdateCapability},
         enums::ScopeKind,
         policy::{CreatePolicyBinding, ListPolicies},
-        role::{CreateRole, ListRoles},
+        role::{CreateRole, ListRoles, UpdateRole},
     },
     state::AppState,
 };
@@ -24,7 +24,8 @@ use super::{
         parse_effect_or_default, parse_grant_kind, parse_id, parse_optional_id,
         parse_optional_subject_kind, parse_scope_kind, parse_subject_kind, Capability,
         CapabilityList, CreateCapabilityInput, CreatePolicyInput, CreateRoleInput, Entity,
-        GqlSubjectKind, PolicyBinding, PolicyBindingList, Role, RoleList, UpdateRoleInput,
+        GqlSubjectKind, PolicyBinding, PolicyBindingList, Role, RoleList, UpdateCapabilityInput,
+        UpdateRoleInput,
     },
 };
 
@@ -275,6 +276,39 @@ impl PolicyMutation {
         Ok(role.into())
     }
 
+    async fn update_role(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: UpdateRoleInput,
+    ) -> Result<Role> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let id = parse_id(id, "id")?;
+        let role = authz_repo::get_role(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        require_capability(
+            &state.pool,
+            auth.entity_id,
+            "role.manage",
+            scope_for_tenant(role.tenant_id),
+        )
+        .await
+        .map_err(gql_error)?;
+        let updated = authz_repo::update_role(
+            &state.pool,
+            id,
+            UpdateRole {
+                name: input.name,
+                description: input.description,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(updated.into())
+    }
+
     async fn delete_role(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
@@ -294,34 +328,6 @@ impl PolicyMutation {
             .await
             .map_err(gql_error)?;
         Ok(true)
-    }
-
-    async fn update_role(&self, ctx: &Context<'_>, id: ID, input: UpdateRoleInput) -> Result<Role> {
-        let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
-        let id = parse_id(id, "id")?;
-        let role = authz_repo::get_role(&state.pool, id)
-            .await
-            .map_err(gql_error)?;
-        require_capability(
-            &state.pool,
-            auth.entity_id,
-            "role.manage",
-            scope_for_tenant(role.tenant_id),
-        )
-        .await
-        .map_err(gql_error)?;
-        let updated = authz_repo::update_role(
-            &state.pool,
-            id,
-            crate::models::role::UpdateRole {
-                name: input.name,
-                description: input.description,
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(updated.into())
     }
 
     async fn add_role_capability(
@@ -410,6 +416,36 @@ impl PolicyMutation {
         .await
         .map_err(gql_error)?;
         Ok(capability.into())
+    }
+
+    async fn update_capability(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: UpdateCapabilityInput,
+    ) -> Result<Capability> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(
+            &state.pool,
+            auth.entity_id,
+            "policy.manage",
+            Scope::Platform,
+        )
+        .await
+        .map_err(gql_error)?;
+        let updated = authz_repo::update_capability(
+            &state.pool,
+            parse_id(id, "id")?,
+            UpdateCapability {
+                name: input.name,
+                resource_kind: input.resource_kind,
+                description: input.description,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(updated.into())
     }
 
     async fn delete_capability(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {

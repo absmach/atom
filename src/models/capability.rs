@@ -17,6 +17,13 @@ pub struct CreateCapability {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UpdateCapability {
+    pub name: Option<String>,
+    pub resource_kind: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListCapabilities {
     pub resource_kind: Option<String>,
 }

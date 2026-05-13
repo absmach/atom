@@ -86,7 +86,30 @@ impl AuthMutation {
 }
 
 pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {
-    async_graphql::Error::new(err.to_string())
+    match &err {
+        AppError::Database(sqlx::Error::Database(db)) => match db.code().as_deref() {
+            Some("23505") => async_graphql::Error::new("already exists"),
+            Some("23503") | Some("23514") => async_graphql::Error::new(db.message()),
+            Some(_) | None => {
+                tracing::error!("db error: {}", db);
+                async_graphql::Error::new("database error")
+            }
+        },
+        AppError::Database(e) => {
+            tracing::error!("db error: {}", e);
+            async_graphql::Error::new("database error")
+        }
+        AppError::Internal(e) => {
+            tracing::error!("internal error: {}", e);
+            async_graphql::Error::new("internal error")
+        }
+        AppError::NotFound(_)
+        | AppError::BadRequest(_)
+        | AppError::Unauthorized(_)
+        | AppError::Forbidden
+        | AppError::Conflict(_)
+        | AppError::PayloadTooLarge(_) => async_graphql::Error::new(err.to_string()),
+    }
 }
 
 pub(crate) fn require_auth(ctx: &Context<'_>) -> Result<AuthContext> {

@@ -361,6 +361,31 @@ pub async fn list_capabilities(
     .map_err(db_err)
 }
 
+pub async fn update_capability(
+    pool: &PgPool,
+    id: Uuid,
+    req: crate::models::capability::UpdateCapability,
+) -> Result<Capability, AppError> {
+    sqlx::query_as::<_, Capability>(
+        r#"UPDATE capabilities
+           SET name          = COALESCE($2, name),
+               resource_kind = COALESCE($3, resource_kind),
+               description   = COALESCE($4, description)
+           WHERE id = $1
+           RETURNING id, name, resource_kind, description"#,
+    )
+    .bind(id)
+    .bind(req.name)
+    .bind(req.resource_kind)
+    .bind(req.description)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("capability {id} not found")),
+        other => AppError::Database(other),
+    })
+}
+
 pub async fn delete_capability(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     let result = sqlx::query("DELETE FROM capabilities WHERE id = $1")
         .bind(id)

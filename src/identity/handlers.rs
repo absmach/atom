@@ -328,7 +328,18 @@ pub async fn update_entity(
         scope_for_tenant(existing.tenant_id),
     )
     .await?;
-    let entity = repo::update_entity(&state.pool, id, req.name, req.status, req.attributes).await?;
+    let entity = repo::update_entity(
+        &state.pool,
+        id,
+        req.name,
+        req.kind,
+        req.tenant_id,
+        req.profile_id,
+        req.profile_version_id,
+        req.status,
+        req.attributes,
+    )
+    .await?;
     Ok(Json(entity))
 }
 

@@ -141,6 +141,7 @@ impl EntityMutation {
             &[
                 ("manage", Scope::Object(id)),
                 ("manage", scope_for_tenant(existing.tenant_id)),
+                ("write", scope_for_tenant(existing.tenant_id)),
             ],
         )
         .await?;
@@ -149,6 +150,10 @@ impl EntityMutation {
             &state.pool,
             id,
             input.name,
+            parse_optional_entity_kind(input.kind),
+            parse_optional_id(input.tenant_id, "tenantId")?,
+            parse_optional_id(input.profile_id, "profileId")?,
+            parse_optional_id(input.profile_version_id, "profileVersionId")?,
             input.status.map(Into::into),
             input.attributes,
         )
@@ -178,6 +183,14 @@ impl EntityMutation {
             .await
             .map_err(gql_error)?;
         Ok(true)
+    }
+
+    async fn enable_entity(&self, ctx: &Context<'_>, id: ID) -> Result<Entity> {
+        change_entity_status(ctx, id, crate::models::enums::EntityStatus::Active).await
+    }
+
+    async fn disable_entity(&self, ctx: &Context<'_>, id: ID) -> Result<Entity> {
+        change_entity_status(ctx, id, crate::models::enums::EntityStatus::Inactive).await
     }
 
     async fn add_ownership(
@@ -219,6 +232,42 @@ impl EntityMutation {
             .map_err(gql_error)?;
         Ok(true)
     }
+}
+
+async fn change_entity_status(
+    ctx: &Context<'_>,
+    id: ID,
+    status: crate::models::enums::EntityStatus,
+) -> Result<Entity> {
+    let auth = require_auth(ctx)?;
+    let state = ctx.data::<AppState>()?;
+    let entity_id = parse_id(id, "id")?;
+    let existing = repo::get_entity(&state.pool, entity_id)
+        .await
+        .map_err(gql_error)?;
+    require_any_capability(
+        &state.pool,
+        auth.entity_id,
+        &[
+            ("manage", scope_for_tenant(existing.tenant_id)),
+            ("write", scope_for_tenant(existing.tenant_id)),
+        ],
+    )
+    .await?;
+    let entity = repo::update_entity(
+        &state.pool,
+        entity_id,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(status),
+        None,
+    )
+    .await
+    .map_err(gql_error)?;
+    Ok(entity.into())
 }
 
 async fn require_ownership_manage(

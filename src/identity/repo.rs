@@ -147,6 +147,10 @@ pub async fn update_entity(
     pool: &PgPool,
     id: Uuid,
     name: Option<String>,
+    kind: Option<EntityKind>,
+    tenant_id: Option<Uuid>,
+    profile_id: Option<Uuid>,
+    profile_version_id: Option<Uuid>,
     status: Option<EntityStatus>,
     attributes: Option<Value>,
 ) -> Result<Entity, AppError> {
@@ -157,16 +161,24 @@ pub async fn update_entity(
 
     sqlx::query_as::<_, Entity>(
         r#"UPDATE entities
-           SET name       = COALESCE($2, name),
-               status     = COALESCE($3, status),
-               attributes = COALESCE($4, attributes),
-               updated_at = now()
+           SET name               = COALESCE($2, name),
+               kind               = COALESCE($3, kind),
+               tenant_id          = COALESCE($4, tenant_id),
+               profile_id         = COALESCE($5, profile_id),
+               profile_version_id = COALESCE($6, profile_version_id),
+               status             = COALESCE($7, status),
+               attributes         = COALESCE($8, attributes),
+               updated_at         = now()
            WHERE id = $1
            RETURNING id, kind, name, tenant_id, profile_id, profile_version_id,
                      status, attributes, created_at, updated_at"#,
     )
     .bind(id)
     .bind(name)
+    .bind(kind)
+    .bind(tenant_id)
+    .bind(profile_id)
+    .bind(profile_version_id)
     .bind(status)
     .bind(attributes)
     .fetch_one(pool)
