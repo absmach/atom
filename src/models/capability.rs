@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -7,6 +8,8 @@ pub struct Capability {
     pub name: String,
     pub resource_kind: Option<String>,
     pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,4 +29,12 @@ pub struct UpdateCapability {
 #[derive(Debug, Deserialize)]
 pub struct ListCapabilities {
     pub resource_kind: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CapabilityList {
+    pub items: Vec<Capability>,
+    pub total: i64,
 }

@@ -342,6 +342,8 @@ CREATE TABLE capabilities (
     name            TEXT    NOT NULL,
     resource_kind   TEXT,
     description     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (name, resource_kind)
 );
 

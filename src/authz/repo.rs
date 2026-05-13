@@ -236,9 +236,9 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
 pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Role, AppError> {
     sqlx::query_as::<_, Role>(
         r#"UPDATE roles
-           SET name = COALESCE($2, name),
+           SET name        = COALESCE($2, name),
                description = COALESCE($3, description),
-               updated_at = now()
+               updated_at  = now()
            WHERE id = $1
            RETURNING id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at"#,
     )
@@ -301,7 +301,7 @@ pub async fn get_role_capabilities(
     role_id: Uuid,
 ) -> Result<Vec<Capability>, AppError> {
     sqlx::query_as::<_, Capability>(
-        r#"SELECT c.id, c.name, c.resource_kind, c.description
+        r#"SELECT c.id, c.name, c.resource_kind, c.description, c.created_at, c.updated_at
            FROM capabilities c
            JOIN role_capabilities rc ON rc.capability_id = c.id
            WHERE rc.role_id = $1"#,
@@ -322,7 +322,7 @@ pub async fn create_capability(
     sqlx::query_as::<_, Capability>(
         r#"INSERT INTO capabilities (id, name, resource_kind, description)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, name, resource_kind, description"#,
+           RETURNING id, name, resource_kind, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
@@ -335,7 +335,7 @@ pub async fn create_capability(
 
 pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppError> {
     sqlx::query_as::<_, Capability>(
-        "SELECT id, name, resource_kind, description FROM capabilities WHERE id = $1",
+        "SELECT id, name, resource_kind, description, created_at, updated_at FROM capabilities WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
@@ -349,16 +349,31 @@ pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppEr
 pub async fn list_capabilities(
     pool: &PgPool,
     params: ListCapabilities,
-) -> Result<Vec<Capability>, AppError> {
-    sqlx::query_as::<_, Capability>(
-        r#"SELECT id, name, resource_kind, description FROM capabilities
-           WHERE ($1::text IS NULL OR resource_kind = $1 OR resource_kind IS NULL)
-           ORDER BY name"#,
+) -> Result<crate::models::capability::CapabilityList, AppError> {
+    let limit = params.limit.clamp(1, 100);
+    let offset = params.offset.max(0);
+
+    let items = sqlx::query_as::<_, Capability>(
+        r#"SELECT id, name, resource_kind, description, created_at, updated_at FROM capabilities
+           WHERE ($1::text IS NULL OR resource_kind = $1)
+           ORDER BY name LIMIT $2 OFFSET $3"#,
     )
-    .bind(params.resource_kind)
+    .bind(&params.resource_kind)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM capabilities WHERE ($1::text IS NULL OR resource_kind = $1)",
+    )
+    .bind(&params.resource_kind)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(crate::models::capability::CapabilityList { items, total })
 }
 
 pub async fn update_capability(
@@ -370,9 +385,10 @@ pub async fn update_capability(
         r#"UPDATE capabilities
            SET name          = COALESCE($2, name),
                resource_kind = COALESCE($3, resource_kind),
-               description   = COALESCE($4, description)
+               description   = COALESCE($4, description),
+               updated_at    = now()
            WHERE id = $1
-           RETURNING id, name, resource_kind, description"#,
+           RETURNING id, name, resource_kind, description, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)

@@ -699,6 +699,14 @@ impl Capability {
     async fn description(&self) -> Option<&str> {
         self.0.description.as_deref()
     }
+
+    async fn created_at(&self) -> String {
+        timestamp(self.0.created_at)
+    }
+
+    async fn updated_at(&self) -> String {
+        timestamp(self.0.updated_at)
+    }
 }
 
 pub struct PolicyBinding(pub PolicyBindingData);

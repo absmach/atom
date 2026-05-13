@@ -27,7 +27,11 @@ const CodeMirror = dynamic<ReactCodeMirrorProps>(
   { ssr: false },
 );
 
-const JSON_EXTENSIONS = [json(), linter(jsonParseLinter()), EditorView.lineWrapping];
+const JSON_EXTENSIONS = [
+  json(),
+  linter(jsonParseLinter()),
+  EditorView.lineWrapping,
+];
 
 const CODEMIRROR_CLASS =
   "max-w-full overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:max-w-full [&_.cm-editor]:min-h-36 [&_.cm-gutters]:border-r [&_.cm-line]:break-words [&_.cm-scroller]:font-mono";
@@ -66,8 +70,15 @@ const attributesSchema = z.string().superRefine((val, ctx) => {
   if (!val.trim()) return;
   try {
     const parsed = JSON.parse(val);
-    if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
-      ctx.addIssue({ code: "custom", message: "Attributes must be a JSON object." });
+    if (
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      parsed === null
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Attributes must be a JSON object.",
+      });
     }
   } catch {
     ctx.addIssue({ code: "custom", message: "Attributes must be valid JSON." });
@@ -132,7 +143,13 @@ function CreateForm({
 
   const form = useForm<CreateFormValues>({
     resolver: zodResolver(createSchema),
-    defaultValues: { kind: "", name: "", tenantId: "", ownerId: "", attributes: "" },
+    defaultValues: {
+      kind: "",
+      name: "",
+      tenantId: "",
+      ownerId: "",
+      attributes: "{}",
+    },
   });
 
   const save = useMutation({
@@ -158,13 +175,20 @@ function CreateForm({
 
   return (
     <Form {...form}>
-      <form className="grid gap-4" onSubmit={form.handleSubmit((v) => save.mutate(v))}>
+      <form
+        className="grid gap-4"
+        onSubmit={form.handleSubmit((v) => save.mutate(v))}
+      >
         <KindField form={form} />
         <NameField form={form} />
         <TenantSelectField form={form} tenants={tenants} />
         <OwnerSelectField form={form} entities={entities} />
         <AttributesField control={form.control} />
-        <FormActions isPending={save.isPending} mode="create" onCancel={onCancel} />
+        <FormActions
+          isPending={save.isPending}
+          mode="create"
+          onCancel={onCancel}
+        />
       </form>
     </Form>
   );
@@ -210,13 +234,20 @@ function EditForm({
 
   return (
     <Form {...form}>
-      <form className="grid gap-4" onSubmit={form.handleSubmit((v) => save.mutate(v))}>
+      <form
+        className="grid gap-4"
+        onSubmit={form.handleSubmit((v) => save.mutate(v))}
+      >
         <ReadOnlyField label="Kind" value={resource.kind} />
         <ReadOnlyField label="Tenant" value={resource.tenantId || "—"} />
         <ReadOnlyField label="Owner" value={resource.ownerId || "—"} />
         <EditNameField form={form} />
         <EditAttributesField control={form.control} />
-        <FormActions isPending={save.isPending} mode="edit" onCancel={onCancel} />
+        <FormActions
+          isPending={save.isPending}
+          mode="edit"
+          onCancel={onCancel}
+        />
       </form>
     </Form>
   );
@@ -317,7 +348,12 @@ function OwnerSelectField({
   entities,
 }: {
   form: UseFormReturn<CreateFormValues>;
-  entities: { id: string; name: string; kind: string; tenantId: string | null }[];
+  entities: {
+    id: string;
+    name: string;
+    kind: string;
+    tenantId: string | null;
+  }[];
 }) {
   return (
     <FormField
@@ -376,7 +412,11 @@ function AttributesField({ control }: { control: Control<CreateFormValues> }) {
   );
 }
 
-function EditAttributesField({ control }: { control: Control<EditFormValues> }) {
+function EditAttributesField({
+  control,
+}: {
+  control: Control<EditFormValues>;
+}) {
   return (
     <FormField
       control={control}
@@ -455,7 +495,12 @@ function usePickerData() {
     queryFn: ({ signal }) =>
       graphqlClient<{
         entities: {
-          items: { id: string; name: string; kind: string; tenantId: string | null }[];
+          items: {
+            id: string;
+            name: string;
+            kind: string;
+            tenantId: string | null;
+          }[];
         };
       }>({ query: ENTITIES_QUERY, signal }),
     staleTime: 60_000,

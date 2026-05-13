@@ -2,13 +2,11 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { X } from "lucide-react";
 import * as React from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Form,
@@ -19,20 +17,29 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
+import { CapabilityPicker } from "./capability-picker";
+
+const TENANT_NONE = "__none__";
 
 // ─── GraphQL ─────────────────────────────────────────────────────────────────
 
 const CREATE_ROLE_MUTATION = `
   mutation CreateRole($input: CreateRoleInput!) {
-    createRole(input: $input) { id name tenantId description createdAt }
+    createRole(input: $input) { id name tenantId description createdAt updatedAt }
   }
 `;
 
 const UPDATE_ROLE_MUTATION = `
   mutation UpdateRole($id: ID!, $input: UpdateRoleInput!) {
-    updateRole(id: $id, input: $input) { id name tenantId description createdAt }
+    updateRole(id: $id, input: $input) { id name tenantId description createdAt updatedAt }
   }
 `;
 
@@ -50,7 +57,7 @@ const REMOVE_CAPABILITY_MUTATION = `
 
 const CAPABILITIES_QUERY = `
   query RoleFormCapabilities {
-    capabilities { items { id name resourceKind } }
+    capabilities(limit: 200, offset: 0) { items { id name resourceKind } }
   }
 `;
 
@@ -173,21 +180,6 @@ function CreateForm({
     onError: (err) => toast.error(err.message),
   });
 
-  function addCapability(id: string) {
-    setSelectedCapIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
-  }
-
-  function removeCapability(id: string) {
-    setSelectedCapIds((prev) => prev.filter((c) => c !== id));
-  }
-
-  const selectedCaps = capabilities.filter((c) =>
-    selectedCapIds.includes(c.id),
-  );
-  const availableCaps = capabilities.filter(
-    (c) => !selectedCapIds.includes(c.id),
-  );
-
   return (
     <Form {...form}>
       <form
@@ -213,19 +205,28 @@ function CreateForm({
           render={({ field }) => (
             <FormItem>
               <FormLabel>Tenant</FormLabel>
-              <FormControl>
-                <select
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  {...field}
-                >
-                  <option value="">— none (platform) —</option>
+              <Select
+                value={field.value || TENANT_NONE}
+                onValueChange={(v) =>
+                  field.onChange(v === TENANT_NONE ? "" : v)
+                }
+              >
+                <FormControl>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  <SelectItem value={TENANT_NONE}>
+                    — none (platform) —
+                  </SelectItem>
                   {tenants.map((t) => (
-                    <option key={t.id} value={t.id}>
+                    <SelectItem key={t.id} value={t.id}>
                       {t.name}
-                    </option>
+                    </SelectItem>
                   ))}
-                </select>
-              </FormControl>
+                </SelectContent>
+              </Select>
               <FormMessage />
             </FormItem>
           )}
@@ -243,52 +244,18 @@ function CreateForm({
             </FormItem>
           )}
         />
-        <div className="grid gap-2">
-          <Label>Capabilities</Label>
-          {selectedCaps.length > 0 ? (
-            <div className="flex flex-wrap gap-1">
-              {selectedCaps.map((cap) => (
-                <Badge key={cap.id} variant="secondary" className="gap-1 pr-1">
-                  {cap.name}
-                  {cap.resourceKind ? (
-                    <span className="text-muted-foreground">
-                      :{cap.resourceKind}
-                    </span>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="ml-0.5 rounded-sm opacity-70 hover:opacity-100"
-                    onClick={() => removeCapability(cap.id)}
-                  >
-                    <X className="h-3 w-3" />
-                    <span className="sr-only">Remove {cap.name}</span>
-                  </button>
-                </Badge>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              No capabilities selected.
-            </p>
-          )}
-          {availableCaps.length > 0 ? (
-            <select
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              value=""
-              onChange={(e) => {
-                if (e.target.value) addCapability(e.target.value);
-              }}
-            >
-              <option value="">— add capability —</option>
-              {availableCaps.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                  {c.resourceKind ? ` (${c.resourceKind})` : ""}
-                </option>
-              ))}
-            </select>
-          ) : null}
-        </div>
+        <CapabilityPicker
+          all={capabilities}
+          selected={selectedCapIds}
+          onAdd={(id) =>
+            setSelectedCapIds((prev) =>
+              prev.includes(id) ? prev : [...prev, id],
+            )
+          }
+          onRemove={(id) =>
+            setSelectedCapIds((prev) => prev.filter((c) => c !== id))
+          }
+        />
         <div className="flex justify-end gap-2">
           <Button onClick={onCancel} type="button" variant="outline">
             Cancel
@@ -372,7 +339,6 @@ function EditForm({
     onError: (err) => toast.error(err.message),
   });
 
-  const availableCaps = capabilities.filter((c) => !roleCapsIds.includes(c.id));
   const capsMutating = addCap.isPending || removeCap.isPending;
 
   return (
@@ -408,56 +374,17 @@ function EditForm({
             </FormItem>
           )}
         />
-        <div className="grid gap-2">
-          <Label>Capabilities</Label>
-          {roleCapsQuery.isFetching && roleCaps.length === 0 ? (
-            <p className="text-xs text-muted-foreground">Loading…</p>
-          ) : roleCaps.length > 0 ? (
-            <div className="flex flex-wrap gap-1">
-              {roleCaps.map((cap) => (
-                <Badge key={cap.id} variant="secondary" className="gap-1 pr-1">
-                  {cap.name}
-                  {cap.resourceKind ? (
-                    <span className="text-muted-foreground">
-                      :{cap.resourceKind}
-                    </span>
-                  ) : null}
-                  <button
-                    type="button"
-                    disabled={capsMutating}
-                    className="ml-0.5 rounded-sm opacity-70 hover:opacity-100 disabled:cursor-not-allowed"
-                    onClick={() => removeCap.mutate(cap.id)}
-                  >
-                    <X className="h-3 w-3" />
-                    <span className="sr-only">Remove {cap.name}</span>
-                  </button>
-                </Badge>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              No capabilities assigned.
-            </p>
-          )}
-          {availableCaps.length > 0 ? (
-            <select
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              disabled={capsMutating}
-              value=""
-              onChange={(e) => {
-                if (e.target.value) addCap.mutate(e.target.value);
-              }}
-            >
-              <option value="">— add capability —</option>
-              {availableCaps.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                  {c.resourceKind ? ` (${c.resourceKind})` : ""}
-                </option>
-              ))}
-            </select>
-          ) : null}
-        </div>
+        {roleCapsQuery.isFetching && roleCaps.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Loading capabilities…</p>
+        ) : (
+          <CapabilityPicker
+            all={capabilities}
+            selected={roleCapsIds}
+            onAdd={(id) => addCap.mutate(id)}
+            onRemove={(id) => removeCap.mutate(id)}
+            disabled={capsMutating}
+          />
+        )}
         <div className="flex justify-end gap-2">
           <Button onClick={onCancel} type="button" variant="outline">
             Cancel

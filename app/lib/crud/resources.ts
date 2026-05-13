@@ -190,8 +190,8 @@ export const crudResources: CrudResource[] = [
       "Tenant-scoped bundles of capabilities assigned through policies.",
     icon: ShieldCheck,
     queryName: "roles",
-    listQuery: `query Roles($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { roles(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id name tenantId description createdAt } } }`,
-    createMutation: `mutation CreateRole($input: CreateRoleInput!) { createRole(input: $input) { id name tenantId description createdAt } }`,
+    listQuery: `query Roles($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { roles(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id name tenantId description createdAt updatedAt } } }`,
+    createMutation: `mutation CreateRole($input: CreateRoleInput!) { createRole(input: $input) { id name tenantId description createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteRole($id: ID!) { deleteRole(id: $id) }`,
     deleteIdField: "id",
     columns: [
@@ -199,6 +199,7 @@ export const crudResources: CrudResource[] = [
       { key: "tenantId", label: "Scope", priority: "medium" },
       { key: "description", label: "Description", priority: "low" },
       { key: "createdAt", label: "Created", priority: "low" },
+      { key: "updatedAt", label: "Updated", priority: "low" },
     ],
     sampleRows: [
       {
@@ -218,14 +219,16 @@ export const crudResources: CrudResource[] = [
       "Atomic actions such as read, write, publish, subscribe, execute, and manage.",
     icon: KeyRound,
     queryName: "capabilities",
-    listQuery: `query Capabilities { capabilities { total items { id name resourceKind description } } }`,
-    createMutation: `mutation CreateCapability($input: CreateCapabilityInput!) { createCapability(input: $input) { id name resourceKind description } }`,
+    listQuery: `query Capabilities($limit: Int = 50, $offset: Int = 0) { capabilities(limit: $limit, offset: $offset) { total items { id name resourceKind description createdAt updatedAt } } }`,
+    createMutation: `mutation CreateCapability($input: CreateCapabilityInput!) { createCapability(input: $input) { id name resourceKind description createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteCapability($id: ID!) { deleteCapability(id: $id) }`,
     deleteIdField: "id",
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "resourceKind", label: "Resource kind", priority: "medium" },
       { key: "description", label: "Description", priority: "low" },
+      { key: "createdAt", label: "Created", priority: "low" },
+      { key: "updatedAt", label: "Updated", priority: "low" },
     ],
     sampleRows: [
       {

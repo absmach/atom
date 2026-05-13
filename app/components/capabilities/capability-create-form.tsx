@@ -1,7 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -16,21 +16,36 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
 
 // ─── GraphQL ─────────────────────────────────────────────────────────────────
 
 const CREATE_CAPABILITY_MUTATION = `
   mutation CreateCapability($input: CreateCapabilityInput!) {
-    createCapability(input: $input) { id name resourceKind description }
+    createCapability(input: $input) { id name resourceKind description createdAt updatedAt }
   }
 `;
 
 const UPDATE_CAPABILITY_MUTATION = `
   mutation UpdateCapability($id: ID!, $input: UpdateCapabilityInput!) {
-    updateCapability(id: $id, input: $input) { id name resourceKind description }
+    updateCapability(id: $id, input: $input) { id name resourceKind description createdAt updatedAt }
   }
 `;
+
+const RESOURCE_KINDS_QUERY = `
+  query CapabilityFormResourceKinds {
+    resources(limit: 200, offset: 0) { items { kind } }
+  }
+`;
+
+const KIND_NONE = "__none__";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -63,6 +78,31 @@ export function CapabilityCreateForm({
   onSaved: () => void;
 }) {
   const isEdit = Boolean(capability);
+
+  const resourceKindsQuery = useQuery({
+    queryKey: ["capability-form-resource-kinds"],
+    queryFn: ({ signal }) =>
+      graphqlClient<{ resources: { items: { kind: string }[] } }>({
+        query: RESOURCE_KINDS_QUERY,
+        signal,
+      }),
+    staleTime: 60_000,
+  });
+
+  const fetchedKinds = [
+    ...new Set(
+      (resourceKindsQuery.data?.resources.items ?? [])
+        .map((r) => r.kind)
+        .filter(Boolean),
+    ),
+  ].sort();
+
+  // In edit mode, ensure the saved value appears even if no matching resource exists.
+  const currentKind = capability?.resourceKind ?? "";
+  const knownKinds =
+    currentKind && !fetchedKinds.includes(currentKind)
+      ? [...fetchedKinds, currentKind].sort()
+      : fetchedKinds;
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
@@ -106,7 +146,10 @@ export function CapabilityCreateForm({
 
   return (
     <Form {...form}>
-      <form className="grid gap-4" onSubmit={form.handleSubmit((v) => save.mutate(v))}>
+      <form
+        className="grid gap-4"
+        onSubmit={form.handleSubmit((v) => save.mutate(v))}
+      >
         <FormField
           control={form.control}
           name="name"
@@ -126,9 +169,28 @@ export function CapabilityCreateForm({
           render={({ field }) => (
             <FormItem>
               <FormLabel>Resource kind</FormLabel>
-              <FormControl>
-                <Input placeholder="e.g. channel" {...field} />
-              </FormControl>
+              <Select
+                value={field.value || KIND_NONE}
+                onValueChange={(v) =>
+                  field.onChange(v === KIND_NONE ? "" : v)
+                }
+              >
+                <FormControl>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="— applies to all resources —" />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  <SelectItem value={KIND_NONE}>
+                    — applies to all resources —
+                  </SelectItem>
+                  {knownKinds.map((kind) => (
+                    <SelectItem key={kind} value={kind}>
+                      {kind}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <FormMessage />
             </FormItem>
           )}
@@ -140,7 +202,10 @@ export function CapabilityCreateForm({
             <FormItem>
               <FormLabel>Description</FormLabel>
               <FormControl>
-                <Input placeholder="e.g. Publish messages to a channel" {...field} />
+                <Input
+                  placeholder="e.g. Publish messages to a channel"
+                  {...field}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>

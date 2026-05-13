@@ -175,19 +175,22 @@ impl PolicyQuery {
         ctx: &Context<'_>,
         resource_kind: Option<String>,
         tenant_id: Option<ID>,
+        #[graphql(default = 50)] limit: i64,
+        #[graphql(default = 0)] offset: i64,
     ) -> Result<CapabilityList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         require_policy_read(&state.pool, auth.entity_id, tenant_id).await?;
-        let capabilities =
-            authz_repo::list_capabilities(&state.pool, ListCapabilities { resource_kind })
-                .await
-                .map_err(gql_error)?;
-        let total = capabilities.len() as i64;
+        let list = authz_repo::list_capabilities(
+            &state.pool,
+            ListCapabilities { resource_kind, limit, offset },
+        )
+        .await
+        .map_err(gql_error)?;
         Ok(CapabilityList {
-            items: capabilities.into_iter().map(Capability::from).collect(),
-            total,
+            items: list.items.into_iter().map(Capability::from).collect(),
+            total: list.total,
         })
     }
 

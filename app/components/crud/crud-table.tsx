@@ -1469,6 +1469,13 @@ function renderCell(value: unknown, key?: string) {
   ) {
     return <StatusBadge value={value} />;
   }
+  if (key === "description") {
+    return (
+      <span className="block max-w-72 whitespace-normal wrap-break-word text-sm">
+        {String(value)}
+      </span>
+    );
+  }
   if (String(value).length > 44) {
     return (
       <span className="font-mono text-xs">{String(value).slice(0, 8)}...</span>
