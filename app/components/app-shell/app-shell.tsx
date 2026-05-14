@@ -41,6 +41,8 @@ import {
   SidebarSeparator,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { GLOBAL_TENANT } from "@/lib/tenant/context";
+import { TenantProvider, useTenant } from "@/components/app-shell/tenant-provider";
 
 type NavChild = { title: string; href: string; icon: React.ElementType };
 type NavItem = {
@@ -84,19 +86,21 @@ export function AppShell({
   entityKind?: string;
 }) {
   return (
-    <SidebarProvider>
-      <AppSidebar entityName={entityName} entityKind={entityKind} />
-      <SidebarInset>
-        <header className="flex h-12 shrink-0 items-center gap-2 px-3">
-          <SidebarTrigger />
-        </header>
-        <main>
-          <div className="mx-auto flex w-full max-w-400 flex-col gap-6 p-4 sm:p-6 lg:p-8">
-            {children}
-          </div>
-        </main>
-      </SidebarInset>
-    </SidebarProvider>
+    <TenantProvider>
+      <SidebarProvider>
+        <AppSidebar entityName={entityName} entityKind={entityKind} />
+        <SidebarInset>
+          <header className="flex h-12 shrink-0 items-center gap-2 px-3">
+            <SidebarTrigger />
+          </header>
+          <main>
+            <div className="mx-auto flex w-full max-w-400 flex-col gap-6 p-4 sm:p-6 lg:p-8">
+              {children}
+            </div>
+          </main>
+        </SidebarInset>
+      </SidebarProvider>
+    </TenantProvider>
   );
 }
 
@@ -108,6 +112,11 @@ function AppSidebar({
   entityKind?: string;
 }) {
   const pathname = usePathname();
+  const { selection } = useTenant();
+  const isTenantScoped = selection.id !== GLOBAL_TENANT;
+  const visibleNav = isTenantScoped
+    ? nav.filter((item) => item.href !== "/tenants")
+    : nav;
 
   return (
     <Sidebar collapsible="icon">
@@ -145,7 +154,7 @@ function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu className="space-y-4">
-              {nav.map((item) => {
+              {visibleNav.map((item) => {
                 const active =
                   pathname === item.href ||
                   pathname.startsWith(`${item.href}/`);

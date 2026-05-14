@@ -30,6 +30,7 @@ export type CrudResource = {
   deleteMutation?: string;
   deleteIdField?: string;
   formAttributes?: boolean;
+  tenantFilter?: boolean;
   columns: Array<{
     key: string;
     label: string;
@@ -72,6 +73,7 @@ export const crudResources: CrudResource[] = [
       "Humans, devices, services, workloads, and applications managed as first-class principals.",
     icon: Fingerprint,
     queryName: "entities",
+    tenantFilter: true,
     listQuery: `query Entities($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { entities(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id kind profileId profileVersionId name tenantId attributes status createdAt updatedAt } } }`,
     createMutation: `mutation CreateEntity($input: CreateEntityInput!) { createEntity(input: $input) { id kind profileId profileVersionId name tenantId status createdAt updatedAt } }`,
     formAttributes: true,
@@ -103,6 +105,7 @@ export const crudResources: CrudResource[] = [
       "Schema-backed platform modeling for entities and future object types.",
     icon: Braces,
     queryName: "profiles",
+    tenantFilter: true,
     listQuery: `query Profiles($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { profiles(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id objectKind kind key displayName status createdAt updatedAt } } }`,
     createMutation: `mutation CreateProfile($input: CreateProfileInput!) { createProfile(input: $input) { id objectKind kind key displayName status createdAt updatedAt } }`,
     columns: [
@@ -131,6 +134,7 @@ export const crudResources: CrudResource[] = [
     description: "Named tenant-scoped collections used as policy subjects.",
     icon: Users,
     queryName: "groups",
+    tenantFilter: true,
     listQuery: `query Groups($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { groups(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id name tenantId description createdAt updatedAt } } }`,
     createMutation: `mutation CreateGroup($input: CreateGroupInput!) { createGroup(input: $input) { id name tenantId description createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteGroup($id: ID!) { deleteGroup(id: $id) }`,
@@ -159,6 +163,7 @@ export const crudResources: CrudResource[] = [
     description: "Protected objects evaluated by Atom's online PDP.",
     icon: Server,
     queryName: "resources",
+    tenantFilter: true,
     listQuery: `query Resources($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { resources(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id kind name tenantId ownerId attributes createdAt updatedAt } } }`,
     createMutation: `mutation CreateResource($input: CreateResourceInput!) { createResource(input: $input) { id kind name tenantId ownerId createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteResource($id: ID!) { deleteResource(id: $id) }`,
@@ -190,6 +195,7 @@ export const crudResources: CrudResource[] = [
       "Tenant-scoped bundles of capabilities assigned through policies.",
     icon: ShieldCheck,
     queryName: "roles",
+    tenantFilter: true,
     listQuery: `query Roles($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { roles(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id name tenantId description createdAt updatedAt } } }`,
     createMutation: `mutation CreateRole($input: CreateRoleInput!) { createRole(input: $input) { id name tenantId description createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteRole($id: ID!) { deleteRole(id: $id) }`,

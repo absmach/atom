@@ -9,6 +9,7 @@ import * as React from "react";
 import { type UseFormReturn, useForm, useWatch } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
+import { useTenant } from "@/components/app-shell/tenant-provider";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,6 +22,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -494,13 +496,31 @@ function TenantSelectField({
 }: {
   form: UseFormReturn<EntityFormValues>;
 }) {
+  const { selection } = useTenant();
+  const isTenantScoped =
+    selection.id !== GLOBAL_TENANT_VALUE && selection.id !== "";
+
   const { data } = useQuery({
     queryKey: ["entity-create-tenants"],
     queryFn: ({ signal }) =>
       graphqlClient<TenantsData>({ query: TENANTS_QUERY, signal }),
     staleTime: 60_000,
+    enabled: !isTenantScoped,
   });
   const tenants = data?.tenants.items ?? [];
+
+  React.useEffect(() => {
+    if (isTenantScoped) form.setValue("tenantId", selection.id);
+  }, [isTenantScoped, selection.id, form]);
+
+  if (isTenantScoped) {
+    return (
+      <div className="grid gap-2">
+        <Label>Tenant</Label>
+        <div className="text-sm text-muted-foreground">{selection.name}</div>
+      </div>
+    );
+  }
 
   return (
     <FormField

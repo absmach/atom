@@ -2,8 +2,9 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { Building2, Check, ChevronsUpDown, Globe2 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import * as React from "react";
-
+import { useTenant } from "@/components/app-shell/tenant-provider";
 import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu,
@@ -42,8 +43,8 @@ type TenantsData = {
 
 export function TenantSwitcher() {
   const { isMobile } = useSidebar();
-  const [selection, setSelection] =
-    React.useState<TenantSelection>(GLOBAL_OPTION);
+  const { selection, setTenant } = useTenant();
+  const router = useRouter();
 
   const { data } = useQuery({
     queryKey: ["tenant-switcher"],
@@ -57,20 +58,13 @@ export function TenantSwitcher() {
   );
   const options = [GLOBAL_OPTION, ...tenantOptions];
 
+  // Resolve the display name for the ID seeded from the cookie once tenants load.
   React.useEffect(() => {
-    const stored = window.localStorage.getItem("atom.tenant");
-    if (!stored) return;
-    const match = options.find((o) => o.id === stored);
-    if (match) setSelection(match);
+    if (!data || selection.id === GLOBAL_TENANT) return;
+    const match = options.find((o) => o.id === selection.id);
+    if (match && match.name !== selection.name) setTenant(match);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data]);
-
-  function selectTenant(next: TenantSelection) {
-    setSelection(next);
-    window.localStorage.setItem("atom.tenant", next.id);
-    // biome-ignore lint/suspicious/noDocumentCookie: non-sensitive tenant context is intentionally mirrored for route continuity.
-    document.cookie = `atom_tenant=${next.id}; path=/; sameSite=lax`;
-  }
+  }, [data, selection.id]);
 
   const Icon = selection.id === GLOBAL_TENANT ? Globe2 : Building2;
   const label = tenantLabel(selection);
@@ -107,7 +101,10 @@ export function TenantSwitcher() {
             {options.map((option) => (
               <DropdownMenuItem
                 key={option.id}
-                onClick={() => selectTenant(option)}
+                onClick={() => {
+                  setTenant(option);
+                  router.push("/dashboard");
+                }}
               >
                 <span className="flex-1">{option.name}</span>
                 {selection.id === option.id ? (

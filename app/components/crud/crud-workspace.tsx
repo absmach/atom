@@ -1,9 +1,11 @@
 import { AlertCircle, Database } from "lucide-react";
+import { cookies } from "next/headers";
 
 import { CrudTable } from "@/components/crud/crud-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { requireResource } from "@/lib/crud/resources";
 import { graphqlServer } from "@/lib/graphql/server";
+import { GLOBAL_TENANT, TENANT_COOKIE } from "@/lib/tenant/context";
 
 const DEFAULT_LIMIT = 20;
 
@@ -33,18 +35,26 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
   );
   const offset = (page - 1) * limit;
 
+  const cookieStore = await cookies();
+  const rawTenant = cookieStore.get(TENANT_COOKIE)?.value;
+  const tenantId =
+    rawTenant && rawTenant !== GLOBAL_TENANT ? rawTenant : undefined;
+
   let rows: Row[] = resource.sampleRows;
   let total = resource.sampleRows.length;
   let source: "graphql" | "scaffold" = "scaffold";
   let fetchError: Error | null = null;
 
   if (resource.listQuery) {
+    const variables: Record<string, unknown> = { limit, offset };
+    if (tenantId && resource.tenantFilter) variables.tenantId = tenantId;
+
     try {
       const data = await graphqlServer<
         Record<string, { items: Row[]; total: number }>
       >({
         query: resource.listQuery,
-        variables: { limit, offset },
+        variables,
       });
       const payload = data[resource.queryName];
       rows = payload?.items ?? [];

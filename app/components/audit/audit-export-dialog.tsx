@@ -26,6 +26,8 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { graphqlClient } from "@/lib/graphql/client";
+import { tenantQueryValue } from "@/lib/tenant/context";
+import { useTenant } from "@/components/app-shell/tenant-provider";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -53,6 +55,7 @@ const EXPORT_QUERY = `
     $outcome: AuditOutcome
     $from: String
     $to: String
+    $tenantId: ID
   ) {
     auditLogs(
       limit: $limit
@@ -61,6 +64,7 @@ const EXPORT_QUERY = `
       outcome: $outcome
       from: $from
       to: $to
+      tenantId: $tenantId
     ) {
       total
       items {
@@ -133,6 +137,7 @@ export function AuditExportDialog({
   defaultTo = "",
 }: Props) {
   const [open, setOpen] = React.useState(false);
+  const { selection } = useTenant();
 
   // Column selection — all on by default
   const [selectedColumns, setSelectedColumns] = React.useState<Set<ColumnKey>>(
@@ -202,6 +207,7 @@ export function AuditExportDialog({
             outcome: outcome || undefined,
             from: from || undefined,
             to: to || undefined,
+            tenantId: tenantQueryValue(selection) ?? undefined,
           },
         });
         allItems.push(...(data.auditLogs.items ?? []));

@@ -6,6 +6,7 @@ import * as React from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
+import { useTenant } from "@/components/app-shell/tenant-provider";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,6 +18,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -132,12 +134,18 @@ function CreateForm({
   onSaved: () => void;
 }) {
   const { tenants, capabilities } = usePickerData();
+  const { selection } = useTenant();
+  const isTenantScoped = selection.id !== TENANT_NONE && selection.id !== "";
   const [selectedCapIds, setSelectedCapIds] = React.useState<string[]>([]);
 
   const form = useForm<CreateFormValues>({
     resolver: zodResolver(createSchema),
     defaultValues: { name: "", tenantId: "", description: "" },
   });
+
+  React.useEffect(() => {
+    if (isTenantScoped) form.setValue("tenantId", selection.id);
+  }, [isTenantScoped, selection.id, form]);
 
   const addCap = useMutation({
     mutationFn: ({
@@ -199,38 +207,47 @@ function CreateForm({
             </FormItem>
           )}
         />
-        <FormField
-          control={form.control}
-          name="tenantId"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Tenant</FormLabel>
-              <Select
-                value={field.value || TENANT_NONE}
-                onValueChange={(v) =>
-                  field.onChange(v === TENANT_NONE ? "" : v)
-                }
-              >
-                <FormControl>
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                </FormControl>
-                <SelectContent>
-                  <SelectItem value={TENANT_NONE}>
-                    — none (platform) —
-                  </SelectItem>
-                  {tenants.map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.name}
+        {isTenantScoped ? (
+          <div className="grid gap-2">
+            <Label>Tenant</Label>
+            <div className="text-sm text-muted-foreground">
+              {selection.name}
+            </div>
+          </div>
+        ) : (
+          <FormField
+            control={form.control}
+            name="tenantId"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Tenant</FormLabel>
+                <Select
+                  value={field.value || TENANT_NONE}
+                  onValueChange={(v) =>
+                    field.onChange(v === TENANT_NONE ? "" : v)
+                  }
+                >
+                  <FormControl>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value={TENANT_NONE}>
+                      — none (platform) —
                     </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+                    {tenants.map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
         <FormField
           control={form.control}
           name="description"

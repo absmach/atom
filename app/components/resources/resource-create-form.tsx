@@ -6,9 +6,11 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { EditorView, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
 import dynamic from "next/dynamic";
-import { type Control, useForm, type UseFormReturn } from "react-hook-form";
+import * as React from "react";
+import { type Control, type UseFormReturn, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
+import { useTenant } from "@/components/app-shell/tenant-provider";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +22,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { graphqlClient } from "@/lib/graphql/client";
 
 const CodeMirror = dynamic<ReactCodeMirrorProps>(
@@ -316,6 +319,22 @@ function TenantSelectField({
   form: UseFormReturn<CreateFormValues>;
   tenants: { id: string; name: string }[];
 }) {
+  const { selection } = useTenant();
+  const isTenantScoped = selection.id !== "" && selection.id !== "global";
+
+  React.useEffect(() => {
+    if (isTenantScoped) form.setValue("tenantId", selection.id);
+  }, [isTenantScoped, selection.id, form]);
+
+  if (isTenantScoped) {
+    return (
+      <div className="grid gap-2">
+        <Label>Tenant</Label>
+        <div className="text-sm text-muted-foreground">{selection.name}</div>
+      </div>
+    );
+  }
+
   return (
     <FormField
       control={form.control}

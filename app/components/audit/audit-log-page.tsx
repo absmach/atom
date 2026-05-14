@@ -60,6 +60,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { graphqlClient } from "@/lib/graphql/client";
+import { tenantQueryValue } from "@/lib/tenant/context";
+import { useTenant } from "@/components/app-shell/tenant-provider";
 
 // ─── CodeMirror (SSR-safe) ────────────────────────────────────────────────────
 
@@ -79,6 +81,7 @@ const AUDIT_LOGS_QUERY = `
     $outcome: AuditOutcome
     $from: String
     $to: String
+    $tenantId: ID
   ) {
     auditLogs(
       limit: $limit
@@ -87,6 +90,7 @@ const AUDIT_LOGS_QUERY = `
       outcome: $outcome
       from: $from
       to: $to
+      tenantId: $tenantId
     ) {
       total
       items {
@@ -177,6 +181,7 @@ function useAuditParams() {
 
 export function AuditLogPage() {
   const params = useAuditParams();
+  const { selection } = useTenant();
   const [inspected, setInspected] = React.useState<AuditLogItem | null>(null);
 
   const columns = React.useMemo<ColumnDef<AuditLogItem>[]>(
@@ -253,6 +258,7 @@ export function AuditLogPage() {
       outcome: params.outcome || undefined,
       from: params.from || undefined,
       to: params.to || undefined,
+      tenantId: tenantQueryValue(selection) ?? undefined,
     }),
     [
       params.page,
@@ -261,6 +267,7 @@ export function AuditLogPage() {
       params.outcome,
       params.from,
       params.to,
+      selection,
     ],
   );
 
