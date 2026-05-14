@@ -1,6 +1,5 @@
 "use client";
 
-import { json } from "@codemirror/lang-json";
 import { useQuery } from "@tanstack/react-query";
 import {
   type ColumnDef,
@@ -10,19 +9,20 @@ import {
   useReactTable,
   type VisibilityState,
 } from "@tanstack/react-table";
-import { EditorView, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
 import {
+  Check,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Copy,
   Search,
   SlidersHorizontal,
 } from "lucide-react";
-import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import * as React from "react";
+import { useTenant } from "@/components/app-shell/tenant-provider";
 import { AuditExportDialog } from "@/components/audit/audit-export-dialog";
 import { StatusBadge } from "@/components/crud/status-badge";
 import { DisplayTimeCell } from "@/components/display-time";
@@ -37,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { JsonEditor } from "@/components/ui/json-editor";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -61,15 +62,9 @@ import {
 } from "@/components/ui/table";
 import { graphqlClient } from "@/lib/graphql/client";
 import { tenantQueryValue } from "@/lib/tenant/context";
-import { useTenant } from "@/components/app-shell/tenant-provider";
 
-// ─── CodeMirror (SSR-safe) ────────────────────────────────────────────────────
-
-const CM_EXTENSIONS = [json(), EditorView.lineWrapping];
-const CodeMirror = dynamic<ReactCodeMirrorProps>(
-  () => import("@uiw/react-codemirror").then((m) => m.default),
-  { ssr: false },
-);
+const AUDIT_INSPECT_ENTITY_QUERY = `query AuditInspectEntity($id: ID!) { entity(id: $id) { id name kind } }`;
+const AUDIT_INSPECT_TENANT_QUERY = `query AuditInspectTenant($id: ID!) { tenant(id: $id) { id name } }`;
 
 // ─── GraphQL ──────────────────────────────────────────────────────────────────
 
@@ -658,53 +653,114 @@ function PageLink({
 // ─── Inspect panel ────────────────────────────────────────────────────────────
 
 function AuditInspect({ item }: { item: AuditLogItem }) {
-  const fields: Array<{ label: string; value: string; mono?: boolean }> = [
-    { label: "ID", value: item.id, mono: true },
-    { label: "Event", value: item.event, mono: true },
-    { label: "Outcome", value: item.outcome },
-    {
-      label: "Entity",
-      value: item.entityId ?? "—",
-      mono: Boolean(item.entityId),
-    },
-    {
-      label: "Tenant",
-      value: item.tenantId ?? "—",
-      mono: Boolean(item.tenantId),
-    },
-    { label: "Time", value: item.createdAt },
-  ];
+  const [copied, setCopied] = React.useState(false);
+
+  const entityQ = useQuery({
+    enabled: Boolean(item.entityId),
+    queryKey: ["audit-inspect-entity", item.entityId],
+    queryFn: ({ signal }) =>
+      graphqlClient<{ entity: { id: string; name: string; kind: string } }>({
+        query: AUDIT_INSPECT_ENTITY_QUERY,
+        variables: { id: item.entityId },
+        signal,
+      }),
+    staleTime: 60_000,
+  });
+  const tenantQ = useQuery({
+    enabled: Boolean(item.tenantId),
+    queryKey: ["audit-inspect-tenant", item.tenantId],
+    queryFn: ({ signal }) =>
+      graphqlClient<{ tenant: { id: string; name: string } }>({
+        query: AUDIT_INSPECT_TENANT_QUERY,
+        variables: { id: item.tenantId },
+        signal,
+      }),
+    staleTime: 60_000,
+  });
+
+  const entityName = entityQ.data?.entity
+    ? `${entityQ.data.entity.name} (${entityQ.data.entity.kind})`
+    : (item.entityId ?? null);
+  const tenantName = tenantQ.data?.tenant.name ?? item.tenantId;
+
+  function copyId() {
+    navigator.clipboard.writeText(item.id).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
 
   return (
-    <div className="grid gap-6 px-4 pb-6">
-      <div className="grid gap-2">
-        {fields.map(({ label, value, mono }) => (
-          <div key={label} className="flex gap-3 text-sm">
-            <span className="w-20 shrink-0 font-medium text-muted-foreground">
-              {label}
-            </span>
-            <span className={mono ? "break-all font-mono text-xs" : ""}>
-              {label === "Outcome" ? <StatusBadge value={value} /> : value}
-            </span>
-          </div>
-        ))}
-      </div>
+    <div className="grid gap-3 px-4 pb-6">
+      <Field label="ID">
+        <div className="flex items-center gap-2">
+          <span className="break-all font-mono text-xs">{item.id}</span>
+          <Button
+            className="h-6 w-6 shrink-0"
+            onClick={copyId}
+            size="icon"
+            variant="ghost"
+          >
+            {copied ? (
+              <Check className="size-3.5" />
+            ) : (
+              <Copy className="size-3.5" />
+            )}
+          </Button>
+        </div>
+      </Field>
 
-      <div className="grid gap-2">
-        <div className="text-sm font-medium">Details</div>
-        <CodeMirror
+      <Field label="Event">
+        <span className="font-mono text-xs">{item.event}</span>
+      </Field>
+
+      <Field label="Outcome">
+        <StatusBadge value={item.outcome} />
+      </Field>
+
+      <Field label="Entity">
+        {entityName ? (
+          <span className="text-sm">{entityName}</span>
+        ) : (
+          <span className="text-sm text-muted-foreground">—</span>
+        )}
+      </Field>
+
+      <Field label="Tenant">
+        {item.tenantId ? (
+          <span className="text-sm">{tenantName}</span>
+        ) : (
+          <span className="text-sm text-muted-foreground">—</span>
+        )}
+      </Field>
+
+      <Field label="Time">
+        <DisplayTimeCell time={item.createdAt} />
+      </Field>
+
+      <Field label="Details">
+        <JsonEditor
           value={JSON.stringify(item.details, null, 2)}
-          extensions={CM_EXTENSIONS}
-          editable={false}
-          basicSetup={{
-            foldGutter: true,
-            highlightActiveLine: false,
-            highlightActiveLineGutter: false,
-            lineNumbers: false,
-          }}
-          className="overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:min-h-16 [&_.cm-editor]:min-h-16 [&_.cm-scroller]:font-mono"
+          className="[&_.cm-editor]:min-h-16"
         />
+      </Field>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-1 rounded-lg border bg-background p-3">
+      <div className="text-xs font-medium uppercase text-muted-foreground">
+        {label}
       </div>
+      <div>{children}</div>
     </div>
   );
 }

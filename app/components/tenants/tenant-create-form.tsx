@@ -1,11 +1,8 @@
 "use client";
 
-import { json } from "@codemirror/lang-json";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation } from "@tanstack/react-query";
-import { EditorView, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
 import type { Tag } from "emblor";
-import dynamic from "next/dynamic";
 import { type SetStateAction, useEffect, useState } from "react";
 import { type UseFormReturn, useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -22,6 +19,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { JsonEditor } from "@/components/ui/json-editor";
 import { graphqlClient } from "@/lib/graphql/client";
 
 const CREATE_TENANT_MUTATION = `
@@ -53,12 +51,6 @@ const UPDATE_TENANT_MUTATION = `
     }
   }
 `;
-
-const JSON_CODEMIRROR_EXTENSIONS = [json(), EditorView.lineWrapping];
-const CodeMirror = dynamic<ReactCodeMirrorProps>(
-  () => import("@uiw/react-codemirror").then((module) => module.default),
-  { ssr: false },
-);
 
 const tenantFormSchema = z
   .object({
@@ -299,15 +291,8 @@ function AttributesField({ form }: { form: UseFormReturn<TenantFormValues> }) {
         <FormItem className="min-w-0">
           <FormLabel>Attributes JSON</FormLabel>
           <FormControl>
-            <CodeMirror
-              basicSetup={{
-                foldGutter: true,
-                highlightActiveLine: false,
-                highlightActiveLineGutter: false,
-                lineNumbers: true,
-              }}
-              className="max-w-full overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:max-w-full [&_.cm-editor]:min-h-48 [&_.cm-gutters]:border-r [&_.cm-line]:break-words [&_.cm-scroller]:font-mono"
-              extensions={JSON_CODEMIRROR_EXTENSIONS}
+            <JsonEditor
+              className="[&_.cm-editor]:min-h-48"
               onChange={field.onChange}
               value={field.value}
             />

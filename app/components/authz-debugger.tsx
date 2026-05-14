@@ -1,9 +1,7 @@
 "use client";
 
-import { json } from "@codemirror/lang-json";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { EditorView, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -11,7 +9,6 @@ import {
   Play,
   XCircle,
 } from "lucide-react";
-import dynamic from "next/dynamic";
 import * as React from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -35,6 +32,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
+import { JsonEditor } from "@/components/ui/json-editor";
 import {
   Select,
   SelectContent,
@@ -45,14 +43,6 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { graphqlClient } from "@/lib/graphql/client";
 import { scopeSummary } from "@/lib/policy/summary";
-
-// ─── CodeMirror (SSR-safe) ────────────────────────────────────────────────────
-
-const CM_EXTENSIONS = [json(), EditorView.lineWrapping];
-const CodeMirror = dynamic<ReactCodeMirrorProps>(
-  () => import("@uiw/react-codemirror").then((m) => m.default),
-  { ssr: false },
-);
 
 // ─── GraphQL ──────────────────────────────────────────────────────────────────
 
@@ -335,17 +325,10 @@ export function AuthzDebugger() {
                   <FormItem>
                     <FormLabel>Context JSON</FormLabel>
                     <FormControl>
-                      <CodeMirror
+                      <JsonEditor
                         value={field.value}
                         onChange={field.onChange}
-                        extensions={CM_EXTENSIONS}
-                        basicSetup={{
-                          foldGutter: false,
-                          highlightActiveLine: false,
-                          highlightActiveLineGutter: false,
-                          lineNumbers: false,
-                        }}
-                        className="overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:min-h-16 [&_.cm-editor]:min-h-16 [&_.cm-scroller]:font-mono"
+                        className="[&_.cm-editor]:min-h-16"
                       />
                     </FormControl>
                     <FormMessage />

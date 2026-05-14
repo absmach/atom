@@ -1,10 +1,7 @@
 "use client";
 
-import { json } from "@codemirror/lang-json";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { EditorView, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
-import dynamic from "next/dynamic";
 import * as React from "react";
 import { type UseFormReturn, useForm, useWatch } from "react-hook-form";
 import { toast } from "sonner";
@@ -22,6 +19,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { JsonEditor } from "@/components/ui/json-editor";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -39,6 +37,7 @@ import {
   type SchemaField,
   type UiSchema,
 } from "@/lib/profiles/schema-form";
+import { GLOBAL_TENANT } from "@/lib/tenant/context";
 
 const TENANTS_QUERY = `
   query EntityFormTenants {
@@ -108,11 +107,6 @@ const ENTITY_KINDS = [
 ] as const;
 const EMPTY_SELECT_VALUE = "__empty__";
 const GLOBAL_TENANT_VALUE = "__global__";
-const JSON_CODEMIRROR_EXTENSIONS = [json(), EditorView.lineWrapping];
-const CodeMirror = dynamic<ReactCodeMirrorProps>(
-  () => import("@uiw/react-codemirror").then((module) => module.default),
-  { ssr: false },
-);
 
 type TenantOption = { id: string; name: string };
 type TenantsData = { tenants: { items: TenantOption[] } };
@@ -497,8 +491,7 @@ function TenantSelectField({
   form: UseFormReturn<EntityFormValues>;
 }) {
   const { selection } = useTenant();
-  const isTenantScoped =
-    selection.id !== GLOBAL_TENANT_VALUE && selection.id !== "";
+  const isTenantScoped = selection.id !== "" && selection.id !== GLOBAL_TENANT;
 
   const { data } = useQuery({
     queryKey: ["entity-create-tenants"],
@@ -667,17 +660,10 @@ function JsonAttributesField({
         <FormItem className="min-w-0">
           <FormLabel>Attributes JSON</FormLabel>
           <FormControl>
-            <CodeMirror
-              basicSetup={{
-                foldGutter: true,
-                highlightActiveLine: false,
-                highlightActiveLineGutter: false,
-                lineNumbers: true,
-              }}
-              className="max-w-full overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:max-w-full [&_.cm-editor]:min-h-48 [&_.cm-gutters]:border-r [&_.cm-line]:break-words [&_.cm-scroller]:font-mono"
-              extensions={JSON_CODEMIRROR_EXTENSIONS}
-              onChange={field.onChange}
+            <JsonEditor
               value={field.value}
+              onChange={field.onChange}
+              className="[&_.cm-editor]:min-h-48"
             />
           </FormControl>
           <FormMessage />

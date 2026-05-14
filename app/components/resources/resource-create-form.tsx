@@ -1,11 +1,7 @@
 "use client";
 
-import { json, jsonParseLinter } from "@codemirror/lang-json";
-import { linter } from "@codemirror/lint";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { EditorView, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
-import dynamic from "next/dynamic";
 import * as React from "react";
 import { type Control, type UseFormReturn, useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -22,22 +18,17 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { JsonEditor } from "@/components/ui/json-editor";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
-
-const CodeMirror = dynamic<ReactCodeMirrorProps>(
-  () => import("@uiw/react-codemirror").then((m) => m.default),
-  { ssr: false },
-);
-
-const JSON_EXTENSIONS = [
-  json(),
-  linter(jsonParseLinter()),
-  EditorView.lineWrapping,
-];
-
-const CODEMIRROR_CLASS =
-  "max-w-full overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:max-w-full [&_.cm-editor]:min-h-36 [&_.cm-gutters]:border-r [&_.cm-line]:break-words [&_.cm-scroller]:font-mono";
+import { GLOBAL_TENANT } from "@/lib/tenant/context";
 
 const CREATE_RESOURCE_MUTATION = `
   mutation CreateResource($input: CreateResourceInput!) {
@@ -320,7 +311,7 @@ function TenantSelectField({
   tenants: { id: string; name: string }[];
 }) {
   const { selection } = useTenant();
-  const isTenantScoped = selection.id !== "" && selection.id !== "global";
+  const isTenantScoped = selection.id !== "" && selection.id !== GLOBAL_TENANT;
 
   React.useEffect(() => {
     if (isTenantScoped) form.setValue("tenantId", selection.id);
@@ -335,6 +326,8 @@ function TenantSelectField({
     );
   }
 
+  const NONE = "__none__";
+
   return (
     <FormField
       control={form.control}
@@ -342,19 +335,24 @@ function TenantSelectField({
       render={({ field }) => (
         <FormItem>
           <FormLabel>Tenant</FormLabel>
-          <FormControl>
-            <select
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              {...field}
-            >
-              <option value="">— none —</option>
+          <Select
+            value={field.value || NONE}
+            onValueChange={(v) => field.onChange(v === NONE ? "" : v)}
+          >
+            <FormControl>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+            </FormControl>
+            <SelectContent>
+              <SelectItem value={NONE}>— none —</SelectItem>
               {tenants.map((t) => (
-                <option key={t.id} value={t.id}>
+                <SelectItem key={t.id} value={t.id}>
                   {t.name}
-                </option>
+                </SelectItem>
               ))}
-            </select>
-          </FormControl>
+            </SelectContent>
+          </Select>
           <FormMessage />
         </FormItem>
       )}
@@ -374,6 +372,8 @@ function OwnerSelectField({
     tenantId: string | null;
   }[];
 }) {
+  const NONE = "__none__";
+
   return (
     <FormField
       control={form.control}
@@ -381,20 +381,25 @@ function OwnerSelectField({
       render={({ field }) => (
         <FormItem>
           <FormLabel>Owner entity</FormLabel>
-          <FormControl>
-            <select
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              {...field}
-            >
-              <option value="">— none —</option>
+          <Select
+            value={field.value || NONE}
+            onValueChange={(v) => field.onChange(v === NONE ? "" : v)}
+          >
+            <FormControl>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+            </FormControl>
+            <SelectContent>
+              <SelectItem value={NONE}>— none —</SelectItem>
               {entities.map((e) => (
-                <option key={e.id} value={e.id}>
+                <SelectItem key={e.id} value={e.id}>
                   {e.name}
-                  {e.tenantId ? ` (${e.tenantId})` : ""}
-                </option>
+                  {e.tenantId ? ` · ${e.tenantId}` : ""}
+                </SelectItem>
               ))}
-            </select>
-          </FormControl>
+            </SelectContent>
+          </Select>
           <FormMessage />
         </FormItem>
       )}
@@ -411,15 +416,8 @@ function AttributesField({ control }: { control: Control<CreateFormValues> }) {
         <FormItem className="min-w-0">
           <FormLabel>Attributes JSON</FormLabel>
           <FormControl>
-            <CodeMirror
-              basicSetup={{
-                foldGutter: true,
-                highlightActiveLine: false,
-                highlightActiveLineGutter: false,
-                lineNumbers: true,
-              }}
-              className={CODEMIRROR_CLASS}
-              extensions={JSON_EXTENSIONS}
+            <JsonEditor
+              className="[&_.cm-editor]:min-h-36"
               onChange={field.onChange}
               value={field.value}
             />
@@ -444,15 +442,8 @@ function EditAttributesField({
         <FormItem className="min-w-0">
           <FormLabel>Attributes JSON</FormLabel>
           <FormControl>
-            <CodeMirror
-              basicSetup={{
-                foldGutter: true,
-                highlightActiveLine: false,
-                highlightActiveLineGutter: false,
-                lineNumbers: true,
-              }}
-              className={CODEMIRROR_CLASS}
-              extensions={JSON_EXTENSIONS}
+            <JsonEditor
+              className="[&_.cm-editor]:min-h-36"
               onChange={field.onChange}
               value={field.value}
             />

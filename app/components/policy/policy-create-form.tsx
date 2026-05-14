@@ -9,6 +9,10 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
+import {
+  PolicySummary,
+  type ScopeKind,
+} from "@/components/policy/policy-summary";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,7 +24,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
-import { summarizePolicy } from "@/lib/policy/summary";
 
 // ─── GraphQL ─────────────────────────────────────────────────────────────────
 
@@ -70,12 +73,6 @@ const RESOURCES_QUERY = `
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type IdName = { id: string; name: string };
-type ScopeKind =
-  | "platform"
-  | "tenant"
-  | "object_kind"
-  | "object_type"
-  | "object";
 
 type WizardState = {
   effect: "allow" | "deny";
@@ -322,23 +319,6 @@ export function PolicyCreateForm({
   const isFirst = stepIdx === 0;
   const isLast = stepIdx === STEPS.length - 1;
 
-  const summary = summarizePolicy({
-    effect: draft.effect,
-    subjectKind: draft.subjectKind,
-    subjectName: draft.subjectLabel || undefined,
-    grantKind: draft.grantKind,
-    grantName: draft.grantLabel || undefined,
-    scopeKind: draft.scopeKind,
-    scopeRef: draft.scopeLabel || draft.scopeRef || undefined,
-    conditions: draft.conditions
-      .filter((c) => c.path && c.value)
-      .map((c) => ({
-        path: c.path,
-        operator: "equals" as const,
-        value: c.value,
-      })),
-  });
-
   return (
     <div className="grid gap-6">
       {/* Step indicator */}
@@ -405,7 +385,7 @@ export function PolicyCreateForm({
         {step === "conditions" && (
           <ConditionsStep draft={draft} onChange={setDraft} />
         )}
-        {step === "review" && <ReviewStep summary={summary} draft={draft} />}
+        {step === "review" && <ReviewStep draft={draft} />}
       </div>
 
       {/* Navigation */}
@@ -829,57 +809,24 @@ function ConditionsStep({
 
 // ─── Step: Review ─────────────────────────────────────────────────────────────
 
-function ReviewStep({
-  summary,
-  draft,
-}: {
-  summary: string;
-  draft: WizardState;
-}) {
-  const rows: Array<{ label: string; value: string }> = [
-    { label: "Effect", value: draft.effect === "allow" ? "Allow" : "Deny" },
-    {
-      label: "Subject",
-      value: `${draft.subjectLabel || draft.subjectId} (${draft.subjectKind})`,
-    },
-    {
-      label: "Grant",
-      value: `${draft.grantLabel || draft.grantId} (${draft.grantKind})`,
-    },
-    {
-      label: "Scope",
-      value:
-        draft.scopeKind + (draft.scopeLabel ? ` — ${draft.scopeLabel}` : ""),
-    },
-  ];
-  if (draft.conditions.some((c) => c.path && c.value)) {
-    rows.push({
-      label: "Conditions",
-      value: draft.conditions
-        .filter((c) => c.path && c.value)
-        .map((c) => `${c.path} = ${c.value}`)
-        .join(", "),
-    });
-  }
+function ReviewStep({ draft }: { draft: WizardState }) {
+  const conditions = draft.conditions.filter((c) => c.path && c.value);
 
   return (
-    <div className="grid gap-4">
-      <div className="rounded-lg border bg-muted/30 p-4">
-        <div className="text-xs font-medium uppercase text-muted-foreground">
-          Summary
-        </div>
-        <p className="mt-2 text-base leading-7">{summary}</p>
+    <div className="rounded-lg border bg-muted/30 p-4">
+      <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Summary
       </div>
-      <div className="grid gap-2">
-        {rows.map((row) => (
-          <div key={row.label} className="flex gap-3 text-sm">
-            <span className="w-24 shrink-0 font-medium text-muted-foreground">
-              {row.label}
-            </span>
-            <span>{row.value}</span>
-          </div>
-        ))}
-      </div>
+      <PolicySummary
+        effect={draft.effect}
+        subjectKind={draft.subjectKind}
+        subjectName={draft.subjectLabel || draft.subjectId}
+        grantKind={draft.grantKind}
+        grantLabel={draft.grantLabel || draft.grantId}
+        scopeKind={draft.scopeKind}
+        scopeRef={draft.scopeLabel || draft.scopeRef || undefined}
+        conditions={conditions}
+      />
     </div>
   );
 }

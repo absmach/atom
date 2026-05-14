@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
+import { GLOBAL_TENANT } from "@/lib/tenant/context";
 import { CapabilityPicker } from "./capability-picker";
 
 const TENANT_NONE = "__none__";
@@ -135,7 +136,7 @@ function CreateForm({
 }) {
   const { tenants, capabilities } = usePickerData();
   const { selection } = useTenant();
-  const isTenantScoped = selection.id !== TENANT_NONE && selection.id !== "";
+  const isTenantScoped = selection.id !== "" && selection.id !== GLOBAL_TENANT;
   const [selectedCapIds, setSelectedCapIds] = React.useState<string[]>([]);
 
   const form = useForm<CreateFormValues>({

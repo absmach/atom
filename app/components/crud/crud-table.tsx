@@ -1,11 +1,8 @@
 "use client";
 
-import { json } from "@codemirror/lang-json";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { EditorView, type ReactCodeMirrorProps } from "@uiw/react-codemirror";
 import { Plus } from "lucide-react";
-import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import * as React from "react";
 import { toast } from "sonner";
@@ -13,17 +10,21 @@ import {
   CapabilityCreateForm,
   type CapabilityFormInitialValues,
 } from "@/components/capabilities/capability-create-form";
+import { CapabilityInspectDetails } from "@/components/capabilities/capability-inspect-details";
 import { StatusBadge } from "@/components/crud/status-badge";
 import { DisplayTimeCell } from "@/components/display-time";
+import { EntityAuditLog } from "@/components/entities/entity-audit-log";
 import {
   EntityCreateForm,
   type EntityFormInitialValues,
 } from "@/components/entities/entity-create-form";
 import { EntityCredentials } from "@/components/entities/entity-credentials";
+import { EntityInspectDetails } from "@/components/entities/entity-inspect-details";
 import {
   GroupEditForm,
   type GroupFormInitialValues,
 } from "@/components/groups/group-edit-form";
+import { GroupInspectDetails } from "@/components/groups/group-inspect-details";
 import { GroupMembersPanel } from "@/components/groups/group-members-panel";
 import {
   PolicyCreateForm,
@@ -35,15 +36,18 @@ import {
   ProfileEditForm,
   type ProfileFormInitialValues,
 } from "@/components/profiles/profile-edit-form";
+import { ProfileInspectDetails } from "@/components/profiles/profile-inspect-details";
 import {
   ResourceCreateForm,
   type ResourceFormInitialValues,
 } from "@/components/resources/resource-create-form";
+import { ResourceInspectDetails } from "@/components/resources/resource-inspect-details";
 import { RoleCapabilitiesPanel } from "@/components/roles/role-capabilities-panel";
 import {
   RoleCreateForm,
   type RoleFormInitialValues,
 } from "@/components/roles/role-create-form";
+import { RoleInspectDetails } from "@/components/roles/role-inspect-details";
 import {
   TenantCreateForm,
   type TenantFormInitialValues,
@@ -52,6 +56,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/ui/data-table";
 import { Input } from "@/components/ui/input";
+import { JsonEditor } from "@/components/ui/json-editor";
 import { Label } from "@/components/ui/label";
 import {
   Sheet,
@@ -60,43 +65,17 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { DisplayTags } from "@/components/view-tags";
 import { requireResource } from "@/lib/crud/resources";
 import { graphqlClient } from "@/lib/graphql/client";
-import type { JsonSchema, UiSchema } from "@/lib/profiles/schema-form";
 import { Action } from "@/lib/utils";
 
 const TENANTS_QUERY = `
   query CrudTenants {
     tenants(limit: 100, offset: 0) {
       items { id name }
-    }
-  }
-`;
-
-const PROFILE_INSPECT_QUERY = `
-  query CrudInspectProfile($id: ID!) {
-    profile(id: $id) {
-      id
-      tenantId
-      objectKind
-      kind
-      key
-      displayName
-      description
-      status
-      createdAt
-      updatedAt
-    }
-    profileVersions(profileId: $id) {
-      id
-      profileId
-      version
-      status
-      jsonSchema
-      uiSchema
-      createdAt
     }
   }
 `;
@@ -117,12 +96,6 @@ const PROFILE_STATUS_MUTATION = `
     updateProfile(id: $id, input: $input) { id status updatedAt }
   }
 `;
-
-const JSON_CODEMIRROR_EXTENSIONS = [json(), EditorView.lineWrapping];
-const CodeMirror = dynamic<ReactCodeMirrorProps>(
-  () => import("@uiw/react-codemirror").then((module) => module.default),
-  { ssr: false },
-);
 
 type Row = Record<string, unknown>;
 
@@ -145,6 +118,7 @@ export function CrudTable({
 }: CrudTableProps) {
   const resource = requireResource(resourceKey);
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [open, setOpen] = React.useState(false);
   const [inspected, setInspected] = React.useState<Row | null>(null);
   const [editingTenant, setEditingTenant] = React.useState<Row | null>(null);
@@ -257,6 +231,9 @@ export function CrudTable({
       toast.success(
         `Profile ${variables.status === "active" ? "enabled" : "disabled"}`,
       );
+      queryClient.invalidateQueries({
+        queryKey: ["profile-inspect", String(variables.row.id)],
+      });
       router.refresh();
     },
     onError: (error) => toast.error(error.message),
@@ -873,26 +850,41 @@ export function CrudTable({
             ) : resource.key === "profiles" ? (
               <ProfileInspectDetails row={inspected} />
             ) : resource.key === "entities" ? (
-              <>
-                <DetailFields row={inspected} />
-                {inspected?.id ? (
-                  <EntityCredentials entityId={String(inspected.id)} />
-                ) : null}
-              </>
+              <Tabs defaultValue="details">
+                <TabsList className="mb-4">
+                  <TabsTrigger value="details">Details</TabsTrigger>
+                  <TabsTrigger value="audit">Audit Logs</TabsTrigger>
+                </TabsList>
+                <TabsContent value="details" className="grid gap-3">
+                  <EntityInspectDetails row={inspected} />
+                  {inspected?.id ? (
+                    <EntityCredentials entityId={String(inspected.id)} />
+                  ) : null}
+                </TabsContent>
+                <TabsContent value="audit">
+                  {inspected?.id ? (
+                    <EntityAuditLog entityId={String(inspected.id)} />
+                  ) : null}
+                </TabsContent>
+              </Tabs>
             ) : resource.key === "groups" ? (
               <>
-                <DetailFields row={inspected} />
+                <GroupInspectDetails row={inspected} />
                 {inspected?.id ? (
                   <GroupMembersPanel groupId={String(inspected.id)} />
                 ) : null}
               </>
+            ) : resource.key === "resources" ? (
+              <ResourceInspectDetails row={inspected} />
             ) : resource.key === "roles" ? (
               <>
-                <DetailFields row={inspected} />
+                <RoleInspectDetails row={inspected} />
                 {inspected?.id ? (
                   <RoleCapabilitiesPanel roleId={String(inspected.id)} />
                 ) : null}
               </>
+            ) : resource.key === "capabilities" ? (
+              <CapabilityInspectDetails row={inspected} />
             ) : (
               <DetailFields row={inspected} />
             )}
@@ -1282,86 +1274,6 @@ function tenantActionPastTense(action: keyof typeof TENANT_STATUS_MUTATIONS) {
   }
 }
 
-type ProfileInspectVersion = {
-  id: string;
-  profileId: string;
-  version: number;
-  status: string;
-  jsonSchema: JsonSchema;
-  uiSchema: UiSchema;
-  createdAt: string;
-};
-type ProfileInspectData = {
-  profile: Row;
-  profileVersions: ProfileInspectVersion[];
-};
-
-function ProfileInspectDetails({ row }: { row: Row | null }) {
-  const profileId = row?.id ? String(row.id) : "";
-  const { data, error, isFetching } = useQuery({
-    enabled: Boolean(profileId),
-    queryKey: ["profile-inspect", profileId],
-    queryFn: ({ signal }) =>
-      graphqlClient<ProfileInspectData>({
-        query: PROFILE_INSPECT_QUERY,
-        variables: { id: profileId },
-        signal,
-      }),
-    staleTime: 30_000,
-  });
-  const profile = data?.profile ?? row;
-  const versions = data?.profileVersions ?? [];
-
-  return (
-    <>
-      {isFetching ? (
-        <div className="text-sm text-muted-foreground">
-          Loading profile details...
-        </div>
-      ) : null}
-      {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-          {error.message}
-        </div>
-      ) : null}
-      <div className="grid gap-3">
-        <div className="text-sm font-medium">Profile details</div>
-        <DetailFields row={profile} />
-      </div>
-      <div className="grid min-w-0 gap-3">
-        <div className="text-sm font-medium">Profile versions</div>
-        {versions.length ? (
-          versions.map((version) => (
-            <ProfileVersionDetails key={version.id} version={version} />
-          ))
-        ) : (
-          <div className="rounded-lg border bg-background p-3 text-sm text-muted-foreground">
-            No profile versions found.
-          </div>
-        )}
-      </div>
-    </>
-  );
-}
-
-function ProfileVersionDetails({
-  version,
-}: {
-  version: ProfileInspectVersion;
-}) {
-  const { jsonSchema, uiSchema, ...versionDetails } = version;
-
-  return (
-    <div className="grid min-w-0 gap-3 rounded-lg border bg-background p-3">
-      <DetailFields row={versionDetails} />
-      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-        <JsonSchemaViewer label="JSON schema" value={jsonSchema} />
-        <JsonSchemaViewer label="UI schema" value={uiSchema} />
-      </div>
-    </div>
-  );
-}
-
 function JsonSchemaViewer({
   label,
   showLabel = true,
@@ -1380,19 +1292,7 @@ function JsonSchemaViewer({
           {label}
         </div>
       ) : null}
-      <CodeMirror
-        basicSetup={{
-          foldGutter: true,
-          highlightActiveLine: false,
-          highlightActiveLineGutter: false,
-          lineNumbers: true,
-        }}
-        className="max-w-full overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:max-w-full [&_.cm-editor]:min-h-48 [&_.cm-gutters]:border-r [&_.cm-line]:wrap-break-word [&_.cm-scroller]:font-mono"
-        editable={false}
-        extensions={JSON_CODEMIRROR_EXTENSIONS}
-        readOnly
-        value={code}
-      />
+      <JsonEditor value={code} className="[&_.cm-editor]:min-h-48" />
     </div>
   );
 }
