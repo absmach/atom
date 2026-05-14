@@ -3,7 +3,7 @@ use std::path::Path;
 use axum::{
     http::{header, HeaderValue, Method, StatusCode},
     response::IntoResponse,
-    routing::{any, delete, get, get_service, post},
+    routing::{any, get, get_service, post},
     Extension, Router,
 };
 use tower_http::{
@@ -13,8 +13,8 @@ use tower_http::{
 };
 
 use crate::{
-    api_endpoints::handlers as api_endpoints, authz::handlers as authz, config::Config, graphql,
-    identity::handlers as identity, keys, state::AppState, tenants::handlers as tenants,
+    api_endpoints::handlers as api_endpoints, config::Config, graphql,
+    identity::handlers as identity, keys, state::AppState,
 };
 
 pub fn create_router(state: AppState) -> Router {
@@ -55,6 +55,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/auth/login", post(identity::login))
         .route("/auth/email/verify", get(identity::verify_email))
         .route("/auth/email/resend", post(identity::resend_verification))
+        .route(
+            "/auth/password/reset/request",
+            post(identity::request_password_reset),
+        )
+        .route("/auth/password/reset", post(identity::reset_password))
         .route("/auth/oauth/:provider/start", get(identity::oauth_start))
         .route(
             "/auth/oauth/:provider/callback",
@@ -62,153 +67,9 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/auth/oauth/exchange", post(identity::oauth_exchange))
         .route("/auth/logout", post(identity::logout))
+        .route("/auth/introspect", get(identity::introspect))
         .route("/auth/sessions/:id", get(identity::get_session))
-        .route("/auth/keys/rotate", post(keys::rotate_keys))
-        // Entities
-        .route(
-            "/entities",
-            get(identity::list_entities).post(identity::create_entity),
-        )
-        .route("/entities/:id/access", get(authz::entity_access))
-        .route(
-            "/entities/:id/effective-capabilities",
-            get(authz::effective_capabilities),
-        )
-        .route("/entities/:id/audit", get(authz::entity_audit_logs))
-        .route(
-            "/entities/:id",
-            get(identity::get_entity)
-                .put(identity::update_entity)
-                .delete(identity::delete_entity),
-        )
-        // Profiles
-        .route(
-            "/profiles",
-            get(identity::list_profiles).post(identity::create_profile),
-        )
-        .route("/profiles/:id", get(identity::get_profile))
-        .route(
-            "/profiles/:id/versions",
-            get(identity::list_profile_versions).post(identity::create_profile_version),
-        )
-        // Credentials
-        .route(
-            "/entities/:id/credentials/password",
-            post(identity::create_password),
-        )
-        .route(
-            "/entities/:id/credentials/api-keys",
-            post(identity::create_api_key),
-        )
-        .route("/entities/:id/credentials", get(identity::list_credentials))
-        .route(
-            "/entities/:entity_id/credentials/:cred_id",
-            delete(identity::revoke_credential),
-        )
-        // Groups (on entity)
-        .route("/entities/:id/groups", get(identity::get_entity_groups))
-        // Ownerships
-        .route(
-            "/entities/:id/owned",
-            get(identity::list_owned).post(identity::add_ownership),
-        )
-        .route(
-            "/entities/:owner_id/owned/:owned_id",
-            delete(identity::remove_ownership),
-        )
-        // Groups
-        .route(
-            "/groups",
-            get(identity::list_groups).post(identity::create_group),
-        )
-        .route(
-            "/groups/:id",
-            get(identity::get_group).delete(identity::delete_group),
-        )
-        .route("/groups/:id/access", get(authz::group_access))
-        .route(
-            "/groups/:id/members",
-            get(identity::list_group_members).post(identity::add_group_member),
-        )
-        .route(
-            "/groups/:group_id/members/:entity_id",
-            delete(identity::remove_group_member),
-        )
-        // Resources
-        .route(
-            "/resources",
-            get(authz::list_resources).post(authz::create_resource),
-        )
-        .route(
-            "/resources/:id",
-            get(authz::get_resource)
-                .put(authz::update_resource)
-                .delete(authz::delete_resource),
-        )
-        .route("/resources/:id/access", get(authz::resource_access))
-        // Roles
-        .route("/roles", get(authz::list_roles).post(authz::create_role))
-        .route(
-            "/roles/:id",
-            get(authz::get_role).delete(authz::delete_role),
-        )
-        .route("/roles/:id/holders", get(authz::role_holders))
-        .route(
-            "/roles/:id/capabilities",
-            get(authz::get_role_capabilities).post(authz::add_role_capability),
-        )
-        .route(
-            "/roles/:role_id/capabilities/:cap_id",
-            delete(authz::remove_role_capability),
-        )
-        // Capabilities
-        .route(
-            "/capabilities",
-            get(authz::list_capabilities).post(authz::create_capability),
-        )
-        .route(
-            "/capabilities/:id",
-            get(authz::get_capability).delete(authz::delete_capability),
-        )
-        // Policy Bindings
-        .route(
-            "/policies",
-            get(authz::list_policies).post(authz::create_policy),
-        )
-        .route(
-            "/policies/:id",
-            get(authz::get_policy).delete(authz::delete_policy),
-        )
-        // Tenants
-        .route(
-            "/tenants",
-            get(tenants::list_tenants).post(tenants::create_tenant),
-        )
-        .route(
-            "/tenants/:id",
-            get(tenants::get_tenant)
-                .put(tenants::update_tenant)
-                .delete(tenants::delete_tenant),
-        )
-        .route("/tenants/:id/enable", post(tenants::enable_tenant))
-        .route("/tenants/:id/disable", post(tenants::disable_tenant))
-        .route("/tenants/:id/freeze", post(tenants::freeze_tenant))
-        // Authorization check (PDP)
-        .route("/authz/check", post(authz::check))
-        .route("/authz/check/bulk", post(authz::bulk_check))
-        .route("/authz/explain", post(authz::explain))
-        // Audit
-        .route("/audit", get(authz::audit_logs))
-        // Admin hygiene
-        .route("/admin/orphan-policies", get(authz::orphan_policies))
-        .route(
-            "/admin/unprotected-resources",
-            get(authz::unprotected_resources),
-        )
-        .route(
-            "/admin/expiring-credentials",
-            get(authz::expiring_credentials),
-        );
+        .route("/auth/keys/rotate", post(keys::rotate_keys));
 
     let app = attach_graphql_console(app, &state.config);
 
@@ -238,9 +99,14 @@ fn attach_graphql_console(app: Router<AppState>, config: &Config) -> Router<AppS
         );
 
         CONSOLE_PAGE_ROUTES.iter().fold(app, |app, page| {
+            let file = console_page_file(dist_dir, page);
             app.route(
                 &format!("/graphql/console/{page}"),
-                get_service(ServeFile::new(console_page_file(dist_dir, page))),
+                get_service(ServeFile::new(file.clone())),
+            )
+            .route(
+                &format!("/graphql/console/{page}/"),
+                get_service(ServeFile::new(file)),
             )
         })
     } else {
@@ -260,10 +126,10 @@ fn console_page_file(dist_dir: &Path, page: &str) -> std::path::PathBuf {
 }
 
 const CONSOLE_PAGE_ROUTES: &[&str] = &[
-    "templates",
     "endpoints",
     "tenants",
     "entities",
+    "groups",
     "profiles",
     "resources",
     "policies",
@@ -271,6 +137,8 @@ const CONSOLE_PAGE_ROUTES: &[&str] = &[
     "explorer",
     "playground",
     "settings",
+    "auth/callback",
+    "auth/verify-email",
 ];
 
 async fn missing_graphql_console_dist() -> impl IntoResponse {
@@ -315,6 +183,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_authz_audit_admin_rest_routes_are_not_registered() {
+        let app = create_router(test_state(false, "console/dist-missing-for-test"));
+
+        for (method, uri) in [
+            ("GET", "/tenants"),
+            ("GET", "/entities"),
+            ("GET", "/groups"),
+            ("GET", "/resources"),
+            ("GET", "/roles"),
+            ("GET", "/capabilities"),
+            ("GET", "/policies"),
+            ("GET", "/profiles"),
+            ("POST", "/authz/check"),
+            ("POST", "/authz/check/bulk"),
+            ("POST", "/authz/explain"),
+            ("GET", "/audit"),
+            ("GET", "/admin/orphan-policies"),
+            ("GET", "/admin/unprotected-resources"),
+            ("GET", "/admin/expiring-credentials"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
     async fn graphql_console_returns_503_when_enabled_without_dist() {
         let app = create_router(test_state(true, "console/dist-missing-for-test"));
 
@@ -352,8 +257,14 @@ mod tests {
 
         for uri in [
             "/graphql/console",
-            "/graphql/console/templates",
+            "/graphql/console/endpoints",
+            "/graphql/console/groups",
+            "/graphql/console/groups/",
             "/graphql/console/playground",
+            "/graphql/console/auth/callback",
+            "/graphql/console/auth/callback/",
+            "/graphql/console/auth/verify-email",
+            "/graphql/console/auth/verify-email/",
             "/graphql/playground",
         ] {
             let response = app
@@ -448,19 +359,27 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             grpc_addr: "127.0.0.1:0".into(),
             jwt_expiry_secs: 3600,
+            jwt_issuer: "http://localhost:8080".to_string(),
+            jwt_audience: "magistrala".to_string(),
             admin_entity_id: ADMIN_ENTITY_ID,
             admin_secret: None,
+            service_secret: None,
+            service_entity_id: crate::config::SERVICE_ENTITY_ID,
             signup_enabled: false,
             dev_allow_unverified_email_login: false,
             public_base_url: "http://localhost:8080".into(),
             cors_allowed_origins: vec!["http://localhost:8080".into()],
             email_verification_redirect: "http://localhost:8080/graphql/console/auth/verify-email"
                 .into(),
+            password_reset_redirect: "http://localhost:8080/graphql/console/auth/reset-password"
+                .into(),
+            invitation_redirect: "http://localhost:8080/graphql/console/invitations/accept".into(),
             oauth_success_redirect: "http://localhost:8080".into(),
             oauth_error_redirect: "http://localhost:8080".into(),
             oidc_providers: vec![],
             smtp: None,
             email_verification_expiry_secs: 86_400,
+            invitation_expiry_secs: 604_800,
             oauth_state_expiry_secs: 600,
             auth_exchange_code_expiry_secs: 300,
             graphql_console_enabled,

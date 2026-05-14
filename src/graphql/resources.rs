@@ -25,6 +25,7 @@ impl ResourceQuery {
     async fn resources(
         &self,
         ctx: &Context<'_>,
+        q: Option<String>,
         kind: Option<String>,
         tenant_id: Option<ID>,
         limit: Option<i32>,
@@ -37,6 +38,7 @@ impl ResourceQuery {
         let list = authz_repo::list_resources(
             &state.pool,
             ListResources {
+                q,
                 kind,
                 tenant_id,
                 limit: limit.map(i64::from).unwrap_or(20),
@@ -90,6 +92,7 @@ impl ResourceMutation {
         let resource = authz_repo::create_resource(
             &state.pool,
             CreateResource {
+                id: parse_optional_id(input.id, "id")?,
                 kind: input.kind,
                 name: input.name,
                 tenant_id,

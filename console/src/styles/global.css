@@ -440,6 +440,11 @@ a:focus-visible {
   color: var(--strong);
 }
 
+.icon-button {
+  width: 42px;
+  padding: 9px;
+}
+
 .button.danger-button,
 .danger-button {
   border-color: #e2b8b0;
@@ -541,6 +546,83 @@ a:focus-visible {
 .record-row.vertical {
   align-items: stretch;
   flex-direction: column;
+}
+
+.policy-list-panel {
+  max-width: 980px;
+}
+
+.policy-toolbar {
+  grid-template-columns: minmax(220px, 320px) auto;
+  justify-content: start;
+}
+
+.policy-row {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfa;
+  padding: 14px;
+}
+
+.policy-row-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.policy-row-header strong,
+.policy-row-header span {
+  display: inline;
+}
+
+.policy-row-header span {
+  margin-left: 6px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.policy-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.policy-fields div {
+  min-width: 0;
+  border-left: 3px solid var(--border);
+  padding-left: 10px;
+}
+
+.policy-fields dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.policy-fields dd {
+  margin: 0;
+  color: var(--strong);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.policy-fields small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.policy-no-conditions {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .record-main {
@@ -680,6 +762,47 @@ legend {
   padding: 9px 10px;
   font-size: 13px;
   font-weight: 700;
+}
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  overflow: auto;
+  background: rgba(17, 24, 21, 0.38);
+  padding: 48px 18px;
+}
+
+.modal-panel {
+  display: grid;
+  width: min(760px, 100%);
+  max-height: calc(100vh - 96px);
+  gap: 16px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(17, 24, 21, 0.24);
+  padding: 18px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-header h2 {
+  margin: 0;
+  color: var(--strong);
+  font-size: 20px;
+}
+
+.modal-actions {
+  justify-content: flex-end;
 }
 
 .form-success {
@@ -825,7 +948,8 @@ legend {
   .grid-2,
   .grid-3,
   .split,
-  .builder-grid {
+  .builder-grid,
+  .policy-fields {
     grid-template-columns: 1fr;
   }
 
@@ -859,5 +983,27 @@ legend {
   .record-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .policy-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .policy-row-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .policy-row-header span {
+    display: block;
+    margin-left: 0;
+  }
+
+  .modal-backdrop {
+    padding: 18px;
+  }
+
+  .modal-panel {
+    max-height: calc(100vh - 36px);
   }
 }

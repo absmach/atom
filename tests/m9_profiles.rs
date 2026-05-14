@@ -63,6 +63,7 @@ async fn profile_with_schema(pool: &sqlx::PgPool, json_schema: Value) -> Uuid {
 
 fn entity_request(name: String) -> CreateEntity {
     CreateEntity {
+        id: None,
         kind: None,
         profile_id: None,
         profile_version_id: None,

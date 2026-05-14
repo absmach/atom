@@ -17,6 +17,7 @@ pub struct Resource {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateResource {
+    pub id: Option<Uuid>,
     pub kind: String,
     pub name: Option<String>,
     pub tenant_id: Option<Uuid>,
@@ -33,6 +34,7 @@ pub struct UpdateResource {
 
 #[derive(Debug, Deserialize)]
 pub struct ListResources {
+    pub q: Option<String>,
     pub kind: Option<String>,
     pub tenant_id: Option<Uuid>,
     #[serde(default = "default_limit")]

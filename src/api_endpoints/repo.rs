@@ -3,7 +3,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    api_templates::repo as api_template_repo,
     error::{db_err, AppError},
     models::api_endpoint::{
         ApiEndpoint, ApiEndpointExecution, ApiEndpointExecutionList, ApiEndpointList,
@@ -11,7 +10,7 @@ use crate::{
     },
 };
 
-const API_ENDPOINT_COLS: &str = "id, tenant_id, key, name, description, method, path, template_id, auth_mode, service_entity_id, variables_mapping, request_schema, response_mapping, status, created_by, updated_by, created_at, updated_at";
+const API_ENDPOINT_COLS: &str = "id, tenant_id, key, name, description, method, path, operation_kind, graphql, auth_mode, service_entity_id, variables_mapping, request_schema, response_mapping, status, created_by, updated_by, created_at, updated_at";
 const API_ENDPOINT_EXECUTION_COLS: &str = "id, endpoint_id, caller_entity_id, status, request_summary, response_summary, error, created_at";
 
 pub async fn create_api_endpoint(
@@ -21,6 +20,8 @@ pub async fn create_api_endpoint(
 ) -> Result<ApiEndpoint, AppError> {
     let method = normalize_method(&req.method)?;
     validate_path(&req.path)?;
+    validate_operation_kind(&req.operation_kind)?;
+    validate_graphql_endpoint(&req.graphql)?;
     let auth_mode = req.auth_mode.unwrap_or_else(|| "caller_context".into());
     validate_auth_mode(&auth_mode, req.service_entity_id)?;
     let status = req.status.unwrap_or_else(|| "draft".into());
@@ -28,16 +29,15 @@ pub async fn create_api_endpoint(
     validate_json_object("variables_mapping", &req.variables_mapping)?;
     validate_json_object("request_schema", &req.request_schema)?;
     validate_json_object("response_mapping", &req.response_mapping)?;
-    validate_template(pool, req.template_id).await?;
 
     let id = Uuid::new_v4();
     sqlx::query_as::<_, ApiEndpoint>(&format!(
         r#"INSERT INTO api_endpoints
-           (id, tenant_id, key, name, description, method, path, template_id,
-            auth_mode, service_entity_id, variables_mapping, request_schema,
+           (id, tenant_id, key, name, description, method, path, operation_kind,
+            graphql, auth_mode, service_entity_id, variables_mapping, request_schema,
             response_mapping, status, created_by, updated_by)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                   $9, $10, $11, $12, $13, $14, $15, $15)
+                   $9, $10, $11, $12, $13, $14, $15, $16, $16)
            RETURNING {API_ENDPOINT_COLS}"#,
     ))
     .bind(id)
@@ -47,7 +47,8 @@ pub async fn create_api_endpoint(
     .bind(req.description)
     .bind(method)
     .bind(req.path)
-    .bind(req.template_id)
+    .bind(req.operation_kind)
+    .bind(req.graphql)
     .bind(auth_mode)
     .bind(req.service_entity_id)
     .bind(json_object_or_default(req.variables_mapping))
@@ -126,6 +127,12 @@ pub async fn update_api_endpoint(
     if let Some(path) = req.path.as_deref() {
         validate_path(path)?;
     }
+    if let Some(operation_kind) = req.operation_kind.as_deref() {
+        validate_operation_kind(operation_kind)?;
+    }
+    if let Some(graphql) = req.graphql.as_deref() {
+        validate_graphql_endpoint(graphql)?;
+    }
     if let Some(status) = req.status.as_deref() {
         validate_status(status)?;
     }
@@ -137,9 +144,6 @@ pub async fn update_api_endpoint(
     }
     if let Some(value) = req.response_mapping.as_ref() {
         validate_json_object("response_mapping", value)?;
-    }
-    if let Some(template_id) = req.template_id {
-        validate_template(pool, template_id).await?;
     }
 
     let existing = get_api_endpoint(pool, id).await?;
@@ -157,14 +161,15 @@ pub async fn update_api_endpoint(
                description       = COALESCE($4, description),
                method            = COALESCE($5, method),
                path              = COALESCE($6, path),
-               template_id       = COALESCE($7, template_id),
-               auth_mode         = COALESCE($8, auth_mode),
-               service_entity_id = COALESCE($9, service_entity_id),
-               variables_mapping = COALESCE($10, variables_mapping),
-               request_schema    = COALESCE($11, request_schema),
-               response_mapping  = COALESCE($12, response_mapping),
-               status            = COALESCE($13, status),
-               updated_by        = $14,
+               operation_kind    = COALESCE($7, operation_kind),
+               graphql           = COALESCE($8, graphql),
+               auth_mode         = COALESCE($9, auth_mode),
+               service_entity_id = COALESCE($10, service_entity_id),
+               variables_mapping = COALESCE($11, variables_mapping),
+               request_schema    = COALESCE($12, request_schema),
+               response_mapping  = COALESCE($13, response_mapping),
+               status            = COALESCE($14, status),
+               updated_by        = $15,
                updated_at        = now()
            WHERE id = $1
            RETURNING {API_ENDPOINT_COLS}"#,
@@ -175,7 +180,8 @@ pub async fn update_api_endpoint(
     .bind(req.description)
     .bind(req.method.map(|method| method.to_uppercase()))
     .bind(req.path)
-    .bind(req.template_id)
+    .bind(req.operation_kind)
+    .bind(req.graphql)
     .bind(req.auth_mode)
     .bind(req.service_entity_id)
     .bind(req.variables_mapping.map(json_object_or_default))
@@ -197,7 +203,7 @@ pub async fn enable_api_endpoint(
     updated_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
     let existing = get_api_endpoint(pool, id).await?;
-    validate_template(pool, existing.template_id).await?;
+    validate_graphql_endpoint(&existing.graphql)?;
     set_api_endpoint_status(pool, id, "active", updated_by).await
 }
 
@@ -315,12 +321,18 @@ async fn set_api_endpoint_status(
     })
 }
 
-async fn validate_template(pool: &PgPool, template_id: Uuid) -> Result<(), AppError> {
-    let template = api_template_repo::get_api_template(pool, template_id).await?;
-    if contains_introspection(&template.graphql) {
+fn validate_graphql_endpoint(graphql: &str) -> Result<(), AppError> {
+    if contains_introspection(graphql) {
         return Err(AppError::bad_request(
-            "api endpoint templates cannot run GraphQL introspection",
+            "api endpoints cannot run GraphQL introspection",
         ));
+    }
+    for operation in ["createDomain", "createClient", "createChannel"] {
+        if graphql.contains(operation) {
+            return Err(AppError::bad_request(format!(
+                "api endpoints must use generic Atom GraphQL operations; found {operation}"
+            )));
+        }
     }
     Ok(())
 }
@@ -358,6 +370,15 @@ fn validate_auth_mode(auth_mode: &str, service_entity_id: Option<Uuid>) -> Resul
             "service_context endpoints require serviceEntityId",
         )),
         _ => Err(AppError::bad_request("unsupported api endpoint authMode")),
+    }
+}
+
+fn validate_operation_kind(operation_kind: &str) -> Result<(), AppError> {
+    match operation_kind {
+        "query" | "mutation" => Ok(()),
+        _ => Err(AppError::bad_request(
+            "unsupported api endpoint operationKind",
+        )),
     }
 }
 

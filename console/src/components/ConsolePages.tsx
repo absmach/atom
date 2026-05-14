@@ -9,6 +9,7 @@ import {
   Search,
   ShieldCheck,
   Trash2,
+  X,
 } from "lucide-react";
 import { type ReactNode, type SyntheticEvent, useEffect, useMemo, useState } from "react";
 import { clearToken, getToken } from "../lib/auth";
@@ -37,13 +38,11 @@ import {
   CREATE_PROFILE,
   CREATE_PROFILE_VERSION,
   CREATE_RESOURCE,
-  CREATE_TEMPLATE,
   CREATE_TENANT,
   CREDENTIALS_QUERY,
   DELETE_GROUP,
   DELETE_RESOURCE,
   DISABLE_ENDPOINT,
-  DISABLE_TEMPLATE,
   DISABLE_TENANT,
   ENABLE_ENDPOINT,
   ENABLE_TENANT,
@@ -62,12 +61,10 @@ import {
   RESOURCES_QUERY,
   ROLES_QUERY,
   REMOVE_GROUP_MEMBER,
-  TEMPLATES_QUERY,
   TENANTS_QUERY,
   UPDATE_ENDPOINT,
   UPDATE_PROFILE,
   UPDATE_RESOURCE,
-  UPDATE_TEMPLATE,
   UPDATE_TENANT,
   endpointCurl,
   endpointFetch,
@@ -79,7 +76,6 @@ import type {
   ApiEndpoint,
   ApiEndpointExecution,
   ApiKeyResponse,
-  ApiTemplate,
   AuthzExplainResponse,
   AuthzResponse,
   Capability,
@@ -176,7 +172,6 @@ function JsonDetails({ title, value }: { title: string; value: JsonValue }) {
 
 export function DashboardPage() {
   const tokenVersion = useTokenVersion();
-  const [templates, setTemplates] = useState<ApiTemplate[]>([]);
   const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
   const [executions, setExecutions] = useState<Record<string, ApiEndpointExecution | undefined>>({});
   const [error, setError] = useState<string | null>(null);
@@ -190,11 +185,10 @@ export function DashboardPage() {
     setState("loading");
     setError(null);
     try {
-      const [templateData, endpointData] = await Promise.all([
-        gql<{ apiTemplates: ListResult<ApiTemplate> }>(TEMPLATES_QUERY, { limit: 5, offset: 0 }),
-        gql<{ apiEndpoints: ListResult<ApiEndpoint> }>(ENDPOINTS_QUERY, { limit: 5, offset: 0 }),
-      ]);
-      setTemplates(templateData.apiTemplates.items);
+      const endpointData = await gql<{ apiEndpoints: ListResult<ApiEndpoint> }>(ENDPOINTS_QUERY, {
+        limit: 5,
+        offset: 0,
+      });
       setEndpoints(endpointData.apiEndpoints.items);
       const latest = await Promise.all(
         endpointData.apiEndpoints.items.map(async (endpoint) => {
@@ -239,21 +233,8 @@ export function DashboardPage() {
           </div>
         </Panel>
         <LoginPanel />
-        <Panel title="Recent Templates" eyebrow="Build" actions={<RefreshButton onClick={load} busy={state === "loading"} />}>
+        <Panel title="Recent Endpoints" eyebrow="Build" actions={<RefreshButton onClick={load} busy={state === "loading"} />}>
           {state === "loading" ? <Loading /> : null}
-          <MiniTable items={templates} empty="No recent templates loaded.">
-            {(template) => (
-              <a className="record-row" href={`${CONSOLE_BASE}/templates`} key={template.id}>
-                <div>
-                  <strong>{template.name}</strong>
-                  <small>{template.key}</small>
-                </div>
-                <StatusBadge value={template.status} />
-              </a>
-            )}
-          </MiniTable>
-        </Panel>
-        <Panel title="Recent Endpoints" eyebrow="Build">
           <MiniTable items={endpoints} empty="No recent endpoints loaded.">
             {(endpoint) => (
               <a className="record-row" href={`${CONSOLE_BASE}/endpoints`} key={endpoint.id}>
@@ -289,223 +270,6 @@ export function DashboardPage() {
   );
 }
 
-type TemplateForm = {
-  tenantId: string;
-  key: string;
-  name: string;
-  description: string;
-  operationKind: "query" | "mutation";
-  graphql: string;
-  variablesSchema: string;
-  defaultVariables: string;
-  resultSelector: string;
-  tags: string;
-  status: "draft" | "active" | "deprecated" | "disabled";
-};
-
-function blankTemplateForm(): TemplateForm {
-  return {
-    tenantId: "",
-    key: "",
-    name: "",
-    description: "",
-    operationKind: "query",
-    graphql: "{ health }",
-    variablesSchema: "{}",
-    defaultVariables: "{}",
-    resultSelector: "{}",
-    tags: "",
-    status: "draft",
-  };
-}
-
-function formFromTemplate(template: ApiTemplate, duplicate = false): TemplateForm {
-  return {
-    tenantId: template.tenantId ?? "",
-    key: duplicate ? `${template.key}-copy` : template.key,
-    name: duplicate ? `${template.name} copy` : template.name,
-    description: template.description ?? "",
-    operationKind: template.operationKind,
-    graphql: template.graphql,
-    variablesSchema: jsonString(template.variablesSchema),
-    defaultVariables: jsonString(template.defaultVariables),
-    resultSelector: jsonString(template.resultSelector),
-    tags: textFromTags(template.tags),
-    status: duplicate ? "draft" : template.status,
-  };
-}
-
-function templateVariables(form: TemplateForm): JsonObject {
-  return {
-    input: {
-      tenantId: compactNullable(form.tenantId),
-      key: form.key.trim(),
-      name: form.name.trim(),
-      description: compactNullable(form.description),
-      operationKind: form.operationKind,
-      graphql: form.graphql,
-      variablesSchema: parseJsonObject(form.variablesSchema, "variables schema"),
-      defaultVariables: parseJsonObject(form.defaultVariables, "default variables"),
-      resultSelector: parseJsonObject(form.resultSelector, "result selector"),
-      tags: tagsFromText(form.tags),
-      status: form.status,
-    },
-  };
-}
-
-export function TemplatesPage() {
-  const [items, setItems] = useState<ApiTemplate[]>([]);
-  const [filter, setFilter] = useState({ tenantId: "", status: "active", tag: "", search: "" });
-  const [selected, setSelected] = useState<ApiTemplate | null>(null);
-  const [form, setForm] = useState<TemplateForm>(blankTemplateForm());
-  const [result, setResult] = useState<unknown>();
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const filtered = useMemo(() => {
-    const term = filter.search.trim().toLowerCase();
-    return term
-      ? items.filter((item) => [item.key, item.name, item.description ?? "", item.tags.join(" ")].join(" ").toLowerCase().includes(term))
-      : items;
-  }, [items, filter.search]);
-
-  async function load() {
-    setBusy(true);
-    setError(null);
-    try {
-      const data = await gql<{ apiTemplates: ListResult<ApiTemplate> }>(TEMPLATES_QUERY, {
-        tenantId: compactNullable(filter.tenantId),
-        status: enumOrNull(filter.status),
-        tag: compactNullable(filter.tag),
-        limit: 100,
-        offset: 0,
-      });
-      setItems(data.apiTemplates.items);
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    void load();
-  }, []);
-
-  async function save() {
-    setBusy(true);
-    setError(null);
-    try {
-      const variables = templateVariables(form);
-      const saved = selected
-        ? (await gql<{ updateApiTemplate: ApiTemplate }>(UPDATE_TEMPLATE, {
-            id: selected.id,
-            input: variables.input as JsonObject,
-          })).updateApiTemplate
-        : (await gql<{ createApiTemplate: ApiTemplate }>(CREATE_TEMPLATE, variables)).createApiTemplate;
-      setSelected(saved);
-      setForm(formFromTemplate(saved));
-      setResult(saved);
-      await load();
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function disable(id: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      await gql(DISABLE_TEMPLATE, { id });
-      await load();
-    } catch (caught) {
-      setError(errorMessage(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="page-stack">
-      <PageHeader eyebrow="API Builder" title="Templates">
-        <RefreshButton onClick={load} busy={busy} />
-      </PageHeader>
-      <ErrorNotice message={error} />
-      <div className="grid-2">
-        <Panel title="Template List" eyebrow={`${filtered.length} shown`}>
-          <div className="toolbar-grid">
-            <input placeholder="Tenant ID" value={filter.tenantId} onChange={(e) => setFilter({ ...filter, tenantId: e.target.value })} />
-            <select value={filter.status} onChange={(e) => setFilter({ ...filter, status: e.target.value })}>
-              <option value="active">active</option>
-              <option value="">any</option>
-              <option value="draft">draft</option>
-              <option value="deprecated">deprecated</option>
-              <option value="disabled">disabled</option>
-            </select>
-            <input placeholder="Tag" value={filter.tag} onChange={(e) => setFilter({ ...filter, tag: e.target.value })} />
-            <button className="button secondary" type="button" onClick={() => void load()} disabled={busy}>
-              <Search size={16} /> Load
-            </button>
-          </div>
-          <input className="spaced" placeholder="Search loaded templates" value={filter.search} onChange={(e) => setFilter({ ...filter, search: e.target.value })} />
-          {busy ? <Loading /> : null}
-          <MiniTable items={filtered} empty="No templates match the current filters.">
-            {(template) => (
-              <div className="record-row vertical" key={template.id}>
-                <div className="record-main">
-                  <button className="link-button" type="button" onClick={() => { setSelected(template); setForm(formFromTemplate(template)); }}>
-                    <strong>{template.name}</strong>
-                  </button>
-                  <small>{template.key} · {template.operationKind}</small>
-                </div>
-                <div className="button-row">
-                  <StatusBadge value={template.status} />
-                  <CopyButton value={template.graphql} label="Copy GraphQL" />
-                  <button className="button secondary" type="button" onClick={() => { setSelected(null); setForm(formFromTemplate(template, true)); }}>Duplicate</button>
-                  <a className="button secondary" href={`${CONSOLE_BASE}/endpoints?templateId=${template.id}`}>Create Endpoint</a>
-                  <button className="button secondary danger-button" type="button" onClick={() => void disable(template.id)}>Disable</button>
-                </div>
-              </div>
-            )}
-          </MiniTable>
-        </Panel>
-        <Panel title={selected ? "Edit Template" : "Create Template"} eyebrow="Metadata">
-          <form className="stack" onSubmit={submit(save)}>
-            <div className="grid-2 compact">
-              <label><span>Tenant ID</span><input value={form.tenantId} onChange={(e) => setForm({ ...form, tenantId: e.target.value })} /></label>
-              <label><span>Status</span><select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as TemplateForm["status"] })}><option>draft</option><option>active</option><option>deprecated</option><option>disabled</option></select></label>
-              <label><span>Key</span><input required value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })} /></label>
-              <label><span>Name</span><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
-              <label><span>Operation</span><select value={form.operationKind} onChange={(e) => setForm({ ...form, operationKind: e.target.value as TemplateForm["operationKind"] })}><option>query</option><option>mutation</option></select></label>
-              <label><span>Tags</span><input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} /></label>
-            </div>
-            <label><span>Description</span><input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
-            <label><span>GraphQL</span><textarea rows={10} spellCheck={false} value={form.graphql} onChange={(e) => setForm({ ...form, graphql: e.target.value })} /></label>
-            <div className="grid-2 compact">
-              <JsonTextarea label="Variables schema" value={form.variablesSchema} onChange={(value) => setForm({ ...form, variablesSchema: value })} />
-              <JsonTextarea label="Default variables" value={form.defaultVariables} onChange={(value) => setForm({ ...form, defaultVariables: value })} />
-            </div>
-            <JsonTextarea label="Result selector" value={form.resultSelector} onChange={(value) => setForm({ ...form, resultSelector: value })} rows={4} />
-            <PreviewPanel
-              query={selected ? UPDATE_TEMPLATE : CREATE_TEMPLATE}
-              variables={safeVariables(() =>
-                selected ? { id: selected.id, input: templateVariables(form).input as JsonObject } : templateVariables(form),
-              )}
-            />
-            <div className="button-row">
-              <button className="button primary" type="submit" disabled={busy}><Save size={16} /> Save</button>
-              <button className="button secondary" type="button" onClick={() => { setSelected(null); setForm(blankTemplateForm()); }}>New</button>
-            </div>
-          </form>
-          <ResultPanel title="Last Result" value={result} error={error} />
-        </Panel>
-      </div>
-    </div>
-  );
-}
-
 type EndpointForm = {
   tenantId: string;
   key: string;
@@ -513,7 +277,8 @@ type EndpointForm = {
   description: string;
   method: string;
   path: string;
-  templateId: string;
+  operationKind: "query" | "mutation";
+  graphql: string;
   authMode: string;
   serviceEntityId: string;
   variablesMapping: string;
@@ -522,7 +287,144 @@ type EndpointForm = {
   status: "draft" | "active" | "disabled";
 };
 
-function blankEndpointForm(templateId = ""): EndpointForm {
+type EndpointPreset = {
+  key: string;
+  label: string;
+  description: string;
+  operationKind: EndpointForm["operationKind"];
+  graphql: string;
+  variablesMapping: JsonObject;
+  requestSchema: JsonObject;
+  responseMapping: JsonObject;
+  sampleBody: JsonObject;
+};
+
+const ENDPOINT_PRESETS: EndpointPreset[] = [
+  {
+    key: "health",
+    label: "Health check",
+    description: "Read Atom health through a custom endpoint.",
+    operationKind: "query",
+    graphql: "query EndpointHealth { health }",
+    variablesMapping: {},
+    requestSchema: {},
+    responseMapping: { data: "$.health" },
+    sampleBody: {},
+  },
+  {
+    key: "create_tenant",
+    label: "Create tenant",
+    description: "Create a tenant from a compact request body.",
+    operationKind: "mutation",
+    graphql:
+      "mutation CreateTenant($input: CreateTenantInput!) {\n  createTenant(input: $input) { id name route status tags attributes createdAt updatedAt }\n}",
+    variablesMapping: { input: "$body" },
+    requestSchema: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string" },
+        route: { type: "string" },
+        tags: { type: "array", items: { type: "string" } },
+        attributes: { type: "object" },
+      },
+    },
+    responseMapping: { tenant: "$.createTenant" },
+    sampleBody: { name: "factory-a", route: "factory-a" },
+  },
+  {
+    key: "create_entity",
+    label: "Create entity",
+    description: "Create a human, device, service, workload, or application entity.",
+    operationKind: "mutation",
+    graphql:
+      "mutation CreateEntity($input: CreateEntityInput!) {\n  createEntity(input: $input) { id kind name tenantId status attributes createdAt updatedAt }\n}",
+    variablesMapping: { input: "$body" },
+    requestSchema: {
+      type: "object",
+      required: ["name", "kind"],
+      properties: {
+        tenantId: { type: "string" },
+        kind: { type: "string" },
+        name: { type: "string" },
+        attributes: { type: "object" },
+      },
+    },
+    responseMapping: { entity: "$.createEntity" },
+    sampleBody: { kind: "device", name: "device-01", attributes: {} },
+  },
+  {
+    key: "create_resource",
+    label: "Create resource",
+    description: "Create a protected Atom resource such as a channel.",
+    operationKind: "mutation",
+    graphql:
+      "mutation CreateResource($input: CreateResourceInput!) {\n  createResource(input: $input) { id kind name tenantId ownerId attributes createdAt updatedAt }\n}",
+    variablesMapping: { input: "$body" },
+    requestSchema: {
+      type: "object",
+      required: ["kind"],
+      properties: {
+        tenantId: { type: "string" },
+        kind: { type: "string" },
+        name: { type: "string" },
+        ownerId: { type: "string" },
+        attributes: { type: "object" },
+      },
+    },
+    responseMapping: { resource: "$.createResource" },
+    sampleBody: { kind: "channel", name: "telemetry" },
+  },
+  {
+    key: "create_policy",
+    label: "Create policy",
+    description: "Bind a subject to a capability or role over a scope.",
+    operationKind: "mutation",
+    graphql:
+      "mutation CreatePolicy($input: CreatePolicyInput!) {\n  createPolicy(input: $input) { id tenantId subjectKind subjectId grantKind grantId scopeKind scopeRef effect conditions createdAt }\n}",
+    variablesMapping: { input: "$body" },
+    requestSchema: {
+      type: "object",
+      required: ["subjectKind", "subjectId", "grantKind", "grantId", "scopeKind", "effect"],
+      properties: {
+        tenantId: { type: "string" },
+        subjectKind: { type: "string" },
+        subjectId: { type: "string" },
+        grantKind: { type: "string" },
+        grantId: { type: "string" },
+        scopeKind: { type: "string" },
+        scopeRef: { type: "string" },
+        effect: { type: "string" },
+        conditions: { type: "object" },
+      },
+    },
+    responseMapping: { policy: "$.createPolicy" },
+    sampleBody: { subjectKind: "entity", grantKind: "capability", scopeKind: "object", effect: "allow" },
+  },
+  {
+    key: "authz_check",
+    label: "Authorization check",
+    description: "Run an authz decision for an entity/action/resource tuple.",
+    operationKind: "mutation",
+    graphql:
+      "mutation AuthzCheck($input: AuthzCheckInput!) {\n  authzCheck(input: $input) { allowed reason details }\n}",
+    variablesMapping: { input: "$body" },
+    requestSchema: {
+      type: "object",
+      required: ["entityId", "resourceId", "action"],
+      properties: {
+        entityId: { type: "string" },
+        resourceId: { type: "string" },
+        action: { type: "string" },
+        context: { type: "object" },
+      },
+    },
+    responseMapping: { decision: "$.authzCheck" },
+    sampleBody: { action: "view", context: {} },
+  },
+];
+
+function blankEndpointForm(): EndpointForm {
   return {
     tenantId: "",
     key: "",
@@ -530,7 +432,8 @@ function blankEndpointForm(templateId = ""): EndpointForm {
     description: "",
     method: "POST",
     path: "/api/custom/",
-    templateId,
+    operationKind: "query",
+    graphql: "{ health }",
     authMode: "caller_context",
     serviceEntityId: "",
     variablesMapping: "{}",
@@ -548,7 +451,8 @@ function formFromEndpoint(endpoint: ApiEndpoint): EndpointForm {
     description: endpoint.description ?? "",
     method: endpoint.method,
     path: endpoint.path,
-    templateId: endpoint.templateId,
+    operationKind: endpoint.operationKind,
+    graphql: endpoint.graphql,
     authMode: endpoint.authMode,
     serviceEntityId: endpoint.serviceEntityId ?? "",
     variablesMapping: jsonString(endpoint.variablesMapping),
@@ -569,7 +473,8 @@ function endpointInput(form: EndpointForm, status = form.status): JsonObject {
     description: compactNullable(form.description),
     method: form.method,
     path: form.path.trim(),
-    templateId: form.templateId,
+    operationKind: form.operationKind,
+    graphql: form.graphql,
     authMode: form.authMode,
     serviceEntityId: compactNullable(form.serviceEntityId),
     variablesMapping: parseJsonObject(form.variablesMapping, "variables mapping"),
@@ -579,13 +484,25 @@ function endpointInput(form: EndpointForm, status = form.status): JsonObject {
   };
 }
 
+function applyEndpointPreset(form: EndpointForm, preset: EndpointPreset): EndpointForm {
+  return {
+    ...form,
+    key: form.key || preset.key,
+    name: form.name || preset.label,
+    description: form.description || preset.description,
+    operationKind: preset.operationKind,
+    graphql: preset.graphql,
+    variablesMapping: jsonString(preset.variablesMapping),
+    requestSchema: jsonString(preset.requestSchema),
+    responseMapping: jsonString(preset.responseMapping),
+  };
+}
+
 export function EndpointsPage() {
-  const initialTemplateId = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("templateId") ?? "";
-  const [templates, setTemplates] = useState<ApiTemplate[]>([]);
   const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
   const [logs, setLogs] = useState<ApiEndpointExecution[]>([]);
   const [selected, setSelected] = useState<ApiEndpoint | null>(null);
-  const [form, setForm] = useState<EndpointForm>(blankEndpointForm(initialTemplateId));
+  const [form, setForm] = useState<EndpointForm>(blankEndpointForm());
   const [filter, setFilter] = useState({ tenantId: "", status: "" });
   const [step, setStep] = useState(1);
   const [sampleBody, setSampleBody] = useState("{}");
@@ -597,20 +514,13 @@ export function EndpointsPage() {
     setBusy(true);
     setError(null);
     try {
-      const [templateData, endpointData] = await Promise.all([
-        gql<{ apiTemplates: ListResult<ApiTemplate> }>(TEMPLATES_QUERY, { status: "active", limit: 100, offset: 0 }),
-        gql<{ apiEndpoints: ListResult<ApiEndpoint> }>(ENDPOINTS_QUERY, {
-          tenantId: compactNullable(filter.tenantId),
-          status: enumOrNull(filter.status),
-          limit: 100,
-          offset: 0,
-        }),
-      ]);
-      setTemplates(templateData.apiTemplates.items);
+      const endpointData = await gql<{ apiEndpoints: ListResult<ApiEndpoint> }>(ENDPOINTS_QUERY, {
+        tenantId: compactNullable(filter.tenantId),
+        status: enumOrNull(filter.status),
+        limit: 100,
+        offset: 0,
+      });
       setEndpoints(endpointData.apiEndpoints.items);
-      if (initialTemplateId && !form.templateId) {
-        setForm((current) => ({ ...current, templateId: initialTemplateId }));
-      }
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -765,8 +675,26 @@ export function EndpointsPage() {
           <form className="stack" onSubmit={submit(async () => { await save(); })}>
             {step === 1 ? (
               <div className="stack">
-                <label><span>Template</span><select required value={form.templateId} onChange={(e) => setForm({ ...form, templateId: e.target.value })}><option value="">Choose template</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} ({template.key})</option>)}</select></label>
-                <JsonDetails title="Selected template defaults" value={templates.find((template) => template.id === form.templateId)?.defaultVariables ?? {}} />
+                <label>
+                  <span>Preset</span>
+                  <select
+                    value=""
+                    onChange={(event) => {
+                      const preset = ENDPOINT_PRESETS.find((item) => item.key === event.target.value);
+                      if (preset) {
+                        setForm((current) => applyEndpointPreset(current, preset));
+                        setSampleBody(jsonString(preset.sampleBody));
+                      }
+                    }}
+                  >
+                    <option value="">Choose preset</option>
+                    {ENDPOINT_PRESETS.map((preset) => (
+                      <option key={preset.key} value={preset.key}>{preset.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label><span>Operation</span><select value={form.operationKind} onChange={(e) => setForm({ ...form, operationKind: e.target.value as EndpointForm["operationKind"] })}><option>query</option><option>mutation</option></select></label>
+                <label><span>GraphQL</span><textarea rows={10} spellCheck={false} value={form.graphql} onChange={(e) => setForm({ ...form, graphql: e.target.value })} /></label>
               </div>
             ) : null}
             {step === 2 ? (
@@ -1264,78 +1192,228 @@ export function ResourcesPage() {
 }
 
 export function PoliciesPage() {
+  const [tenants, setTenants] = useState<Tenant[]>([]);
   const [entities, setEntities] = useState<Entity[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [resources, setResources] = useState<Resource[]>([]);
   const [policies, setPolicies] = useState<PolicyBinding[]>([]);
+  const [filter, setFilter] = useState({ tenantId: "" });
   const [form, setForm] = useState({ tenantId: "", subjectKind: "entity", subjectId: "", grantKind: "capability", grantId: "", scopeKind: "object", scopeRef: "", effect: "allow", conditions: "{}" });
+  const [createOpen, setCreateOpen] = useState(false);
   const [result, setResult] = useState<unknown>();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  async function loadPolicyContext(tenantId: string | null) {
+    const [entityData, groupData, roleData, capData, resourceData, policyData] = await Promise.all([
+      gql<{ entities: ListResult<Entity> }>(ENTITIES_QUERY, { tenantId, limit: 100, offset: 0 }),
+      gql<{ groups: ListResult<Group> }>(GROUPS_QUERY, { tenantId, limit: 100, offset: 0 }),
+      gql<{ roles: ListResult<Role> }>(ROLES_QUERY, { tenantId, limit: 100, offset: 0 }),
+      gql<{ capabilities: ListResult<Capability> }>(CAPABILITIES_QUERY, { tenantId }),
+      gql<{ resources: ListResult<Resource> }>(RESOURCES_QUERY, { tenantId, limit: 100, offset: 0 }),
+      gql<{ policies: ListResult<PolicyBinding> }>(POLICIES_QUERY, { tenantId, limit: 50, offset: 0 }),
+    ]);
+    setEntities(entityData.entities.items); setGroups(groupData.groups.items); setRoles(roleData.roles.items); setCapabilities(capData.capabilities.items); setResources(resourceData.resources.items); setPolicies(policyData.policies.items);
+  }
+
   async function load() {
     setBusy(true); setError(null);
     try {
-      const [entityData, groupData, roleData, capData, resourceData, policyData] = await Promise.all([
-        gql<{ entities: ListResult<Entity> }>(ENTITIES_QUERY, { limit: 100, offset: 0 }),
-        gql<{ groups: ListResult<Group> }>(GROUPS_QUERY, { limit: 100, offset: 0 }),
-        gql<{ roles: ListResult<Role> }>(ROLES_QUERY, { limit: 100, offset: 0 }),
-        gql<{ capabilities: ListResult<Capability> }>(CAPABILITIES_QUERY, {}),
-        gql<{ resources: ListResult<Resource> }>(RESOURCES_QUERY, { limit: 100, offset: 0 }),
-        gql<{ policies: ListResult<PolicyBinding> }>(POLICIES_QUERY, { limit: 50, offset: 0 }),
-      ]);
-      setEntities(entityData.entities.items); setGroups(groupData.groups.items); setRoles(roleData.roles.items); setCapabilities(capData.capabilities.items); setResources(resourceData.resources.items); setPolicies(policyData.policies.items);
+      const tenantData = await gql<{ tenants: ListResult<Tenant> }>(TENANTS_QUERY, { limit: 100, offset: 0 });
+      setTenants(tenantData.tenants.items);
+      const tenantId = compactNullable(filter.tenantId);
+      try {
+        await loadPolicyContext(tenantId);
+      } catch (caught) {
+        const fallbackTenant = tenantData.tenants.items[0];
+        if (tenantId || !fallbackTenant || !errorMessage(caught).toLowerCase().includes("forbidden")) {
+          throw caught;
+        }
+        setFilter({ tenantId: fallbackTenant.id });
+        setForm((current) => current.tenantId ? current : { ...current, tenantId: fallbackTenant.id, scopeKind: "tenant", scopeRef: fallbackTenant.id });
+        await loadPolicyContext(fallbackTenant.id);
+      }
     } catch (caught) { setError(errorMessage(caught)); } finally { setBusy(false); }
   }
   useEffect(() => { void load(); }, []);
+
+  function openCreatePolicy() {
+    const tenantId = compactNullable(filter.tenantId) ?? "";
+    setForm((current) => ({
+      ...current,
+      tenantId: current.tenantId || tenantId,
+      scopeKind: current.scopeKind === "object" && tenantId ? "tenant" : current.scopeKind,
+      scopeRef: current.scopeRef || tenantId,
+    }));
+    setCreateOpen(true);
+  }
+
   async function createPolicy() {
     setBusy(true); setError(null);
     try {
       const input = { tenantId: compactNullable(form.tenantId), subjectKind: form.subjectKind, subjectId: form.subjectId, grantKind: form.grantKind, grantId: form.grantId, scopeKind: form.scopeKind, scopeRef: compactNullable(form.scopeRef), effect: form.effect, conditions: parseJsonObject(form.conditions, "conditions") };
-      const data = await gql<{ createPolicy: PolicyBinding }>(CREATE_POLICY, { input }); setResult(data.createPolicy); await load();
+      const data = await gql<{ createPolicy: PolicyBinding }>(CREATE_POLICY, { input });
+      setResult(data.createPolicy);
+      setCreateOpen(false);
+      await load();
     } catch (caught) { setError(errorMessage(caught)); } finally { setBusy(false); }
   }
   const subjectOptions: Array<{ id: string; name: string }> =
     form.subjectKind === "entity" ? entities.map((entity) => ({ id: entity.id, name: entity.name })) : groups.map((group) => ({ id: group.id, name: group.name }));
   const grantOptions: Array<{ id: string; name: string }> =
     form.grantKind === "capability" ? capabilities.map((capability) => ({ id: capability.id, name: capability.name })) : roles.map((role) => ({ id: role.id, name: role.name }));
+
+  const tenantById = useMemo(() => new Map(tenants.map((tenant) => [tenant.id, tenant])), [tenants]);
+  const entityById = useMemo(() => new Map(entities.map((entity) => [entity.id, entity])), [entities]);
+  const groupById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
+  const roleById = useMemo(() => new Map(roles.map((role) => [role.id, role])), [roles]);
+  const capabilityById = useMemo(() => new Map(capabilities.map((capability) => [capability.id, capability])), [capabilities]);
+  const resourceById = useMemo(() => new Map(resources.map((resource) => [resource.id, resource])), [resources]);
+
+  function shortId(id: string | null | undefined): string {
+    return id ? `${id.slice(0, 8)}...${id.slice(-6)}` : "*";
+  }
+
+  function policyTenant(policy: PolicyBinding): { title: string; detail: string } {
+    if (!policy.tenantId) {
+      return { title: "Platform", detail: "platform policy" };
+    }
+    const tenant = tenantById.get(policy.tenantId);
+    return { title: tenant?.name ?? shortId(policy.tenantId), detail: policy.tenantId };
+  }
+
+  function policySubject(policy: PolicyBinding): { title: string; detail: string } {
+    if (policy.subjectKind === "entity") {
+      const entity = entityById.get(policy.subjectId);
+      return { title: entity?.name ?? shortId(policy.subjectId), detail: `${entity?.kind ?? "entity"} · ${policy.subjectId}` };
+    }
+    const group = groupById.get(policy.subjectId);
+    return { title: group?.name ?? shortId(policy.subjectId), detail: `group · ${policy.subjectId}` };
+  }
+
+  function policyGrant(policy: PolicyBinding): { title: string; detail: string } {
+    if (policy.grantKind === "role") {
+      const role = roleById.get(policy.grantId);
+      return { title: role?.name ?? shortId(policy.grantId), detail: `role · ${policy.grantId}` };
+    }
+    const capability = capabilityById.get(policy.grantId);
+    return { title: capability?.name ?? shortId(policy.grantId), detail: `capability · ${policy.grantId}` };
+  }
+
+  function policyScope(policy: PolicyBinding): { title: string; detail: string } {
+    if (policy.scopeKind === "platform") {
+      return { title: "Platform", detail: "all tenants and objects" };
+    }
+    if (policy.scopeKind === "tenant" && policy.scopeRef) {
+      const tenant = tenantById.get(policy.scopeRef);
+      return { title: tenant?.name ?? shortId(policy.scopeRef), detail: `tenant · ${policy.scopeRef}` };
+    }
+    if (policy.scopeKind === "object" && policy.scopeRef) {
+      const resource = resourceById.get(policy.scopeRef);
+      return { title: resource?.name ?? shortId(policy.scopeRef), detail: `${resource?.kind ?? "object"} · ${policy.scopeRef}` };
+    }
+    return { title: policy.scopeRef ?? "*", detail: policy.scopeKind };
+  }
+
+  function hasConditions(policy: PolicyBinding): boolean {
+    return isJsonObject(policy.conditions) ? Object.keys(policy.conditions).length > 0 : Boolean(policy.conditions);
+  }
+
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Secure" title="Policies"><RefreshButton onClick={load} busy={busy} /></PageHeader>
+      <PageHeader eyebrow="Secure" title="Policies">
+        <RefreshButton onClick={load} busy={busy} />
+        <button className="button primary" type="button" onClick={openCreatePolicy} disabled={busy}><Plus size={16} /> Create policy</button>
+      </PageHeader>
       <ErrorNotice message={error} />
-      <div className="grid-2">
-        <Panel title="Visual Policy Builder" eyebrow="WHO / CAN DO / ON / WHEN / EFFECT">
-          <form className="stack" onSubmit={submit(createPolicy)}>
-            <div className="builder-grid"><label><span>WHO</span><select value={form.subjectKind} onChange={(e) => setForm({ ...form, subjectKind: e.target.value, subjectId: "" })}><option>entity</option><option>group</option></select></label><label><span>Subject</span><select value={form.subjectId} onChange={(e) => setForm({ ...form, subjectId: e.target.value })}><option value="">Choose subject</option>{subjectOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label><span>CAN DO</span><select value={form.grantKind} onChange={(e) => setForm({ ...form, grantKind: e.target.value, grantId: "" })}><option>capability</option><option>role</option></select></label><label><span>Grant</span><select value={form.grantId} onChange={(e) => setForm({ ...form, grantId: e.target.value })}><option value="">Choose grant</option>{grantOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label><span>ON</span><select value={form.scopeKind} onChange={(e) => setForm({ ...form, scopeKind: e.target.value })}><option>platform</option><option>tenant</option><option>object_kind</option><option>object_type</option><option>object</option></select></label><label><span>Scope ref</span><input list="resource-ids" value={form.scopeRef} onChange={(e) => setForm({ ...form, scopeRef: e.target.value })} /></label><label><span>EFFECT</span><select value={form.effect} onChange={(e) => setForm({ ...form, effect: e.target.value })}><option>allow</option><option>deny</option></select></label><label><span>Policy tenant ID</span><input value={form.tenantId} onChange={(e) => setForm({ ...form, tenantId: e.target.value })} /></label></div>
-            <datalist id="resource-ids">{resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name ?? resource.kind}</option>)}</datalist>
-            <JsonTextarea label="WHEN conditions JSON" value={form.conditions} onChange={(value) => setForm({ ...form, conditions: value })} />
-            <button className="button primary" type="submit" disabled={busy}>Create policy</button>
-          </form>
-          <PreviewPanel
-            query={CREATE_POLICY}
-            variables={safeVariables(() => ({
-              input: {
-                tenantId: compactNullable(form.tenantId),
-                subjectKind: form.subjectKind,
-                subjectId: form.subjectId,
-                grantKind: form.grantKind,
-                grantId: form.grantId,
-                scopeKind: form.scopeKind,
-                scopeRef: compactNullable(form.scopeRef),
-                effect: form.effect,
-                conditions: parseJsonObject(form.conditions, "conditions"),
-              },
-            }))}
-          />
-          <ResultPanel title="Last Result" value={result} error={error} />
-        </Panel>
-        <Panel title="Existing Policies" eyebrow={`${policies.length} loaded`}>
-          <MiniTable items={policies} empty="No policies loaded.">
-            {(policy) => <div className="record-row vertical" key={policy.id}><div className="button-row"><StatusBadge value={policy.effect} /><strong>{policy.subjectKind}:{policy.subjectId}</strong></div><small>{policy.grantKind}:{policy.grantId} on {policy.scopeKind}:{policy.scopeRef ?? "*"}</small><JsonDetails title="conditions" value={policy.conditions} /></div>}
-          </MiniTable>
-        </Panel>
-      </div>
+      <Panel title="Policy List" eyebrow={`${policies.length} loaded`} className="policy-list-panel">
+        <div className="toolbar-grid policy-toolbar">
+          <select value={filter.tenantId} onChange={(event) => setFilter({ tenantId: event.target.value })}>
+            <option value="">All policies</option>
+            {tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+          </select>
+          <button className="button secondary" type="button" onClick={() => void load()} disabled={busy}><Search size={16} /> Load</button>
+        </div>
+        <MiniTable items={policies} empty="No policies loaded.">
+          {(policy) => {
+            const tenant = policyTenant(policy);
+            const subject = policySubject(policy);
+            const grant = policyGrant(policy);
+            const scope = policyScope(policy);
+            return (
+              <div className="policy-row" key={policy.id}>
+                <div className="policy-row-header">
+                  <StatusBadge value={policy.effect} />
+                  <div>
+                    <strong>{subject.title}</strong>
+                    <span>{policy.effect === "allow" ? "can use" : "is denied"} {grant.title}</span>
+                  </div>
+                </div>
+                <dl className="policy-fields">
+                  <div><dt>Subject</dt><dd>{subject.title}<small>{subject.detail}</small></dd></div>
+                  <div><dt>Grant</dt><dd>{grant.title}<small>{grant.detail}</small></dd></div>
+                  <div><dt>Scope</dt><dd>{scope.title}<small>{scope.detail}</small></dd></div>
+                  <div><dt>Policy Tenant</dt><dd>{tenant.title}<small>{tenant.detail}</small></dd></div>
+                </dl>
+                {hasConditions(policy) ? <JsonDetails title="conditions" value={policy.conditions} /> : <p className="policy-no-conditions">No conditions</p>}
+              </div>
+            );
+          }}
+        </MiniTable>
+      </Panel>
+      {createOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="create-policy-title">
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">WHO / CAN DO / ON / WHEN / EFFECT</p>
+                <h2 id="create-policy-title">Create Policy</h2>
+              </div>
+              <button className="button secondary icon-button" type="button" onClick={() => setCreateOpen(false)} aria-label="Close"><X size={18} /></button>
+            </div>
+            <form className="stack" onSubmit={submit(createPolicy)}>
+              <div className="builder-grid">
+                <label><span>WHO</span><select value={form.subjectKind} onChange={(e) => setForm({ ...form, subjectKind: e.target.value, subjectId: "" })}><option>entity</option><option>group</option></select></label>
+                <label><span>Subject</span><select value={form.subjectId} onChange={(e) => setForm({ ...form, subjectId: e.target.value })}><option value="">Choose subject</option>{subjectOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                <label><span>CAN DO</span><select value={form.grantKind} onChange={(e) => setForm({ ...form, grantKind: e.target.value, grantId: "" })}><option>capability</option><option>role</option></select></label>
+                <label><span>Grant</span><select value={form.grantId} onChange={(e) => setForm({ ...form, grantId: e.target.value })}><option value="">Choose grant</option>{grantOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                <label><span>Policy tenant</span><select value={form.tenantId} onChange={(e) => { const tenantId = e.target.value; setForm({ ...form, tenantId, scopeRef: form.scopeKind === "tenant" ? tenantId : form.scopeRef }); }}><option value="">Platform</option>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select></label>
+                <label><span>ON</span><select value={form.scopeKind} onChange={(e) => { const scopeKind = e.target.value; setForm({ ...form, scopeKind, scopeRef: scopeKind === "tenant" ? form.tenantId : "" }); }}><option>platform</option><option>tenant</option><option>object_kind</option><option>object_type</option><option>object</option></select></label>
+                <label><span>Scope ref</span><input list="policy-scope-refs" value={form.scopeRef} onChange={(e) => setForm({ ...form, scopeRef: e.target.value })} /></label>
+                <label><span>EFFECT</span><select value={form.effect} onChange={(e) => setForm({ ...form, effect: e.target.value })}><option>allow</option><option>deny</option></select></label>
+              </div>
+              <datalist id="policy-scope-refs">
+                {tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+                {resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name ?? resource.kind}</option>)}
+              </datalist>
+              <JsonTextarea label="WHEN conditions JSON" value={form.conditions} onChange={(value) => setForm({ ...form, conditions: value })} />
+              <div className="button-row modal-actions">
+                <button className="button secondary" type="button" onClick={() => setCreateOpen(false)}>Cancel</button>
+                <button className="button primary" type="submit" disabled={busy}>Create policy</button>
+              </div>
+            </form>
+            {result ? <ResultPanel title="Last Created" value={result} error={null} /> : null}
+            <PreviewPanel
+              query={CREATE_POLICY}
+              variables={safeVariables(() => ({
+                input: {
+                  tenantId: compactNullable(form.tenantId),
+                  subjectKind: form.subjectKind,
+                  subjectId: form.subjectId,
+                  grantKind: form.grantKind,
+                  grantId: form.grantId,
+                  scopeKind: form.scopeKind,
+                  scopeRef: compactNullable(form.scopeRef),
+                  effect: form.effect,
+                  conditions: parseJsonObject(form.conditions, "conditions"),
+                },
+              }))}
+            />
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1530,7 +1608,6 @@ function GraphqlDeveloperPage({ title, eyebrow }: { title: string; eyebrow: stri
   const [query, setQuery] = useState("{ health }");
   const [variables, setVariables] = useState("{}");
   const [response, setResponse] = useState<GraphqlEnvelope<JsonObject> | undefined>();
-  const [templateName, setTemplateName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [health, setHealth] = useState<unknown>();
@@ -1547,13 +1624,6 @@ function GraphqlDeveloperPage({ title, eyebrow }: { title: string; eyebrow: stri
   async function run() {
     setBusy(true); setError(null);
     try { setResponse(await rawGql<JsonObject>(query, parseJsonObject(variables, "variables"))); } catch (caught) { setError(errorMessage(caught)); } finally { setBusy(false); }
-  }
-  async function saveAsTemplate() {
-    setBusy(true); setError(null);
-    try {
-      await gql(CREATE_TEMPLATE, { input: { key: templateName.trim() || `explorer_${Date.now()}`, name: templateName.trim() || "Explorer operation", operationKind: query.trim().startsWith("mutation") ? "mutation" : "query", graphql: query, variablesSchema: {}, defaultVariables: parseJsonObject(variables, "variables"), resultSelector: {}, tags: ["explorer"], status: "draft" } });
-      setTemplateName("");
-    } catch (caught) { setError(errorMessage(caught)); } finally { setBusy(false); }
   }
   const typeMap = useMemo(
     () => Object.fromEntries((schema?.types ?? []).flatMap((type) => (type.name ? [[type.name, type]] : []))) as Record<string, IntrospectionType>,
@@ -1600,7 +1670,7 @@ function GraphqlDeveloperPage({ title, eyebrow }: { title: string; eyebrow: stri
         </Panel>
         <div className="stack">
           <Panel title="Query Editor">
-            <div className="stack"><label><span>GraphQL</span><textarea rows={12} spellCheck={false} value={query} onChange={(e) => setQuery(e.target.value)} /></label><JsonTextarea label="Variables" value={variables} onChange={setVariables} rows={6} /><div className="button-row"><button className="button primary" type="button" onClick={() => void run()} disabled={busy}>Run</button><CopyButton value={graphQlCurl(query, explorerVariables)} label="curl" /><CopyButton value={graphQlFetch(query, explorerVariables)} label="fetch" /></div><div className="button-row"><input placeholder="Template name" value={templateName} onChange={(e) => setTemplateName(e.target.value)} /><button className="button secondary" type="button" onClick={() => void saveAsTemplate()} disabled={busy}>Save as template</button></div></div>
+            <div className="stack"><label><span>GraphQL</span><textarea rows={12} spellCheck={false} value={query} onChange={(e) => setQuery(e.target.value)} /></label><JsonTextarea label="Variables" value={variables} onChange={setVariables} rows={6} /><div className="button-row"><button className="button primary" type="button" onClick={() => void run()} disabled={busy}>Run</button><CopyButton value={graphQlCurl(query, explorerVariables)} label="curl" /><CopyButton value={graphQlFetch(query, explorerVariables)} label="fetch" /></div></div>
           </Panel>
           <ResultPanel title="Response" value={response} error={error} />
         </div>

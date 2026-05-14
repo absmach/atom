@@ -97,11 +97,11 @@ pnpm --dir console build
 cargo build --release
 ```
 
-The console also includes an API Endpoint Builder for super admins. It creates metadata-backed custom HTTP endpoints under `/api/custom/*` that execute saved generic Atom GraphQL templates and return JSON responses.
+The console also includes an API Endpoint Builder for super admins. It creates metadata-backed custom HTTP endpoints under `/api/custom/*` that execute inline generic Atom GraphQL operations and return JSON responses.
 
-- `api_template` is a saved GraphQL operation plus variable metadata.
-- `api_endpoint` is a custom HTTP route that executes one `api_template`.
-- `caller_context` executes the template with the caller's authenticated Atom context and is the default.
+- `api_endpoint` is the only custom API object. It stores the HTTP route, operation kind, GraphQL operation, variable mapping, request schema, response mapping, auth mode, and status.
+- Console presets are local shortcuts for filling endpoint fields; they are not backend records.
+- `caller_context` executes the endpoint GraphQL with the caller's authenticated Atom context and is the default.
 - `service_context` executes with a configured service entity and should be used only for tightly controlled admin-created endpoints.
 
 Example:
@@ -110,7 +110,7 @@ Example:
 POST /api/custom/devices
 ```
 
-can run a saved `createEntity` template with a variables mapping such as:
+can run an inline `createEntity` GraphQL operation with a variables mapping such as:
 
 ```json
 {
@@ -348,7 +348,7 @@ curl -s -X POST http://localhost:8080/roles/$ROLE/capabilities \
   -H 'Content-Type: application/json' \
   -d "{\"capability_id\": \"$PUBLISH_CAP_ID\"}"
 
-# 4. Bind the role to a device, scoped to all resources of kind "channel"
+# 4. Bind the role to a device, scoped to all channel resources
 curl -s -X POST http://localhost:8080/policies \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
@@ -357,8 +357,8 @@ curl -s -X POST http://localhost:8080/policies \
     \"subject_id\":   \"$DEVICE_ID\",
     \"grant_kind\":   \"role\",
     \"grant_id\":     \"$ROLE\",
-    \"scope_kind\":   \"resource_kind\",
-    \"scope_ref\":    \"channel\",
+    \"scope_kind\":   \"object_type\",
+    \"scope_ref\":    \"resource:channel\",
     \"effect\":       \"allow\"
   }"
 
@@ -415,8 +415,8 @@ curl -X POST http://localhost:8080/policies \
     "subject_id":   "<svc-id>",
     "grant_kind":   "capability",
     "grant_id":     "<read-cap-id>",
-    "scope_kind":   "resource_kind",
-    "scope_ref":    "secret",
+    "scope_kind":   "object_type",
+    "scope_ref":    "resource:secret",
     "effect":       "allow",
     "conditions": {
       "resource.attributes.env":  "prod",
@@ -613,11 +613,11 @@ Supported `object_kind` values: `resource`, `tenant`. When
 `object_kind`/`object_id` are supplied they win over `resource_id`;
 otherwise the legacy `resource_id` form is used unchanged.
 
-Policy bindings continue to apply against tenant objects:
+Policy bindings apply against tenant objects with canonical scopes:
 
-- `scope_kind = all` — covers every protected object including tenants.
-- `scope_kind = resource_kind`, `scope_ref = "tenant"` — covers all tenants.
-- `scope_kind = resource`, `scope_ref = <tenant UUID>` — covers one tenant.
+- `scope_kind = platform` — covers every protected object including tenants.
+- `scope_kind = object_type`, `scope_ref = "tenant"` — covers all tenants.
+- `scope_kind = object`, `scope_ref = <tenant UUID>` — covers one tenant.
 
 ---
 
@@ -634,7 +634,7 @@ Entity ─── owns ──────── Entities (via Ownerships)
 
 PolicyBinding ─── subject: Entity | Group
               ─── grant:   Capability | Role
-              ─── scope:   all | resource_kind | resource
+              ─── scope:   platform | tenant | object_kind | object_type | object
               ─── effect:  allow | deny
               ─── conditions: ABAC dot-path map
 

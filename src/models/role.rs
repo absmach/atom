@@ -8,7 +8,10 @@ pub struct Role {
     pub name: String,
     pub tenant_id: Option<Uuid>,
     pub description: Option<String>,
+    pub scope_kind: String,
+    pub scope_ref: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -16,11 +19,22 @@ pub struct CreateRole {
     pub name: String,
     pub tenant_id: Option<Uuid>,
     pub description: Option<String>,
+    pub scope_kind: Option<String>,
+    pub scope_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRole {
+    pub name: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ListRoles {
     pub tenant_id: Option<Uuid>,
+    pub scope_kind: Option<String>,
+    pub scope_ref: Option<String>,
+    pub q: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]

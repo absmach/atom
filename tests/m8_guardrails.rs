@@ -79,6 +79,8 @@ async fn role_capability_addition_rejects_existing_device_role_holder() {
             name: format!("m8-role-{}", Uuid::new_v4()),
             tenant_id: None,
             description: None,
+            scope_kind: None,
+            scope_ref: None,
         },
     )
     .await
@@ -117,9 +119,11 @@ async fn group_membership_rejects_new_device_that_would_inherit_denied_policy() 
     let group = atom::identity::repo::create_group(
         &p,
         CreateGroup {
+            id: None,
             name: format!("m8-group-{}", Uuid::new_v4()),
             tenant_id: None,
             description: None,
+            attributes: json!({}),
         },
     )
     .await

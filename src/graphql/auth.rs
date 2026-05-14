@@ -166,15 +166,20 @@ pub(crate) async fn require_role_read(
     .await
 }
 
-pub(crate) async fn require_policy_read(pool: &sqlx::PgPool, entity_id: Uuid) -> Result<()> {
+pub(crate) async fn require_policy_read(
+    pool: &sqlx::PgPool,
+    entity_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<()> {
+    let scope = scope_for_tenant(tenant_id);
     require_any_capability(
         pool,
         entity_id,
         &[
-            ("policy.manage", Scope::Platform),
-            ("read", Scope::Platform),
-            ("list", Scope::Platform),
-            ("manage", Scope::Platform),
+            ("policy.manage", scope),
+            ("read", scope),
+            ("list", scope),
+            ("manage", scope),
         ],
     )
     .await

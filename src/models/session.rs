@@ -72,6 +72,19 @@ pub struct ResendVerificationRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PasswordResetRequest {
+    pub email: String,
+    pub redirect_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PasswordResetConfirmRequest {
+    pub token: String,
+    pub password: String,
+    pub confirm_password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OAuthStartQuery {
     pub return_to: Option<String>,
 }

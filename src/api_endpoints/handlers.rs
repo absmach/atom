@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use crate::{
     api_endpoints::repo as api_endpoint_repo,
-    api_templates::repo as api_template_repo,
     auth::{authenticate_token, require_any_capability, scope_for_tenant, AuthContext, Scope},
     error::AppError,
     graphql::AtomSchema,
@@ -199,25 +198,8 @@ async fn execute_endpoint(req: EndpointExecutionRequest<'_>) -> Result<Value, Ap
         return Err(err);
     }
 
-    let template =
-        match api_template_repo::get_api_template(&state.pool, endpoint.template_id).await {
-            Ok(template) => template,
-            Err(err) => {
-                record_execution(
-                    state,
-                    Some(endpoint.id),
-                    Some(caller.entity_id),
-                    "error",
-                    request_summary(method, path, redact_value(&body_json)),
-                    json!({}),
-                    Some(err.to_string()),
-                )
-                .await;
-                return Err(err);
-            }
-        };
-    if contains_introspection(&template.graphql) {
-        let err = AppError::bad_request("custom endpoints cannot execute introspection templates");
+    if contains_introspection(&endpoint.graphql) {
+        let err = AppError::bad_request("custom endpoints cannot execute introspection GraphQL");
         record_execution(
             state,
             Some(endpoint.id),
@@ -272,7 +254,7 @@ async fn execute_endpoint(req: EndpointExecutionRequest<'_>) -> Result<Value, Ap
     };
     let request_summary = request_summary(method, path, redact_value(&variables));
 
-    let request = GraphqlRequest::new(template.graphql)
+    let request = GraphqlRequest::new(endpoint.graphql.clone())
         .variables(Variables::from_json(variables.clone()))
         .data(execution_auth);
 

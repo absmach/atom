@@ -1,6 +1,6 @@
-//! M1 schema integration tests.
+//! Schema integration tests.
 //!
-//! Verifies migration 005 has shipped the right columns, tables, capability
+//! Verifies the initial schema ships the right columns, tables, capability
 //! seeds, and CHECK constraints. All tests are `#[ignore]`; run with:
 //!
 //! ```bash
@@ -13,7 +13,7 @@ use common::{admin_id, admin_role_id, pool};
 
 #[tokio::test]
 #[ignore]
-async fn migration_is_idempotent() {
+async fn migrations_are_idempotent() {
     // pool() runs migrations once; running again should be a no-op.
     let p = pool().await;
     sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
@@ -173,7 +173,7 @@ async fn capability_assignment_rules_table_exists_with_object_type() {
 
 #[tokio::test]
 #[ignore]
-async fn admin_seed_uses_platform_scope_after_migration() {
+async fn admin_seed_uses_platform_scope() {
     let p = pool().await;
     let scope: String = sqlx::query_scalar(
         "SELECT scope_kind::text FROM policy_bindings
@@ -186,7 +186,7 @@ async fn admin_seed_uses_platform_scope_after_migration() {
     .expect("admin binding must exist");
     assert_eq!(
         scope, "platform",
-        "admin binding's scope_kind must be migrated from 'all' to 'platform'"
+        "admin binding must use canonical platform scope"
     );
 }
 
@@ -246,7 +246,7 @@ async fn check_constraint_rejects_invalid_scope_kind() {
 
     assert!(
         result.is_err(),
-        "scope_kind='all' must be rejected post-M1 (legacy value retired)"
+        "scope_kind='all' must be rejected by the canonical scope CHECK"
     );
 }
 

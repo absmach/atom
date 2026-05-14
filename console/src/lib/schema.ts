@@ -96,25 +96,6 @@ export type Resource = {
   updatedAt: string;
 };
 
-export type ApiTemplate = {
-  id: string;
-  tenantId: string | null;
-  key: string;
-  name: string;
-  description: string | null;
-  operationKind: "query" | "mutation";
-  graphql: string;
-  variablesSchema: JsonValue;
-  defaultVariables: JsonValue;
-  resultSelector: JsonValue;
-  tags: string[];
-  status: "draft" | "active" | "deprecated" | "disabled";
-  createdBy: string | null;
-  updatedBy: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
 export type ApiEndpoint = {
   id: string;
   tenantId: string | null;
@@ -123,7 +104,8 @@ export type ApiEndpoint = {
   description: string | null;
   method: string;
   path: string;
-  templateId: string;
+  operationKind: "query" | "mutation";
+  graphql: string;
   authMode: string;
   serviceEntityId: string | null;
   variablesMapping: JsonValue;

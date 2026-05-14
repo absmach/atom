@@ -56,10 +56,10 @@ export default function Dashboard() {
           <div className="panel-header">
             <div>
               <p className="eyebrow">Recent</p>
-              <h2>Templates</h2>
+              <h2>Custom APIs</h2>
             </div>
           </div>
-          <p className="empty-state">No template activity in the shell phase.</p>
+          <p className="empty-state">No custom API activity in the shell phase.</p>
         </section>
 
         <section className="panel">

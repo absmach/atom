@@ -1,6 +1,5 @@
 pub mod admin;
 pub mod api_endpoints;
-pub mod api_templates;
 pub mod auth;
 pub mod authz;
 pub mod credentials;

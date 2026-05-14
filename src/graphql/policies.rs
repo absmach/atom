@@ -24,7 +24,7 @@ use super::{
         parse_effect_or_default, parse_grant_kind, parse_id, parse_optional_id,
         parse_optional_subject_kind, parse_scope_kind, parse_subject_kind, Capability,
         CapabilityList, CreateCapabilityInput, CreatePolicyInput, CreateRoleInput, Entity,
-        GqlSubjectKind, PolicyBinding, PolicyBindingList, Role, RoleList,
+        GqlSubjectKind, PolicyBinding, PolicyBindingList, Role, RoleList, UpdateRoleInput,
     },
 };
 
@@ -33,10 +33,14 @@ pub struct PolicyQuery;
 
 #[Object]
 impl PolicyQuery {
+    #[allow(clippy::too_many_arguments)]
     async fn roles(
         &self,
         ctx: &Context<'_>,
         tenant_id: Option<ID>,
+        scope_kind: Option<String>,
+        scope_ref: Option<String>,
+        q: Option<String>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<RoleList> {
@@ -48,6 +52,9 @@ impl PolicyQuery {
             &state.pool,
             ListRoles {
                 tenant_id,
+                scope_kind,
+                scope_ref,
+                q,
                 limit: limit.map(i64::from).unwrap_or(20),
                 offset: offset.map(i64::from).unwrap_or(0),
             },
@@ -133,14 +140,45 @@ impl PolicyQuery {
         Ok(entities)
     }
 
+    async fn role_policies(
+        &self,
+        ctx: &Context<'_>,
+        role_id: ID,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<PolicyBindingList> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let role_id = parse_id(role_id, "roleId")?;
+        let role = authz_repo::get_role(&state.pool, role_id)
+            .await
+            .map_err(gql_error)?;
+        require_role_read(&state.pool, auth.entity_id, role.tenant_id).await?;
+        let list = authz_repo::role_policies(
+            &state.pool,
+            role_id,
+            limit.map(i64::from).unwrap_or(20),
+            offset.map(i64::from).unwrap_or(0),
+        )
+        .await
+        .map_err(gql_error)?;
+
+        Ok(PolicyBindingList {
+            items: list.items.into_iter().map(PolicyBinding::from).collect(),
+            total: list.total,
+        })
+    }
+
     async fn capabilities(
         &self,
         ctx: &Context<'_>,
         resource_kind: Option<String>,
+        tenant_id: Option<ID>,
     ) -> Result<CapabilityList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_policy_read(&state.pool, auth.entity_id).await?;
+        let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
+        require_policy_read(&state.pool, auth.entity_id, tenant_id).await?;
         let capabilities =
             authz_repo::list_capabilities(&state.pool, ListCapabilities { resource_kind })
                 .await
@@ -155,7 +193,7 @@ impl PolicyQuery {
     async fn capability(&self, ctx: &Context<'_>, id: ID) -> Result<Capability> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_policy_read(&state.pool, auth.entity_id).await?;
+        require_policy_read(&state.pool, auth.entity_id, None).await?;
         let capability = authz_repo::get_capability(&state.pool, parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
@@ -165,6 +203,7 @@ impl PolicyQuery {
     async fn policies(
         &self,
         ctx: &Context<'_>,
+        tenant_id: Option<ID>,
         subject_id: Option<ID>,
         subject_kind: Option<GqlSubjectKind>,
         limit: Option<i32>,
@@ -172,10 +211,12 @@ impl PolicyQuery {
     ) -> Result<PolicyBindingList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_policy_read(&state.pool, auth.entity_id).await?;
+        let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
+        require_policy_read(&state.pool, auth.entity_id, tenant_id).await?;
         let list = authz_repo::list_policies(
             &state.pool,
             ListPolicies {
+                tenant_id,
                 subject_id: parse_optional_id(subject_id, "subjectId")?,
                 subject_kind: parse_optional_subject_kind(subject_kind),
                 limit: limit.map(i64::from).unwrap_or(20),
@@ -194,10 +235,10 @@ impl PolicyQuery {
     async fn policy(&self, ctx: &Context<'_>, id: ID) -> Result<PolicyBinding> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_policy_read(&state.pool, auth.entity_id).await?;
         let policy = authz_repo::get_policy(&state.pool, parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
+        require_policy_read(&state.pool, auth.entity_id, policy.tenant_id).await?;
         Ok(policy.into())
     }
 }
@@ -225,6 +266,8 @@ impl PolicyMutation {
                 name: input.name,
                 tenant_id,
                 description: input.description,
+                scope_kind: input.scope_kind,
+                scope_ref: input.scope_ref,
             },
         )
         .await
@@ -251,6 +294,34 @@ impl PolicyMutation {
             .await
             .map_err(gql_error)?;
         Ok(true)
+    }
+
+    async fn update_role(&self, ctx: &Context<'_>, id: ID, input: UpdateRoleInput) -> Result<Role> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let id = parse_id(id, "id")?;
+        let role = authz_repo::get_role(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        require_capability(
+            &state.pool,
+            auth.entity_id,
+            "role.manage",
+            scope_for_tenant(role.tenant_id),
+        )
+        .await
+        .map_err(gql_error)?;
+        let updated = authz_repo::update_role(
+            &state.pool,
+            id,
+            crate::models::role::UpdateRole {
+                name: input.name,
+                description: input.description,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(updated.into())
     }
 
     async fn add_role_capability(

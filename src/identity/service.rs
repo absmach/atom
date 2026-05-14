@@ -28,7 +28,10 @@ use crate::{
         enums::{
             AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus, TenantStatus,
         },
-        session::{LoginResponse, SignupRequest, SignupResponse},
+        session::{
+            LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
+            SignupResponse,
+        },
         token::{ApiKeyResponse, CreateApiKey},
     },
 };
@@ -48,14 +51,18 @@ pub fn verify_secret(secret: &[u8], hash: &str) -> bool {
         .unwrap_or(false)
 }
 
-const MIN_PASSWORD_CHARS: usize = 12;
+const DEFAULT_MIN_PASSWORD_CHARS: usize = 12;
 const LOGIN_FAILURE_LIMIT: i64 = 5;
 const LOGIN_FAILURE_WINDOW_SECS: i64 = 15 * 60;
 
 pub fn validate_password_strength(password: &str) -> Result<(), AppError> {
-    if password.chars().count() < MIN_PASSWORD_CHARS {
+    let min_password_chars = std::env::var("ATOM_MIN_PASSWORD_CHARS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MIN_PASSWORD_CHARS);
+    if password.chars().count() < min_password_chars {
         return Err(AppError::bad_request(format!(
-            "password must be at least {MIN_PASSWORD_CHARS} characters"
+            "password must be at least {min_password_chars} characters"
         )));
     }
     if password.chars().all(char::is_whitespace) {
@@ -289,6 +296,8 @@ async fn do_signup_human(
     .await
     .map_err(db_err)?;
 
+    super::repo::add_authenticated_user_membership_in_tx(&mut tx, entity_id).await?;
+
     sqlx::query(
         r#"INSERT INTO entity_emails (id, entity_id, email)
            VALUES ($1, $2, $3)"#,
@@ -421,6 +430,151 @@ pub async fn resend_verification(pool: &PgPool, cfg: &Config, email: &str) -> Re
     if let Err(err) = send_verification_email(cfg, &email, &token).await {
         tracing::warn!("verification email resend failed: {err}");
     }
+    Ok(())
+}
+
+pub async fn request_password_reset(
+    pool: &PgPool,
+    cfg: &Config,
+    req: PasswordResetRequest,
+) -> Result<(), AppError> {
+    let email = normalize_email(&req.email)?;
+    use sqlx::Row;
+    let row = sqlx::query(
+        r#"SELECT ee.id AS email_id, ee.entity_id
+           FROM entity_emails ee
+           JOIN entities e ON e.id = ee.entity_id
+           WHERE ee.email = $1
+             AND e.kind = 'human'
+             AND e.status = 'active'"#,
+    )
+    .bind(&email)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+
+    let Some(row) = row else {
+        return Ok(());
+    };
+
+    let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
+    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+    let (token_id, token_secret, token) = new_secret_token("atomr");
+    let token_hash = hash_secret(token_secret.as_bytes())?;
+    let expires_at = Utc::now() + Duration::minutes(30);
+
+    sqlx::query(
+        r#"INSERT INTO password_reset_tokens
+             (id, entity_id, email_id, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(token_id)
+    .bind(entity_id)
+    .bind(email_id)
+    .bind(token_hash)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
+
+    let redirect = req
+        .redirect_url
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| cfg.password_reset_redirect.clone());
+    if let Err(err) = send_password_reset_email(cfg, &email, &redirect, &token).await {
+        tracing::warn!("password reset email send failed: {err}");
+    }
+    Ok(())
+}
+
+pub async fn reset_password(
+    pool: &PgPool,
+    req: PasswordResetConfirmRequest,
+) -> Result<(), AppError> {
+    if let Some(confirm_password) = req.confirm_password.as_deref() {
+        if confirm_password != req.password {
+            return Err(AppError::bad_request(
+                "password confirmation does not match",
+            ));
+        }
+    }
+    validate_password_strength(&req.password)?;
+    let (token_id, token_secret) = parse_secret_token(&req.token, "atomr")
+        .ok_or_else(|| AppError::bad_request("invalid password reset token"))?;
+
+    use sqlx::Row;
+    let row = sqlx::query(
+        r#"SELECT entity_id, email_id, secret_hash, expires_at, consumed_at
+           FROM password_reset_tokens
+           WHERE id = $1"#,
+    )
+    .bind(token_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::bad_request("invalid password reset token"),
+        other => AppError::Database(other),
+    })?;
+
+    let secret_hash: String = row.try_get("secret_hash").map_err(db_err)?;
+    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
+    let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
+    if consumed_at.is_some() || expires_at < Utc::now() {
+        return Err(AppError::bad_request("password reset token expired"));
+    }
+    if !verify_secret(token_secret.as_bytes(), &secret_hash) {
+        return Err(AppError::bad_request("invalid password reset token"));
+    }
+
+    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+    let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
+    let email: String = sqlx::query_scalar("SELECT email FROM entity_emails WHERE id = $1")
+        .bind(email_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let password_hash = hash_secret(req.password.as_bytes())?;
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let updated = sqlx::query(
+        "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
+    )
+    .bind(token_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::bad_request("password reset token expired"));
+    }
+    sqlx::query(
+        r#"UPDATE credentials
+           SET status = 'revoked'
+           WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#,
+    )
+    .bind(entity_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(entity_id)
+    .bind(CredentialKind::Password)
+    .bind(email)
+    .bind(password_hash)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -630,6 +784,8 @@ async fn create_login_response(
         tenant_id,
         primary_key,
         cfg.jwt_expiry_secs,
+        &cfg.jwt_issuer,
+        &cfg.jwt_audience,
     )?;
     Ok(LoginResponse {
         token,
@@ -879,6 +1035,64 @@ async fn send_verification_email(cfg: &Config, email: &str, token: &str) -> Resu
         .send(message)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("send verification email: {e}")))?;
+    Ok(())
+}
+
+async fn send_password_reset_email(
+    cfg: &Config,
+    email: &str,
+    redirect_url: &str,
+    token: &str,
+) -> Result<(), AppError> {
+    let reset_url = url_with_params(redirect_url, &[("token", token)]);
+    let Some(smtp) = cfg.smtp.as_ref() else {
+        if cfg.dev_allow_unverified_email_login {
+            tracing::warn!(
+                email,
+                reset_url,
+                "SMTP is not configured; skipping password reset email in development bypass mode"
+            );
+            return Ok(());
+        }
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "SMTP is not configured"
+        )));
+    };
+
+    let message = Message::builder()
+        .from(
+            smtp.from
+                .parse()
+                .map_err(|e| AppError::bad_request(format!("invalid SMTP from address: {e}")))?,
+        )
+        .to(email
+            .parse()
+            .map_err(|e| AppError::bad_request(format!("invalid email address: {e}")))?)
+        .subject("Reset your Atom password")
+        .header(ContentType::TEXT_PLAIN)
+        .body(format!(
+            "Reset your Atom password by opening this link:\n\n{reset_url}\n"
+        ))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("build email: {e}")))?;
+
+    let mut builder = match smtp.tls {
+        SmtpTls::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host),
+        SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp.host)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("smtp starttls: {e}")))?,
+        SmtpTls::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp.host)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("smtp tls: {e}")))?,
+    }
+    .port(smtp.port);
+
+    if let (Some(username), Some(password)) = (&smtp.username, &smtp.password) {
+        builder = builder.credentials(Credentials::new(username.clone(), password.clone()));
+    }
+
+    let mailer = builder.build();
+    mailer
+        .send(message)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("send password reset email: {e}")))?;
     Ok(())
 }
 

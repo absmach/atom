@@ -8,7 +8,6 @@ pub struct MutationRoot(
     super::entities::EntityMutation,
     super::resources::ResourceMutation,
     super::api_endpoints::ApiEndpointMutation,
-    super::api_templates::ApiTemplateMutation,
     super::groups::GroupMutation,
     super::credentials::CredentialMutation,
     super::policies::PolicyMutation,

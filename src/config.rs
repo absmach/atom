@@ -5,6 +5,8 @@ use uuid::Uuid;
 // 00000000-0000-0000-0000-000000000001
 pub const ADMIN_ENTITY_ID: Uuid =
     Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+pub const SERVICE_ENTITY_ID: Uuid =
+    Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -12,10 +14,15 @@ pub struct Config {
     pub listen_addr: String,
     pub grpc_addr: String,
     pub jwt_expiry_secs: u64,
+    pub jwt_issuer: String,
+    pub jwt_audience: String,
     /// UUID of the seeded admin entity. Defaults to the well-known seed UUID.
     pub admin_entity_id: Uuid,
     /// If set, the admin entity's password credential is created on first boot.
     pub admin_secret: Option<String>,
+    /// If set, the service entity's password credential is created on first boot.
+    pub service_secret: Option<String>,
+    pub service_entity_id: Uuid,
     /// Enables unauthenticated global human signup.
     pub signup_enabled: bool,
     /// Development-only: allow password login before the signup email is verified.
@@ -23,11 +30,14 @@ pub struct Config {
     pub public_base_url: String,
     pub cors_allowed_origins: Vec<String>,
     pub email_verification_redirect: String,
+    pub password_reset_redirect: String,
+    pub invitation_redirect: String,
     pub oauth_success_redirect: String,
     pub oauth_error_redirect: String,
     pub oidc_providers: Vec<OidcProviderConfig>,
     pub smtp: Option<SmtpConfig>,
     pub email_verification_expiry_secs: u64,
+    pub invitation_expiry_secs: u64,
     pub oauth_state_expiry_secs: u64,
     pub auth_exchange_code_expiry_secs: u64,
     /// Enables the local developer GraphQL console at /graphql/console.
@@ -50,11 +60,20 @@ impl Config {
                 .unwrap_or_else(|_| "3600".to_string())
                 .parse()
                 .unwrap_or(3600),
+            jwt_issuer: std::env::var("ATOM_JWT_ISSUER")
+                .unwrap_or_else(|_| public_base_url.trim_end_matches('/').to_string()),
+            jwt_audience: std::env::var("ATOM_JWT_AUDIENCE")
+                .unwrap_or_else(|_| "magistrala".to_string()),
             admin_entity_id: std::env::var("ADMIN_ENTITY_ID")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(ADMIN_ENTITY_ID),
             admin_secret: std::env::var("ADMIN_SECRET").ok(),
+            service_secret: std::env::var("ATOM_SERVICE_SECRET").ok(),
+            service_entity_id: std::env::var("ATOM_SERVICE_ENTITY_ID")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(SERVICE_ENTITY_ID),
             signup_enabled: env_bool("ATOM_SIGNUP_ENABLED"),
             dev_allow_unverified_email_login: env_bool("ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
@@ -62,6 +81,12 @@ impl Config {
                 .unwrap_or_else(|_| {
                     public_url(&public_base_url, "/graphql/console/auth/verify-email")
                 }),
+            password_reset_redirect: std::env::var("ATOM_PASSWORD_RESET_REDIRECT").unwrap_or_else(
+                |_| public_url(&public_base_url, "/graphql/console/auth/reset-password"),
+            ),
+            invitation_redirect: std::env::var("ATOM_INVITATION_REDIRECT").unwrap_or_else(|_| {
+                public_url(&public_base_url, "/graphql/console/invitations/accept")
+            }),
             oauth_success_redirect: std::env::var("ATOM_OAUTH_SUCCESS_REDIRECT")
                 .unwrap_or_else(|_| console_auth_callback.clone()),
             oauth_error_redirect: std::env::var("ATOM_OAUTH_ERROR_REDIRECT")
@@ -69,6 +94,7 @@ impl Config {
             oidc_providers: parse_oidc_providers()?,
             smtp: smtp_from_env(),
             email_verification_expiry_secs: env_u64("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS", 86_400),
+            invitation_expiry_secs: env_u64("ATOM_INVITATION_EXPIRY_SECS", 604_800),
             oauth_state_expiry_secs: env_u64("ATOM_OAUTH_STATE_EXPIRY_SECS", 600),
             auth_exchange_code_expiry_secs: env_u64("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", 300),
             public_base_url,

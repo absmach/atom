@@ -31,6 +31,7 @@ RUN apk add --no-cache ca-certificates libgcc
 WORKDIR /app
 COPY --from=builder-release /app/target/release/atom /usr/local/bin/atom
 COPY --from=console-builder /app/console/dist /app/console/dist
+COPY migrations ./migrations
 EXPOSE 8080
 CMD ["atom"]
 
@@ -39,5 +40,6 @@ RUN apk add --no-cache ca-certificates libgcc
 WORKDIR /app
 COPY --from=builder-dev /app/target/debug/atom /usr/local/bin/atom
 COPY --from=console-builder /app/console/dist /app/console/dist
+COPY migrations ./migrations
 EXPOSE 8080
 CMD ["atom"]

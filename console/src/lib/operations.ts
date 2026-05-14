@@ -1,4 +1,4 @@
-import type { ApiEndpoint, ApiTemplate, JsonObject, JsonValue } from "./schema";
+import type { ApiEndpoint, JsonObject, JsonValue } from "./schema";
 
 export const HEALTH_QUERY = `query ConsoleHealth {
   health
@@ -120,35 +120,10 @@ export const DELETE_RESOURCE = `mutation ConsoleDeleteResource($id: ID!) {
   deleteResource(id: $id)
 }`;
 
-export const TEMPLATES_QUERY = `query ConsoleApiTemplates($tenantId: ID, $status: ApiTemplateStatus, $tag: String, $limit: Int, $offset: Int) {
-  apiTemplates(tenantId: $tenantId, status: $status, tag: $tag, limit: $limit, offset: $offset) {
-    items {
-      id tenantId key name description operationKind graphql variablesSchema defaultVariables resultSelector tags status createdBy updatedBy createdAt updatedAt
-    }
-    total
-  }
-}`;
-
-export const CREATE_TEMPLATE = `mutation ConsoleCreateTemplate($input: CreateApiTemplateInput!) {
-  createApiTemplate(input: $input) {
-    id tenantId key name description operationKind graphql variablesSchema defaultVariables resultSelector tags status createdBy updatedBy createdAt updatedAt
-  }
-}`;
-
-export const UPDATE_TEMPLATE = `mutation ConsoleUpdateTemplate($id: ID!, $input: UpdateApiTemplateInput!) {
-  updateApiTemplate(id: $id, input: $input) {
-    id tenantId key name description operationKind graphql variablesSchema defaultVariables resultSelector tags status createdBy updatedBy createdAt updatedAt
-  }
-}`;
-
-export const DISABLE_TEMPLATE = `mutation ConsoleDisableTemplate($id: ID!) {
-  disableApiTemplate(id: $id)
-}`;
-
 export const ENDPOINTS_QUERY = `query ConsoleApiEndpoints($tenantId: ID, $status: String, $limit: Int, $offset: Int) {
   apiEndpoints(tenantId: $tenantId, status: $status, limit: $limit, offset: $offset) {
     items {
-      id tenantId key name description method path templateId authMode serviceEntityId variablesMapping requestSchema responseMapping status createdBy updatedBy createdAt updatedAt
+      id tenantId key name description method path operationKind graphql authMode serviceEntityId variablesMapping requestSchema responseMapping status createdBy updatedBy createdAt updatedAt
     }
     total
   }
@@ -156,13 +131,13 @@ export const ENDPOINTS_QUERY = `query ConsoleApiEndpoints($tenantId: ID, $status
 
 export const CREATE_ENDPOINT = `mutation ConsoleCreateEndpoint($input: CreateApiEndpointInput!) {
   createApiEndpoint(input: $input) {
-    id tenantId key name description method path templateId authMode serviceEntityId variablesMapping requestSchema responseMapping status createdBy updatedBy createdAt updatedAt
+    id tenantId key name description method path operationKind graphql authMode serviceEntityId variablesMapping requestSchema responseMapping status createdBy updatedBy createdAt updatedAt
   }
 }`;
 
 export const UPDATE_ENDPOINT = `mutation ConsoleUpdateEndpoint($id: ID!, $input: UpdateApiEndpointInput!) {
   updateApiEndpoint(id: $id, input: $input) {
-    id tenantId key name description method path templateId authMode serviceEntityId variablesMapping requestSchema responseMapping status createdBy updatedBy createdAt updatedAt
+    id tenantId key name description method path operationKind graphql authMode serviceEntityId variablesMapping requestSchema responseMapping status createdBy updatedBy createdAt updatedAt
   }
 }`;
 
@@ -188,8 +163,8 @@ export const ROLES_QUERY = `query ConsoleRoles($tenantId: ID, $limit: Int, $offs
   }
 }`;
 
-export const CAPABILITIES_QUERY = `query ConsoleCapabilities($resourceKind: String) {
-  capabilities(resourceKind: $resourceKind) {
+export const CAPABILITIES_QUERY = `query ConsoleCapabilities($resourceKind: String, $tenantId: ID) {
+  capabilities(resourceKind: $resourceKind, tenantId: $tenantId) {
     items { id name resourceKind description }
     total
   }
@@ -224,8 +199,8 @@ export const REMOVE_GROUP_MEMBER = `mutation ConsoleRemoveGroupMember($groupId: 
   removeGroupMember(groupId: $groupId, entityId: $entityId)
 }`;
 
-export const POLICIES_QUERY = `query ConsolePolicies($subjectId: ID, $subjectKind: SubjectKind, $limit: Int, $offset: Int) {
-  policies(subjectId: $subjectId, subjectKind: $subjectKind, limit: $limit, offset: $offset) {
+export const POLICIES_QUERY = `query ConsolePolicies($tenantId: ID, $subjectId: ID, $subjectKind: SubjectKind, $limit: Int, $offset: Int) {
+  policies(tenantId: $tenantId, subjectId: $subjectId, subjectKind: $subjectKind, limit: $limit, offset: $offset) {
     items { id tenantId subjectKind subjectId grantKind grantId scopeKind scopeRef effect conditions createdAt }
     total
   }
@@ -320,20 +295,4 @@ export function endpointFetch(endpoint: Pick<ApiEndpoint, "method" | "path">, bo
 });
 
 const result = await response.json();`;
-}
-
-export function templateInput(template: ApiTemplate): JsonObject {
-  return {
-    tenantId: template.tenantId,
-    key: template.key,
-    name: template.name,
-    description: template.description,
-    operationKind: template.operationKind,
-    graphql: template.graphql,
-    variablesSchema: template.variablesSchema,
-    defaultVariables: template.defaultVariables,
-    resultSelector: template.resultSelector,
-    tags: template.tags,
-    status: template.status,
-  };
 }

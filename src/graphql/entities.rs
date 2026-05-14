@@ -1,7 +1,9 @@
 use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
-    auth::Scope, identity::repo, models::entity as entity_model, models::entity::ListEntities,
+    auth::Scope,
+    identity::repo,
+    models::{entity as entity_model, entity::ListEntities},
     state::AppState,
 };
 
@@ -13,6 +15,7 @@ use super::{
     types::{
         parse_id, parse_optional_entity_kind, parse_optional_entity_status, parse_optional_id,
         CreateEntityInput, Entity, EntityList, GqlEntityKind, GqlEntityStatus, Ownership,
+        UpdateEntityInput,
     },
 };
 
@@ -48,6 +51,7 @@ impl EntityQuery {
     async fn entities(
         &self,
         ctx: &Context<'_>,
+        q: Option<String>,
         kind: Option<GqlEntityKind>,
         profile_id: Option<ID>,
         tenant_id: Option<ID>,
@@ -62,6 +66,7 @@ impl EntityQuery {
         let list = repo::list_entities(
             &state.pool,
             ListEntities {
+                q,
                 kind: parse_optional_entity_kind(kind),
                 profile_id: parse_optional_id(profile_id, "profileId")?,
                 tenant_id,
@@ -102,6 +107,7 @@ impl EntityMutation {
         let entity = repo::create_entity(
             &state.pool,
             entity_model::CreateEntity {
+                id: parse_optional_id(input.id, "id")?,
                 kind: parse_optional_entity_kind(input.kind),
                 profile_id: parse_optional_id(input.profile_id, "profileId")?,
                 profile_version_id: parse_optional_id(
@@ -117,6 +123,61 @@ impl EntityMutation {
         .map_err(gql_error)?;
 
         Ok(entity.into())
+    }
+
+    async fn update_entity(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: UpdateEntityInput,
+    ) -> Result<Entity> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let id = parse_id(id, "id")?;
+        let existing = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
+        require_any_capability(
+            &state.pool,
+            auth.entity_id,
+            &[
+                ("manage", Scope::Object(id)),
+                ("manage", scope_for_tenant(existing.tenant_id)),
+            ],
+        )
+        .await?;
+
+        let entity = repo::update_entity(
+            &state.pool,
+            id,
+            input.name,
+            input.status.map(Into::into),
+            input.attributes,
+        )
+        .await
+        .map_err(gql_error)?;
+
+        Ok(entity.into())
+    }
+
+    async fn delete_entity(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let id = parse_id(id, "id")?;
+        if auth.entity_id != id {
+            let existing = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
+            require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", Scope::Object(id)),
+                    ("manage", scope_for_tenant(existing.tenant_id)),
+                ],
+            )
+            .await?;
+        }
+        repo::delete_entity(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        Ok(true)
     }
 
     async fn add_ownership(

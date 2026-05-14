@@ -20,6 +20,8 @@ use crate::{
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
+    pub iss: String,
+    pub aud: String,
     pub sub: String,
     pub sid: String,
     pub tid: Option<String>,
@@ -48,6 +50,8 @@ pub fn encode_jwt(
     tenant_id: Option<Uuid>,
     primary: &LoadedKey,
     expiry_secs: u64,
+    issuer: &str,
+    audience: &str,
 ) -> Result<String, AppError> {
     let header = Header {
         alg: Algorithm::ES256,
@@ -57,6 +61,8 @@ pub fn encode_jwt(
 
     let now = Utc::now().timestamp() as usize;
     let claims = Claims {
+        iss: issuer.to_string(),
+        aud: audience.to_string(),
         sub: entity_id.to_string(),
         sid: session_id.to_string(),
         tid: tenant_id.map(|t| t.to_string()),
@@ -71,7 +77,12 @@ pub fn encode_jwt(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))
 }
 
-fn decode_jwt(token: &str, keys: &ActiveKeys) -> Result<Claims, AppError> {
+fn decode_jwt(
+    token: &str,
+    keys: &ActiveKeys,
+    issuer: &str,
+    audience: &str,
+) -> Result<Claims, AppError> {
     let header =
         decode_header(token).map_err(|e| AppError::unauthorized(format!("invalid token: {e}")))?;
 
@@ -88,6 +99,9 @@ fn decode_jwt(token: &str, keys: &ActiveKeys) -> Result<Claims, AppError> {
 
     let mut validation = Validation::new(Algorithm::ES256);
     validation.validate_exp = true;
+    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[audience]);
 
     decode::<Claims>(token, &decoding_key, &validation)
         .map(|d| d.claims)
@@ -131,7 +145,12 @@ async fn auth_from_token(state: &AppState, token: &str) -> Result<AuthContext, A
 
 async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, AppError> {
     let keys = state.keys.read().await;
-    let claims = decode_jwt(token, &keys)?;
+    let claims = decode_jwt(
+        token,
+        &keys,
+        &state.config.jwt_issuer,
+        &state.config.jwt_audience,
+    )?;
     drop(keys);
 
     let entity_id: Uuid = claims

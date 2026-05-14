@@ -15,12 +15,13 @@ use crate::{
     error::AppError,
     models::{
         entity::{CreateEntity, CreateOwnership, ListEntities, UpdateEntity},
-        enums::AuditOutcome,
-        group::{AddMember, CreateGroup, ListGroups},
+        enums::{AuditOutcome, EntityStatus},
+        group::{AddMember, CreateGroup, ListGroups, SetGroupParent, UpdateGroup},
         profile::{CreateProfile, CreateProfileVersion, ListProfiles},
         session::{
             LoginRequest, OAuthCallbackQuery, OAuthExchangeRequest, OAuthStartQuery,
-            PublicAuthConfigResponse, ResendVerificationRequest, SignupRequest, VerifyEmailQuery,
+            PasswordResetConfirmRequest, PasswordResetRequest, PublicAuthConfigResponse,
+            ResendVerificationRequest, SignupRequest, VerifyEmailQuery,
         },
         token::CreateApiKey,
     },
@@ -169,6 +170,22 @@ pub async fn resend_verification(
     Ok(StatusCode::ACCEPTED)
 }
 
+pub async fn request_password_reset(
+    State(state): State<AppState>,
+    Json(req): Json<PasswordResetRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    service::request_password_reset(&state.pool, &state.config, req).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+pub async fn reset_password(
+    State(state): State<AppState>,
+    Json(req): Json<PasswordResetConfirmRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    service::reset_password(&state.pool, req).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn oauth_start(
     State(state): State<AppState>,
     Path(provider): Path<String>,
@@ -227,6 +244,15 @@ pub async fn logout(
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn introspect(auth: AuthContext) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(serde_json::json!({
+        "active": true,
+        "entity_id": auth.entity_id,
+        "tenant_id": auth.tenant_id,
+        "session_id": auth.session_id,
+    })))
 }
 
 pub async fn get_session(
@@ -495,6 +521,76 @@ pub async fn get_group(
     Ok(Json(group))
 }
 
+pub async fn update_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateGroup>,
+) -> Result<impl IntoResponse, AppError> {
+    let group = repo::get_group(&state.pool, id).await?;
+    require_capability(
+        &state.pool,
+        auth.entity_id,
+        "manage",
+        scope_for_tenant(group.tenant_id),
+    )
+    .await?;
+    let group = repo::update_group(&state.pool, id, req).await?;
+    Ok(Json(group))
+}
+
+pub async fn enable_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    change_group_status(state, auth, id, EntityStatus::Active).await
+}
+
+pub async fn disable_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    change_group_status(state, auth, id, EntityStatus::Inactive).await
+}
+
+pub async fn suspend_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    change_group_status(state, auth, id, EntityStatus::Suspended).await
+}
+
+async fn change_group_status(
+    state: AppState,
+    auth: AuthContext,
+    id: Uuid,
+    status: EntityStatus,
+) -> Result<impl IntoResponse, AppError> {
+    let group = repo::get_group(&state.pool, id).await?;
+    require_capability(
+        &state.pool,
+        auth.entity_id,
+        "manage",
+        scope_for_tenant(group.tenant_id),
+    )
+    .await?;
+    let group = repo::update_group(
+        &state.pool,
+        id,
+        UpdateGroup {
+            name: None,
+            description: None,
+            status: Some(status),
+            attributes: None,
+        },
+    )
+    .await?;
+    Ok(Json(group))
+}
+
 pub async fn list_groups(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -520,6 +616,53 @@ pub async fn delete_group(
     .await?;
     repo::delete_group(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn set_group_parent(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetGroupParent>,
+) -> Result<impl IntoResponse, AppError> {
+    let group = repo::get_group(&state.pool, id).await?;
+    require_capability(
+        &state.pool,
+        auth.entity_id,
+        "manage",
+        scope_for_tenant(group.tenant_id),
+    )
+    .await?;
+    let group = repo::set_group_parent(&state.pool, id, req.parent_id).await?;
+    Ok(Json(group))
+}
+
+pub async fn remove_group_parent(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let group = repo::get_group(&state.pool, id).await?;
+    require_capability(
+        &state.pool,
+        auth.entity_id,
+        "manage",
+        scope_for_tenant(group.tenant_id),
+    )
+    .await?;
+    repo::remove_group_parent(&state.pool, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_child_groups(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+    Query(params): Query<ListGroups>,
+) -> Result<impl IntoResponse, AppError> {
+    let group = repo::get_group(&state.pool, id).await?;
+    require_read_access(&state.pool, auth.entity_id, group.tenant_id, id).await?;
+    let list = repo::list_child_groups(&state.pool, id, params.limit, params.offset).await?;
+    Ok(Json(list))
 }
 
 pub async fn add_group_member(

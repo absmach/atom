@@ -23,6 +23,7 @@ async fn fresh_tenant(pool: &sqlx::PgPool) -> uuid::Uuid {
     let t = atom::tenants::repo::create_tenant(
         pool,
         CreateTenant {
+            id: None,
             name: format!("m3-{}", Uuid::new_v4()),
             route: None,
             tags: vec![],

@@ -274,6 +274,8 @@ mod tests {
 
 #[derive(Debug, Deserialize)]
 pub struct ListPolicies {
+    #[serde(default, alias = "tenantId")]
+    pub tenant_id: Option<Uuid>,
     pub subject_id: Option<Uuid>,
     pub subject_kind: Option<SubjectKind>,
     #[serde(default = "default_limit")]

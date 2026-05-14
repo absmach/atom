@@ -1,7 +1,7 @@
 //! M1 functional/end-to-end authz tests.
 //!
-//! Verifies the PDP still authorises correctly after the scope_kind migration
-//! and that the new scope_kind variants (`object_type`, `object`, `object_kind`)
+//! Verifies the PDP authorises correctly with canonical scope_kind variants
+//! (`object_type`, `object`, `object_kind`)
 //! evaluate as expected against real database state.
 //!
 //! Run with:
@@ -50,7 +50,7 @@ async fn make_active_entity(pool: &sqlx::PgPool, kind: &str) -> Uuid {
 
 #[tokio::test]
 #[ignore]
-async fn admin_platform_binding_still_authorises_after_migration() {
+async fn admin_platform_binding_authorises() {
     let p = pool().await;
     let resource_id = make_resource(&p, "channel").await;
 
@@ -67,7 +67,7 @@ async fn admin_platform_binding_still_authorises_after_migration() {
         .expect("evaluate");
     assert!(
         resp.allowed,
-        "admin's migrated platform binding should authorise read on a channel: {}",
+        "admin's platform binding should authorise read on a channel: {}",
         resp.reason
     );
 

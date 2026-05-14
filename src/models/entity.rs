@@ -21,6 +21,7 @@ pub struct Entity {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEntity {
+    pub id: Option<Uuid>,
     pub kind: Option<EntityKind>,
     pub profile_id: Option<Uuid>,
     pub profile_version_id: Option<Uuid>,
@@ -39,6 +40,7 @@ pub struct UpdateEntity {
 
 #[derive(Debug, Deserialize)]
 pub struct ListEntities {
+    pub q: Option<String>,
     pub kind: Option<EntityKind>,
     pub profile_id: Option<Uuid>,
     pub tenant_id: Option<Uuid>,

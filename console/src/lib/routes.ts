@@ -8,7 +8,6 @@ export type ConsoleRoute = {
 
 export const CONSOLE_ROUTES: ConsoleRoute[] = [
   { label: "Dashboard", href: CONSOLE_BASE, section: "Build" },
-  { label: "Templates", href: `${CONSOLE_BASE}/templates`, section: "Build" },
   { label: "Endpoints", href: `${CONSOLE_BASE}/endpoints`, section: "Build" },
   { label: "Tenants", href: `${CONSOLE_BASE}/tenants`, section: "Operate" },
   { label: "Entities", href: `${CONSOLE_BASE}/entities`, section: "Operate" },

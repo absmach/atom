@@ -21,6 +21,7 @@ pub struct Tenant {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTenant {
+    pub id: Option<Uuid>,
     pub name: String,
     pub route: Option<String>,
     #[serde(default)]
@@ -39,6 +40,7 @@ pub struct UpdateTenant {
 
 #[derive(Debug, Deserialize)]
 pub struct ListTenants {
+    pub q: Option<String>,
     pub name: Option<String>,
     pub route: Option<String>,
     pub status: Option<TenantStatus>,
@@ -56,4 +58,49 @@ fn default_limit() -> i64 {
 pub struct TenantList {
     pub items: Vec<Tenant>,
     pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TenantInvitation {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub invitee_user_id: Option<Uuid>,
+    pub invitee_email: Option<String>,
+    pub invited_by: Uuid,
+    pub role_id: Option<Uuid>,
+    pub role_name: Option<String>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub rejected_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTenantInvitation {
+    pub invitee_user_id: Option<Uuid>,
+    pub invitee_email: Option<String>,
+    pub role_id: Option<Uuid>,
+    #[serde(default)]
+    pub resend: bool,
+    pub redirect_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTenantInvitations {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TenantInvitationList {
+    pub items: Vec<TenantInvitation>,
+    pub total: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InvitationTokenRequest {
+    pub token: String,
 }

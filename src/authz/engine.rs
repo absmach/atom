@@ -108,8 +108,9 @@ pub(crate) async fn resolve_object(
                 }))
             }
             "entity" => load_entity_as_object(pool, id).await,
+            "group" => load_group_as_object(pool, id).await,
             other => Err(AppError::bad_request(format!(
-                "unsupported object_kind '{other}' (supported: platform, resource, tenant, entity)"
+                "unsupported object_kind '{other}' (supported: platform, resource, tenant, entity, group)"
             ))),
         };
     }
@@ -165,6 +166,30 @@ async fn load_resource(pool: &PgPool, id: Uuid) -> Result<Option<ProtectedObject
             .try_get::<String, _>("kind")
             .unwrap_or_else(|_| String::new()),
         name: r.try_get::<Option<String>, _>("name").unwrap_or(None),
+        tenant_id: r.try_get::<Option<Uuid>, _>("tenant_id").unwrap_or(None),
+        attributes: r
+            .try_get::<Value, _>("attributes")
+            .unwrap_or(Value::Object(Default::default())),
+    }))
+}
+
+async fn load_group_as_object(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<ProtectedObject>, AppError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT id, name, tenant_id, attributes FROM groups WHERE id = $1 AND status <> 'inactive'",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(row.map(|r| ProtectedObject {
+        id,
+        coarse_kind: "group".to_string(),
+        kind: "group".to_string(),
+        name: r.try_get::<String, _>("name").ok(),
         tenant_id: r.try_get::<Option<Uuid>, _>("tenant_id").unwrap_or(None),
         attributes: r
             .try_get::<Value, _>("attributes")
@@ -426,13 +451,16 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
                     ELSE 'group:' || g.name
                   END AS via
            FROM policy_bindings pb
-           LEFT JOIN groups g ON pb.subject_kind = 'group' AND g.id = pb.subject_id
+           LEFT JOIN groups g ON pb.subject_kind = 'group' AND g.id = pb.subject_id AND g.status = 'active'
            LEFT JOIN roles role ON pb.grant_kind = 'role' AND role.id = pb.grant_id
            WHERE
              (pb.subject_kind = 'entity' AND pb.subject_id = $1)
              OR
              (pb.subject_kind = 'group' AND pb.subject_id IN (
-               SELECT group_id FROM group_members WHERE entity_id = $1
+               SELECT gm.group_id
+               FROM group_members gm
+               JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+               WHERE gm.entity_id = $1
              ))
            ORDER BY pb.created_at ASC"#,
     )
@@ -1143,6 +1171,7 @@ mod db_tests {
         let t = crate::tenants::repo::create_tenant(
             &pool,
             CreateTenant {
+                id: None,
                 name: format!("authz-{}", Uuid::new_v4()),
                 route: None,
                 tags: vec![],
@@ -1187,6 +1216,7 @@ mod db_tests {
         let t = crate::tenants::repo::create_tenant(
             &pool,
             CreateTenant {
+                id: None,
                 name: format!("authz-deny-{}", Uuid::new_v4()),
                 route: None,
                 tags: vec![],
@@ -1291,6 +1321,7 @@ mod db_tests {
         let t = crate::tenants::repo::create_tenant(
             &pool,
             CreateTenant {
+                id: None,
                 name: format!("authz-deleted-{}", Uuid::new_v4()),
                 route: None,
                 tags: vec![],

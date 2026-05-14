@@ -25,7 +25,7 @@ use crate::{
         enums::{AuditOutcome, ScopeKind},
         policy::{AuthzRequest, CreatePolicyBinding, ListPolicies},
         resource::{CreateResource, ListResources, UpdateResource},
-        role::{AddRoleCapability, CreateRole, ListRoles},
+        role::{AddRoleCapability, CreateRole, ListRoles, UpdateRole},
     },
     state::AppState,
 };
@@ -270,6 +270,24 @@ pub async fn delete_role(
     .await?;
     repo::delete_role(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn update_role(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateRole>,
+) -> Result<impl IntoResponse, AppError> {
+    let role = repo::get_role(&state.pool, id).await?;
+    require_management(
+        &state.pool,
+        auth.entity_id,
+        "role.manage",
+        scope_for_tenant(role.tenant_id),
+    )
+    .await?;
+    let role = repo::update_role(&state.pool, id, req).await?;
+    Ok(Json(role))
 }
 
 pub async fn add_role_capability(

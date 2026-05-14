@@ -158,8 +158,6 @@ mod tests {
             "entity",
             "resources",
             "resource",
-            "apiTemplates",
-            "apiTemplate",
             "apiEndpoints",
             "apiEndpoint",
             "apiEndpointExecutions",
@@ -199,9 +197,6 @@ mod tests {
             "createResource",
             "updateResource",
             "deleteResource",
-            "createApiTemplate",
-            "updateApiTemplate",
-            "disableApiTemplate",
             "createApiEndpoint",
             "updateApiEndpoint",
             "enableApiEndpoint",
@@ -233,6 +228,24 @@ mod tests {
             );
         }
 
+        for name in ["apiTemplates", "apiTemplate"] {
+            assert!(
+                !query_fields.contains(name),
+                "unexpected query field {name}"
+            );
+        }
+
+        for name in [
+            "createApiTemplate",
+            "updateApiTemplate",
+            "disableApiTemplate",
+        ] {
+            assert!(
+                !mutation_fields.contains(name),
+                "unexpected mutation field {name}"
+            );
+        }
+
         for suffix in ["Domain", "Client", "Channel"] {
             let name = format!("create{suffix}");
             assert!(
@@ -244,6 +257,50 @@ mod tests {
                 "unexpected mutation field {name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn api_endpoint_schema_is_self_contained() {
+        let schema = build_schema(test_state());
+
+        let response = schema
+            .execute(Request::new(
+                r#"
+                {
+                  endpointType: __type(name: "ApiEndpoint") {
+                    fields { name }
+                  }
+                  createInput: __type(name: "CreateApiEndpointInput") {
+                    inputFields { name }
+                  }
+                  updateInput: __type(name: "UpdateApiEndpointInput") {
+                    inputFields { name }
+                  }
+                  templateType: __type(name: "ApiTemplate") {
+                    name
+                  }
+                }
+                "#,
+            ))
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().expect("json data");
+        let endpoint_fields = field_names(&data["endpointType"]["fields"]);
+        assert!(endpoint_fields.contains("operationKind"));
+        assert!(endpoint_fields.contains("graphql"));
+        assert!(!endpoint_fields.contains("templateId"));
+
+        let create_fields = field_names(&data["createInput"]["inputFields"]);
+        assert!(create_fields.contains("operationKind"));
+        assert!(create_fields.contains("graphql"));
+        assert!(!create_fields.contains("templateId"));
+
+        let update_fields = field_names(&data["updateInput"]["inputFields"]);
+        assert!(update_fields.contains("operationKind"));
+        assert!(update_fields.contains("graphql"));
+        assert!(!update_fields.contains("templateId"));
+        assert!(data["templateType"].is_null());
     }
 
     #[tokio::test]
@@ -263,8 +320,6 @@ mod tests {
                   effect: __type(name: "Effect") { enumValues { name } }
                   credentialKind: __type(name: "CredentialKind") { enumValues { name } }
                   auditOutcome: __type(name: "AuditOutcome") { enumValues { name } }
-                  apiTemplateOperationKind: __type(name: "ApiTemplateOperationKind") { enumValues { name } }
-                  apiTemplateStatus: __type(name: "ApiTemplateStatus") { enumValues { name } }
                 }
                 "#,
             ))
@@ -300,14 +355,6 @@ mod tests {
             enum_names(&data, "auditOutcome"),
             set(&["allow", "deny", "error"])
         );
-        assert_eq!(
-            enum_names(&data, "apiTemplateOperationKind"),
-            set(&["query", "mutation"])
-        );
-        assert_eq!(
-            enum_names(&data, "apiTemplateStatus"),
-            set(&["draft", "active", "deprecated", "disabled"])
-        );
     }
 
     fn test_state() -> AppState {
@@ -319,19 +366,27 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             grpc_addr: "127.0.0.1:0".into(),
             jwt_expiry_secs: 3600,
+            jwt_issuer: "http://localhost:8080".to_string(),
+            jwt_audience: "magistrala".to_string(),
             admin_entity_id: ADMIN_ENTITY_ID,
             admin_secret: None,
+            service_secret: None,
+            service_entity_id: crate::config::SERVICE_ENTITY_ID,
             signup_enabled: false,
             dev_allow_unverified_email_login: false,
             public_base_url: "http://localhost:8080".into(),
             cors_allowed_origins: vec!["http://localhost:8080".into()],
             email_verification_redirect: "http://localhost:8080/graphql/console/auth/verify-email"
                 .into(),
+            password_reset_redirect: "http://localhost:8080/graphql/console/auth/reset-password"
+                .into(),
+            invitation_redirect: "http://localhost:8080/graphql/console/invitations/accept".into(),
             oauth_success_redirect: "http://localhost:8080".into(),
             oauth_error_redirect: "http://localhost:8080".into(),
             oidc_providers: vec![],
             smtp: None,
             email_verification_expiry_secs: 86_400,
+            invitation_expiry_secs: 604_800,
             oauth_state_expiry_secs: 600,
             auth_exchange_code_expiry_secs: 300,
             graphql_console_enabled: false,

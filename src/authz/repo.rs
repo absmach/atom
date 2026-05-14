@@ -22,18 +22,18 @@ use crate::{
         },
         capability::{Capability, CreateCapability, ListCapabilities},
         entity::Entity,
-        enums::{CredentialKind, GrantKind, SubjectKind},
+        enums::{CredentialKind, Effect, GrantKind, SubjectKind},
         group::Group,
         policy::{CreatePolicyBinding, ListPolicies, PolicyBinding, PolicyList},
         resource::{CreateResource, ListResources, Resource, ResourceList, UpdateResource},
-        role::{CreateRole, ListRoles, Role, RoleList},
+        role::{CreateRole, ListRoles, Role, RoleList, UpdateRole},
     },
 };
 
 // ─── Resources ────────────────────────────────────────────────────────────────
 
 pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resource, AppError> {
-    let id = Uuid::new_v4();
+    let id = req.id.unwrap_or_else(Uuid::new_v4);
     let attrs = if req.attributes.is_null() {
         serde_json::json!({})
     } else {
@@ -77,17 +77,20 @@ pub async fn list_resources(
 
     let kind = params.kind;
     let tenant_id = params.tenant_id;
+    let q = search_pattern(params.q);
 
     let items = sqlx::query_as::<_, Resource>(
         r#"SELECT id, kind, name, tenant_id, owner_id, attributes, created_at, updated_at
            FROM resources
            WHERE ($1::text IS NULL OR kind = $1)
              AND ($2::uuid IS NULL OR tenant_id = $2)
+             AND ($3::text IS NULL OR name ILIKE $3 OR attributes::text ILIKE $3)
            ORDER BY created_at DESC
-           LIMIT $3 OFFSET $4"#,
+           LIMIT $4 OFFSET $5"#,
     )
     .bind(kind.clone())
     .bind(tenant_id)
+    .bind(q.clone())
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
@@ -97,10 +100,12 @@ pub async fn list_resources(
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM resources
            WHERE ($1::text IS NULL OR kind = $1)
-             AND ($2::uuid IS NULL OR tenant_id = $2)"#,
+             AND ($2::uuid IS NULL OR tenant_id = $2)
+             AND ($3::text IS NULL OR name ILIKE $3 OR attributes::text ILIKE $3)"#,
     )
     .bind(kind)
     .bind(tenant_id)
+    .bind(q)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -148,15 +153,27 @@ pub async fn delete_resource(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
 
 pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
     let id = Uuid::new_v4();
+    let scope_kind = req.scope_kind.unwrap_or_else(|| {
+        if req.tenant_id.is_some() {
+            "tenant".to_string()
+        } else {
+            "platform".to_string()
+        }
+    });
+    let scope_ref = req
+        .scope_ref
+        .or_else(|| req.tenant_id.map(|tenant_id| tenant_id.to_string()));
     sqlx::query_as::<_, Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, created_at"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description, scope_kind, scope_ref)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
+    .bind(scope_kind)
+    .bind(scope_ref)
     .fetch_one(pool)
     .await
     .map_err(db_err)
@@ -164,7 +181,7 @@ pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppErro
 
 pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
     sqlx::query_as::<_, Role>(
-        "SELECT id, name, tenant_id, description, created_at FROM roles WHERE id = $1",
+        "SELECT id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at FROM roles WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
@@ -178,27 +195,62 @@ pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
 pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
+    let q = search_pattern(params.q);
 
     let items = sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, created_at FROM roles
+        r#"SELECT id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
-           ORDER BY name LIMIT $2 OFFSET $3"#,
+             AND ($2::text IS NULL OR scope_kind = $2)
+             AND ($3::text IS NULL OR scope_ref = $3)
+             AND ($4::text IS NULL OR name ILIKE $4 OR description ILIKE $4)
+           ORDER BY name LIMIT $5 OFFSET $6"#,
     )
     .bind(params.tenant_id)
+    .bind(params.scope_kind.clone())
+    .bind(params.scope_ref.clone())
+    .bind(q.clone())
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
-    let total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE ($1::uuid IS NULL OR tenant_id = $1)")
-            .bind(params.tenant_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM roles
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR scope_kind = $2)
+             AND ($3::text IS NULL OR scope_ref = $3)
+             AND ($4::text IS NULL OR name ILIKE $4 OR description ILIKE $4)"#,
+    )
+    .bind(params.tenant_id)
+    .bind(params.scope_kind)
+    .bind(params.scope_ref)
+    .bind(q)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
 
     Ok(RoleList { items, total })
+}
+
+pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Role, AppError> {
+    sqlx::query_as::<_, Role>(
+        r#"UPDATE roles
+           SET name = COALESCE($2, name),
+               description = COALESCE($3, description),
+               updated_at = now()
+           WHERE id = $1
+           RETURNING id, name, tenant_id, description, scope_kind, scope_ref, created_at, updated_at"#,
+    )
+    .bind(id)
+    .bind(req.name)
+    .bind(req.description)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("role {id} not found")),
+        other => AppError::Database(other),
+    })
 }
 
 pub async fn delete_role(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
@@ -329,12 +381,17 @@ pub async fn create_policy(
 ) -> Result<PolicyBinding, AppError> {
     crate::guardrails::validate_policy(pool, &req).await?;
     let id = Uuid::new_v4();
+    let membership_tenant_id = req.tenant_id;
+    let membership_entity_id = req.subject_id;
+    let should_sync_membership = req.tenant_id.is_some()
+        && req.subject_kind == SubjectKind::Entity
+        && req.effect == Effect::Allow;
     let conditions = if req.conditions.is_null() {
         serde_json::json!({})
     } else {
         req.conditions
     };
-    sqlx::query_as::<_, PolicyBinding>(
+    let policy = sqlx::query_as::<_, PolicyBinding>(
         r#"INSERT INTO policy_bindings
              (id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -352,7 +409,39 @@ pub async fn create_policy(
     .bind(conditions)
     .fetch_one(pool)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+
+    if should_sync_membership {
+        if let Some(tenant_id) = membership_tenant_id {
+            sync_tenant_membership_for_policy(pool, tenant_id, membership_entity_id).await?;
+        }
+    }
+
+    Ok(policy)
+}
+
+async fn sync_tenant_membership_for_policy(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    entity_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
+           SELECT $1, $2, 'active'
+           WHERE EXISTS (
+               SELECT 1 FROM entities
+               WHERE id = $2 AND kind = 'human'
+           )
+           ON CONFLICT (tenant_id, entity_id)
+           DO UPDATE SET status = 'active'"#,
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(())
 }
 
 pub async fn get_policy(pool: &PgPool, id: Uuid) -> Result<PolicyBinding, AppError> {
@@ -372,17 +461,20 @@ pub async fn get_policy(pool: &PgPool, id: Uuid) -> Result<PolicyBinding, AppErr
 pub async fn list_policies(pool: &PgPool, params: ListPolicies) -> Result<PolicyList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
+    let tenant_id = params.tenant_id;
     let subject_id = params.subject_id;
     let subject_kind = params.subject_kind;
 
     let items = sqlx::query_as::<_, PolicyBinding>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions, created_at
            FROM policy_bindings
-           WHERE ($1::uuid IS NULL OR subject_id = $1)
-             AND ($2::text IS NULL OR subject_kind = $2)
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::uuid IS NULL OR subject_id = $2)
+             AND ($3::text IS NULL OR subject_kind = $3)
            ORDER BY created_at DESC
-           LIMIT $3 OFFSET $4"#,
+           LIMIT $4 OFFSET $5"#,
     )
+    .bind(tenant_id)
     .bind(subject_id)
     .bind(subject_kind.clone())
     .bind(limit)
@@ -393,11 +485,50 @@ pub async fn list_policies(pool: &PgPool, params: ListPolicies) -> Result<Policy
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM policy_bindings
-           WHERE ($1::uuid IS NULL OR subject_id = $1)
-             AND ($2::text IS NULL OR subject_kind = $2)"#,
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::uuid IS NULL OR subject_id = $2)
+             AND ($3::text IS NULL OR subject_kind = $3)"#,
     )
+    .bind(tenant_id)
     .bind(subject_id)
     .bind(subject_kind)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(PolicyList { items, total })
+}
+
+pub async fn role_policies(
+    pool: &PgPool,
+    role_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<PolicyList, AppError> {
+    let limit = limit.clamp(1, 100);
+    let offset = offset.max(0);
+
+    let items = sqlx::query_as::<_, PolicyBinding>(
+        r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id,
+                  scope_kind, scope_ref, effect, conditions, created_at
+           FROM policy_bindings
+           WHERE grant_kind = 'role' AND grant_id = $1
+           ORDER BY created_at DESC
+           LIMIT $2 OFFSET $3"#,
+    )
+    .bind(role_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM policy_bindings
+           WHERE grant_kind = 'role' AND grant_id = $1"#,
+    )
+    .bind(role_id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -499,7 +630,7 @@ pub async fn entity_access(
              SELECT pb.*, ('group:' || g.name)::text AS via
              FROM policy_bindings pb
              JOIN group_members gm ON gm.group_id = pb.subject_id
-             JOIN groups g ON g.id = gm.group_id
+             JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
              WHERE pb.subject_kind = 'group' AND gm.entity_id = $1
            ), expanded AS (
              SELECT b.id AS policy_id, b.grant_kind, b.grant_id, b.scope_kind, b.scope_ref,
@@ -1042,7 +1173,7 @@ pub async fn effective_capabilities(
              SELECT pb.*, ('group:' || g.name)::text AS via
              FROM policy_bindings pb
              JOIN group_members gm ON gm.group_id = pb.subject_id
-             JOIN groups g ON g.id = gm.group_id
+             JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
              LEFT JOIN roles r ON pb.grant_kind = 'role' AND r.id = pb.grant_id
              WHERE pb.subject_kind = 'group' AND gm.entity_id = $1
                AND ($2::uuid IS NULL OR g.tenant_id = $2 OR r.tenant_id = $2)
@@ -1471,7 +1602,7 @@ fn grant_from_row(row: &sqlx::postgres::PgRow, caps: Value) -> Result<GrantSumma
 
 async fn get_group_with_count(pool: &PgPool, group_id: Uuid) -> Result<(i64, Group), AppError> {
     let group = sqlx::query_as::<_, Group>(
-        "SELECT id, name, tenant_id, description, created_at, updated_at FROM groups WHERE id = $1",
+        "SELECT id, name, tenant_id, description, status, attributes, created_at, updated_at FROM groups WHERE id = $1",
     )
     .bind(group_id)
     .fetch_one(pool)
@@ -1557,4 +1688,10 @@ pub async fn find_capability_by_name(
     .fetch_optional(pool)
     .await
     .map_err(db_err)
+}
+
+fn search_pattern(q: Option<String>) -> Option<String> {
+    q.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("%{value}%"))
 }

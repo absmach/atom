@@ -22,6 +22,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref secret) = cfg.admin_secret {
         bootstrap_admin_credentials(&pool, cfg.admin_entity_id, secret).await?;
     }
+    if let Some(ref secret) = cfg.service_secret {
+        bootstrap_password_credentials(&pool, cfg.service_entity_id, secret, "service").await?;
+    }
 
     keys::bootstrap_if_needed(&pool).await?;
     let active_keys = keys::load_active_keys(&pool).await?;
@@ -51,10 +54,19 @@ async fn bootstrap_admin_credentials(
     admin_entity_id: Uuid,
     secret: &str,
 ) -> anyhow::Result<()> {
+    bootstrap_password_credentials(pool, admin_entity_id, secret, "admin").await
+}
+
+async fn bootstrap_password_credentials(
+    pool: &sqlx::PgPool,
+    entity_id: Uuid,
+    secret: &str,
+    label: &str,
+) -> anyhow::Result<()> {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
-    .bind(admin_entity_id)
+    .bind(entity_id)
     .fetch_one(pool)
     .await?;
 
@@ -67,11 +79,11 @@ async fn bootstrap_admin_credentials(
             "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
         )
         .bind(Uuid::new_v4())
-        .bind(admin_entity_id)
+        .bind(entity_id)
         .bind(hash)
         .execute(pool)
         .await?;
-        tracing::info!("admin password bootstrapped");
+        tracing::info!("{label} password bootstrapped");
     }
 
     Ok(())
