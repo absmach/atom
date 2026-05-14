@@ -494,7 +494,7 @@ function ApiKeyRevealBanner({
         This key will not be shown again. Store it securely before dismissing.
       </p>
       <div className="mb-3 flex gap-2">
-        <code className="flex-1 overflow-auto rounded bg-yellow-100 px-2 py-1 font-mono text-xs text-yellow-900 dark:bg-yellow-900 dark:text-yellow-100">
+        <code className="min-w-0 flex-1 break-all rounded bg-yellow-100 px-2 py-1 font-mono text-xs text-yellow-900 dark:bg-yellow-900 dark:text-yellow-100">
           {apiKey.key}
         </code>
         <Button onClick={copy} size="sm" variant="outline">
