@@ -149,13 +149,18 @@ impl EntityMutation {
         let entity = repo::update_entity(
             &state.pool,
             id,
-            input.name,
-            parse_optional_entity_kind(input.kind),
-            parse_optional_id(input.tenant_id, "tenantId")?,
-            parse_optional_id(input.profile_id, "profileId")?,
-            parse_optional_id(input.profile_version_id, "profileVersionId")?,
-            input.status.map(Into::into),
-            input.attributes,
+            entity_model::UpdateEntity {
+                name: input.name,
+                kind: parse_optional_entity_kind(input.kind),
+                tenant_id: parse_optional_id(input.tenant_id, "tenantId")?,
+                profile_id: parse_optional_id(input.profile_id, "profileId")?,
+                profile_version_id: parse_optional_id(
+                    input.profile_version_id,
+                    "profileVersionId",
+                )?,
+                status: input.status.map(Into::into),
+                attributes: input.attributes,
+            },
         )
         .await
         .map_err(gql_error)?;
@@ -257,13 +262,15 @@ async fn change_entity_status(
     let entity = repo::update_entity(
         &state.pool,
         entity_id,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(status),
-        None,
+        entity_model::UpdateEntity {
+            name: None,
+            kind: None,
+            tenant_id: None,
+            profile_id: None,
+            profile_version_id: None,
+            status: Some(status),
+            attributes: None,
+        },
     )
     .await
     .map_err(gql_error)?;

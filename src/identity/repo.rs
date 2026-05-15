@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::{
     error::{db_err, AppError},
     models::{
-        entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership},
-        enums::{EntityKind, EntityStatus},
+        entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
+        enums::EntityKind,
         group::{CreateGroup, Group, GroupList, ListGroups, UpdateGroup},
         session::Session,
     },
@@ -143,18 +143,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     Ok(EntityList { items, total })
 }
 
-pub async fn update_entity(
-    pool: &PgPool,
-    id: Uuid,
-    name: Option<String>,
-    kind: Option<EntityKind>,
-    tenant_id: Option<Uuid>,
-    profile_id: Option<Uuid>,
-    profile_version_id: Option<Uuid>,
-    status: Option<EntityStatus>,
-    attributes: Option<Value>,
-) -> Result<Entity, AppError> {
-    let attributes = attributes.map(normalize_attributes);
+pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result<Entity, AppError> {
+    let attributes = req.attributes.map(normalize_attributes);
     if let Some(attrs) = attributes.as_ref() {
         validate_existing_entity_attributes(pool, id, attrs).await?;
     }
@@ -174,12 +164,12 @@ pub async fn update_entity(
                      status, attributes, created_at, updated_at"#,
     )
     .bind(id)
-    .bind(name)
-    .bind(kind)
-    .bind(tenant_id)
-    .bind(profile_id)
-    .bind(profile_version_id)
-    .bind(status)
+    .bind(req.name)
+    .bind(req.kind)
+    .bind(req.tenant_id)
+    .bind(req.profile_id)
+    .bind(req.profile_version_id)
+    .bind(req.status)
     .bind(attributes)
     .fetch_one(pool)
     .await
