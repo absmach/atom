@@ -1,0 +1,7 @@
+.next
+node_modules
+test-results
+*.log
+.env
+.env.*
+tsconfig.tsbuildinfo
