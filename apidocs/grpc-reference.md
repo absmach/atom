@@ -68,8 +68,8 @@
 | action | [string](#string) |  | capability name, e.g. &#34;publish&#34; |
 | resource_id | [string](#string) |  | Legacy form: identifies a row in the `resources` table. Resolved with kind = `resources.kind`. Mutually exclusive with object_kind/object_id; if both are supplied, object_kind/object_id win. |
 | context | [CheckRequest.ContextEntry](#atom-v1-CheckRequest-ContextEntry) | repeated | Optional ABAC context — flat string key/value pairs injected into the evaluation context under the &#34;context&#34; key. Note: only string values are supported over gRPC; use REST for nested JSON. |
-| object_kind | [string](#string) |  | Explicit form. Supported values: `resource` (same as `resource_id`) or `tenant` (resolved from the `tenants` table; kind = `"tenant"`). Both fields must be set together, or both empty. |
-| object_id | [string](#string) |  | UUID of the protected object identified by `object_kind`. |
+| object_kind | [string](#string) |  | Explicit form: identifies any first-class protected object. Supported object_kind values: &#34;resource&#34; (same as resource_id) or &#34;tenant&#34; (resolved from the `tenants` table; kind = &#34;tenant&#34;). Both fields must be set together, or both empty. |
+| object_id | [string](#string) |  |  |
 
 
 
@@ -158,4 +158,3 @@ Call this on every request to protected downstream resources.
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
-
