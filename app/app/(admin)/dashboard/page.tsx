@@ -1,4 +1,8 @@
 import { Activity, AlertTriangle, GitBranch, ShieldCheck } from "lucide-react";
+import type { Metadata } from "next";
+
+export const metadata: Metadata = { title: "Dashboard" };
+
 import { RelationshipPanel } from "@/components/relationships/relationship-panel";
 import {
   Card,

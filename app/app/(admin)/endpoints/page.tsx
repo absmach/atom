@@ -1,4 +1,7 @@
+import type { Metadata } from "next";
 import { ApiEndpointsWorkspace } from "@/components/endpoints/api-endpoints-workspace";
+
+export const metadata: Metadata = { title: "Endpoints" };
 
 export default async function EndpointsPage({
   searchParams,

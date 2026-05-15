@@ -1,4 +1,7 @@
+import type { Metadata } from "next";
 import { CrudWorkspace } from "@/components/crud/crud-workspace";
+
+export const metadata: Metadata = { title: "Entities" };
 
 export default async function EntitiesPage({
   searchParams,

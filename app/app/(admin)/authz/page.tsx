@@ -1,4 +1,7 @@
+import type { Metadata } from "next";
 import { AuthzDebugger } from "@/components/authz-debugger";
+
+export const metadata: Metadata = { title: "Authorization" };
 
 export default function AuthzPage() {
   return (

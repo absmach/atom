@@ -15,7 +15,12 @@ export default async function AdminLayout({
     redirect("/login");
   }
 
-  const profile = await getEntityProfile(session.entityId);
+  let profile: Awaited<ReturnType<typeof getEntityProfile>> = null;
+  try {
+    profile = await getEntityProfile(session.entityId);
+  } catch {
+    redirect("/login");
+  }
 
   return (
     <AppShell

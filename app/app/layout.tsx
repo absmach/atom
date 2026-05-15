@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Atom Admin",
+  title: { template: "%s | Atom", default: "Atom" },
   description: "Cloud-native identity and authorization control plane",
 };
 

@@ -1,5 +1,10 @@
 import { ShieldCheck } from "lucide-react";
+import type { Metadata } from "next";
 import { RegisterForm } from "@/components/auth/register-form";
+
+export const metadata: Metadata = { title: "Sign Up" };
+
+import Link from "next/link";
 import {
   Card,
   CardContent,
@@ -7,7 +12,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 

@@ -1,4 +1,7 @@
+import type { Metadata } from "next";
 import { CrudWorkspace } from "@/components/crud/crud-workspace";
+
+export const metadata: Metadata = { title: "Policy Bindings" };
 
 export default async function PoliciesPage({
   searchParams,
