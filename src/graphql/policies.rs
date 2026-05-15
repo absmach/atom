@@ -184,7 +184,11 @@ impl PolicyQuery {
         require_policy_read(&state.pool, auth.entity_id, tenant_id).await?;
         let list = authz_repo::list_capabilities(
             &state.pool,
-            ListCapabilities { resource_kind, limit, offset },
+            ListCapabilities {
+                resource_kind,
+                limit,
+                offset,
+            },
         )
         .await
         .map_err(gql_error)?;
@@ -279,12 +283,7 @@ impl PolicyMutation {
         Ok(role.into())
     }
 
-    async fn update_role(
-        &self,
-        ctx: &Context<'_>,
-        id: ID,
-        input: UpdateRoleInput,
-    ) -> Result<Role> {
+    async fn update_role(&self, ctx: &Context<'_>, id: ID, input: UpdateRoleInput) -> Result<Role> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
