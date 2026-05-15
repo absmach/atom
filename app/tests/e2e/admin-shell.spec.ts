@@ -36,7 +36,8 @@ test("authenticated admin can reach core workflows", async ({ page }) => {
     ["/policies", "Policy Builder Wizard"],
     ["/authz", "Authorization debugger"],
     ["/audit", "Audit Logs"],
-    ["/developer", "Developer tools"],
+    ["/endpoints", "API Endpoints"],
+    ["/playground", "Playground"],
     ["/settings", "Session and platform settings"],
   ] as const) {
     await page.goto(route[0]);

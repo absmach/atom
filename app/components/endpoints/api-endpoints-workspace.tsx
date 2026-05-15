@@ -1,6 +1,6 @@
 import { Database } from "lucide-react";
 
-import { ApiEndpointsTable } from "@/components/developer/api-endpoints-table";
+import { ApiEndpointsTable } from "@/components/endpoints/api-endpoints-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { graphqlServer } from "@/lib/graphql/server";
 
@@ -14,34 +14,29 @@ export type ApiEndpointRow = {
   description: string | null;
   method: string;
   path: string;
-  templateId: string;
+  operationKind: string;
+  graphql: string;
   authMode: string;
+  serviceEntityId: string | null;
   variablesMapping: unknown;
   requestSchema: unknown;
   responseMapping: unknown;
   status: string;
+  createdBy: string | null;
+  updatedBy: string | null;
   createdAt: string;
   updatedAt: string;
 };
-
-export type TemplateOption = { id: string; key: string; name: string };
 
 const ENDPOINTS_QUERY = `
   query ApiEndpoints($limit: Int, $offset: Int) {
     apiEndpoints(limit: $limit, offset: $offset) {
       total
       items {
-        id tenantId key name description method path templateId authMode
-        variablesMapping requestSchema responseMapping status createdAt updatedAt
+        id tenantId key name description method path operationKind graphql
+        authMode serviceEntityId variablesMapping requestSchema responseMapping
+        status createdBy updatedBy createdAt updatedAt
       }
-    }
-  }
-`;
-
-const TEMPLATES_FOR_PICKER_QUERY = `
-  query ApiTemplatesForPicker {
-    apiTemplates(limit: 100, offset: 0) {
-      items { id key name }
     }
   }
 `;
@@ -60,24 +55,17 @@ export async function ApiEndpointsWorkspace({
 
   let rows: ApiEndpointRow[] = [];
   let total = 0;
-  let templateOptions: TemplateOption[] = [];
   let fetchError: Error | null = null;
 
   try {
-    const [endpointsData, templatesData] = await Promise.all([
-      graphqlServer<{
-        apiEndpoints: { items: ApiEndpointRow[]; total: number };
-      }>({
-        query: ENDPOINTS_QUERY,
-        variables: { limit: LIMIT, offset },
-      }),
-      graphqlServer<{ apiTemplates: { items: TemplateOption[] } }>({
-        query: TEMPLATES_FOR_PICKER_QUERY,
-      }),
-    ]);
+    const endpointsData = await graphqlServer<{
+      apiEndpoints: { items: ApiEndpointRow[]; total: number };
+    }>({
+      query: ENDPOINTS_QUERY,
+      variables: { limit: LIMIT, offset },
+    });
     rows = endpointsData.apiEndpoints.items;
     total = endpointsData.apiEndpoints.total;
-    templateOptions = templatesData.apiTemplates.items;
   } catch (err) {
     fetchError = err instanceof Error ? err : new Error("Data request failed");
   }
@@ -91,8 +79,8 @@ export async function ApiEndpointsWorkspace({
           </h1>
         </div>
         <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-          HTTP facades bound to API templates, with auth mode and variable
-          mapping.
+          Custom HTTP routes backed by Atom GraphQL operations, request
+          validation, response mapping, and execution auth controls.
         </p>
       </div>
 
@@ -104,13 +92,7 @@ export async function ApiEndpointsWorkspace({
         </Alert>
       ) : null}
 
-      <ApiEndpointsTable
-        limit={LIMIT}
-        page={page}
-        rows={rows}
-        templateOptions={templateOptions}
-        total={total}
-      />
+      <ApiEndpointsTable limit={LIMIT} page={page} rows={rows} total={total} />
     </section>
   );
 }

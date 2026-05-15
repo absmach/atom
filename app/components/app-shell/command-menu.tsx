@@ -63,7 +63,8 @@ export function CommandMenu() {
               })),
               { title: "Authorization debugger", route: "/authz" },
               { title: "Audit logs", route: "/audit" },
-              { title: "Developer tools", route: "/developer" },
+              { title: "API endpoints", route: "/endpoints" },
+              { title: "Playground", route: "/playground" },
             ].map((item) => (
               <CommandItem
                 key={`${item.title}-${item.route}`}

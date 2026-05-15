@@ -1,4 +1,4 @@
-import { ApiEndpointsWorkspace } from "@/components/developer/api-endpoints-workspace";
+import { ApiEndpointsWorkspace } from "@/components/endpoints/api-endpoints-workspace";
 
 export default async function EndpointsPage({
   searchParams,

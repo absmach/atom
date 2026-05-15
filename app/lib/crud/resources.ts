@@ -1,6 +1,5 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity,
   Boxes,
   Braces,
   Building2,
@@ -285,54 +284,6 @@ export const crudResources: CrudResource[] = [
 ];
 
 export const secondaryResources: CrudResource[] = [
-  {
-    key: "credentials",
-    title: "Credentials",
-    route: "/settings",
-    description: "Passwords and API keys attached to entities.",
-    icon: KeyRound,
-    queryName: "credentials",
-    columns: [
-      { key: "kind", label: "Kind", priority: "high" },
-      { key: "status", label: "Status", priority: "high" },
-      { key: "expiresAt", label: "Expires", priority: "medium" },
-    ],
-    sampleRows: [
-      {
-        id: "cred-demo",
-        kind: "api_key",
-        status: "active",
-        expiresAt: "Never",
-      },
-    ],
-    missing: { update: "Credentials can be created/revoked, not updated." },
-  },
-  {
-    key: "sessions",
-    title: "Sessions",
-    route: "/settings",
-    description: "JWT session lookup and logout flows.",
-    icon: Activity,
-    queryName: "session",
-    columns: [
-      { key: "entityId", label: "Entity", priority: "high" },
-      { key: "expiresAt", label: "Expires", priority: "high" },
-      { key: "revokedAt", label: "Revoked", priority: "medium" },
-    ],
-    sampleRows: [
-      {
-        id: "session-demo",
-        entityId: "current",
-        expiresAt: "1 hour",
-        revokedAt: "-",
-      },
-    ],
-    missing: {
-      create: "Sessions are created through login.",
-      update: "Full admin session management is not exposed.",
-      delete: "Only current-session logout is exposed.",
-    },
-  },
   {
     key: "audit",
     title: "Audit Logs",

@@ -9,17 +9,20 @@ import {
   GitBranch,
   Home,
   KeyRound,
-  LayoutList,
   Link2,
   ScrollText,
   Server,
-  Settings,
   ShieldCheck,
   Users,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type * as React from "react";
+import { Fragment } from "react";
+import {
+  TenantProvider,
+  useTenant,
+} from "@/components/app-shell/tenant-provider";
 import { TenantSwitcher } from "@/components/app-shell/tenant-switcher";
 import { UserNav } from "@/components/app-shell/user-nav";
 import {
@@ -28,52 +31,58 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   SidebarProvider,
   SidebarRail,
   SidebarSeparator,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { GLOBAL_TENANT } from "@/lib/tenant/context";
-import { TenantProvider, useTenant } from "@/components/app-shell/tenant-provider";
 
-type NavChild = { title: string; href: string; icon: React.ElementType };
 type NavItem = {
   title: string;
   href: string;
   icon: React.ElementType;
-  children?: NavChild[];
+};
+type NavSection = {
+  title: string;
+  items: NavItem[];
 };
 
-const nav: NavItem[] = [
-  { title: "Dashboard", href: "/dashboard", icon: Home },
-  { title: "Tenants", href: "/tenants", icon: Building2 },
-  { title: "Entities", href: "/entities", icon: Fingerprint },
-  { title: "Profiles", href: "/profiles", icon: Braces },
-  { title: "Groups", href: "/groups", icon: Users },
-  { title: "Resources", href: "/resources", icon: Server },
-  { title: "Roles", href: "/roles", icon: ShieldCheck },
-  { title: "Capabilities", href: "/capabilities", icon: KeyRound },
-  { title: "Policies", href: "/policies", icon: GitBranch },
-  { title: "Authz", href: "/authz", icon: Activity },
-  { title: "Audit", href: "/audit", icon: ScrollText },
+const navSections: NavSection[] = [
   {
-    title: "Developer",
-    href: "/developer",
-    icon: Code2,
-    children: [
-      { title: "Templates", href: "/developer/templates", icon: LayoutList },
-      { title: "Endpoints", href: "/developer/endpoints", icon: Link2 },
+    title: "Overview",
+    items: [
+      { title: "Dashboard", href: "/dashboard", icon: Home },
+      { title: "Tenants", href: "/tenants", icon: Building2 },
     ],
   },
-  { title: "Settings", href: "/settings", icon: Settings },
+  {
+    title: "Identity & Access",
+    items: [
+      { title: "Entities", href: "/entities", icon: Fingerprint },
+      { title: "Profiles", href: "/profiles", icon: Braces },
+      { title: "Groups", href: "/groups", icon: Users },
+      { title: "Resources", href: "/resources", icon: Server },
+      { title: "Roles", href: "/roles", icon: ShieldCheck },
+      { title: "Capabilities", href: "/capabilities", icon: KeyRound },
+      { title: "Policies", href: "/policies", icon: GitBranch },
+      { title: "Authz", href: "/authz", icon: Activity },
+      { title: "Audit", href: "/audit", icon: ScrollText },
+    ],
+  },
+  {
+    title: "Developer",
+    items: [
+      { title: "Endpoints", href: "/endpoints", icon: Link2 },
+      { title: "Playground", href: "/playground", icon: Code2 },
+    ],
+  },
 ];
 
 export function AppShell({
@@ -114,9 +123,14 @@ function AppSidebar({
   const pathname = usePathname();
   const { selection } = useTenant();
   const isTenantScoped = selection.id !== GLOBAL_TENANT;
-  const visibleNav = isTenantScoped
-    ? nav.filter((item) => item.href !== "/tenants")
-    : nav;
+  const visibleSections = navSections
+    .map((section) => ({
+      ...section,
+      items: isTenantScoped
+        ? section.items.filter((item) => item.href !== "/tenants")
+        : section.items,
+    }))
+    .filter((section) => section.items.length > 0);
 
   return (
     <Sidebar collapsible="icon">
@@ -151,52 +165,38 @@ function AppSidebar({
 
         <SidebarSeparator className="mb-2" />
 
-        <SidebarGroup>
-          <SidebarGroupContent>
-            <SidebarMenu className="space-y-4">
-              {visibleNav.map((item) => {
-                const active =
-                  pathname === item.href ||
-                  pathname.startsWith(`${item.href}/`);
-                return (
-                  <SidebarMenuItem key={item.href}>
-                    <SidebarMenuButton
-                      asChild
-                      isActive={active && !item.children}
-                      tooltip={item.title}
-                      className="[&_svg]:size-5 data-active:bg-primary data-active:text-primary-foreground"
-                    >
-                      <Link href={item.href} className="flex flex-row gap-4">
-                        <item.icon />
-                        <span className="text-base">{item.title}</span>
-                      </Link>
-                    </SidebarMenuButton>
-                    {item.children && active ? (
-                      <SidebarMenuSub>
-                        {item.children.map((child) => (
-                          <SidebarMenuSubItem key={child.href}>
-                            <SidebarMenuSubButton
-                              asChild
-                              isActive={pathname === child.href}
-                            >
-                              <Link
-                                href={child.href}
-                                className="flex flex-row gap-2"
-                              >
-                                <child.icon className="size-4" />
-                                <span>{child.title}</span>
-                              </Link>
-                            </SidebarMenuSubButton>
-                          </SidebarMenuSubItem>
-                        ))}
-                      </SidebarMenuSub>
-                    ) : null}
-                  </SidebarMenuItem>
-                );
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {visibleSections.map((section, index) => (
+          <Fragment key={section.title}>
+            {index > 0 ? <SidebarSeparator /> : null}
+            <SidebarGroup>
+              <SidebarGroupLabel>{section.title}</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu className="space-y-2">
+                  {section.items.map((item) => {
+                    const active =
+                      pathname === item.href ||
+                      pathname.startsWith(`${item.href}/`);
+                    return (
+                      <SidebarMenuItem key={item.href}>
+                        <SidebarMenuButton
+                          asChild
+                          isActive={active}
+                          tooltip={item.title}
+                          className="data-active:bg-primary data-active:text-primary-foreground"
+                        >
+                          <Link href={item.href}>
+                            <item.icon />
+                            <span>{item.title}</span>
+                          </Link>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </Fragment>
+        ))}
       </SidebarContent>
 
       <SidebarFooter>

@@ -9,7 +9,6 @@ import {
   Play,
   XCircle,
 } from "lucide-react";
-import * as React from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
@@ -146,6 +145,9 @@ export function AuthzDebugger() {
 
   const explain = useMutation({
     mutationFn: (values: FormValues) => {
+      const selectedCapability = capabilities.find(
+        (c) => c.id === values.action,
+      );
       let context: Record<string, unknown> = {};
       try {
         context = JSON.parse(values.context || "{}") as Record<string, unknown>;
@@ -161,7 +163,7 @@ export function AuthzDebugger() {
         variables: {
           input: {
             subjectId: values.subjectId,
-            action: values.action,
+            action: selectedCapability?.name ?? values.action,
             resourceId,
             objectKind: values.platformCheck ? "platform" : undefined,
             context,
@@ -243,7 +245,7 @@ export function AuthzDebugger() {
                           — select capability —
                         </SelectItem>
                         {capabilities.map((c) => (
-                          <SelectItem key={c.id} value={c.name}>
+                          <SelectItem key={c.id} value={c.id}>
                             {c.name}
                             {c.resourceKind ? (
                               <span className="ml-1.5 text-xs text-muted-foreground">
@@ -469,9 +471,9 @@ function TraceCard({
     : null;
   const grantLabel =
     grantKind === "role"
-      ? (roleName ?? (grantId ? grantId.slice(0, 8) + "…" : "unknown role"))
+      ? (roleName ?? (grantId ? `${grantId.slice(0, 8)}…` : "unknown role"))
       : (capName ??
-        (grantId ? grantId.slice(0, 8) + "…" : "unknown capability"));
+        (grantId ? `${grantId.slice(0, 8)}…` : "unknown capability"));
 
   const viaLabel = via.startsWith("group:")
     ? `Inherited via group "${via.slice(6)}"`
