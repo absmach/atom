@@ -61,7 +61,9 @@ export function CapabilityPicker({
           ))}
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">No capabilities selected.</p>
+        <p className="text-xs text-muted-foreground">
+          No capabilities selected.
+        </p>
       )}
       {availableCaps.length > 0 && (
         <Select

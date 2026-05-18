@@ -61,6 +61,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { graphqlClient } from "@/lib/graphql/client";
+import { useNameMap } from "@/lib/reconcile/use-name-map";
 import { tenantQueryValue } from "@/lib/tenant/context";
 
 const AUDIT_INSPECT_ENTITY_QUERY = `query AuditInspectEntity($id: ID!) { entity(id: $id) { id name kind } }`;
@@ -179,72 +180,6 @@ export function AuditLogPage() {
   const { selection } = useTenant();
   const [inspected, setInspected] = React.useState<AuditLogItem | null>(null);
 
-  const columns = React.useMemo<ColumnDef<AuditLogItem>[]>(
-    () => [
-      {
-        accessorKey: "createdAt",
-        header: "Time",
-        cell: ({ getValue }) => <DisplayTimeCell time={String(getValue())} />,
-      },
-      {
-        accessorKey: "event",
-        header: "Event",
-        cell: ({ getValue }) => (
-          <span className="font-mono text-xs">{String(getValue())}</span>
-        ),
-      },
-      {
-        accessorKey: "outcome",
-        header: "Outcome",
-        cell: ({ getValue }) => <StatusBadge value={getValue()} />,
-      },
-      {
-        accessorKey: "entityId",
-        header: "Entity",
-        cell: ({ getValue }) => {
-          const v = getValue() as string | null;
-          return v ? (
-            <span className="font-mono text-xs text-muted-foreground">
-              {v.slice(0, 8)}…
-            </span>
-          ) : (
-            <span className="text-xs text-muted-foreground">—</span>
-          );
-        },
-      },
-      {
-        accessorKey: "tenantId",
-        header: "Tenant",
-        cell: ({ getValue }) => {
-          const v = getValue() as string | null;
-          return v ? (
-            <span className="font-mono text-xs text-muted-foreground">
-              {v.slice(0, 8)}…
-            </span>
-          ) : (
-            <span className="text-xs text-muted-foreground">—</span>
-          );
-        },
-      },
-      {
-        id: "actions",
-        header: () => <span className="sr-only">Actions</span>,
-        cell: ({ row }) => (
-          <div className="flex justify-end">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setInspected(row.original)}
-            >
-              Inspect
-            </Button>
-          </div>
-        ),
-      },
-    ],
-    [],
-  );
-
   const variables = React.useMemo(
     () => ({
       limit: params.limit,
@@ -280,6 +215,81 @@ export function AuditLogPage() {
 
   const items = data?.auditLogs.items ?? [];
   const total = data?.auditLogs.total ?? 0;
+
+  const nameMap = useNameMap({
+    entityIds: items
+      .map((i) => i.entityId)
+      .filter((id): id is string => Boolean(id)),
+  });
+
+  const columns = React.useMemo<ColumnDef<AuditLogItem>[]>(
+    () => [
+      {
+        accessorKey: "createdAt",
+        header: "Time",
+        cell: ({ getValue }) => <DisplayTimeCell time={String(getValue())} />,
+      },
+      {
+        accessorKey: "event",
+        header: "Event",
+        cell: ({ getValue }) => (
+          <span className="font-mono text-xs">{String(getValue())}</span>
+        ),
+      },
+      {
+        accessorKey: "outcome",
+        header: "Outcome",
+        cell: ({ getValue }) => <StatusBadge value={getValue()} />,
+      },
+      {
+        accessorKey: "entityId",
+        header: "Entity",
+        cell: ({ getValue }) => {
+          const v = getValue() as string | null;
+          if (!v)
+            return <span className="text-xs text-muted-foreground">—</span>;
+          const name = nameMap.get(v);
+          return name ? (
+            <span className="text-sm">{name}</span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground">
+              {v.slice(0, 8)}…
+            </span>
+          );
+        },
+      },
+      {
+        accessorKey: "tenantId",
+        header: "Tenant",
+        cell: ({ getValue }) => {
+          const v = getValue() as string | null;
+          return v ? (
+            <span className="font-mono text-xs text-muted-foreground">
+              {v.slice(0, 8)}…
+            </span>
+          ) : (
+            <span className="text-xs text-muted-foreground">—</span>
+          );
+        },
+      },
+      {
+        id: "actions",
+        header: () => <span className="sr-only">Actions</span>,
+        cell: ({ row }) => (
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setInspected(row.original)}
+            >
+              Inspect
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [nameMap],
+  );
 
   return (
     <>

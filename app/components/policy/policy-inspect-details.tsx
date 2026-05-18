@@ -8,9 +8,9 @@ import {
   EffectBadge,
   GrantKindBadge,
   PolicySummary,
+  type ScopeKind,
   ScopeKindBadge,
   SubjectKindBadge,
-  type ScopeKind,
 } from "@/components/policy/policy-summary";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ const ENTITY_QUERY = `query PolicyInspectEntity($id: ID!) { entity(id: $id) { id
 const GROUP_QUERY = `query PolicyInspectGroup($id: ID!) { group(id: $id) { id name } }`;
 const CAPABILITY_QUERY = `query PolicyInspectCapability($id: ID!) { capability(id: $id) { id name resourceKind } }`;
 const ROLE_QUERY = `query PolicyInspectRole($id: ID!) { role(id: $id) { id name } }`;
+const TENANT_QUERY = `query PolicyInspectTenant($id: ID!) { tenant(id: $id) { id name } }`;
 
 type Row = Record<string, unknown>;
 
@@ -84,6 +85,17 @@ export function PolicyInspectDetails({ row }: { row: Row | null }) {
       }),
     staleTime: 60_000,
   });
+  const tenantQ = useQuery({
+    enabled: scopeKind === "tenant" && Boolean(scopeRef),
+    queryKey: ["policy-inspect-tenant", scopeRef],
+    queryFn: ({ signal }) =>
+      graphqlClient<{ tenant: { id: string; name: string } }>({
+        query: TENANT_QUERY,
+        variables: { id: scopeRef },
+        signal,
+      }),
+    staleTime: 60_000,
+  });
 
   const entity = entityQ.data?.entity;
   const group = groupQ.data?.group;
@@ -91,8 +103,8 @@ export function PolicyInspectDetails({ row }: { row: Row | null }) {
   const role = roleQ.data?.role;
 
   const subjectName =
-    entity?.name ?? group?.name ?? subjectId.slice(0, 8) + "…";
-  const grantName = capability?.name ?? role?.name ?? grantId.slice(0, 8) + "…";
+    entity?.name ?? group?.name ?? `${subjectId.slice(0, 8)}…`;
+  const grantName = capability?.name ?? role?.name ?? `${grantId.slice(0, 8)}…`;
   const grantLabel = capability
     ? `${capability.name}${capability.resourceKind ? ` · ${capability.resourceKind}` : ""}`
     : grantName;
@@ -179,7 +191,11 @@ export function PolicyInspectDetails({ row }: { row: Row | null }) {
           <div className="flex flex-wrap items-center gap-2">
             <ScopeKindBadge kind={scopeKind} />
             {scopeRef ? (
-              <span className="font-mono text-xs">{scopeRef}</span>
+              <span className="text-sm">
+                {scopeKind === "tenant"
+                  ? (tenantQ.data?.tenant.name ?? scopeRef)
+                  : scopeRef}
+              </span>
             ) : (
               <span className="text-sm">
                 {scopeSummary(scopeKind, scopeRef)}

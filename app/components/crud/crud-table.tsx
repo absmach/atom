@@ -36,6 +36,7 @@ import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/ui/data-table";
 import { requireResource } from "@/lib/crud/resources";
 import { graphqlClient } from "@/lib/graphql/client";
+import { extractIds, useNameMap } from "@/lib/reconcile/use-name-map";
 
 export type { CrudTableProps };
 
@@ -64,6 +65,8 @@ export function CrudTable({
   const [editingCapability, setEditingCapability] = React.useState<Row | null>(
     null,
   );
+
+  const nameMap = useNameMap(extractIds(resourceKey, rows));
 
   const refresh = React.useCallback(() => {
     setOpen(false);
@@ -207,7 +210,7 @@ export function CrudTable({
       accessorKey: col.key,
       header: col.label,
       cell: ({ getValue }: { getValue: () => unknown }) =>
-        renderCell(getValue(), col.key),
+        renderCell(getValue(), col.key, nameMap),
     })),
     {
       id: "actions",

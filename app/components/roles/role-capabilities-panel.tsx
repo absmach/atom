@@ -39,14 +39,22 @@ export function RoleCapabilitiesPanel({ roleId }: { roleId: string }) {
       ) : error ? (
         <p className="text-sm text-destructive">{error.message}</p>
       ) : capabilities.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No capabilities assigned to this role.</p>
+        <p className="text-sm text-muted-foreground">
+          No capabilities assigned to this role.
+        </p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {capabilities.map((cap) => (
-            <Badge key={cap.id} variant="secondary" title={cap.description ?? undefined}>
+            <Badge
+              key={cap.id}
+              variant="secondary"
+              title={cap.description ?? undefined}
+            >
               {cap.name}
               {cap.resourceKind ? (
-                <span className="ml-1 text-muted-foreground">:{cap.resourceKind}</span>
+                <span className="ml-1 text-muted-foreground">
+                  :{cap.resourceKind}
+                </span>
               ) : null}
             </Badge>
           ))}

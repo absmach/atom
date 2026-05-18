@@ -1,5 +1,5 @@
-import { AtomGraphqlError, getGraphqlEndpoint } from "@/lib/graphql/client";
 import { getServerToken } from "@/lib/auth/session";
+import { AtomGraphqlError, getGraphqlEndpoint } from "@/lib/graphql/client";
 
 type ServerGraphqlRequest = {
   query: string;

@@ -92,7 +92,10 @@ export function EntityAuditLog({ entityId }: { entityId: string }) {
           <TableBody>
             {isFetching && items.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={3} className="text-center text-muted-foreground text-sm">
+                <TableCell
+                  colSpan={3}
+                  className="text-center text-muted-foreground text-sm"
+                >
                   Loading…
                 </TableCell>
               </TableRow>
@@ -102,7 +105,9 @@ export function EntityAuditLog({ entityId }: { entityId: string }) {
                   <TableCell className="text-xs">
                     <DisplayTimeCell time={item.createdAt} />
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{item.event}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {item.event}
+                  </TableCell>
                   <TableCell>
                     <StatusBadge value={item.outcome} />
                   </TableCell>

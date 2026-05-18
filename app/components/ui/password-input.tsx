@@ -5,7 +5,10 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-function PasswordInput({ className, ...props }: Omit<React.ComponentProps<"input">, "type">) {
+function PasswordInput({
+  className,
+  ...props
+}: Omit<React.ComponentProps<"input">, "type">) {
   const [visible, setVisible] = React.useState(false);
 
   return (

@@ -3,9 +3,31 @@ import { DisplayTimeCell } from "@/components/display-time";
 import { DisplayTags } from "@/components/view-tags";
 import { Action } from "@/lib/utils";
 
-export function renderCell(value: unknown, key?: string) {
+const RESOLVABLE_FIELDS = new Set([
+  "tenantId",
+  "profileId",
+  "ownerId",
+  "subjectId",
+  "grantId",
+  "scopeRef",
+]);
+
+export function renderCell(
+  value: unknown,
+  key?: string,
+  nameMap?: Map<string, string>,
+) {
   if (value === null || value === undefined || value === "") {
     return <span className="text-muted-foreground">-</span>;
+  }
+  if (
+    nameMap &&
+    key &&
+    RESOLVABLE_FIELDS.has(key) &&
+    typeof value === "string"
+  ) {
+    const resolved = nameMap.get(value);
+    if (resolved) return <span className="text-sm">{resolved}</span>;
   }
   if (
     key &&

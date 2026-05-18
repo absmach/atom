@@ -1,5 +1,5 @@
-import { getGraphqlEndpoint } from "@/lib/graphql/client";
 import { getServerToken } from "@/lib/auth/session";
+import { getGraphqlEndpoint } from "@/lib/graphql/client";
 
 const ENTITY_PROFILE_QUERY = `
   query EntityProfile($id: ID!) {

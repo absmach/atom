@@ -17,8 +17,6 @@ function statusClass(normalized: string): string {
       return "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:border-amber-400/40 dark:text-amber-400";
     case "frozen":
       return "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:border-blue-400/40 dark:text-blue-400";
-    case "inactive":
-    case "draft":
     default:
       return "border-border bg-muted text-muted-foreground";
   }

@@ -270,9 +270,7 @@ function AccountSection({
             />
             <div className="flex justify-end">
               <Button type="submit" disabled={update.isPending}>
-                {update.isPending ? (
-                  <Loader2 className="animate-spin" />
-                ) : null}
+                {update.isPending ? <Loader2 className="animate-spin" /> : null}
                 Save changes
               </Button>
             </div>

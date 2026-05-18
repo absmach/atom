@@ -119,7 +119,7 @@ export function CapabilityCreateForm({
         ? graphqlClient({
             query: UPDATE_CAPABILITY_MUTATION,
             variables: {
-              id: capability!.id,
+              id: capability?.id,
               input: {
                 name: values.name,
                 resourceKind: values.resourceKind || undefined,
@@ -171,9 +171,7 @@ export function CapabilityCreateForm({
               <FormLabel>Resource kind</FormLabel>
               <Select
                 value={field.value || KIND_NONE}
-                onValueChange={(v) =>
-                  field.onChange(v === KIND_NONE ? "" : v)
-                }
+                onValueChange={(v) => field.onChange(v === KIND_NONE ? "" : v)}
               >
                 <FormControl>
                   <SelectTrigger className="w-full">

@@ -64,7 +64,7 @@ export function TenantSwitcher() {
     const match = options.find((o) => o.id === selection.id);
     if (match && match.name !== selection.name) setTenant(match);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, selection.id]);
+  }, [data, selection.id, options.find, selection.name, setTenant]);
 
   const Icon = selection.id === GLOBAL_TENANT ? Globe2 : Building2;
   const label = tenantLabel(selection);
