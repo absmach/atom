@@ -472,7 +472,7 @@ const payload = await response.json();`,
                 placeholder="Search schema"
               />
             </label>
-            <div className="grid max-h-[520px] gap-2 overflow-auto pr-1">
+            <div className="grid max-h-130 gap-2 overflow-auto pr-1">
               {filteredSchema.length ? (
                 filteredSchema.map((type) => (
                   <SchemaTypeCard

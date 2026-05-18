@@ -1,20 +1,16 @@
-use std::path::Path;
-
 use axum::{
-    http::{header, HeaderValue, Method, StatusCode},
-    response::IntoResponse,
-    routing::{any, get, get_service, post},
+    http::{header, HeaderValue, Method},
+    routing::{any, get, post},
     Extension, Router,
 };
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
-    services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
 
 use crate::{
-    api_endpoints::handlers as api_endpoints, config::Config, graphql,
-    identity::handlers as identity, keys, state::AppState,
+    api_endpoints::handlers as api_endpoints, graphql, identity::handlers as identity, keys,
+    state::AppState,
 };
 
 pub fn create_router(state: AppState) -> Router {
@@ -71,81 +67,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/auth/sessions/:id", get(identity::get_session))
         .route("/auth/keys/rotate", post(keys::rotate_keys));
 
-    let app = attach_graphql_console(app, &state.config);
-
     app.with_state(state)
         .layer(Extension(graphql_schema))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-}
-
-fn attach_graphql_console(app: Router<AppState>, config: &Config) -> Router<AppState> {
-    if !config.graphql_console_enabled {
-        return app;
-    }
-
-    let dist_dir = Path::new(&config.graphql_console_dist_dir);
-    let index = dist_dir.join("index.html");
-    if index.is_file() {
-        let app = app.nest_service(
-            "/graphql/console",
-            ServeDir::new(dist_dir)
-                .append_index_html_on_directories(true)
-                .fallback(ServeFile::new(index)),
-        );
-        let app = app.route(
-            "/graphql/playground",
-            get_service(ServeFile::new(console_page_file(dist_dir, "playground"))),
-        );
-
-        CONSOLE_PAGE_ROUTES.iter().fold(app, |app, page| {
-            let file = console_page_file(dist_dir, page);
-            app.route(
-                &format!("/graphql/console/{page}"),
-                get_service(ServeFile::new(file.clone())),
-            )
-            .route(
-                &format!("/graphql/console/{page}/"),
-                get_service(ServeFile::new(file)),
-            )
-        })
-    } else {
-        app.route("/graphql/console", get(missing_graphql_console_dist))
-            .route("/graphql/console/*path", get(missing_graphql_console_dist))
-            .route("/graphql/playground", get(missing_graphql_console_dist))
-    }
-}
-
-fn console_page_file(dist_dir: &Path, page: &str) -> std::path::PathBuf {
-    let page_index = dist_dir.join(page).join("index.html");
-    if page_index.is_file() {
-        page_index
-    } else {
-        dist_dir.join("index.html")
-    }
-}
-
-const CONSOLE_PAGE_ROUTES: &[&str] = &[
-    "endpoints",
-    "tenants",
-    "entities",
-    "groups",
-    "profiles",
-    "resources",
-    "policies",
-    "authz",
-    "explorer",
-    "playground",
-    "settings",
-    "auth/callback",
-    "auth/verify-email",
-];
-
-async fn missing_graphql_console_dist() -> impl IntoResponse {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Atom GraphQL Console is enabled, but console/dist/index.html is missing. Run `pnpm --dir console build` before starting Atom.",
-    )
 }
 
 #[cfg(test)]
@@ -166,25 +91,8 @@ mod tests {
     use super::create_router;
 
     #[tokio::test]
-    async fn graphql_console_route_is_not_registered_by_default() {
-        let app = create_router(test_state(false, "console/dist-missing-for-test"));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/graphql/console")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
     async fn catalog_authz_audit_admin_rest_routes_are_not_registered() {
-        let app = create_router(test_state(false, "console/dist-missing-for-test"));
+        let app = create_router(test_state());
 
         for (method, uri) in [
             ("GET", "/tenants"),
@@ -220,78 +128,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graphql_console_returns_503_when_enabled_without_dist() {
-        let app = create_router(test_state(true, "console/dist-missing-for-test"));
+    async fn legacy_graphql_playground_route_is_not_registered() {
+        let app = create_router(test_state());
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/graphql/console")
+                    .uri("/graphql/playground")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(body.contains("console/dist/index.html is missing"));
-        assert!(body.contains("pnpm --dir console build"));
-    }
-
-    #[tokio::test]
-    async fn graphql_console_serves_built_astro_dist_when_available() {
-        let dist_dir =
-            std::env::temp_dir().join(format!("atom-console-dist-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dist_dir).expect("create temp console dist");
-        std::fs::write(
-            dist_dir.join("index.html"),
-            "<!doctype html><title>Astro console</title>",
-        )
-        .expect("write temp index");
-
-        let app = create_router(test_state(true, dist_dir.to_str().expect("utf8 path")));
-
-        for uri in [
-            "/graphql/console",
-            "/graphql/console/endpoints",
-            "/graphql/console/groups",
-            "/graphql/console/groups/",
-            "/graphql/console/playground",
-            "/graphql/console/auth/callback",
-            "/graphql/console/auth/callback/",
-            "/graphql/console/auth/verify-email",
-            "/graphql/console/auth/verify-email/",
-            "/graphql/playground",
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("body");
-            let html = String::from_utf8(body.to_vec()).expect("utf8 body");
-            assert!(html.contains("Astro console"));
-        }
-
-        let _ = std::fs::remove_dir_all(dist_dir);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn signup_route_is_disabled_by_default() {
-        let app = create_router(test_state(false, "console/dist-missing-for-test"));
+        let app = create_router(test_state());
 
         let response = app
             .oneshot(
@@ -312,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn public_auth_config_reports_enabled_signup_and_providers() {
-        let mut state = test_state(false, "console/dist-missing-for-test");
+        let mut state = test_state();
         state.config.signup_enabled = true;
         state.config.dev_allow_unverified_email_login = true;
         state.config.oidc_providers = vec![OidcProviderConfig {
@@ -350,7 +205,7 @@ mod tests {
         );
     }
 
-    fn test_state(graphql_console_enabled: bool, graphql_console_dist_dir: &str) -> AppState {
+    fn test_state() -> AppState {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://atom:atom@localhost/atom_test")
             .expect("create lazy test pool");
@@ -369,11 +224,9 @@ mod tests {
             dev_allow_unverified_email_login: false,
             public_base_url: "http://localhost:8080".into(),
             cors_allowed_origins: vec!["http://localhost:8080".into()],
-            email_verification_redirect: "http://localhost:8080/graphql/console/auth/verify-email"
-                .into(),
-            password_reset_redirect: "http://localhost:8080/graphql/console/auth/reset-password"
-                .into(),
-            invitation_redirect: "http://localhost:8080/graphql/console/invitations/accept".into(),
+            email_verification_redirect: "http://localhost:3005/verify-email".into(),
+            password_reset_redirect: "http://localhost:3005/reset-password".into(),
+            invitation_redirect: "http://localhost:3005/invitations/accept".into(),
             oauth_success_redirect: "http://localhost:8080".into(),
             oauth_error_redirect: "http://localhost:8080".into(),
             oidc_providers: vec![],
@@ -382,8 +235,6 @@ mod tests {
             invitation_expiry_secs: 604_800,
             oauth_state_expiry_secs: 600,
             auth_exchange_code_expiry_secs: 300,
-            graphql_console_enabled,
-            graphql_console_dist_dir: graphql_console_dist_dir.into(),
         };
         let primary = LoadedKey {
             kid: "test".into(),

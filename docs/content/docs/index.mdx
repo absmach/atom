@@ -20,11 +20,9 @@ Built for [Magistrala](https://github.com/absmach/magistrala), but generic enoug
 
 ## GraphQL
 
-Atom exposes GraphQL at `POST /graphql`; debug builds also expose `/graphql/playground`. GraphQL uses the same Bearer token authentication as REST. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, capabilities, policies, authz checks, audit logs, and profile-driven entity creation. REST remains available and unchanged.
+Atom exposes GraphQL at `POST /graphql`. GraphQL uses the same Bearer token authentication as REST. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, capabilities, policies, authz checks, audit logs, and profile-driven entity creation. REST remains available and unchanged.
 
-`/graphql/playground` is the simple debug playground. `/graphql/console` is the Atom GraphQL Console: a generic task-first API Builder for GraphQL introspection, operation exploration, guided tenant setup, profile-driven entity creation, protected resource creation, policy grants, credential management, authorization checks, and reusable GraphQL recipes. Enable it explicitly with `ATOM_GRAPHQL_CONSOLE_ENABLED=true`.
-
-The console is disabled by default. Its default mode is task-first and plain-language; its advanced mode is a GraphQL explorer backed by introspection. It uses GraphQL introspection and Atom GraphQL operations only, does not inspect raw database tables, and does not provide Magistrala-specific mutations or aliases.
+The UI platform contains the GraphQL playground and API Builder. It uses GraphQL introspection and Atom GraphQL operations only, does not inspect raw database tables, and does not provide Magistrala-specific mutations or aliases.
 
 Atom GraphQL is generic. No Magistrala-specific GraphQL aliases exist; use the generic application mappings below.
 

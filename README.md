@@ -32,55 +32,35 @@ docker-compose up postgres -d
 # 3. Run (migrations apply automatically on startup)
 cargo run
 
-# or with Docker (release image plus built console on :8080)
+# or with Docker
 docker compose up --build atom
 
-# or with the dev image (debug build with GraphQL playground plus console on :8081)
+# or with the dev image on :8081
 docker compose --profile dev up --build atom-dev
 ```
 
 The service starts on `http://localhost:8080`.
 
-The release Docker image serves Atom on `http://localhost:8080` and the built console at `http://localhost:8080/graphql/console`.
-
-The dev Docker image serves Atom on `http://localhost:8081`; because it is built in debug mode, the GraphQL playground and built console are available through the Astro console at `http://localhost:8081/graphql/console`.
-
 GraphQL is available at `POST /graphql` in both images. GraphQL uses the same Bearer token authentication as REST.
 
-`/graphql/console` is the Atom GraphQL Console. Its Astro playground is available at `/graphql/console/playground`, and `/graphql/playground` serves the same built page when the console is enabled. Enable the console explicitly with:
-
-```bash
-ATOM_GRAPHQL_CONSOLE_ENABLED=true
-```
-
-The console is disabled by default. In production, Atom serves the built Astro console from `console/dist` when that directory exists. If the built console is missing while the console is enabled, Atom returns `503 Service Unavailable` with build instructions. The console uses Atom GraphQL operations only, does not inspect raw database tables, and does not provide Magistrala-specific mutations or aliases.
-
-For local console development, run the backend and frontend separately:
+The admin UI lives in the Next.js app under `app/`. For local UI development, run the backend and frontend separately:
 
 ```bash
 # backend on http://localhost:8080
 cargo run
 
-# console on http://localhost:4321/graphql/console
-cd console
+# UI on http://localhost:3000
+cd app
 pnpm install
 pnpm dev
 ```
 
-When using the dev Docker backend on `http://localhost:8081`, point the Astro proxy at that port:
+When using the dev Docker backend on `http://localhost:8081`, point the UI proxy at that port:
 
 ```bash
-cd console
-ATOM_BACKEND_URL=http://localhost:8081 pnpm dev
+cd app
+ATOM_GRAPHQL_URL=http://localhost:8081/graphql pnpm dev
 ```
-
-You can also run the Astro console dev server through Docker Compose while Atom runs in the release container:
-
-```bash
-docker compose --profile console-dev up --build atom console
-```
-
-Then open `http://localhost:4321/graphql/console`. Astro proxies `/graphql` and `/api/custom/*` to the `atom` service.
 
 If a host port is already occupied, override only the host-side port:
 
@@ -93,14 +73,14 @@ The Atom container still connects to Postgres through Docker DNS at `postgres:54
 Production builds can be made with:
 
 ```bash
-pnpm --dir console build
 cargo build --release
+pnpm --dir app build
 ```
 
-The console also includes an API Endpoint Builder for super admins. It creates metadata-backed custom HTTP endpoints under `/api/custom/*` that execute inline generic Atom GraphQL operations and return JSON responses.
+The UI includes an API Endpoint Builder for super admins. It creates metadata-backed custom HTTP endpoints under `/api/custom/*` that execute inline generic Atom GraphQL operations and return JSON responses.
 
 - `api_endpoint` is the only custom API object. It stores the HTTP route, operation kind, GraphQL operation, variable mapping, request schema, response mapping, auth mode, and status.
-- Console presets are local shortcuts for filling endpoint fields; they are not backend records.
+- UI presets are local shortcuts for filling endpoint fields; they are not backend records.
 - `caller_context` executes the endpoint GraphQL with the caller's authenticated Atom context and is the default.
 - `service_context` executes with a configured service entity and should be used only for tightly controlled admin-created endpoints.
 
@@ -124,7 +104,7 @@ can run an inline `createEntity` GraphQL operation with a variables mapping such
 
 Custom API endpoints do not inspect raw Postgres tables, do not change REST or GraphQL semantics, and do not add external-system aliases. Every execution is audited with redacted request/response summaries. Paths must stay under `/api/custom/`, request bodies are size-limited and JSON-schema validated when a request schema is configured, and active method/path duplicates are rejected.
 
-The Astro playground includes health status, saved-token awareness, starter operations, introspection-backed query/mutation search, generated starter operations with variables, response viewing, and copyable curl/fetch snippets.
+The Next.js playground includes starter operations, schema introspection search, variables, response viewing, and copyable curl/fetch snippets.
 
 The GraphQL schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, capabilities, policies, authz checks, audit logs, and profile-driven entity creation. REST remains available and unchanged.
 
@@ -244,13 +224,11 @@ Generic application mapping:
 | `ATOM_SIGNUP_ENABLED` | `false`                              | Enables unauthenticated global human signup |
 | `ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN` | `false`           | Development-only password login before email verification |
 | `ATOM_PUBLIC_BASE_URL` | `http://localhost:8080`             | Public URL used for email verification and OAuth callbacks |
-| `ATOM_EMAIL_VERIFICATION_REDIRECT` | `/graphql/console/auth/verify-email` | Frontend URL that verifies email tokens |
-| `ATOM_OAUTH_SUCCESS_REDIRECT` | `/graphql/console/auth/callback` | Frontend URL that receives the OAuth exchange code |
-| `ATOM_OAUTH_ERROR_REDIRECT` | `/graphql/console/auth/callback` | Frontend URL that receives OAuth errors |
+| `ATOM_EMAIL_VERIFICATION_REDIRECT` | `/verify-email` | Frontend URL that verifies email tokens |
+| `ATOM_OAUTH_SUCCESS_REDIRECT` | `/callback` | Frontend URL that receives the OAuth exchange code |
+| `ATOM_OAUTH_ERROR_REDIRECT` | `/callback` | Frontend URL that receives OAuth errors |
 | `ATOM_OIDC_PROVIDERS` | `[]`                                 | JSON array of OIDC providers, for example Google |
 | `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM` | *(optional)*          | SMTP settings for signup verification email |
-| `ATOM_GRAPHQL_CONSOLE_ENABLED` | `false`                     | Enables `/graphql/console` Atom GraphQL Console |
-| `ATOM_GRAPHQL_CONSOLE_DIST_DIR` | `console/dist`              | Built Astro console directory   |
 | `RUST_LOG`       | `info`                                     | Log level filter                |
 
 ---
@@ -287,7 +265,7 @@ curl -s -X POST http://localhost:8080/auth/signup \
 ```
 
 ```bash
-curl -s 'http://localhost:8080/graphql/console/auth/verify-email?token=atomv_...'
+curl -s 'http://localhost:3005/verify-email?token=atomv_...'
 
 curl -s -X POST http://localhost:8080/auth/email/resend \
   -H 'Content-Type: application/json' \

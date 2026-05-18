@@ -34,10 +34,9 @@ fn state(pool: PgPool) -> AppState {
         dev_allow_unverified_email_login: false,
         public_base_url: "http://localhost:8080".into(),
         cors_allowed_origins: vec!["http://localhost:8080".into()],
-        email_verification_redirect: "http://localhost:8080/graphql/console/auth/verify-email"
-            .into(),
-        password_reset_redirect: "http://localhost:8080/graphql/console/auth/reset-password".into(),
-        invitation_redirect: "http://localhost:8080/graphql/console/invitations/accept".into(),
+        email_verification_redirect: "http://localhost:3005/verify-email".into(),
+        password_reset_redirect: "http://localhost:3005/reset-password".into(),
+        invitation_redirect: "http://localhost:3005/invitations/accept".into(),
         oauth_success_redirect: "http://localhost:8080".into(),
         oauth_error_redirect: "http://localhost:8080".into(),
         oidc_providers: vec![],
@@ -46,8 +45,6 @@ fn state(pool: PgPool) -> AppState {
         invitation_expiry_secs: 604_800,
         oauth_state_expiry_secs: 600,
         auth_exchange_code_expiry_secs: 300,
-        graphql_console_enabled: false,
-        graphql_console_dist_dir: "console/dist".into(),
     };
     let primary = LoadedKey {
         kid: "test".into(),
