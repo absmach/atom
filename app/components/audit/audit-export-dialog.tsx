@@ -276,9 +276,11 @@ export function AuditExportDialog({
               {EXPORT_COLUMNS.map((col) => (
                 <label
                   key={col.key}
+                  htmlFor={`audit-export-${col.key}`}
                   className="flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50 has-data-checked:border-primary has-[[data-checked]]:bg-primary/5"
                 >
                   <Checkbox
+                    id={`audit-export-${col.key}`}
                     checked={selectedColumns.has(col.key)}
                     onCheckedChange={() => toggleColumn(col.key)}
                   />

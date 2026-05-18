@@ -73,6 +73,7 @@ const RESOURCES_QUERY = `
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type IdName = { id: string; name: string };
+type ConditionDraft = { id: string; path: string; value: string };
 
 type WizardState = {
   effect: "allow" | "deny";
@@ -85,7 +86,7 @@ type WizardState = {
   scopeKind: ScopeKind;
   scopeRef: string;
   scopeLabel: string;
-  conditions: Array<{ path: string; value: string }>;
+  conditions: ConditionDraft[];
 };
 
 const EMPTY: WizardState = {
@@ -760,7 +761,7 @@ function ConditionsStep({
       </p>
       {draft.conditions.map((condition, index) => (
         <div
-          key={index}
+          key={condition.id}
           className="grid gap-2 rounded-lg border p-3 sm:grid-cols-[1fr_auto_1fr_auto] sm:items-end"
         >
           <FormRow label="Path">
@@ -797,7 +798,10 @@ function ConditionsStep({
         onClick={() =>
           onChange({
             ...draft,
-            conditions: [...draft.conditions, { path: "", value: "" }],
+            conditions: [
+              ...draft.conditions,
+              { id: crypto.randomUUID(), path: "", value: "" },
+            ],
           })
         }
       >
@@ -853,14 +857,15 @@ function rowToWizardState(row: PolicyRow): WizardState {
   };
 }
 
-function parseConditions(raw: unknown): Array<{ path: string; value: string }> {
+function parseConditions(raw: unknown): ConditionDraft[] {
   if (!raw) return [];
   try {
     const arr = Array.isArray(raw) ? raw : JSON.parse(String(raw));
     if (!Array.isArray(arr)) return [];
     return arr
       .filter((c) => c && typeof c === "object")
-      .map((c: Record<string, string>) => ({
+      .map((c: Record<string, string>, index) => ({
+        id: `condition-${index}-${String(c.path ?? "")}-${String(c.value ?? "")}`,
         path: String(c.path ?? ""),
         value: String(c.value ?? ""),
       }));

@@ -772,7 +772,7 @@ function EndpointForm({
     <div className="mt-6 flex flex-col gap-4">
       {showPresets ? (
         <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium">Start from a template</label>
+          <div className="text-sm font-medium">Start from a template</div>
           <Select onValueChange={applyPreset}>
             <SelectTrigger className="w-full">
               <SelectValue placeholder="Choose a template…" />

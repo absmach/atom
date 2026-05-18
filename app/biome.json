@@ -9,12 +9,21 @@
     "ignoreUnknown": true,
     "includes": [
       "**",
+      "!next-env.d.ts",
+      "!components/ui",
       "!node_modules",
       "!.next",
+      "!.agents",
+      "!.codex",
       "!dist",
       "!build",
       "!test-results",
-      "!playwright-report"
+      "!playwright-report",
+      "!coverage",
+      "!.env",
+      "!.env.local",
+      "!.env.*.local",
+      "!tsconfig.tsbuildinfo"
     ]
   },
   "formatter": {

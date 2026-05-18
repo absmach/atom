@@ -69,15 +69,6 @@ type EntityBreakdownResponse = {
   applications: Count;
 };
 
-type StatusResponse = {
-  entitiesActive: Count;
-  entitiesInactive: Count;
-  entitiesSuspended: Count;
-  tenantsActive: Count;
-  tenantsInactive: Count;
-  tenantsFrozen: Count;
-};
-
 type ResourceKindsResponse = {
   resources: CountWithItems<{ kind: string }>;
 };
@@ -93,19 +84,6 @@ type PostureResponse = {
   policies: CountWithItems<{ effect: string; scopeKind: string }>;
   authzAllowed: Count;
   authzDenied: Count;
-};
-
-type AuditResponse = {
-  auditLogs: CountWithItems<AuditLogRow>;
-};
-
-type AuditLogRow = {
-  id: string;
-  event: string;
-  outcome: string;
-  entityId: string | null;
-  tenantId: string | null;
-  createdAt: string;
 };
 
 const SUMMARY_QUERY = `
@@ -140,17 +118,6 @@ const ENTITY_BREAKDOWN_QUERY = `
   }
 `;
 
-const STATUS_QUERY = `
-  query DashboardStatus {
-    entitiesActive: entities(status: active, limit: 1, offset: 0) { total }
-    entitiesInactive: entities(status: inactive, limit: 1, offset: 0) { total }
-    entitiesSuspended: entities(status: suspended, limit: 1, offset: 0) { total }
-    tenantsActive: tenants(status: active, limit: 1, offset: 0) { total }
-    tenantsInactive: tenants(status: inactive, limit: 1, offset: 0) { total }
-    tenantsFrozen: tenants(status: frozen, limit: 1, offset: 0) { total }
-  }
-`;
-
 const RESOURCE_KINDS_QUERY = `
   query DashboardResourceKinds {
     resources(limit: 200, offset: 0) {
@@ -177,15 +144,6 @@ const POSTURE_QUERY = `
     }
     authzAllowed: auditLogs(event: "authz.check", outcome: allow, limit: 1, offset: 0) { total }
     authzDenied: auditLogs(event: "authz.check", outcome: deny, limit: 1, offset: 0) { total }
-  }
-`;
-
-const AUDIT_QUERY = `
-  query DashboardAudit {
-    auditLogs(limit: 8, offset: 0) {
-      total
-      items { id event outcome entityId tenantId createdAt }
-    }
   }
 `;
 
@@ -241,19 +199,17 @@ function SummaryCards() {
     const skeletonCount = isGlobal ? 8 : 7;
     return (
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {Array.from({ length: skeletonCount }, (_, i) => `sk-${i}`).map(
-          (id) => (
-            <Card key={id}>
-              <CardHeader className="pb-2">
-                <Skeleton className="h-4 w-28" />
-                <Skeleton className="mt-3 h-8 w-20" />
-              </CardHeader>
-              <CardContent>
-                <Skeleton className="h-4 w-full" />
-              </CardContent>
-            </Card>
-          ),
-        )}
+        {SUMMARY_SKELETONS.slice(0, skeletonCount).map((id) => (
+          <Card key={id}>
+            <CardHeader className="pb-2">
+              <Skeleton className="h-4 w-28" />
+              <Skeleton className="mt-3 h-8 w-20" />
+            </CardHeader>
+            <CardContent>
+              <Skeleton className="h-4 w-full" />
+            </CardContent>
+          </Card>
+        ))}
       </section>
     );
   }
@@ -634,17 +590,6 @@ function buildEntityKindData(
     value,
     fill: ENTITY_KIND_COLORS[index],
   }));
-}
-
-function buildStatusData(data: StatusResponse | undefined): ChartDatum[] {
-  return [
-    { label: "Active", value: data?.entitiesActive.total ?? 0 },
-    { label: "Inactive", value: data?.entitiesInactive.total ?? 0 },
-    { label: "Suspended", value: data?.entitiesSuspended.total ?? 0 },
-    { label: "Tenants active", value: data?.tenantsActive.total ?? 0 },
-    { label: "Tenants frozen", value: data?.tenantsFrozen.total ?? 0 },
-    { label: "Tenants inactive", value: data?.tenantsInactive.total ?? 0 },
-  ];
 }
 
 function buildRiskData(data: RiskResponse | undefined): ChartDatum[] {
