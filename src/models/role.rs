@@ -11,7 +11,7 @@ pub struct Role {
     pub scope_kind: String,
     pub scope_ref: Option<String>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]

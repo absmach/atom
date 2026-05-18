@@ -39,6 +39,8 @@ services:
       RUST_LOG: info
     ports:
       - "${ATOM_HTTP_PORT:-8080}:8080"
+    profiles:
+      - default
 
   atom-dev:
     build:
@@ -79,6 +81,8 @@ services:
       ATOM_GRAPHQL_URL: ${ATOM_GRAPHQL_URL:-http://atom:8080/graphql}
     ports:
       - "${ATOM_UI_HTTP_PORT:-3005}:3000"
+    profiles:
+      - default
 
 volumes:
   postgres_data:

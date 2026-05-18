@@ -12,7 +12,7 @@ pub struct Resource {
     pub owner_id: Option<Uuid>,
     pub attributes: Value,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]

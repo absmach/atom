@@ -21,7 +21,7 @@ CREATE TABLE tenants (
     created_by  UUID,
     updated_by  UUID,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at  TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX idx_tenants_name ON tenants(name);
@@ -41,7 +41,7 @@ CREATE TABLE profiles (
     status       TEXT        NOT NULL DEFAULT 'active'
                              CHECK (status IN ('active', 'deprecated', 'disabled')),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ,
     CHECK (
         object_kind <> 'entity'
         OR kind IN ('human', 'device', 'service', 'workload', 'application')
@@ -83,7 +83,7 @@ CREATE TABLE entities (
     profile_id         UUID        REFERENCES profiles(id),
     profile_version_id UUID        REFERENCES profile_versions(id),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at         TIMESTAMPTZ
 );
 
 CREATE INDEX idx_entities_kind ON entities(kind);
@@ -250,7 +250,7 @@ CREATE TABLE groups (
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
     attributes  JSONB       NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at  TIMESTAMPTZ
 );
 
 CREATE INDEX idx_groups_tenant ON groups(tenant_id);
@@ -302,7 +302,7 @@ CREATE TABLE resources (
     owner_id    UUID        REFERENCES entities(id) ON DELETE SET NULL,
     attributes  JSONB       NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at  TIMESTAMPTZ
 );
 
 CREATE INDEX idx_resources_kind ON resources(kind);
@@ -329,7 +329,7 @@ CREATE TABLE roles (
     scope_kind  TEXT        NOT NULL CHECK (scope_kind IN ('platform', 'tenant', 'object_kind', 'object_type', 'object')),
     scope_ref   TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at  TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX idx_roles_name_tenant_scope
@@ -343,7 +343,7 @@ CREATE TABLE capabilities (
     resource_kind   TEXT,
     description     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ,
     UNIQUE (name, resource_kind)
 );
 
@@ -416,7 +416,7 @@ CREATE TABLE tenant_invitations (
     rejected_at     TIMESTAMPTZ,
     revoked_at      TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at      TIMESTAMPTZ
 );
 
 CREATE INDEX idx_tenant_invitations_tenant
@@ -459,7 +459,7 @@ CREATE TABLE api_endpoints (
     created_by         UUID        REFERENCES entities(id) ON DELETE SET NULL,
     updated_by         UUID        REFERENCES entities(id) ON DELETE SET NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at         TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX idx_api_endpoints_global_key
