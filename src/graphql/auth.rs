@@ -12,8 +12,9 @@ use crate::{
 
 use crate::models::session::SignupRequest;
 
-use super::types::{parse_id, parse_optional_id, LoginInput, LoginResponse, Session, SignupInput,
-    SignupResponse};
+use super::types::{
+    parse_id, parse_optional_id, LoginInput, LoginResponse, Session, SignupInput, SignupResponse,
+};
 
 #[derive(Default)]
 pub struct AuthQuery;
