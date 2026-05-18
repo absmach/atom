@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
+import { AUTH_COOKIE, AUTH_META_COOKIE } from "@/lib/auth/constants";
 
-export const AUTH_COOKIE = "atom_token";
-export const AUTH_META_COOKIE = "atom_session";
+export { AUTH_COOKIE, AUTH_META_COOKIE };
 
 export type AtomSession = {
   entityId: string;

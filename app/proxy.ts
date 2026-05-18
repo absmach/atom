@@ -1,26 +1,24 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import { AUTH_COOKIE } from "@/lib/auth/session";
+import { AUTH_COOKIE } from "@/lib/auth/constants";
+
+const REDIRECT_TO_LOGIN = new Set(["/register", "/verify-email", "/callback"]);
+const PUBLIC_PAGES = new Set(["/login"]);
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const token = request.cookies.get(AUTH_COOKIE)?.value;
 
-  if (
-    pathname === "/register" ||
-    pathname === "/verify-email" ||
-    pathname === "/callback"
-  ) {
+  if (REDIRECT_TO_LOGIN.has(pathname)) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  const publicPages = ["/login"];
+  const token = request.cookies.get(AUTH_COOKIE)?.value;
 
-  if (publicPages.includes(pathname) && token) {
+  if (PUBLIC_PAGES.has(pathname) && token) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
-  if (!publicPages.includes(pathname) && !token) {
+  if (!PUBLIC_PAGES.has(pathname) && !token) {
     const url = new URL("/login", request.url);
     url.searchParams.set("next", pathname);
     return NextResponse.redirect(url);
