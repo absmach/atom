@@ -1,6 +1,7 @@
 "use client";
 
 import { Laptop, LogOut, Moon, Sun, User } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 
@@ -97,9 +98,11 @@ export function UserNav({
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem>
-                <User />
-                Profile settings
+              <DropdownMenuItem asChild>
+                <Link href="/profile">
+                  <User />
+                  Profile settings
+                </Link>
               </DropdownMenuItem>
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>

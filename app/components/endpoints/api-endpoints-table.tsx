@@ -142,6 +142,357 @@ type PanelState =
   | { mode: "inspect"; row: ApiEndpointRow }
   | null;
 
+type EndpointPreset = {
+  label: string;
+  description: string;
+  values: Partial<FormValues>;
+};
+
+// variablesMapping uses dotted keys to build nested GraphQL variables.
+// e.g. "input.name": "$body.name" → { input: { name: <value> } }
+// Nested objects as values are NOT interpolated — only string "$source" values are.
+const ENDPOINT_PRESETS: EndpointPreset[] = [
+  {
+    label: "Health Check",
+    description: "Ping the backend health query.",
+    values: {
+      key: "health_check",
+      name: "Health Check",
+      description: "Returns OK when the backend is reachable.",
+      method: "GET",
+      path: "/api/custom/health",
+      operationKind: "query",
+      graphql: `query HealthCheck {\n  health\n}`,
+      authMode: "caller_context",
+      variablesMapping: "{}",
+      requestSchema: "{}",
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Create Tenant",
+    description: "Create a new tenant.",
+    values: {
+      key: "create_tenant",
+      name: "Create Tenant",
+      description: "Creates a new tenant with a name and optional route.",
+      method: "POST",
+      path: "/api/custom/tenants",
+      operationKind: "mutation",
+      graphql: `mutation CreateTenant($input: CreateTenantInput!) {\n  createTenant(input: $input) {\n    id\n    name\n    route\n    status\n    createdAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        { "input.name": "$body.name", "input.route": "$body.route" },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          required: ["name"],
+          properties: {
+            name: { type: "string" },
+            route: { type: "string" },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Update Tenant",
+    description: "Update an existing tenant by ID.",
+    values: {
+      key: "update_tenant",
+      name: "Update Tenant",
+      description: "Updates a tenant's name or route.",
+      method: "PATCH",
+      path: "/api/custom/tenants/update",
+      operationKind: "mutation",
+      graphql: `mutation UpdateTenant($id: ID!, $input: UpdateTenantInput!) {\n  updateTenant(id: $id, input: $input) {\n    id\n    name\n    route\n    status\n    updatedAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        {
+          id: "$query.id",
+          "input.name": "$body.name",
+          "input.route": "$body.route",
+        },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            route: { type: "string" },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Create Entity",
+    description: "Create a new entity (human, service, device, etc.).",
+    values: {
+      key: "create_entity",
+      name: "Create Entity",
+      description: "Creates an entity with a name, kind, and optional tenant.",
+      method: "POST",
+      path: "/api/custom/entities",
+      operationKind: "mutation",
+      graphql: `mutation CreateEntity($input: CreateEntityInput!) {\n  createEntity(input: $input) {\n    id\n    name\n    kind\n    status\n    createdAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        {
+          "input.name": "$body.name",
+          "input.kind": "$body.kind",
+          "input.tenantId": "$body.tenantId",
+        },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          required: ["name"],
+          properties: {
+            name: { type: "string" },
+            kind: { type: "string" },
+            tenantId: { type: "string" },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Update Entity",
+    description: "Update an existing entity by ID.",
+    values: {
+      key: "update_entity",
+      name: "Update Entity",
+      description: "Updates an entity's name or attributes.",
+      method: "PATCH",
+      path: "/api/custom/entities/update",
+      operationKind: "mutation",
+      graphql: `mutation UpdateEntity($id: ID!, $input: UpdateEntityInput!) {\n  updateEntity(id: $id, input: $input) {\n    id\n    name\n    kind\n    status\n    updatedAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        {
+          id: "$query.id",
+          "input.name": "$body.name",
+          "input.attributes": "$body.attributes",
+        },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            attributes: { type: "object" },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Create Resource",
+    description: "Register a new resource.",
+    values: {
+      key: "create_resource",
+      name: "Create Resource",
+      description: "Creates a resource that can be referenced in policies.",
+      method: "POST",
+      path: "/api/custom/resources",
+      operationKind: "mutation",
+      graphql: `mutation CreateResource($input: CreateResourceInput!) {\n  createResource(input: $input) {\n    id\n    name\n    kind\n    status\n    createdAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        { "input.name": "$body.name", "input.kind": "$body.kind" },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          required: ["name"],
+          properties: {
+            name: { type: "string" },
+            kind: { type: "string" },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Update Resource",
+    description: "Update an existing resource by ID.",
+    values: {
+      key: "update_resource",
+      name: "Update Resource",
+      description: "Updates a resource's name or attributes.",
+      method: "PATCH",
+      path: "/api/custom/resources/update",
+      operationKind: "mutation",
+      graphql: `mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {\n  updateResource(id: $id, input: $input) {\n    id\n    name\n    kind\n    status\n    updatedAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        { id: "$query.id", "input.name": "$body.name" },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          properties: { name: { type: "string" } },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Create Policy",
+    description: "Create an authorization policy.",
+    values: {
+      key: "create_policy",
+      name: "Create Policy",
+      description:
+        "Creates a policy binding actions to entities and resources.",
+      method: "POST",
+      path: "/api/custom/policies",
+      operationKind: "mutation",
+      graphql: `mutation CreatePolicy($input: CreatePolicyInput!) {\n  createPolicy(input: $input) {\n    id\n    effect\n    actions\n    status\n    createdAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        {
+          "input.effect": "$body.effect",
+          "input.actions": "$body.actions",
+          "input.entityId": "$body.entityId",
+          "input.resourceId": "$body.resourceId",
+        },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          required: ["effect", "actions"],
+          properties: {
+            effect: { type: "string" },
+            actions: { type: "array", items: { type: "string" } },
+            entityId: { type: "string" },
+            resourceId: { type: "string" },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Update Policy",
+    description: "Update an existing policy by ID.",
+    values: {
+      key: "update_policy",
+      name: "Update Policy",
+      description: "Updates a policy's effect, actions, or status.",
+      method: "PATCH",
+      path: "/api/custom/policies/update",
+      operationKind: "mutation",
+      graphql: `mutation UpdatePolicy($id: ID!, $input: UpdatePolicyInput!) {\n  updatePolicy(id: $id, input: $input) {\n    id\n    effect\n    actions\n    status\n    updatedAt\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        {
+          id: "$query.id",
+          "input.effect": "$body.effect",
+          "input.actions": "$body.actions",
+        },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          properties: {
+            effect: { type: "string" },
+            actions: { type: "array", items: { type: "string" } },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+  {
+    label: "Authorization Check",
+    description: "Evaluate whether an entity can perform an action.",
+    values: {
+      key: "authz_check",
+      name: "Authorization Check",
+      description:
+        "Explains the authorization decision for a given entity, action, and resource.",
+      method: "POST",
+      path: "/api/custom/authz/check",
+      operationKind: "query",
+      graphql: `query AuthzCheck($entityId: ID!, $action: String!, $resourceId: ID) {\n  explain(entityId: $entityId, action: $action, resourceId: $resourceId) {\n    decision\n    reason\n  }\n}`,
+      authMode: "caller_context",
+      variablesMapping: JSON.stringify(
+        {
+          entityId: "$body.entityId",
+          action: "$body.action",
+          resourceId: "$body.resourceId",
+        },
+        null,
+        2,
+      ),
+      requestSchema: JSON.stringify(
+        {
+          type: "object",
+          required: ["entityId", "action"],
+          properties: {
+            entityId: { type: "string" },
+            action: { type: "string" },
+            resourceId: { type: "string" },
+          },
+        },
+        null,
+        2,
+      ),
+      responseMapping: "{}",
+      status: "draft",
+    },
+  },
+];
+
 export function ApiEndpointsTable({
   rows,
   total,
@@ -321,6 +672,7 @@ export function ApiEndpointsTable({
                 <EndpointForm
                   defaultValues={panel.mode === "edit" ? panel.row : undefined}
                   isPending={isPending}
+                  showPresets={panel.mode === "create"}
                   testEndpoint={panel.mode === "edit" ? panel.row : null}
                   onSubmit={(input) => {
                     if (panel.mode === "create") {
@@ -365,11 +717,13 @@ export function ApiEndpointsTable({
 function EndpointForm({
   defaultValues,
   isPending,
+  showPresets,
   testEndpoint,
   onSubmit,
 }: {
   defaultValues?: ApiEndpointRow;
   isPending: boolean;
+  showPresets?: boolean;
   testEndpoint: ApiEndpointRow | null;
   onSubmit: (input: EndpointInput) => void;
 }) {
@@ -377,6 +731,12 @@ function EndpointForm({
     resolver: zodResolver(schema),
     defaultValues: endpointFormValues(defaultValues),
   });
+
+  function applyPreset(label: string) {
+    const preset = ENDPOINT_PRESETS.find((p) => p.label === label);
+    if (!preset) return;
+    form.reset({ ...endpointFormValues(undefined), ...preset.values });
+  }
 
   function submit(values: FormValues) {
     const input: EndpointInput = {};
@@ -410,6 +770,28 @@ function EndpointForm({
 
   return (
     <div className="mt-6 flex flex-col gap-4">
+      {showPresets ? (
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium">Start from a template</label>
+          <Select onValueChange={applyPreset}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Choose a template…" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {ENDPOINT_PRESETS.map((preset) => (
+                  <SelectItem key={preset.label} value={preset.label}>
+                    <span className="font-medium">{preset.label}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {preset.description}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
       <Form {...form}>
         <form
           className="flex flex-col gap-4"
@@ -722,7 +1104,7 @@ function GraphqlCodeEditor({ value }: { value: string }) {
         highlightActiveLine: false,
         highlightActiveLineGutter: false,
       }}
-      className="max-w-full overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:max-w-full [&_.cm-editor]:min-h-40 [&_.cm-gutters]:border-r [&_.cm-line]:break-words [&_.cm-scroller]:font-mono"
+      className="max-w-full overflow-hidden rounded-md border bg-background text-xs [&_.cm-content]:max-w-full [&_.cm-editor]:min-h-40 [&_.cm-gutters]:border-r [&_.cm-line]:wrap-break-word [&_.cm-scroller]:font-mono"
     />
   );
 }

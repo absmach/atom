@@ -125,7 +125,7 @@ export function CrudEditSheets({
           if (!nextOpen) setters.setProfile(null);
         }}
       >
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md!">
+        <SheetContent className="w-full overflow-y-auto sm:w-[min(90vw,64rem)]! sm:max-w-3xl!">
           <SheetHeader>
             <SheetTitle>
               {`Edit ${String(editing.profile?.displayName ?? editing.profile?.id ?? "profile")}`}

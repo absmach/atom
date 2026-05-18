@@ -1,0 +1,445 @@
+---
+title: Custom API Endpoints
+description: Expose named HTTP routes backed by Atom GraphQL operations, with request validation, variable mapping, and response shaping.
+---
+
+Custom API Endpoints let you expose named HTTP routes backed by Atom GraphQL operations. Each endpoint defines an HTTP facade (method + path), the GraphQL operation to execute, how to map request data to GraphQL variables, how to validate the incoming request body, and how to shape the response.
+
+## How it works
+
+```
+HTTP request
+    │
+    ▼
+Path + method lookup  ──► 404 if not found or not active
+    │
+    ▼
+Bearer token auth     ──► 401 if missing / invalid
+    │
+    ▼
+Capability check      ──► 403 if caller lacks execute / manage
+    │
+    ▼
+Request schema validation ──► 400 if body fails JSON Schema
+    │
+    ▼
+variables_mapping     ──► builds GraphQL variable object
+    │
+    ▼
+GraphQL execution     ──► runs against the Atom schema
+    │
+    ▼
+response_mapping      ──► reshapes the GraphQL data object
+    │
+    ▼
+JSON response
+```
+
+All executions are recorded in the `api_endpoint_executions` table and queryable via `apiEndpointExecutions`.
+
+---
+
+## Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | string | yes | Machine identifier. Must be unique. |
+| `name` | string | yes | Human-readable label shown in the UI. |
+| `description` | string | no | Free-text description. |
+| `method` | string | yes | HTTP method. One of `GET`, `POST`, `PUT`, `PATCH`, `DELETE`. |
+| `path` | string | yes | URL path. Must start with `/api/custom/`. No `//`, `..`, `?`, or `#`. |
+| `operationKind` | string | yes | Whether the GraphQL operation is a `query` or `mutation`. |
+| `graphql` | string | yes | Full GraphQL operation text. |
+| `authMode` | string | yes | How the GraphQL operation is authenticated. See [Auth modes](#auth-modes). |
+| `serviceEntityId` | UUID | conditional | Required when `authMode` is `service_context`. |
+| `variablesMapping` | JSON object | no | Maps HTTP request data to GraphQL variables. See [Variables mapping](#variables-mapping). |
+| `requestSchema` | JSON object | no | JSON Schema to validate the request body before execution. See [Request schema](#request-schema). |
+| `responseMapping` | JSON object | no | Selects and renames fields from the GraphQL response. See [Response mapping](#response-mapping). |
+| `status` | string | yes | Lifecycle state. One of `draft`, `active`, `disabled`. Only `active` endpoints are callable. |
+| `tenantId` | UUID | no | Scopes the endpoint to a tenant. Omit for platform-level endpoints. |
+
+---
+
+## Status lifecycle
+
+| Status | Callable | Editable |
+|--------|----------|----------|
+| `draft` | No | Yes |
+| `active` | Yes | Yes |
+| `disabled` | No | No (must re-enable first) |
+
+Only `active` endpoints are matched when a request arrives. Transitions: `draft` → `active` (enable) → `disabled` (disable) → `active` (re-enable).
+
+---
+
+## Auth modes
+
+### `caller_context`
+
+The GraphQL operation runs as the authenticated caller. The caller's entity ID, tenant, and capabilities determine what the operation can access — identical to calling the GraphQL API directly.
+
+Use this for endpoints where access should be limited to what the caller is already allowed to do.
+
+### `service_context`
+
+The GraphQL operation runs as the specified `serviceEntityId` entity, regardless of who the HTTP caller is. The caller still needs `execute` capability on the endpoint itself, but the underlying GraphQL operation is authorised by the service entity's capabilities.
+
+Use this for privileged operations that should be available to less-privileged callers — for example, a device registering itself through an endpoint that internally calls `createEntity` using an admin service account.
+
+`serviceEntityId` must reference an **active** entity in an **active** tenant (or a platform entity). The endpoint returns 403 if either is inactive at execution time.
+
+---
+
+## Caller capability requirement
+
+Regardless of `authMode`, the HTTP caller must hold one of the following capabilities before the endpoint executes:
+
+| Capability | Scope |
+|------------|-------|
+| `execute` | `Object(<endpointId>)` — granted directly on this endpoint |
+| `manage` | `Object(<endpointId>)` |
+| `execute` | Tenant scope of the endpoint |
+| `manage` | Tenant scope of the endpoint |
+
+A caller without any of these receives **403 Forbidden**.
+
+---
+
+## Variables mapping
+
+`variablesMapping` is a JSON object that controls how HTTP request data is assembled into the GraphQL variable object. Keys use **dot notation** to address nested GraphQL variables. Values are **source expressions** that resolve to actual values at runtime.
+
+### Source expressions
+
+| Expression | Resolves to |
+|------------|-------------|
+| `$body` | The entire parsed request body (JSON object) |
+| `$body.<path>` | A value extracted from the body by dot-path (e.g. `$body.user.name`) |
+| `$query.<name>` | A query string parameter (e.g. `$query.id`) |
+| `$headers.<name>` | An HTTP header value (e.g. `$headers.x-correlation-id`) |
+| `$auth.entityId` | The authenticated caller's entity ID (UUID string) |
+| `$auth.tenantId` | The caller's tenant ID, or absent if platform-level |
+| `$auth.sessionId` | The caller's session ID, or absent if using an API key |
+| `$path` | The full request path string |
+| Any other string | Passed through as a literal string value |
+
+> **Important:** Source expressions must be **strings**. Nested objects as values are passed through as-is without interpolation — only flat string `$…` expressions are evaluated. Use dot-notation keys to build nested output instead.
+
+### Dot-notation keys
+
+Keys use dot notation to build nested GraphQL variable objects:
+
+```json
+{
+  "input.name":   "$body.name",
+  "input.route":  "$body.route",
+  "input.tags":   "$body.tags"
+}
+```
+
+This produces the GraphQL variables:
+
+```json
+{
+  "input": {
+    "name":  "<value of body.name>",
+    "route": "<value of body.route>",
+    "tags":  "<value of body.tags>"
+  }
+}
+```
+
+### Empty mapping fallback
+
+If `variablesMapping` is an empty object (`{}`), the **entire request body** is forwarded as the variables object. Useful when the body already matches the expected GraphQL variable shape.
+
+### Absent source values
+
+If a source expression resolves to nothing (e.g. `$query.id` when no `id` parameter was sent), that variable key is omitted from the resulting object rather than set to `null`.
+
+### Examples
+
+**Map top-level variables from body:**
+```json
+{
+  "entityId": "$body.entityId",
+  "action":   "$body.action"
+}
+```
+
+**Map nested input from body + ID from query string:**
+```json
+{
+  "id":           "$query.id",
+  "input.name":   "$body.name",
+  "input.status": "$body.status"
+}
+```
+
+**Inject caller identity:**
+```json
+{
+  "input.createdBy": "$auth.entityId",
+  "input.name":      "$body.name"
+}
+```
+
+---
+
+## Request schema
+
+`requestSchema` is a [JSON Schema](https://json-schema.org/) object validated against the request body before any GraphQL execution occurs. An empty object (`{}`) disables validation.
+
+Validation failures return **400 Bad Request** with a message listing the schema errors.
+
+```json
+{
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name":     { "type": "string" },
+    "route":    { "type": "string" },
+    "tenantId": { "type": "string" }
+  }
+}
+```
+
+**Notes:**
+- Only the request **body** is validated — query parameters and headers are not covered.
+- For `GET` requests the body is typically empty; avoid requiring body fields on `GET` endpoints.
+
+---
+
+## Response mapping
+
+`responseMapping` selects and renames fields from the top-level GraphQL `data` object before sending the HTTP response. An empty object (`{}`) returns the full `data` object unchanged.
+
+### Selector syntax
+
+| Value | Meaning |
+|-------|---------|
+| `$.createTenant.id` | Extracts `data.createTenant.id` |
+| `$.createTenant` | Extracts the entire `data.createTenant` object |
+| Any string without `$.` | Used as a literal value in the response |
+
+If a selected path does not exist in the data, the key is set to `null`.
+
+### Example
+
+GraphQL data returned:
+```json
+{
+  "createTenant": {
+    "id":        "abc-123",
+    "name":      "Acme",
+    "status":    "active",
+    "createdAt": "2026-05-18T10:00:00Z"
+  }
+}
+```
+
+With this `responseMapping`:
+```json
+{
+  "id":     "$.createTenant.id",
+  "name":   "$.createTenant.name",
+  "status": "$.createTenant.status"
+}
+```
+
+The HTTP response becomes:
+```json
+{
+  "id":     "abc-123",
+  "name":   "Acme",
+  "status": "active"
+}
+```
+
+---
+
+## GraphQL operation rules
+
+- The operation must be a complete `query` or `mutation` string.
+- **Introspection is blocked**: `__schema`, `__type`, and `IntrospectionQuery` are rejected at save time and at execution time.
+- `operationKind` (`query` / `mutation`) must match the operation type in the `graphql` text.
+- The operation runs against the full Atom GraphQL schema — all queries and mutations are accessible, subject to the auth context.
+
+---
+
+## Execution behaviour
+
+| Constraint | Value |
+|------------|-------|
+| Timeout | 5 seconds |
+| Maximum body size | 1 MiB |
+| Only `active` endpoints are matched | Draft and disabled endpoints return 404 |
+
+If the GraphQL execution returns errors, the endpoint returns **400**. Error details are recorded in the execution log but not forwarded to the caller.
+
+---
+
+## GraphQL management API
+
+### Queries
+
+```graphql
+# List endpoints (platform manage required)
+query ApiEndpoints($tenantId: ID, $status: String, $limit: Int, $offset: Int) {
+  apiEndpoints(tenantId: $tenantId, status: $status, limit: $limit, offset: $offset) {
+    total
+    items {
+      id tenantId key name description
+      method path operationKind graphql
+      authMode serviceEntityId
+      variablesMapping requestSchema responseMapping
+      status createdBy updatedBy createdAt updatedAt
+    }
+  }
+}
+
+# Get a single endpoint
+query ApiEndpoint($id: ID!) {
+  apiEndpoint(id: $id) {
+    id key name method path status
+  }
+}
+
+# List execution history for an endpoint
+query ApiEndpointExecutions($endpointId: ID!, $limit: Int, $offset: Int) {
+  apiEndpointExecutions(endpointId: $endpointId, limit: $limit, offset: $offset) {
+    total
+    items {
+      id endpointId callerEntityId
+      status error
+      requestSummary responseSummary
+      createdAt
+    }
+  }
+}
+```
+
+### Mutations
+
+```graphql
+# Create
+mutation CreateApiEndpoint($input: CreateApiEndpointInput!) {
+  createApiEndpoint(input: $input) {
+    id key name method path status createdAt
+  }
+}
+
+# Update (all fields optional)
+mutation UpdateApiEndpoint($id: ID!, $input: UpdateApiEndpointInput!) {
+  updateApiEndpoint(id: $id, input: $input) {
+    id key name method path status updatedAt
+  }
+}
+
+# Activate (validates GraphQL before enabling)
+mutation EnableApiEndpoint($id: ID!) {
+  enableApiEndpoint(id: $id) { id status }
+}
+
+# Deactivate
+mutation DisableApiEndpoint($id: ID!) {
+  disableApiEndpoint(id: $id) { id status }
+}
+```
+
+All management mutations require the caller to hold `manage` on the platform scope.
+
+---
+
+## Execution log
+
+Each execution records:
+
+| Field | Description |
+|-------|-------------|
+| `id` | Unique execution ID |
+| `endpointId` | The endpoint that was called |
+| `callerEntityId` | Entity that made the HTTP request |
+| `status` | `success`, `error`, or `denied` |
+| `requestSummary` | Method, path, and resolved variables |
+| `responseSummary` | Shaped response data |
+| `error` | Error message when status is not `success` |
+| `createdAt` | Timestamp |
+
+Sensitive keys (`password`, `secret`, `token`, `authorization`, `apikey`, `api_key`, `api-key`) are automatically redacted from both summaries.
+
+---
+
+## End-to-end example
+
+### Create Tenant endpoint
+
+| Field | Value |
+|-------|-------|
+| `key` | `create_tenant` |
+| `method` | `POST` |
+| `path` | `/api/custom/tenants` |
+| `operationKind` | `mutation` |
+| `authMode` | `caller_context` |
+| `status` | `active` |
+
+```graphql
+mutation CreateTenant($input: CreateTenantInput!) {
+  createTenant(input: $input) {
+    id name route status createdAt
+  }
+}
+```
+
+```json title="variablesMapping"
+{
+  "input.name":  "$body.name",
+  "input.route": "$body.route"
+}
+```
+
+```json title="requestSchema"
+{
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name":  { "type": "string" },
+    "route": { "type": "string" }
+  }
+}
+```
+
+**Request:**
+```http
+POST /api/custom/tenants
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "name": "Acme", "route": "acme" }
+```
+
+**Response:**
+```json
+{
+  "createTenant": {
+    "id":        "3334383c-e62c-4452-a88b-cd099942e7d2",
+    "name":      "Acme",
+    "route":     "acme",
+    "status":    "active",
+    "createdAt": "2026-05-18T09:36:07.015819+00:00"
+  }
+}
+```
+
+---
+
+## Common mistakes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Field values are literal strings like `"$body.name"` | `variablesMapping` uses nested objects instead of dotted keys | Use `"input.name": "$body.name"` not `"input": { "name": "$body.name" }` |
+| 404 on a valid path | Endpoint is `draft` or `disabled` | Set status to `active` |
+| 403 on execution | Caller lacks `execute` or `manage` capability | Grant `execute` on the endpoint object or its tenant scope |
+| 400 "GraphQL execution failed" | The GraphQL operation returned errors | Check `apiEndpointExecutions` for the `error` field |
+| 400 "request body failed requestSchema validation" | Body doesn't match `requestSchema` | Fix the request or relax the schema |
+| 400 "custom endpoint execution timed out" | Operation took longer than 5 seconds | Simplify the GraphQL operation |

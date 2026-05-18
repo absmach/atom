@@ -6,6 +6,7 @@
     "architecture",
     "access-control",
     "authentication",
-    "queries"
+    "queries",
+    "endpoints"
   ]
 }

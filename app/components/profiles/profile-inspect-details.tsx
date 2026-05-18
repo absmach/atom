@@ -7,22 +7,17 @@ import { toast } from "sonner";
 import { StatusBadge } from "@/components/crud/status-badge";
 import { DisplayTimeCell } from "@/components/display-time";
 import {
+  ProfileVersionForm,
+  type ProfileVersionSubmitInput,
+} from "@/components/profiles/profile-version-form";
+import {
   Accordion,
   AccordionContent,
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { JsonEditor } from "@/components/ui/json-editor";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
 import type { JsonSchema, UiSchema } from "@/lib/profiles/schema-form";
 import { Action } from "@/lib/utils";
@@ -266,12 +261,7 @@ function ProfileVersionsSection({
   versions: ProfileVersion[];
   nextVersion: number;
   isPending: boolean;
-  onCreateVersion: (input: {
-    version: number;
-    jsonSchema: unknown;
-    uiSchema: unknown;
-    status: string;
-  }) => void;
+  onCreateVersion: (input: ProfileVersionSubmitInput) => void;
 }) {
   const [showForm, setShowForm] = React.useState(false);
 
@@ -288,7 +278,7 @@ function ProfileVersionsSection({
       </div>
 
       {showForm ? (
-        <NewVersionForm
+        <ProfileVersionForm
           isPending={isPending}
           nextVersion={nextVersion}
           onCancel={() => setShowForm(false)}
@@ -296,6 +286,7 @@ function ProfileVersionsSection({
             onCreateVersion(input);
             setShowForm(false);
           }}
+          submitLabel="Create version"
         />
       ) : null}
 
@@ -339,115 +330,6 @@ function ProfileVersionsSection({
         )
       )}
     </div>
-  );
-}
-
-function NewVersionForm({
-  nextVersion,
-  isPending,
-  onCancel,
-  onSubmit,
-}: {
-  nextVersion: number;
-  isPending: boolean;
-  onCancel: () => void;
-  onSubmit: (input: {
-    version: number;
-    jsonSchema: unknown;
-    uiSchema: unknown;
-    status: string;
-  }) => void;
-}) {
-  const [versionNum, setVersionNum] = React.useState(String(nextVersion));
-  const [jsonCode, setJsonCode] = React.useState("{}");
-  const [uiCode, setUiCode] = React.useState("{}");
-  const [status, setStatus] = React.useState("active");
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const vNum = Number.parseInt(versionNum, 10);
-    if (Number.isNaN(vNum) || vNum < 1) {
-      toast.error("Version must be a positive integer.");
-      return;
-    }
-    let jsonSchema: unknown;
-    let uiSchema: unknown;
-    try {
-      jsonSchema = JSON.parse(jsonCode);
-    } catch {
-      toast.error("JSON schema must be valid JSON.");
-      return;
-    }
-    try {
-      uiSchema = JSON.parse(uiCode);
-    } catch {
-      toast.error("UI schema must be valid JSON.");
-      return;
-    }
-    onSubmit({ version: vNum, jsonSchema, uiSchema, status });
-  }
-
-  return (
-    <form
-      className="grid gap-4 rounded-lg border bg-muted/30 p-4"
-      onSubmit={handleSubmit}
-    >
-      <div className="text-sm font-medium">New version</div>
-
-      <div className="grid gap-2 sm:grid-cols-2">
-        <div className="grid gap-2">
-          <Label htmlFor="version-num">Version</Label>
-          <Input
-            id="version-num"
-            min={1}
-            onChange={(e) => setVersionNum(e.target.value)}
-            required
-            type="number"
-            value={versionNum}
-          />
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor="version-status">Status</Label>
-          <Select onValueChange={setStatus} value={status}>
-            <SelectTrigger className="w-full" id="version-status">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">active</SelectItem>
-              <SelectItem value="deprecated">deprecated</SelectItem>
-              <SelectItem value="disabled">disabled</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      <div className="grid gap-2">
-        <Label>JSON schema</Label>
-        <JsonEditor
-          className="[&_.cm-editor]:min-h-36"
-          onChange={setJsonCode}
-          value={jsonCode}
-        />
-      </div>
-
-      <div className="grid gap-2">
-        <Label>UI schema</Label>
-        <JsonEditor
-          className="[&_.cm-editor]:min-h-36"
-          onChange={setUiCode}
-          value={uiCode}
-        />
-      </div>
-
-      <div className="flex justify-end gap-2">
-        <Button onClick={onCancel} type="button" variant="outline">
-          Cancel
-        </Button>
-        <Button disabled={isPending} type="submit">
-          Create version
-        </Button>
-      </div>
-    </form>
   );
 }
 

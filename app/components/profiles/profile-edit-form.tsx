@@ -1,12 +1,17 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus } from "lucide-react";
 import * as React from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
+import {
+  ProfileVersionForm,
+  type ProfileVersionSubmitInput,
+} from "@/components/profiles/profile-version-form";
 import { Button } from "@/components/ui/button";
 import {
   Form,
@@ -39,6 +44,26 @@ const UPDATE_PROFILE_MUTATION = `
   }
 `;
 
+const PROFILE_VERSIONS_QUERY = `
+  query ProfileEditVersions($profileId: ID!) {
+    profileVersions(profileId: $profileId) {
+      id
+      version
+    }
+  }
+`;
+
+const CREATE_VERSION_MUTATION = `
+  mutation CreateProfileVersion($profileId: ID!, $input: CreateProfileVersionInput!) {
+    createProfileVersion(profileId: $profileId, input: $input) {
+      id
+      version
+      status
+      createdAt
+    }
+  }
+`;
+
 const PROFILE_STATUSES = ["active", "deprecated", "disabled"] as const;
 
 const schema = z.object({
@@ -48,6 +73,9 @@ const schema = z.object({
 });
 
 type FormValues = z.infer<typeof schema>;
+type ProfileVersionsData = {
+  profileVersions: { id: string; version: number }[];
+};
 
 export type ProfileFormInitialValues = {
   id: string;
@@ -65,6 +93,8 @@ export function ProfileEditForm({
   onCancel: () => void;
   onSaved: () => void;
 }) {
+  const [showVersionForm, setShowVersionForm] = React.useState(false);
+  const queryClient = useQueryClient();
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
@@ -93,74 +123,147 @@ export function ProfileEditForm({
     },
     onError: (err) => toast.error(err.message),
   });
+  const versionsQuery = useQuery({
+    queryKey: ["profile-edit-versions", profile.id],
+    queryFn: ({ signal }) =>
+      graphqlClient<ProfileVersionsData>({
+        query: PROFILE_VERSIONS_QUERY,
+        variables: { profileId: profile.id },
+        signal,
+      }),
+    staleTime: 30_000,
+  });
+  const versions = versionsQuery.data?.profileVersions ?? [];
+  const nextVersion =
+    versions.length > 0 ? Math.max(...versions.map((v) => v.version)) + 1 : 1;
+  const createVersion = useMutation({
+    mutationFn: (input: ProfileVersionSubmitInput) =>
+      graphqlClient({
+        query: CREATE_VERSION_MUTATION,
+        variables: {
+          profileId: profile.id,
+          input: {
+            version: input.version,
+            jsonSchema: input.jsonSchema,
+            uiSchema: input.uiSchema,
+            status: input.status,
+          },
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Profile version created");
+      setShowVersionForm(false);
+      queryClient.invalidateQueries({
+        queryKey: ["profile-edit-versions", profile.id],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["profile-inspect", profile.id],
+      });
+    },
+    onError: (err) => toast.error(err.message),
+  });
 
   return (
-    <Form {...form}>
-      <form
-        className="grid gap-4"
-        onSubmit={form.handleSubmit((v) => save.mutate(v))}
-      >
-        <FormField
-          control={form.control}
-          name="displayName"
-          render={({ field }) => (
-            <FormItem>
-              <RequiredFormLabel required>Display name</RequiredFormLabel>
-              <FormControl>
-                <Input {...field} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name="description"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Description</FormLabel>
-              <FormControl>
-                <Input {...field} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name="status"
-          render={({ field }) => (
-            <FormItem>
-              <RequiredFormLabel required>Status</RequiredFormLabel>
-              <Select onValueChange={field.onChange} value={field.value}>
+    <div className="grid gap-6">
+      <Form {...form}>
+        <form
+          className="grid gap-4"
+          onSubmit={form.handleSubmit((v) => save.mutate(v))}
+        >
+          <FormField
+            control={form.control}
+            name="displayName"
+            render={({ field }) => (
+              <FormItem>
+                <RequiredFormLabel required>Display name</RequiredFormLabel>
                 <FormControl>
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
+                  <Input {...field} />
                 </FormControl>
-                <SelectContent>
-                  <SelectGroup>
-                    {PROFILE_STATUSES.map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <div className="flex justify-end gap-2">
-          <Button onClick={onCancel} type="button" variant="outline">
-            Cancel
-          </Button>
-          <Button type="submit" disabled={save.isPending}>
-            Save changes
-          </Button>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="description"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Description</FormLabel>
+                <FormControl>
+                  <Input {...field} />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="status"
+            render={({ field }) => (
+              <FormItem>
+                <RequiredFormLabel required>Status</RequiredFormLabel>
+                <Select onValueChange={field.onChange} value={field.value}>
+                  <FormControl>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectGroup>
+                      {PROFILE_STATUSES.map((s) => (
+                        <SelectItem key={s} value={s}>
+                          {s}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <div className="flex justify-end gap-2">
+            <Button onClick={onCancel} type="button" variant="outline">
+              Cancel
+            </Button>
+            <Button type="submit" disabled={save.isPending}>
+              Save changes
+            </Button>
+          </div>
+        </form>
+      </Form>
+
+      <div className="grid gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium">Profile versions</h3>
+            <p className="text-xs text-muted-foreground">
+              Add a new schema version for future entities using this profile.
+            </p>
+          </div>
+          {!showVersionForm ? (
+            <Button
+              onClick={() => setShowVersionForm(true)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Plus data-icon="inline-start" />
+              New version
+            </Button>
+          ) : null}
         </div>
-      </form>
-    </Form>
+
+        {showVersionForm ? (
+          <ProfileVersionForm
+            isPending={createVersion.isPending}
+            nextVersion={nextVersion}
+            onCancel={() => setShowVersionForm(false)}
+            onSubmit={(input) => createVersion.mutate(input)}
+            submitLabel="Create version"
+          />
+        ) : null}
+      </div>
+    </div>
   );
 }

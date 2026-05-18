@@ -137,16 +137,18 @@ impl EntityMutation {
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
         let existing = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            auth.entity_id,
-            &[
-                ("manage", Scope::Object(id)),
-                ("manage", scope_for_tenant(existing.tenant_id)),
-                ("write", scope_for_tenant(existing.tenant_id)),
-            ],
-        )
-        .await?;
+        if auth.entity_id != id {
+            require_any_capability(
+                &state.pool,
+                auth.entity_id,
+                &[
+                    ("manage", Scope::Object(id)),
+                    ("manage", scope_for_tenant(existing.tenant_id)),
+                    ("write", scope_for_tenant(existing.tenant_id)),
+                ],
+            )
+            .await?;
+        }
 
         let entity = repo::update_entity(
             &state.pool,

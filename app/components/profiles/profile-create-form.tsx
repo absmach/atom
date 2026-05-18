@@ -2,21 +2,18 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
 import * as React from "react";
-import {
-  type UseFormReturn,
-  useFieldArray,
-  useForm,
-  useWatch,
-} from "react-hook-form";
+import { type UseFormReturn, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import { useTenant } from "@/components/app-shell/tenant-provider";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
+import {
+  ProfileVersionForm,
+  type ProfileVersionSubmitInput,
+} from "@/components/profiles/profile-version-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Form,
   FormControl,
@@ -26,7 +23,6 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { JsonEditor } from "@/components/ui/json-editor";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -87,14 +83,6 @@ const ENTITY_KINDS = [
   "workload",
   "application",
 ] as const;
-const SCHEMA_FIELD_TYPES = [
-  "string",
-  "number",
-  "integer",
-  "boolean",
-  "json",
-] as const;
-const ATTRIBUTE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const GLOBAL_TENANT_VALUE = "__global__";
 
 type TenantOption = { id: string; name: string };
@@ -102,23 +90,6 @@ type TenantsPickerData = { tenants: { items: TenantOption[] } };
 type ProfileCreateResponse = {
   createProfile: { id: string };
 };
-
-const schemaFieldSchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(1, "Attribute name is required.")
-    .regex(
-      ATTRIBUTE_NAME_PATTERN,
-      "Use letters, numbers, and underscores only. The first character cannot be a number.",
-    ),
-  label: z.string().trim(),
-  type: z.enum(SCHEMA_FIELD_TYPES),
-  required: z.boolean(),
-  options: z.string().trim(),
-  description: z.string().trim(),
-  placeholder: z.string().trim(),
-});
 
 const profileFormSchema = z
   .object({
@@ -128,8 +99,6 @@ const profileFormSchema = z
     displayName: z.string().trim().min(1, "Display name is required."),
     description: z.string().trim(),
     tenantId: z.string().trim(),
-    version: z.number().int().min(1, "Version must be at least 1."),
-    schemaFields: z.array(schemaFieldSchema),
   })
   .superRefine((value, ctx) => {
     if (
@@ -142,19 +111,9 @@ const profileFormSchema = z
         message: "Entity profiles must use a supported entity kind.",
       });
     }
-
-    const names = value.schemaFields.map((field) => field.name);
-    if (new Set(names).size !== names.length) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["schemaFields"],
-        message: "Attribute names must be unique.",
-      });
-    }
   });
 
 type ProfileFormValues = z.infer<typeof profileFormSchema>;
-type SchemaBuilderField = ProfileFormValues["schemaFields"][number];
 
 const defaultValues: ProfileFormValues = {
   objectKind: "entity",
@@ -163,8 +122,6 @@ const defaultValues: ProfileFormValues = {
   displayName: "",
   description: "",
   tenantId: "",
-  version: 1,
-  schemaFields: [],
 };
 
 export function ProfileCreateForm({
@@ -180,20 +137,7 @@ export function ProfileCreateForm({
     mode: "onSubmit",
     defaultValues,
   });
-  const { fields, append, remove } = useFieldArray({
-    control: form.control,
-    name: "schemaFields",
-  });
   const objectKind = form.watch("objectKind");
-  const schemaFields =
-    useWatch({
-      control: form.control,
-      name: "schemaFields",
-    }) ?? [];
-  const generated = React.useMemo(
-    () => buildProfileSchemas(schemaFields),
-    [schemaFields],
-  );
 
   React.useEffect(() => {
     if (
@@ -205,18 +149,23 @@ export function ProfileCreateForm({
   }, [form, objectKind]);
 
   const createProfile = useMutation({
-    mutationFn: async (values: ProfileFormValues) => {
-      const schemas = buildProfileSchemas(values.schemaFields);
+    mutationFn: async ({
+      profileValues,
+      versionValues,
+    }: {
+      profileValues: ProfileFormValues;
+      versionValues: ProfileVersionSubmitInput;
+    }) => {
       const profile = await graphqlClient<ProfileCreateResponse>({
         query: CREATE_PROFILE_WITH_ID_MUTATION,
         variables: {
           input: removeEmptyValues({
-            tenantId: values.tenantId,
-            objectKind: values.objectKind,
-            kind: values.kind,
-            key: values.key,
-            displayName: values.displayName,
-            description: values.description,
+            tenantId: profileValues.tenantId,
+            objectKind: profileValues.objectKind,
+            kind: profileValues.kind,
+            key: profileValues.key,
+            displayName: profileValues.displayName,
+            description: profileValues.description,
             status: "active",
           }),
         },
@@ -226,10 +175,10 @@ export function ProfileCreateForm({
         variables: {
           profileId: profile.createProfile.id,
           input: {
-            version: values.version,
-            jsonSchema: schemas.jsonSchema,
-            uiSchema: schemas.uiSchema,
-            status: "active",
+            version: versionValues.version,
+            jsonSchema: versionValues.jsonSchema,
+            uiSchema: versionValues.uiSchema,
+            status: versionValues.status,
           },
         },
       });
@@ -253,24 +202,30 @@ export function ProfileCreateForm({
     if (valid) setStep("version");
   }
 
-  function submit(values: ProfileFormValues) {
-    createProfile.mutate(values);
+  function submitVersion(versionValues: ProfileVersionSubmitInput) {
+    createProfile.mutate({
+      profileValues: form.getValues(),
+      versionValues,
+    });
   }
 
   return (
-    <Form {...form}>
-      <form className="mt-6 grid gap-4" onSubmit={form.handleSubmit(submit)}>
-        <div className="flex gap-2">
-          <Badge variant={step === "basics" ? "default" : "outline"}>
-            Basics
-          </Badge>
-          <Badge variant={step === "version" ? "default" : "outline"}>
-            Version
-          </Badge>
-        </div>
+    <div className="mt-6 grid gap-4">
+      <div className="flex gap-2">
+        <Badge variant={step === "basics" ? "default" : "outline"}>
+          Basics
+        </Badge>
+        <Badge variant={step === "version" ? "default" : "outline"}>
+          Version
+        </Badge>
+      </div>
 
-        {step === "basics" ? (
-          <>
+      {step === "basics" ? (
+        <Form {...form}>
+          <form
+            className="grid gap-4"
+            onSubmit={form.handleSubmit(() => setStep("version"))}
+          >
             <ProfileBasicsFields form={form} objectKind={objectKind} />
             <div className="flex justify-end gap-2">
               <Button onClick={onCancel} type="button" variant="outline">
@@ -280,64 +235,18 @@ export function ProfileCreateForm({
                 Next
               </Button>
             </div>
-          </>
-        ) : (
-          <>
-            <ProfileVersionFields form={form} />
-            <div className="grid gap-3 rounded-lg border p-3">
-              <div className="grid gap-1">
-                <h3 className="text-sm font-medium">Schema fields</h3>
-                <p className="text-xs text-muted-foreground">
-                  Schema fields are optional. Add fields only when they should
-                  become generated entity attribute inputs.
-                </p>
-              </div>
-              {fields.map((field, index) => (
-                <SchemaBuilderRow
-                  form={form}
-                  index={index}
-                  key={field.id}
-                  onRemove={() => remove(index)}
-                  position={index + 1}
-                />
-              ))}
-              <Button
-                onClick={() => append(emptySchemaBuilderField())}
-                type="button"
-                variant="outline"
-              >
-                <Plus data-icon="inline-start" />
-                Add field
-              </Button>
-            </div>
-
-            <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-              <GeneratedSchemaPreview
-                label="JSON schema"
-                value={generated.jsonSchema}
-              />
-              <GeneratedSchemaPreview
-                label="UI schema"
-                value={generated.uiSchema}
-              />
-            </div>
-
-            <div className="flex justify-between gap-2">
-              <Button
-                onClick={() => setStep("basics")}
-                type="button"
-                variant="outline"
-              >
-                Back
-              </Button>
-              <Button type="submit" disabled={createProfile.isPending}>
-                Save profile
-              </Button>
-            </div>
-          </>
-        )}
-      </form>
-    </Form>
+          </form>
+        </Form>
+      ) : (
+        <ProfileVersionForm
+          isPending={createProfile.isPending}
+          nextVersion={1}
+          onCancel={() => setStep("basics")}
+          onSubmit={submitVersion}
+          submitLabel="Save profile"
+        />
+      )}
+    </div>
   );
 }
 
@@ -388,22 +297,6 @@ function ProfileBasicsFields({
   );
 }
 
-function ProfileVersionFields({
-  form,
-}: {
-  form: UseFormReturn<ProfileFormValues>;
-}) {
-  return (
-    <TextField
-      form={form}
-      label="Version"
-      name="version"
-      required
-      type="number"
-    />
-  );
-}
-
 function TextField({
   form,
   label,
@@ -414,17 +307,7 @@ function TextField({
 }: {
   form: UseFormReturn<ProfileFormValues>;
   label: string;
-  name:
-    | "kind"
-    | "key"
-    | "displayName"
-    | "description"
-    | "version"
-    | `schemaFields.${number}.name`
-    | `schemaFields.${number}.label`
-    | `schemaFields.${number}.options`
-    | `schemaFields.${number}.description`
-    | `schemaFields.${number}.placeholder`;
+  name: "kind" | "key" | "displayName" | "description";
   placeholder?: string;
   required?: boolean;
   type?: string;
@@ -467,7 +350,7 @@ function NativeSelectField({
 }: {
   form: UseFormReturn<ProfileFormValues>;
   label: string;
-  name: "objectKind" | "kind" | `schemaFields.${number}.type`;
+  name: "objectKind" | "kind";
   options: readonly string[];
   required?: boolean;
 }) {
@@ -570,183 +453,6 @@ function TenantSelectField({
   );
 }
 
-function SchemaBuilderRow({
-  form,
-  index,
-  onRemove,
-  position,
-}: {
-  form: UseFormReturn<ProfileFormValues>;
-  index: number;
-  onRemove: () => void;
-  position: number;
-}) {
-  const type = form.watch(`schemaFields.${index}.type`);
-
-  return (
-    <div className="grid gap-3 rounded-lg border bg-background p-3">
-      <div className="flex items-center justify-between gap-2">
-        <Badge variant="outline">Field {position}</Badge>
-        <Button onClick={onRemove} size="sm" type="button" variant="ghost">
-          Remove
-        </Button>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <TextField
-          form={form}
-          label="Attribute name"
-          name={`schemaFields.${index}.name`}
-          placeholder="serial_no"
-          required
-        />
-        <TextField
-          form={form}
-          label="Label"
-          name={`schemaFields.${index}.label`}
-          placeholder="Serial number"
-        />
-        <NativeSelectField
-          form={form}
-          label="Type"
-          name={`schemaFields.${index}.type`}
-          options={SCHEMA_FIELD_TYPES}
-          required
-        />
-        <TextField
-          form={form}
-          label="Placeholder"
-          name={`schemaFields.${index}.placeholder`}
-        />
-      </div>
-      <TextField
-        form={form}
-        label="Help text"
-        name={`schemaFields.${index}.description`}
-      />
-      {type === "string" ? (
-        <TextField
-          form={form}
-          label="Options"
-          name={`schemaFields.${index}.options`}
-          placeholder="prod, stage, dev"
-        />
-      ) : null}
-      <FormField
-        control={form.control}
-        name={`schemaFields.${index}.required`}
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel className="flex min-h-9 items-center gap-2 text-sm">
-              <FormControl>
-                <Checkbox
-                  checked={Boolean(field.value)}
-                  onCheckedChange={(checked) =>
-                    field.onChange(checked === true)
-                  }
-                />
-              </FormControl>
-              Required field
-            </FormLabel>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
-    </div>
-  );
-}
-
-function GeneratedSchemaPreview({
-  label,
-  value,
-}: {
-  label: string;
-  value: unknown;
-}) {
-  const code = React.useMemo(() => JSON.stringify(value, null, 2), [value]);
-
-  return (
-    <div className="grid min-w-0 max-w-full gap-2">
-      <div className="text-sm font-medium">{label}</div>
-      <JsonEditor value={code} className="[&_.cm-editor]:min-h-48" />
-    </div>
-  );
-}
-
-function emptySchemaBuilderField(): SchemaBuilderField {
-  return {
-    name: "",
-    label: "",
-    type: "string",
-    required: false,
-    options: "",
-    description: "",
-    placeholder: "",
-  };
-}
-
-function buildProfileSchemas(fields: SchemaBuilderField[]) {
-  if (fields.length === 0) {
-    return { jsonSchema: {}, uiSchema: {} };
-  }
-
-  const properties = Object.fromEntries(
-    fields.map((field) => [
-      field.name.trim(),
-      removeEmptyValues({
-        type: schemaPropertyType(field.type),
-        title: field.label.trim() || titleizeLocal(field.name),
-        description: field.description,
-        enum:
-          field.type === "string"
-            ? field.options
-                .split(",")
-                .map((option) => option.trim())
-                .filter(Boolean)
-            : undefined,
-      }),
-    ]),
-  );
-  const required = fields
-    .filter((field) => field.required)
-    .map((field) => field.name.trim());
-  const jsonSchema = removeEmptyValues({
-    type: "object",
-    required: required.length ? required : undefined,
-    properties,
-  });
-  const uiSchema = removeEmptyValues({
-    "ui:order": fields.map((field) => field.name.trim()),
-    ...Object.fromEntries(
-      fields.map((field) => [
-        field.name.trim(),
-        removeEmptyValues({
-          "ui:title": field.label,
-          "ui:description": field.description,
-          "ui:placeholder": field.placeholder,
-          "ui:widget": field.type === "json" ? "textarea" : undefined,
-        }),
-      ]),
-    ),
-  });
-
-  return { jsonSchema, uiSchema };
-}
-
-function schemaPropertyType(type: SchemaBuilderField["type"]) {
-  switch (type) {
-    case "string":
-      return "string";
-    case "number":
-      return "number";
-    case "integer":
-      return "integer";
-    case "boolean":
-      return "boolean";
-    case "json":
-      return "object";
-  }
-}
-
 function removeEmptyValues(values: Record<string, unknown>) {
   return Object.fromEntries(
     Object.entries(values).filter(([, value]) => {
@@ -755,10 +461,4 @@ function removeEmptyValues(values: Record<string, unknown>) {
       return true;
     }),
   );
-}
-
-function titleizeLocal(value: string) {
-  return value
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
 }

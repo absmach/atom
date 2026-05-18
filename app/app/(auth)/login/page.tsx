@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { LoginForm } from "@/components/auth/login-form";
 
 export const metadata: Metadata = { title: "Sign In" };
@@ -18,15 +17,6 @@ export default function LoginPage() {
         <div className="mt-4">
           <LoginForm />
         </div>
-        <p className="mt-4 text-center text-sm text-muted-foreground">
-          Don&apos;t have an account?{" "}
-          <Link
-            href="/register"
-            className="font-medium text-primary underline-offset-4 hover:underline"
-          >
-            Sign up
-          </Link>
-        </p>
       </div>
     </main>
   );

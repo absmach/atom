@@ -10,7 +10,10 @@ use crate::{
     state::AppState,
 };
 
-use super::types::{parse_id, parse_optional_id, LoginInput, LoginResponse, Session};
+use crate::models::session::SignupRequest;
+
+use super::types::{parse_id, parse_optional_id, LoginInput, LoginResponse, Session, SignupInput,
+    SignupResponse};
 
 #[derive(Default)]
 pub struct AuthQuery;
@@ -59,6 +62,26 @@ impl AuthMutation {
         .await
         .map_err(gql_error)?;
 
+        Ok(response.into())
+    }
+
+    async fn signup(&self, ctx: &Context<'_>, input: SignupInput) -> Result<SignupResponse> {
+        let state = ctx.data::<AppState>()?;
+        if !state.config.signup_enabled {
+            return Err(async_graphql::Error::new("sign up is not enabled"));
+        }
+        let response = service::signup_human(
+            &state.pool,
+            &state.config,
+            SignupRequest {
+                name: input.name,
+                email: input.email,
+                password: input.password,
+                attributes: input.attributes.0,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
         Ok(response.into())
     }
 
@@ -228,6 +251,9 @@ pub(crate) async fn require_credential_management(
     let target = repo::get_entity(&state.pool, target_entity_id)
         .await
         .map_err(gql_error)?;
+    if actor_id == target_entity_id {
+        return Ok(target.tenant_id);
+    }
     if has_capability_in_scope(
         &state.pool,
         actor_id,

@@ -6,7 +6,15 @@ export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const token = request.cookies.get(AUTH_COOKIE)?.value;
 
-  const publicPages = ["/login", "/register"];
+  if (
+    pathname === "/register" ||
+    pathname === "/verify-email" ||
+    pathname === "/callback"
+  ) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  const publicPages = ["/login"];
 
   if (publicPages.includes(pathname) && token) {
     return NextResponse.redirect(new URL("/dashboard", request.url));

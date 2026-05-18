@@ -1,7 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Tag } from "emblor";
 import { type SetStateAction, useEffect, useState } from "react";
 import { type UseFormReturn, useForm } from "react-hook-form";
@@ -124,6 +124,8 @@ export function TenantCreateForm({
     );
   }, [form, tagItems]);
 
+  const queryClient = useQueryClient();
+
   const createTenant = useMutation({
     mutationFn: async (values: TenantFormValues) =>
       graphqlClient({
@@ -141,6 +143,7 @@ export function TenantCreateForm({
       toast.success("Tenant created");
       form.reset(defaultValues);
       setTagItems([]);
+      queryClient.invalidateQueries({ queryKey: ["tenant-switcher"] });
       onCreated();
     },
     onError: (error) => toast.error(error.message),
@@ -163,6 +166,7 @@ export function TenantCreateForm({
     },
     onSuccess: () => {
       toast.success("Tenant updated");
+      queryClient.invalidateQueries({ queryKey: ["tenant-switcher"] });
       onCreated();
     },
     onError: (error) => toast.error(error.message),

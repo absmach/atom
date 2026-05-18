@@ -239,6 +239,23 @@ impl Session {
     }
 }
 
+pub struct SignupResponse(pub session_model::SignupResponse);
+
+#[Object]
+impl SignupResponse {
+    async fn entity_id(&self) -> ID {
+        id(self.0.entity_id)
+    }
+
+    async fn email(&self) -> &str {
+        &self.0.email
+    }
+
+    async fn verification_required(&self) -> bool {
+        self.0.verification_required
+    }
+}
+
 pub struct LoginResponse(pub session_model::LoginResponse);
 
 #[Object]
@@ -874,6 +891,15 @@ pub struct LoginInput {
 }
 
 #[derive(InputObject)]
+pub struct SignupInput {
+    pub name: String,
+    pub email: String,
+    pub password: String,
+    #[graphql(default)]
+    pub attributes: async_graphql::Json<serde_json::Value>,
+}
+
+#[derive(InputObject)]
 pub struct CreateProfileInput {
     pub tenant_id: Option<ID>,
     pub object_kind: String,
@@ -1320,6 +1346,12 @@ impl From<entity_model::Entity> for Entity {
 impl From<session_model::Session> for Session {
     fn from(session: session_model::Session) -> Self {
         Session(session)
+    }
+}
+
+impl From<session_model::SignupResponse> for SignupResponse {
+    fn from(response: session_model::SignupResponse) -> Self {
+        SignupResponse(response)
     }
 }
 
