@@ -131,8 +131,8 @@ impl Profile {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -209,8 +209,8 @@ impl Entity {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -325,8 +325,8 @@ impl Tenant {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -378,8 +378,8 @@ impl TenantInvitation {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -415,8 +415,8 @@ impl Resource {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -496,8 +496,8 @@ impl ApiEndpoint {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -574,8 +574,8 @@ impl Group {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -692,8 +692,8 @@ impl Role {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
@@ -721,8 +721,8 @@ impl Capability {
         timestamp(self.0.created_at)
     }
 
-    async fn updated_at(&self) -> String {
-        timestamp(self.0.updated_at)
+    async fn updated_at(&self) -> Option<String> {
+        self.0.updated_at.map(timestamp)
     }
 }
 
