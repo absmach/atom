@@ -18,19 +18,10 @@ FROM deps-dev AS builder-dev
 COPY . .
 RUN touch src/main.rs && cargo build
 
-FROM node:24-alpine AS console-builder
-WORKDIR /app/console
-RUN corepack enable
-COPY console/package.json console/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-COPY console/ ./
-RUN pnpm build
-
 FROM alpine:3.20 AS release
 RUN apk add --no-cache ca-certificates libgcc
 WORKDIR /app
 COPY --from=builder-release /app/target/release/atom /usr/local/bin/atom
-COPY --from=console-builder /app/console/dist /app/console/dist
 COPY migrations ./migrations
 EXPOSE 8080
 CMD ["atom"]
@@ -39,7 +30,6 @@ FROM alpine:3.20 AS dev
 RUN apk add --no-cache ca-certificates libgcc
 WORKDIR /app
 COPY --from=builder-dev /app/target/debug/atom /usr/local/bin/atom
-COPY --from=console-builder /app/console/dist /app/console/dist
 COPY migrations ./migrations
 EXPOSE 8080
 CMD ["atom"]

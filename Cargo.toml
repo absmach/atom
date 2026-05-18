@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.7", features = ["json", "macros"] }
-async-graphql = { version = "=7.2.1", default-features = false, features = ["playground"] }
+async-graphql = { version = "=7.2.1", default-features = false }
 async-graphql-axum = "=7.0.13"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate", "derive"] }
@@ -24,7 +24,7 @@ jsonwebtoken = "9"
 openidconnect = "4.0.1"
 argon2 = { version = "0.5", features = ["std"] }
 tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors", "fs"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "1"

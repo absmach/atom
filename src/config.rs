@@ -40,17 +40,13 @@ pub struct Config {
     pub invitation_expiry_secs: u64,
     pub oauth_state_expiry_secs: u64,
     pub auth_exchange_code_expiry_secs: u64,
-    /// Enables the local developer GraphQL console at /graphql/console.
-    pub graphql_console_enabled: bool,
-    /// Directory containing the built Astro console.
-    pub graphql_console_dist_dir: String,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self> {
         let public_base_url = std::env::var("ATOM_PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".into());
-        let console_auth_callback = public_url(&public_base_url, "/graphql/console/auth/callback");
+        let auth_callback = public_url(&public_base_url, "/callback");
         Ok(Config {
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
             listen_addr: std::env::var("LISTEN_ADDR")
@@ -78,19 +74,15 @@ impl Config {
             dev_allow_unverified_email_login: env_bool("ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
             email_verification_redirect: std::env::var("ATOM_EMAIL_VERIFICATION_REDIRECT")
-                .unwrap_or_else(|_| {
-                    public_url(&public_base_url, "/graphql/console/auth/verify-email")
-                }),
-            password_reset_redirect: std::env::var("ATOM_PASSWORD_RESET_REDIRECT").unwrap_or_else(
-                |_| public_url(&public_base_url, "/graphql/console/auth/reset-password"),
-            ),
-            invitation_redirect: std::env::var("ATOM_INVITATION_REDIRECT").unwrap_or_else(|_| {
-                public_url(&public_base_url, "/graphql/console/invitations/accept")
-            }),
+                .unwrap_or_else(|_| public_url(&public_base_url, "/verify-email")),
+            password_reset_redirect: std::env::var("ATOM_PASSWORD_RESET_REDIRECT")
+                .unwrap_or_else(|_| public_url(&public_base_url, "/reset-password")),
+            invitation_redirect: std::env::var("ATOM_INVITATION_REDIRECT")
+                .unwrap_or_else(|_| public_url(&public_base_url, "/invitations/accept")),
             oauth_success_redirect: std::env::var("ATOM_OAUTH_SUCCESS_REDIRECT")
-                .unwrap_or_else(|_| console_auth_callback.clone()),
+                .unwrap_or_else(|_| auth_callback.clone()),
             oauth_error_redirect: std::env::var("ATOM_OAUTH_ERROR_REDIRECT")
-                .unwrap_or_else(|_| console_auth_callback.clone()),
+                .unwrap_or_else(|_| auth_callback.clone()),
             oidc_providers: parse_oidc_providers()?,
             smtp: smtp_from_env(),
             email_verification_expiry_secs: env_u64("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS", 86_400),
@@ -98,9 +90,6 @@ impl Config {
             oauth_state_expiry_secs: env_u64("ATOM_OAUTH_STATE_EXPIRY_SECS", 600),
             auth_exchange_code_expiry_secs: env_u64("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", 300),
             public_base_url,
-            graphql_console_enabled: env_bool("ATOM_GRAPHQL_CONSOLE_ENABLED"),
-            graphql_console_dist_dir: std::env::var("ATOM_GRAPHQL_CONSOLE_DIST_DIR")
-                .unwrap_or_else(|_| "console/dist".to_string()),
         })
     }
 }
@@ -223,14 +212,14 @@ mod tests {
     use super::public_url;
 
     #[test]
-    fn public_url_joins_base_and_console_auth_paths() {
+    fn public_url_joins_base_and_ui_auth_paths() {
         assert_eq!(
-            public_url("http://localhost:8080/", "/graphql/console/auth/callback"),
-            "http://localhost:8080/graphql/console/auth/callback"
+            public_url("http://localhost:3005/", "/callback"),
+            "http://localhost:3005/callback"
         );
         assert_eq!(
-            public_url("https://atom.example", "/graphql/console/auth/verify-email"),
-            "https://atom.example/graphql/console/auth/verify-email"
+            public_url("https://atom.example", "/verify-email"),
+            "https://atom.example/verify-email"
         );
     }
 }
