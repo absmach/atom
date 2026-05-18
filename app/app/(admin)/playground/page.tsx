@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { GraphqlPlayground } from "@/components/playground/graphql-playground";
 
 export const metadata: Metadata = { title: "Playground" };
 
@@ -9,19 +9,10 @@ export default function DeveloperPlaygroundPage() {
       <div className="min-w-0">
         <h1 className="text-2xl font-semibold tracking-tight">Playground</h1>
         <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-          A developer request playground for testing custom endpoints will live
-          here.
+          Compose, run, inspect, and reuse authenticated Atom GraphQL requests.
         </p>
       </div>
-      <Card>
-        <CardHeader>
-          <CardTitle>Coming soon</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">
-          Endpoint request execution and response inspection will be added in a
-          later step.
-        </CardContent>
-      </Card>
+      <GraphqlPlayground />
     </section>
   );
 }
