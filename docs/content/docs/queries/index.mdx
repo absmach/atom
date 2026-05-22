@@ -29,37 +29,37 @@ These are useful for CRUD, but they don't answer operational questions like:
 
 | Endpoint | Question it answers |
 |---|---|
-| [`POST /authz/explain`](/docs/queries/authz-explain) | **Why** can/can't this entity perform this action? Full decision trail. |
-| [`POST /authz/check/bulk`](/docs/queries/bulk-check) | Can this entity perform **multiple actions** on a resource? Single call. |
+| [`POST /authz/explain`](/queries/authz-explain) | **Why** can/can't this entity perform this action? Full decision trail. |
+| [`POST /authz/check/bulk`](/queries/bulk-check) | Can this entity perform **multiple actions** on a resource? Single call. |
 
 ### Access queries (who can do what)
 
 | Endpoint | Question it answers |
 |---|---|
-| [`GET /entities/:id/access`](/docs/queries/entity-access) | What resources can this entity access, with which roles and capabilities? |
-| [`GET /resources/:id/access`](/docs/queries/resource-access) | Who can access this resource, with which roles and capabilities? |
-| [`GET /entities/:id/effective-capabilities`](/docs/queries/effective-capabilities) | Flat, deduplicated list of what this entity can actually do. |
+| [`GET /entities/:id/access`](/queries/entity-access) | What resources can this entity access, with which roles and capabilities? |
+| [`GET /resources/:id/access`](/queries/resource-access) | Who can access this resource, with which roles and capabilities? |
+| [`GET /entities/:id/effective-capabilities`](/queries/effective-capabilities) | Flat, deduplicated list of what this entity can actually do. |
 
 ### Relationship queries (impact analysis)
 
 | Endpoint | Question it answers |
 |---|---|
-| [`GET /roles/:id/holders`](/docs/queries/role-holders) | Who holds this role? Needed before modifying or deleting a role. |
-| [`GET /groups/:id/access`](/docs/queries/group-access) | What access does membership in this group grant? |
+| [`GET /roles/:id/holders`](/queries/role-holders) | Who holds this role? Needed before modifying or deleting a role. |
+| [`GET /groups/:id/access`](/queries/group-access) | What access does membership in this group grant? |
 
 ### Audit
 
 | Endpoint | Question it answers |
 |---|---|
-| [`GET /audit`](/docs/queries/audit) | Query the audit log. Filter by entity, event type, outcome, and time range. |
+| [`GET /audit`](/queries/audit) | Query the audit log. Filter by entity, event type, outcome, and time range. |
 
 ### Admin hygiene
 
 | Endpoint | Question it answers |
 |---|---|
-| [`GET /admin/orphan-policies`](/docs/queries/admin-hygiene#orphan-policies) | Policies referencing deleted entities, groups, or roles. |
-| [`GET /admin/unprotected-resources`](/docs/queries/admin-hygiene#unprotected-resources) | Resources with no policies covering them. |
-| [`GET /admin/expiring-credentials`](/docs/queries/admin-hygiene#expiring-credentials) | Credentials expiring within N days. |
+| [`GET /admin/orphan-policies`](/queries/admin-hygiene#orphan-policies) | Policies referencing deleted entities, groups, or roles. |
+| [`GET /admin/unprotected-resources`](/queries/admin-hygiene#unprotected-resources) | Resources with no policies covering them. |
+| [`GET /admin/expiring-credentials`](/queries/admin-hygiene#expiring-credentials) | Credentials expiring within N days. |
 
 ## Design principles
 

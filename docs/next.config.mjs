@@ -2,19 +2,20 @@ import { createMDX } from 'fumadocs-mdx/next';
 
 const withMDX = createMDX();
 
-// NEXT_PUBLIC_BASE_PATH is injected by actions/configure-pages when deploying
-// to GitHub Pages (e.g. "/atom" for a project page at github.io/atom).
-const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+const BASE_PATH = '/docs/atom';
 
 /** @type {import('next').NextConfig} */
 const config = {
-  reactStrictMode: true,
   output: 'export',
   trailingSlash: true,
-  ...(basePath && {
-    basePath,
-    assetPrefix: basePath,
-  }),
+  reactStrictMode: true,
+  images: {
+    unoptimized: true,
+  },
+  basePath: BASE_PATH,
+  env: {
+    NEXT_PUBLIC_BASE_PATH: BASE_PATH,
+  },
 };
 
 export default withMDX(config);

@@ -30,7 +30,7 @@ export default async function Page({
   params: Promise<{ slug?: string[] }>;
 }) {
   const { slug } = await params;
-  const page = source.getPage(slug);
+  const page = source.getPage(slug ?? []);
   if (!page) notFound();
 
   const MDX = page.data.body;
@@ -55,7 +55,7 @@ export async function generateMetadata({
   params: Promise<{ slug?: string[] }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  const page = source.getPage(slug);
+  const page = source.getPage(slug ?? []);
   if (!page) notFound();
 
   return {
