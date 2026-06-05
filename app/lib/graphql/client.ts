@@ -29,6 +29,7 @@ export async function graphqlClient<TData>({
   const response = await fetch("/api/graphql", {
     method: "POST",
     headers: { "content-type": "application/json" },
+    credentials: "same-origin",
     body: JSON.stringify({ query, variables, operationName }),
     signal,
   });
