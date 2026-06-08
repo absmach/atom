@@ -381,7 +381,7 @@ atom_<32-hex-credential-id>_<64-hex-secret>
 
 The plaintext API key is revealed once and must not be recoverable later.
 
-Certificate credentials are first-class Atom credentials. Atom owns certificate issuance, CSR signing, renewal, revocation, entity-wide revocation, CA chain publication, CRL publication, OCSP responses, and runtime certificate identity lookup. Certificates are issued by Atom's internal CA; the CA private keys are encrypted before storage in Postgres using a configured key-encryption secret. Issued leaf certificate PEM is stored on the certificate credential and may be retrieved by authorized callers. Generated leaf private keys are revealed once and must not be recoverable later. CSR-issued private keys are never known to Atom. Certificate fingerprints are computed over certificate DER, not PEM text.
+Certificate credentials are first-class Atom credentials. Atom owns certificate issuance, CSR signing, renewal, revocation, entity-wide revocation, CA chain publication, CRL publication, OCSP responses, and runtime certificate identity lookup. Certificates are issued from operator-supplied CA files loaded at startup. Atom must not store CA certificates or CA private keys in Postgres. Issued leaf certificate PEM is stored on the certificate credential and may be retrieved by authorized callers. Generated leaf private keys are revealed once and must not be recoverable later. CSR-issued private keys are never known to Atom. Certificate fingerprints are computed over certificate DER, not PEM text.
 
 Credential management authority follows the entity's `tenant_id`, not tenant membership:
 
@@ -974,8 +974,8 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AUTH-8 | Signing keys must be rotatable through a manage-protected endpoint. | Should |
 | AUTH-9 | Tenant admins may manage credentials for tenant-scoped entities in their tenant. | Must |
 | AUTH-10 | Tenant admins must not manage credentials for any entity not owned by their tenant, including global entities (`tenant_id = null`), entities owned by other tenants, and platform admins. Platform policy may explicitly delegate credential authority over a specific entity to a specific tenant admin. | Must |
-| AUTH-11 | The system must support Atom-issued certificate credentials backed by an internal CA. | Must |
-| AUTH-12 | CA private keys must be encrypted before storage in Postgres. | Must |
+| AUTH-11 | The system must support Atom-issued certificate credentials backed by an operator-supplied file issuer CA. | Must |
+| AUTH-12 | CA certificates and CA private keys must be loaded from mounted files and must not be stored in Postgres. | Must |
 | AUTH-13 | The system must support generated leaf certificates with one-time private key reveal. | Must |
 | AUTH-14 | The system must support CSR signing without storing or returning a private key. | Must |
 | AUTH-15 | The system must support certificate renewal, serial revocation, entity-wide certificate revocation, CRL publication, OCSP responses, and CA chain publication. | Must |
@@ -1175,8 +1175,8 @@ Detailed endpoint requirements are maintained in the linked product docs:
 
 - Secrets must be hashed with argon2.
 - JWTs must be signed and verifiable through published keys.
-- CA private keys must be encrypted before they are stored.
-- Atom must fail startup when certificate support is enabled without a valid CA key-encryption secret.
+- CA private keys must be provided through mounted files and must not be stored in Postgres.
+- Atom must fail startup when certificate support is enabled without valid file issuer CA material.
 - Management endpoints must require a manage-capable caller.
 - Authorization must be denied by default.
 - API keys must not be recoverable after creation.

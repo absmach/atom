@@ -46,6 +46,8 @@ async fn state(pool: PgPool) -> AppState {
         dev_allow_unverified_email_login: false,
         public_base_url: "http://localhost:8080".into(),
         cors_allowed_origins: vec!["http://localhost:8080".into()],
+        auth_cookie_secure: false,
+        auth_cookie_domain: None,
         email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
         password_reset_redirect: "http://localhost:8080/reset-password".into(),
         invitation_redirect: "http://localhost:8080/invitations/accept".into(),
@@ -58,15 +60,15 @@ async fn state(pool: PgPool) -> AppState {
         oauth_state_expiry_secs: 600,
         auth_exchange_code_expiry_secs: 300,
         certs_enabled: false,
-        certs_key_encryption_secret: None,
-        certs_root_ttl_secs: 315_360_000,
-        certs_intermediate_ttl_secs: 157_680_000,
+        certs_ca_mode: atom::config::CertsCaMode::FileIntermediateIssuer,
+        certs_root_ca_cert_path: None,
+        certs_intermediate_ca_cert_path: None,
+        certs_intermediate_ca_key_path: None,
+        certs_root_ca_key_path: None,
         certs_leaf_default_ttl_secs: 2_592_000,
         certs_leaf_max_ttl_secs: 2_592_000,
-        certs_root_common_name: "Atom Root CA".into(),
-        certs_intermediate_common_name: "Atom Intermediate CA".into(),
     };
-    AppState::new(pool, config, active_keys)
+    AppState::new(pool, config, active_keys, None)
 }
 
 fn authed(query: impl Into<String>) -> Request {
@@ -87,6 +89,20 @@ async fn create_human(pool: &PgPool) -> (Uuid, String) {
         .await
         .expect("insert human");
     (id, name)
+}
+
+async fn create_device(pool: &PgPool) -> Uuid {
+    let id = Uuid::new_v4();
+    let name = format!("graphql-device-{id}");
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'device', $2, 'active')",
+    )
+    .bind(id)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("insert device");
+    id
 }
 
 async fn seeded_client_profile(pool: &PgPool) -> Uuid {
@@ -174,6 +190,76 @@ async fn login_mutation_returns_token() {
         .is_some_and(|token| !token.is_empty()));
     assert!(login["sessionId"].as_str().is_some());
     assert!(login["expiresAt"].as_str().is_some());
+}
+
+#[tokio::test]
+#[ignore]
+async fn login_mutation_accepts_entity_uuid_identifier() {
+    let pool = common::pool().await;
+    let (entity_id, _) = create_human(&pool).await;
+    service::create_password(&pool, entity_id, "test-password-123")
+        .await
+        .expect("create password");
+    let schema = build_schema(state(pool).await);
+
+    let response = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{entity_id}",
+                secret: "test-password-123"
+              }}) {{
+                token
+                entityId
+                sessionId
+              }}
+            }}
+            "#
+        )))
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let login = &response.data.into_json().expect("json data")["login"];
+    assert_eq!(login["entityId"], entity_id.to_string());
+    assert!(login["token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty()));
+    assert!(login["sessionId"].as_str().is_some());
+}
+
+#[tokio::test]
+#[ignore]
+async fn create_password_allows_legacy_device_secret_and_login_by_uuid() {
+    let pool = common::pool().await;
+    let entity_id = create_device(&pool).await;
+    service::create_password(&pool, entity_id, "device1")
+        .await
+        .expect("create device password");
+    let schema = build_schema(state(pool).await);
+
+    let response = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{entity_id}",
+                secret: "device1"
+              }}) {{
+                token
+                entityId
+              }}
+            }}
+            "#
+        )))
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let login = &response.data.into_json().expect("json data")["login"];
+    assert_eq!(login["entityId"], entity_id.to_string());
+    assert!(login["token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty()));
 }
 
 #[tokio::test]

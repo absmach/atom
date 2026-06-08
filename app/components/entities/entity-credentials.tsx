@@ -8,7 +8,6 @@ import {
   FileKey,
   KeyRound,
   Lock,
-  Plus,
   RefreshCw,
   Trash2,
 } from "lucide-react";
@@ -21,14 +20,6 @@ import { Button } from "@/components/ui/button";
 import { DateTimePicker } from "@/components/ui/date-time-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { graphqlClient } from "@/lib/graphql/client";
 import { Action } from "@/lib/utils";
@@ -183,20 +174,18 @@ type DownloadableCertificate = {
 };
 
 export function EntityCredentials({ entityId }: { entityId: string }) {
-  const [adding, setAdding] = React.useState(false);
-  const [selectedKind, setSelectedKind] =
-    React.useState<CredentialKind>("password");
+  const [activeForm, setActiveForm] = React.useState<CredentialKind | null>(
+    null,
+  );
   const [createdApiKey, setCreatedApiKey] = React.useState<ApiKeyResult | null>(
     null,
   );
   const [createdCertificate, setCreatedCertificate] =
     React.useState<CertificateResult | null>(null);
   const [showPassword, setShowPassword] = React.useState(false);
-  const [form, setForm] = React.useState<AddCredentialState>({
-    kind: "password",
-    password: "",
-    confirm: "",
-  });
+  const [form, setForm] = React.useState<AddCredentialState>(
+    newCredentialForm("password"),
+  );
 
   const { data, error, isFetching, refetch } = useQuery({
     enabled: Boolean(entityId),
@@ -218,7 +207,7 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
       }),
     onSuccess: () => {
       toast.success("Password credential created");
-      setAdding(false);
+      setActiveForm(null);
       void refetch();
     },
     onError: (err) => toast.error(err.message),
@@ -232,7 +221,7 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
       }),
     onSuccess: (data) => {
       setCreatedApiKey(data.createApiKey);
-      setAdding(false);
+      setActiveForm(null);
       void refetch();
     },
     onError: (err) => toast.error(err.message),
@@ -265,7 +254,7 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
       }),
     onSuccess: (data) => {
       setCreatedCertificate(data.issueCertificate);
-      setAdding(false);
+      setActiveForm(null);
       void refetch();
     },
     onError: (err) => toast.error(err.message),
@@ -283,7 +272,7 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
       }),
     onSuccess: (data) => {
       setCreatedCertificate(data.issueCertificateFromCsr);
-      setAdding(false);
+      setActiveForm(null);
       void refetch();
     },
     onError: (err) => toast.error(err.message),
@@ -329,22 +318,10 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
 
   const credentials = data?.credentials.items ?? [];
 
-  function handleKindChange(kind: CredentialKind) {
-    setSelectedKind(kind);
-    setForm(
-      kind === "password"
-        ? { kind: "password", password: "", confirm: "" }
-        : kind === "api_key"
-          ? { kind: "api_key", description: "", expiresAt: "" }
-          : {
-              kind: "certificate",
-              commonName: "",
-              dnsNames: "",
-              ipAddresses: "",
-              ttlSecs: "",
-              csrPem: "",
-            },
-    );
+  function openForm(kind: CredentialKind) {
+    setShowPassword(false);
+    setForm(newCredentialForm(kind));
+    setActiveForm(kind);
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -403,11 +380,33 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
     <div className="grid gap-4">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">Credentials</div>
-        {!adding ? (
-          <Button onClick={() => setAdding(true)} size="sm" variant="outline">
-            <Plus data-icon="inline-start" className="size-3.5" />
-            Add credential
-          </Button>
+        {!activeForm ? (
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              onClick={() => openForm("password")}
+              size="sm"
+              variant="outline"
+            >
+              <Lock data-icon="inline-start" className="size-3.5" />
+              Add password
+            </Button>
+            <Button
+              onClick={() => openForm("api_key")}
+              size="sm"
+              variant="outline"
+            >
+              <KeyRound data-icon="inline-start" className="size-3.5" />
+              Add API key
+            </Button>
+            <Button
+              onClick={() => openForm("certificate")}
+              size="sm"
+              variant="outline"
+            >
+              <FileKey data-icon="inline-start" className="size-3.5" />
+              Issue certificate
+            </Button>
+          </div>
         ) : null}
       </div>
 
@@ -425,44 +424,13 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
         />
       ) : null}
 
-      {adding ? (
+      {activeForm ? (
         <div className="rounded-lg border bg-background p-4">
-          <div className="mb-3 text-sm font-medium">New credential</div>
+          <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+            <CredentialKindIcon kind={activeForm} />
+            {newCredentialTitle(activeForm)}
+          </div>
           <form className="grid gap-3" onSubmit={handleSubmit}>
-            <div className="grid gap-2">
-              <Label>Type</Label>
-              <Select
-                onValueChange={(v) => handleKindChange(v as CredentialKind)}
-                value={selectedKind}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectItem value="password">
-                      <span className="flex items-center gap-2">
-                        <Lock className="size-3.5" />
-                        Password
-                      </span>
-                    </SelectItem>
-                    <SelectItem value="api_key">
-                      <span className="flex items-center gap-2">
-                        <KeyRound className="size-3.5" />
-                        API Key
-                      </span>
-                    </SelectItem>
-                    <SelectItem value="certificate">
-                      <span className="flex items-center gap-2">
-                        <FileKey className="size-3.5" />
-                        Certificate
-                      </span>
-                    </SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            </div>
-
             {form.kind === "password" ? (
               <>
                 <div className="grid gap-2">
@@ -631,7 +599,7 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
 
             <div className="flex justify-end gap-2">
               <Button
-                onClick={() => setAdding(false)}
+                onClick={() => setActiveForm(null)}
                 type="button"
                 variant="outline"
                 size="sm"
@@ -815,6 +783,35 @@ function credentialKindLabel(kind: string) {
       return "Certificate";
     default:
       return kind;
+  }
+}
+
+function newCredentialForm(kind: CredentialKind): AddCredentialState {
+  switch (kind) {
+    case "password":
+      return { kind: "password", password: "", confirm: "" };
+    case "api_key":
+      return { kind: "api_key", description: "", expiresAt: "" };
+    case "certificate":
+      return {
+        kind: "certificate",
+        commonName: "",
+        dnsNames: "",
+        ipAddresses: "",
+        ttlSecs: "",
+        csrPem: "",
+      };
+  }
+}
+
+function newCredentialTitle(kind: CredentialKind) {
+  switch (kind) {
+    case "password":
+      return "Add password";
+    case "api_key":
+      return "Add API key";
+    case "certificate":
+      return "Issue certificate";
   }
 }
 

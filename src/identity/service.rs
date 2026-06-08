@@ -890,6 +890,28 @@ async fn login_entity_row(
     identifier: &str,
     tenant_id: Option<Uuid>,
 ) -> Result<sqlx::postgres::PgRow, AppError> {
+    if let Ok(entity_id) = Uuid::parse_str(identifier) {
+        let row =
+            match tenant_id {
+                Some(tenant_id) => sqlx::query(
+                    "SELECT id, tenant_id, status FROM entities WHERE id = $1 AND tenant_id = $2",
+                )
+                .bind(entity_id)
+                .bind(tenant_id)
+                .fetch_optional(pool)
+                .await,
+                None => {
+                    sqlx::query("SELECT id, tenant_id, status FROM entities WHERE id = $1")
+                        .bind(entity_id)
+                        .fetch_optional(pool)
+                        .await
+                }
+            }
+            .map_err(db_err)?;
+
+        return row.ok_or_else(|| AppError::unauthorized("invalid credentials"));
+    }
+
     let mut rows = match tenant_id {
         Some(tenant_id) => {
             sqlx::query(
@@ -1460,7 +1482,7 @@ pub async fn create_password(
     entity_id: Uuid,
     password: &str,
 ) -> Result<(), AppError> {
-    validate_password_strength(password)?;
+    validate_password_for_entity(pool, entity_id, password).await?;
     let hash = hash_secret(password.as_bytes())?;
     let id = Uuid::new_v4();
 
@@ -1474,6 +1496,33 @@ pub async fn create_password(
     .execute(pool)
     .await
     .map_err(db_err)?;
+    Ok(())
+}
+
+async fn validate_password_for_entity(
+    pool: &PgPool,
+    entity_id: Uuid,
+    password: &str,
+) -> Result<(), AppError> {
+    let kind: EntityKind = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
+        .bind(entity_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+
+    match kind {
+        EntityKind::Human => validate_password_strength(password),
+        EntityKind::Device
+        | EntityKind::Service
+        | EntityKind::Workload
+        | EntityKind::Application => validate_machine_secret(password),
+    }
+}
+
+fn validate_machine_secret(secret: &str) -> Result<(), AppError> {
+    if secret.chars().all(char::is_whitespace) {
+        return Err(AppError::bad_request("password cannot be blank"));
+    }
     Ok(())
 }
 

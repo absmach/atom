@@ -1,16 +1,17 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Redirect},
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Redirect, Response},
     Json,
 };
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     audit,
     auth::{
         has_capability_in_scope, require_any_capability, require_capability, require_list_access,
-        require_read_access, scope_for_tenant, AuthContext, Scope,
+        require_read_access, scope_for_tenant, AuthContext, Scope, AUTH_COOKIE_NAME,
     },
     error::AppError,
     models::{
@@ -119,7 +120,7 @@ pub async fn public_auth_config(State(state): State<AppState>) -> Json<PublicAut
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     use crate::models::enums::CredentialKind;
     match req.kind {
         CredentialKind::Password => {
@@ -134,7 +135,19 @@ pub async fn login(
                 req.tenant_route.as_deref(),
             )
             .await?;
-            Ok((StatusCode::OK, Json(resp)))
+            let cookie = auth_cookie(
+                &resp.token,
+                resp.expires_at,
+                state.config.auth_cookie_secure,
+                state.config.auth_cookie_domain.as_deref(),
+            );
+            let mut response = (StatusCode::OK, Json(resp)).into_response();
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&cookie)
+                    .map_err(|err| AppError::Internal(anyhow::anyhow!("set auth cookie: {err}")))?,
+            );
+            Ok(response)
         }
         other => Err(AppError::bad_request(format!(
             "unsupported credential kind: {other:?}"
@@ -230,7 +243,7 @@ pub async fn oauth_exchange(
 pub async fn logout(
     State(state): State<AppState>,
     auth: AuthContext,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     if let Some(session_id) = auth.session_id {
         repo::revoke_session(&state.pool, session_id).await?;
     }
@@ -243,7 +256,16 @@ pub async fn logout(
         serde_json::json!({}),
     )
     .await;
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = Json(serde_json::json!({"authenticated": false})).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_auth_cookie(
+            state.config.auth_cookie_secure,
+            state.config.auth_cookie_domain.as_deref(),
+        ))
+        .map_err(|err| AppError::Internal(anyhow::anyhow!("clear auth cookie: {err}")))?,
+    );
+    Ok(response)
 }
 
 pub async fn introspect(auth: AuthContext) -> Result<impl IntoResponse, AppError> {
@@ -252,6 +274,27 @@ pub async fn introspect(auth: AuthContext) -> Result<impl IntoResponse, AppError
         "entity_id": auth.entity_id,
         "tenant_id": auth.tenant_id,
         "session_id": auth.session_id,
+    })))
+}
+
+pub async fn current_session(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<impl IntoResponse, AppError> {
+    let expires_at = if let Some(session_id) = auth.session_id {
+        Some(repo::get_session(&state.pool, session_id).await?.expires_at)
+    } else {
+        None
+    };
+
+    Ok(Json(serde_json::json!({
+        "authenticated": true,
+        "session": {
+            "entityId": auth.entity_id,
+            "tenantId": auth.tenant_id,
+            "sessionId": auth.session_id,
+            "expiresAt": expires_at,
+        }
     })))
 }
 
@@ -272,6 +315,32 @@ pub async fn get_session(
         .await?;
     }
     Ok(Json(session))
+}
+
+fn auth_cookie(
+    token: &str,
+    expires_at: chrono::DateTime<Utc>,
+    secure: bool,
+    domain: Option<&str>,
+) -> String {
+    let max_age = (expires_at - Utc::now()).num_seconds().max(1);
+    let secure = if secure { "; Secure" } else { "" };
+    let domain = domain
+        .map(|value| format!("; Domain={value}"))
+        .unwrap_or_default();
+    format!(
+        "{AUTH_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{domain}{secure}"
+    )
+}
+
+fn clear_auth_cookie(secure: bool, domain: Option<&str>) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    let domain = domain
+        .map(|value| format!("; Domain={value}"))
+        .unwrap_or_default();
+    format!(
+        "{AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT{domain}{secure}"
+    )
 }
 
 // ─── Entities ─────────────────────────────────────────────────────────────────

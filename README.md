@@ -116,7 +116,7 @@ Object Group           = where
 # 1. Copy and edit config
 cp .env.example .env
 # set ADMIN_SECRET on first boot to create the admin password
-# set ATOM_CERTS_KEY_ENCRYPTION_SECRET when ATOM_CERTS_ENABLED=true
+# mount issuer CA files under ATOM_CERTS_CA_DIR when ATOM_CERTS_ENABLED=true
 
 # 2. Start Postgres
 docker-compose up postgres -d
@@ -138,9 +138,11 @@ The service starts on `http://localhost:8080`.
 
 GraphQL is available at `POST /graphql` in both images. GraphQL uses the same Bearer token authentication as REST.
 
-Certificate support is enabled by default. `ATOM_CERTS_KEY_ENCRYPTION_SECRET` must be at least 32 random bytes when enabled; Atom uses it to encrypt internal CA private keys in Postgres. Public PKI endpoints are available at `GET /certs/ca-chain`, `GET /certs/crl`, and `POST /certs/ocsp`.
+Certificate support is enabled by default. Atom loads issuer CA material from mounted files and does not store CA certificates or CA private keys in Postgres. Production deployments should use `ATOM_CERTS_CA_MODE=file_intermediate_issuer` with root certificate, intermediate certificate, and intermediate private key files mounted read-only; `file_root_issuer` is supported for local/dev when only root certificate and root private key files exist. Public PKI endpoints are available at `GET /certs/ca-chain`, `GET /certs/crl`, and `POST /certs/ocsp`.
 
 The Atom Next UI is a separate optional service. In Docker Compose it is enabled with the `atom-ui` profile and is available at `http://localhost:3005`.
+
+Shared Magistrala/Cube deployments may consume `ghcr.io/absmach/atom:latest` and `ghcr.io/absmach/atom-ui:latest`, but those tags are mutable. Before consuming `latest`, publish both images from the same stabilized Atom commit. Production deployments that need immutability should override the image with a digest or fixed release tag.
 
 For local UI development, run the backend and frontend separately:
 

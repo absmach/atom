@@ -26,6 +26,7 @@ pub fn create_router(state: AppState) -> Router {
         .collect::<Vec<_>>();
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list(cors_origins))
+        .allow_credentials(true)
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -68,6 +69,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/auth/oauth/exchange", post(identity::oauth_exchange))
         .route("/auth/logout", post(identity::logout))
         .route("/auth/introspect", get(identity::introspect))
+        .route("/auth/session", get(identity::current_session))
         .route("/auth/sessions/:id", get(identity::get_session))
         .route("/auth/keys/rotate", post(keys::rotate_keys));
 
@@ -231,6 +233,8 @@ mod tests {
             dev_allow_unverified_email_login: false,
             public_base_url: "http://localhost:8080".into(),
             cors_allowed_origins: vec!["http://localhost:8080".into()],
+            auth_cookie_secure: false,
+            auth_cookie_domain: None,
             email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
             password_reset_redirect: "http://localhost:8080/reset-password".into(),
             invitation_redirect: "http://localhost:8080/invitations/accept".into(),
@@ -243,13 +247,13 @@ mod tests {
             oauth_state_expiry_secs: 600,
             auth_exchange_code_expiry_secs: 300,
             certs_enabled: false,
-            certs_key_encryption_secret: None,
-            certs_root_ttl_secs: 315_360_000,
-            certs_intermediate_ttl_secs: 157_680_000,
+            certs_ca_mode: crate::config::CertsCaMode::FileIntermediateIssuer,
+            certs_root_ca_cert_path: None,
+            certs_intermediate_ca_cert_path: None,
+            certs_intermediate_ca_key_path: None,
+            certs_root_ca_key_path: None,
             certs_leaf_default_ttl_secs: 2_592_000,
             certs_leaf_max_ttl_secs: 2_592_000,
-            certs_root_common_name: "Atom Root CA".into(),
-            certs_intermediate_common_name: "Atom Intermediate CA".into(),
         };
         let primary = LoadedKey {
             kid: "test".into(),
@@ -265,6 +269,7 @@ mod tests {
                 primary,
                 standby: None,
             },
+            None,
         )
     }
 }

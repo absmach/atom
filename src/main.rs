@@ -27,10 +27,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     keys::bootstrap_if_needed(&pool).await?;
-    certs::service::bootstrap_if_needed(&pool, &cfg).await?;
+    let certificate_issuer = certs::service::load_file_issuer_if_enabled(&cfg)?;
     let active_keys = keys::load_active_keys(&pool).await?;
 
-    let state = state::AppState::new(pool, cfg.clone(), active_keys);
+    let state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer);
 
     // Spawn gRPC server on a separate port; runs concurrently with HTTP.
     let grpc_addr = cfg.grpc_addr.parse()?;

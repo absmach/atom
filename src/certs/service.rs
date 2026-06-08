@@ -9,24 +9,26 @@ use ocsp::{
     },
 };
 use rcgen::{
-    BasicConstraints, CertificateParams, CertificateRevocationListParams,
-    CertificateSigningRequestParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod,
-    KeyPair, KeyUsagePurpose, RevocationReason, RevokedCertParams, RsaKeySize, SanType,
-    SerialNumber, SigningKey, PKCS_RSA_SHA256,
+    CertificateParams, CertificateRevocationListParams, CertificateSigningRequestParams, DnType,
+    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose, RevocationReason,
+    RevokedCertParams, SanType, SerialNumber, SigningKey,
 };
 use ring::{digest, rand, rand::SecureRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fs;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::pem::parse_x509_pem;
 use zeroize::Zeroize;
 
-use crate::{config::Config, error::AppError};
+use crate::{
+    config::{CertsCaMode, Config},
+    error::AppError,
+};
 
-use super::{crypto, repo};
+use super::repo;
 
-const CA_BOOTSTRAP_LOCK_ID: i64 = 0x0041_544f_4d43_4101;
 const CRL_REGEN_LOCK_ID: i64 = 0x0041_544f_4d43_524c;
 const LEAF_CLOCK_SKEW_SECS: i64 = 300;
 const CRL_TTL_HOURS: i64 = 24;
@@ -61,8 +63,10 @@ pub struct CertificateMetadata {
     pub subject: Value,
     pub dns_names: Vec<String>,
     pub ip_addresses: Vec<String>,
-    pub issuer_ca_id: Uuid,
+    pub issuer_kind: String,
+    pub issuer_subject: String,
     pub issuer_serial_number: String,
+    pub issuer_fingerprint_sha256: String,
     pub fingerprint_sha256: String,
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
@@ -103,8 +107,13 @@ pub struct CertificateIdentity {
     pub expires_at: DateTime<Utc>,
 }
 
-struct LoadedIssuer {
-    ca: repo::CertificateAuthority,
+pub struct CertificateIssuer {
+    issuer_kind: &'static str,
+    chain_pem: String,
+    issuer_subject: String,
+    issuer_serial_number: String,
+    issuer_fingerprint_sha256: String,
+    issuer_not_after: DateTime<Utc>,
     issuer: Issuer<'static, KeyPair>,
     key_pair: KeyPair,
     certificate_der: Vec<u8>,
@@ -124,120 +133,204 @@ struct PersistCertificate {
     not_after: DateTime<Utc>,
 }
 
-pub async fn bootstrap_if_needed(pool: &sqlx::PgPool, config: &Config) -> Result<(), AppError> {
+struct CertificateInfo {
+    pem: String,
+    der: Vec<u8>,
+    subject: String,
+    serial_number: String,
+    fingerprint_sha256: String,
+    not_after: DateTime<Utc>,
+    public_key_der: Vec<u8>,
+}
+
+pub fn load_file_issuer_if_enabled(config: &Config) -> Result<Option<CertificateIssuer>, AppError> {
     if !config.certs_enabled {
-        return Ok(());
+        return Ok(None);
     }
-    validate_encryption_config(config)?;
+    validate_file_issuer_config(config)?;
+    let issuer = match config.certs_ca_mode {
+        CertsCaMode::FileIntermediateIssuer => load_intermediate_file_issuer(config)?,
+        CertsCaMode::FileRootIssuer => load_root_file_issuer(config)?,
+    };
+    tracing::info!(
+        mode = config.certs_ca_mode.as_str(),
+        issuer_fingerprint_sha256 = issuer.issuer_fingerprint_sha256,
+        "certificate file issuer loaded"
+    );
+    Ok(Some(issuer))
+}
 
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(CA_BOOTSTRAP_LOCK_ID)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
+fn load_intermediate_file_issuer(config: &Config) -> Result<CertificateIssuer, AppError> {
+    let root_path = require_config_path(
+        config.certs_root_ca_cert_path.as_deref(),
+        "ATOM_CERTS_ROOT_CA_CERT_PATH",
+    )?;
+    let intermediate_path = require_config_path(
+        config.certs_intermediate_ca_cert_path.as_deref(),
+        "ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH",
+    )?;
+    let key_path = require_config_path(
+        config.certs_intermediate_ca_key_path.as_deref(),
+        "ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH",
+    )?;
+    let root = load_ca_cert(root_path, "root CA")?;
+    let intermediate = load_ca_cert(intermediate_path, "intermediate CA")?;
+    verify_signed_by(
+        &intermediate,
+        &root,
+        "intermediate CA is not signed by root CA",
+    )?;
+    let mut key_pem = read_required_file(key_path, "intermediate CA private key")?;
+    let issuer = build_issuer(
+        "intermediate",
+        format!("{}{}", intermediate.pem, root.pem),
+        intermediate,
+        &key_pem,
+    )?;
+    key_pem.zeroize();
+    Ok(issuer)
+}
 
-    let root = repo::active_authority_tx(&mut tx, "root").await?;
-    let intermediate = repo::active_authority_tx(&mut tx, "intermediate").await?;
-    match (root, intermediate) {
-        (Some(_), Some(_)) => {
-            tx.commit().await.map_err(AppError::Database)?;
-            return Ok(());
-        }
-        (None, None) => {}
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "certificate CA bootstrap is partially initialized"
+fn load_root_file_issuer(config: &Config) -> Result<CertificateIssuer, AppError> {
+    let root_path = require_config_path(
+        config.certs_root_ca_cert_path.as_deref(),
+        "ATOM_CERTS_ROOT_CA_CERT_PATH",
+    )?;
+    let key_path = require_config_path(
+        config.certs_root_ca_key_path.as_deref(),
+        "ATOM_CERTS_ROOT_CA_KEY_PATH",
+    )?;
+    let root = load_ca_cert(root_path, "root CA")?;
+    verify_self_signed(&root, "root CA is not self-signed")?;
+    let mut key_pem = read_required_file(key_path, "root CA private key")?;
+    let issuer = build_issuer("root", root.pem.clone(), root, &key_pem)?;
+    key_pem.zeroize();
+    Ok(issuer)
+}
+
+fn build_issuer(
+    issuer_kind: &'static str,
+    chain_pem: String,
+    cert: CertificateInfo,
+    key_pem: &str,
+) -> Result<CertificateIssuer, AppError> {
+    let key_pair = KeyPair::from_pem(key_pem).map_err(rcgen_err)?;
+    ensure_key_matches_cert(&key_pair, &cert)?;
+    let issuer =
+        Issuer::from_ca_cert_pem(&cert.pem, KeyPair::from_pem(key_pem).map_err(rcgen_err)?)
+            .map_err(rcgen_err)?;
+    let (issuer_name_hash_sha1, issuer_key_hash_sha1) = issuer_sha1_hashes_from_der(&cert.der)?;
+    Ok(CertificateIssuer {
+        issuer_kind,
+        chain_pem,
+        issuer_subject: cert.subject,
+        issuer_serial_number: cert.serial_number,
+        issuer_fingerprint_sha256: cert.fingerprint_sha256,
+        issuer_not_after: cert.not_after,
+        issuer,
+        key_pair,
+        certificate_der: cert.der,
+        issuer_name_hash_sha1,
+        issuer_key_hash_sha1,
+    })
+}
+
+fn read_required_file(path: &str, label: &str) -> Result<String, AppError> {
+    fs::read_to_string(path)
+        .map_err(|err| AppError::bad_request(format!("failed to read {label} file {path}: {err}")))
+}
+
+fn load_ca_cert(path: &str, label: &str) -> Result<CertificateInfo, AppError> {
+    let pem = read_required_file(path, label)?;
+    let der = certificate_der_from_pem(&pem)
+        .map_err(|_| AppError::bad_request(format!("invalid {label} PEM at {path}")))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&der)
+        .map_err(|_| AppError::bad_request(format!("invalid {label} certificate at {path}")))?;
+    if !cert.tbs_certificate.is_ca() {
+        return Err(AppError::bad_request(format!(
+            "{label} must be a CA certificate"
+        )));
+    }
+    let key_usage = cert
+        .tbs_certificate
+        .key_usage()
+        .map_err(|_| AppError::bad_request(format!("invalid {label} key usage")))?
+        .map(|usage| *usage.value);
+    if let Some(usage) = key_usage {
+        if !usage.key_cert_sign() || !usage.crl_sign() {
+            return Err(AppError::bad_request(format!(
+                "{label} key usage must allow certificate and CRL signing"
             )));
         }
     }
+    let not_after = DateTime::<Utc>::from_timestamp(cert.validity().not_after.timestamp(), 0)
+        .ok_or_else(|| AppError::bad_request(format!("invalid {label} notAfter timestamp")))?;
+    if not_after <= Utc::now() {
+        return Err(AppError::bad_request(format!("{label} is expired")));
+    }
+    let subject = cert.subject().to_string();
+    let serial_number = normalize_serial(&cert.tbs_certificate.raw_serial_as_string())?;
+    let public_key_der = cert.public_key().raw.to_vec();
+    let fingerprint = digest::digest(&digest::SHA256, &der);
+    Ok(CertificateInfo {
+        pem,
+        der,
+        subject,
+        serial_number,
+        fingerprint_sha256: hex::encode(fingerprint.as_ref()),
+        not_after,
+        public_key_der,
+    })
+}
 
-    let now = OffsetDateTime::now_utc();
-    let root_serial = random_serial()?;
-    let intermediate_serial = random_serial()?;
+fn verify_signed_by(
+    cert: &CertificateInfo,
+    issuer: &CertificateInfo,
+    message: &str,
+) -> Result<(), AppError> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(&cert.der)
+        .map_err(|_| AppError::bad_request("invalid issuer certificate"))?;
+    let (_, parsed_issuer) = x509_parser::parse_x509_certificate(&issuer.der)
+        .map_err(|_| AppError::bad_request("invalid root certificate"))?;
+    parsed
+        .verify_signature(Some(parsed_issuer.public_key()))
+        .map_err(|_| AppError::bad_request(message))
+}
 
-    let mut root_params = ca_params(
-        &config.certs_root_common_name,
-        root_serial.clone(),
-        now,
-        config.certs_root_ttl_secs,
-    )?;
-    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let root_key =
-        KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048).map_err(rcgen_err)?;
-    let mut root_private_key = root_key.serialize_pem();
-    let root_cert = root_params.self_signed(&root_key).map_err(rcgen_err)?;
-    let root_issuer = Issuer::new(root_params.clone(), root_key);
+fn verify_self_signed(cert: &CertificateInfo, message: &str) -> Result<(), AppError> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(&cert.der)
+        .map_err(|_| AppError::bad_request("invalid root certificate"))?;
+    parsed
+        .verify_signature(None)
+        .map_err(|_| AppError::bad_request(message))
+}
 
-    let mut intermediate_params = ca_params(
-        &config.certs_intermediate_common_name,
-        intermediate_serial.clone(),
-        now,
-        config.certs_intermediate_ttl_secs,
-    )?;
-    intermediate_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let intermediate_key =
-        KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048).map_err(rcgen_err)?;
-    let mut intermediate_private_key = intermediate_key.serialize_pem();
-    let intermediate_cert = intermediate_params
-        .signed_by(&intermediate_key, &root_issuer)
-        .map_err(rcgen_err)?;
-
-    let encrypted_root = crypto::encrypt_private_key(config, root_private_key.as_bytes())?;
-    root_private_key.zeroize();
-    repo::insert_authority_tx(
-        &mut tx,
-        repo::NewAuthority {
-            kind: "root",
-            subject: json!({"common_name": config.certs_root_common_name}),
-            serial_number: &serial_to_string(&root_serial),
-            certificate_pem: &root_cert.pem(),
-            encrypted_private_key: &encrypted_root.ciphertext,
-            private_key_nonce: &encrypted_root.nonce,
-            not_before: to_chrono(now)?,
-            not_after: to_chrono(now + Duration::seconds(config.certs_root_ttl_secs as i64))?,
-        },
-    )
-    .await?;
-
-    let encrypted_intermediate =
-        crypto::encrypt_private_key(config, intermediate_private_key.as_bytes())?;
-    intermediate_private_key.zeroize();
-    repo::insert_authority_tx(
-        &mut tx,
-        repo::NewAuthority {
-            kind: "intermediate",
-            subject: json!({"common_name": config.certs_intermediate_common_name}),
-            serial_number: &serial_to_string(&intermediate_serial),
-            certificate_pem: &intermediate_cert.pem(),
-            encrypted_private_key: &encrypted_intermediate.ciphertext,
-            private_key_nonce: &encrypted_intermediate.nonce,
-            not_before: to_chrono(now)?,
-            not_after: to_chrono(
-                now + Duration::seconds(config.certs_intermediate_ttl_secs as i64),
-            )?,
-        },
-    )
-    .await?;
-
-    tx.commit().await.map_err(AppError::Database)?;
-    tracing::info!("certificate authorities bootstrapped");
+fn ensure_key_matches_cert(key_pair: &KeyPair, cert: &CertificateInfo) -> Result<(), AppError> {
+    let public_key_pem = key_pair.public_key_pem();
+    let public_key_der = parse_x509_pem(public_key_pem.as_bytes())
+        .map(|(_, pem)| pem.contents)
+        .map_err(|_| AppError::bad_request("invalid issuer private key public component"))?;
+    if public_key_der != cert.public_key_der {
+        return Err(AppError::bad_request(
+            "issuer private key does not match issuer certificate",
+        ));
+    }
     Ok(())
 }
 
 pub async fn issue_certificate(
     pool: &sqlx::PgPool,
     config: &Config,
+    issuer: Option<&CertificateIssuer>,
     input: IssueCertificate,
 ) -> Result<IssuedCertificate, AppError> {
-    ensure_enabled(config)?;
+    let loaded = require_issuer(config, issuer)?;
     repo::entity_tenant_id(pool, input.entity_id).await?;
-    let loaded = load_intermediate(pool, config).await?;
     let ttl = leaf_ttl(config, input.ttl_secs)?;
     let now = OffsetDateTime::now_utc();
     let not_before = now - Duration::seconds(LEAF_CLOCK_SKEW_SECS);
     let not_after = now + Duration::seconds(ttl as i64);
-    ensure_issuer_covers_leaf(&loaded.ca, not_after)?;
+    ensure_issuer_covers_leaf(loaded, not_after)?;
     let common_name = input
         .common_name
         .clone()
@@ -273,7 +366,7 @@ pub async fn issue_certificate(
         let mut private_key_pem = key_pair.serialize_pem();
         match persist_certificate(
             pool,
-            &loaded.ca,
+            loaded,
             PersistCertificate {
                 entity_id: input.entity_id,
                 serial_number,
@@ -312,16 +405,16 @@ pub async fn issue_certificate(
 pub async fn issue_certificate_from_csr(
     pool: &sqlx::PgPool,
     config: &Config,
+    issuer: Option<&CertificateIssuer>,
     input: IssueCertificateFromCsr,
 ) -> Result<IssuedCertificate, AppError> {
-    ensure_enabled(config)?;
+    let loaded = require_issuer(config, issuer)?;
     repo::entity_tenant_id(pool, input.entity_id).await?;
-    let loaded = load_intermediate(pool, config).await?;
     let ttl = leaf_ttl(config, input.ttl_secs)?;
     let now = OffsetDateTime::now_utc();
     let not_before = now - Duration::seconds(LEAF_CLOCK_SKEW_SECS);
     let not_after = now + Duration::seconds(ttl as i64);
-    ensure_issuer_covers_leaf(&loaded.ca, not_after)?;
+    ensure_issuer_covers_leaf(loaded, not_after)?;
     let mut csr_template = CertificateSigningRequestParams::from_pem(&input.csr_pem)
         .map_err(|_| AppError::bad_request("invalid CSR"))?;
     force_leaf_csr_params(&mut csr_template.params);
@@ -338,7 +431,7 @@ pub async fn issue_certificate_from_csr(
         let cert = csr.signed_by(&loaded.issuer).map_err(rcgen_err)?;
         match persist_certificate(
             pool,
-            &loaded.ca,
+            loaded,
             PersistCertificate {
                 entity_id: input.entity_id,
                 serial_number,
@@ -372,6 +465,7 @@ pub async fn issue_certificate_from_csr(
 pub async fn renew_certificate(
     pool: &sqlx::PgPool,
     config: &Config,
+    issuer: Option<&CertificateIssuer>,
     input: RenewCertificate,
 ) -> Result<IssuedCertificate, AppError> {
     let serial = normalize_serial(&input.serial_number)?;
@@ -382,6 +476,7 @@ pub async fn renew_certificate(
     let issued = issue_certificate(
         pool,
         config,
+        issuer,
         IssueCertificate {
             entity_id: old.entity_id,
             ttl_secs: input.ttl_secs,
@@ -476,21 +571,16 @@ pub async fn list_certificates(
     rows.into_iter().map(record_from_row).collect()
 }
 
-pub async fn ca_chain(pool: &sqlx::PgPool) -> Result<String, AppError> {
-    let intermediate = repo::active_authority(pool, "intermediate")
-        .await?
-        .ok_or_else(|| AppError::not_found("intermediate CA not found"))?;
-    let root = repo::active_authority(pool, "root")
-        .await?
-        .ok_or_else(|| AppError::not_found("root CA not found"))?;
-    Ok(format!(
-        "{}{}",
-        intermediate.certificate_pem, root.certificate_pem
-    ))
+pub fn ca_chain(config: &Config, issuer: Option<&CertificateIssuer>) -> Result<String, AppError> {
+    Ok(require_issuer(config, issuer)?.chain_pem.clone())
 }
 
-pub async fn generate_crl(pool: &sqlx::PgPool, config: &Config) -> Result<Vec<u8>, AppError> {
-    ensure_enabled(config)?;
+pub async fn generate_crl(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    issuer: Option<&CertificateIssuer>,
+) -> Result<Vec<u8>, AppError> {
+    let loaded = require_issuer(config, issuer)?;
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(CRL_REGEN_LOCK_ID)
@@ -498,7 +588,7 @@ pub async fn generate_crl(pool: &sqlx::PgPool, config: &Config) -> Result<Vec<u8
         .await
         .map_err(AppError::Database)?;
 
-    let state = repo::crl_state_tx(&mut tx).await?;
+    let state = repo::crl_state_tx(&mut tx, &loaded.issuer_fingerprint_sha256).await?;
     let now_chrono = Utc::now();
     if !should_regenerate_crl(&state, now_chrono) {
         if let Some(crl_der) = state.crl_der {
@@ -507,7 +597,6 @@ pub async fn generate_crl(pool: &sqlx::PgPool, config: &Config) -> Result<Vec<u8
         }
     }
 
-    let loaded = load_intermediate_tx(&mut tx, config).await?;
     let revoked = repo::revoked_certificates(pool).await?;
     let revoked_certs = revoked
         .into_iter()
@@ -537,6 +626,7 @@ pub async fn generate_crl(pool: &sqlx::PgPool, config: &Config) -> Result<Vec<u8
     let crl_der = crl.der().as_ref().to_vec();
     repo::store_crl_tx(
         &mut tx,
+        &loaded.issuer_fingerprint_sha256,
         crl_number,
         &crl_der,
         to_chrono(now)?,
@@ -550,10 +640,10 @@ pub async fn generate_crl(pool: &sqlx::PgPool, config: &Config) -> Result<Vec<u8
 pub async fn ocsp_response(
     pool: &sqlx::PgPool,
     config: &Config,
+    issuer: Option<&CertificateIssuer>,
     request_der: &[u8],
 ) -> Result<Vec<u8>, AppError> {
-    ensure_enabled(config)?;
-    let loaded = load_intermediate(pool, config).await?;
+    let loaded = require_issuer(config, issuer)?;
     let request = OcspRequest::parse(request_der)
         .map_err(|_| AppError::bad_request("invalid OCSP request"))?;
     let now = Utc::now();
@@ -654,103 +744,66 @@ pub fn normalize_serial(serial_number: &str) -> Result<String, AppError> {
     Ok(normalized)
 }
 
-fn validate_encryption_config(config: &Config) -> Result<(), AppError> {
+fn validate_file_issuer_config(config: &Config) -> Result<(), AppError> {
     if config.certs_leaf_default_ttl_secs > config.certs_leaf_max_ttl_secs {
         return Err(AppError::bad_request(
             "ATOM_CERTS_LEAF_DEFAULT_TTL_SECS must be less than or equal to ATOM_CERTS_LEAF_MAX_TTL_SECS",
         ));
     }
-    if config.certs_intermediate_ttl_secs > config.certs_root_ttl_secs {
-        return Err(AppError::bad_request(
-            "ATOM_CERTS_INTERMEDIATE_TTL_SECS must be less than or equal to ATOM_CERTS_ROOT_TTL_SECS",
-        ));
+    match config.certs_ca_mode {
+        CertsCaMode::FileIntermediateIssuer => {
+            require_config_path(
+                config.certs_root_ca_cert_path.as_deref(),
+                "ATOM_CERTS_ROOT_CA_CERT_PATH",
+            )?;
+            require_config_path(
+                config.certs_intermediate_ca_cert_path.as_deref(),
+                "ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH",
+            )?;
+            require_config_path(
+                config.certs_intermediate_ca_key_path.as_deref(),
+                "ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH",
+            )?;
+        }
+        CertsCaMode::FileRootIssuer => {
+            require_config_path(
+                config.certs_root_ca_cert_path.as_deref(),
+                "ATOM_CERTS_ROOT_CA_CERT_PATH",
+            )?;
+            require_config_path(
+                config.certs_root_ca_key_path.as_deref(),
+                "ATOM_CERTS_ROOT_CA_KEY_PATH",
+            )?;
+        }
     }
-    crypto::encrypt_private_key(config, b"certificate-key-validation").map(|_| ())
+    Ok(())
 }
 
-fn ensure_enabled(config: &Config) -> Result<(), AppError> {
-    if config.certs_enabled {
-        Ok(())
+fn require_config_path<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, AppError> {
+    value
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| AppError::bad_request(format!("{name} must be set")))
+}
+
+fn require_issuer<'a>(
+    config: &Config,
+    issuer: Option<&'a CertificateIssuer>,
+) -> Result<&'a CertificateIssuer, AppError> {
+    if !config.certs_enabled {
+        return Err(AppError::bad_request("certificate support is disabled"));
+    }
+    if let Some(issuer) = issuer {
+        Ok(issuer)
     } else {
-        Err(AppError::bad_request("certificate support is disabled"))
+        Err(AppError::Internal(anyhow::anyhow!(
+            "certificate file issuer is not loaded"
+        )))
     }
-}
-
-fn ca_params(
-    common_name: &str,
-    serial: SerialNumber,
-    now: OffsetDateTime,
-    ttl_secs: u64,
-) -> Result<CertificateParams, AppError> {
-    let mut params = CertificateParams::new(Vec::<String>::new()).map_err(rcgen_err)?;
-    params.distinguished_name = rcgen::DistinguishedName::new();
-    params
-        .distinguished_name
-        .push(DnType::CommonName, common_name);
-    params.serial_number = Some(serial);
-    params.not_before = now;
-    params.not_after = now + Duration::seconds(ttl_secs as i64);
-    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-    params.key_usages.push(KeyUsagePurpose::KeyCertSign);
-    params.key_usages.push(KeyUsagePurpose::CrlSign);
-    Ok(params)
-}
-
-async fn load_intermediate(pool: &sqlx::PgPool, config: &Config) -> Result<LoadedIssuer, AppError> {
-    let ca = repo::active_authority(pool, "intermediate")
-        .await?
-        .ok_or_else(|| AppError::not_found("intermediate CA not found"))?;
-    load_issuer_from_ca(config, ca)
-}
-
-async fn load_intermediate_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    config: &Config,
-) -> Result<LoadedIssuer, AppError> {
-    let ca = repo::active_authority_tx(tx, "intermediate")
-        .await?
-        .ok_or_else(|| AppError::not_found("intermediate CA not found"))?;
-    load_issuer_from_ca(config, ca)
-}
-
-fn load_issuer_from_ca(
-    config: &Config,
-    ca: repo::CertificateAuthority,
-) -> Result<LoadedIssuer, AppError> {
-    if ca.not_after <= Utc::now() {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "active certificate intermediate CA is expired"
-        )));
-    }
-    let certificate_der = certificate_der_from_pem(&ca.certificate_pem)?;
-    let (issuer_name_hash_sha1, issuer_key_hash_sha1) =
-        issuer_sha1_hashes_from_der(&certificate_der)?;
-    let mut key_pem = String::from_utf8(crypto::decrypt_private_key(
-        config,
-        &ca.private_key_nonce,
-        &ca.encrypted_private_key,
-    )?)
-    .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid CA key PEM")))?;
-    let key_pair = KeyPair::from_pem(&key_pem).map_err(rcgen_err)?;
-    let issuer = Issuer::from_ca_cert_pem(
-        &ca.certificate_pem,
-        KeyPair::from_pem(&key_pem).map_err(rcgen_err)?,
-    )
-    .map_err(rcgen_err)?;
-    key_pem.zeroize();
-    Ok(LoadedIssuer {
-        ca,
-        issuer,
-        key_pair,
-        certificate_der,
-        issuer_name_hash_sha1,
-        issuer_key_hash_sha1,
-    })
 }
 
 async fn persist_certificate(
     pool: &sqlx::PgPool,
-    ca: &repo::CertificateAuthority,
+    issuer: &CertificateIssuer,
     input: PersistCertificate,
 ) -> Result<CertificateRecord, AppError> {
     let fingerprint_sha256 = certificate_fingerprint_sha256(&input.certificate_pem)?;
@@ -759,8 +812,10 @@ async fn persist_certificate(
         subject: input.subject,
         dns_names: input.dns_names,
         ip_addresses: input.ip_addresses,
-        issuer_ca_id: ca.id,
-        issuer_serial_number: ca.serial_number.clone(),
+        issuer_kind: issuer.issuer_kind.to_string(),
+        issuer_subject: issuer.issuer_subject.clone(),
+        issuer_serial_number: issuer.issuer_serial_number.clone(),
+        issuer_fingerprint_sha256: issuer.issuer_fingerprint_sha256.clone(),
         fingerprint_sha256,
         not_before: input.not_before,
         not_after: input.not_after,
@@ -830,13 +885,13 @@ fn validate_certificate_status(status: String) -> Result<String, AppError> {
 }
 
 fn ensure_issuer_covers_leaf(
-    ca: &repo::CertificateAuthority,
+    issuer: &CertificateIssuer,
     leaf_not_after: OffsetDateTime,
 ) -> Result<(), AppError> {
     let leaf_not_after = to_chrono(leaf_not_after)?;
-    if leaf_not_after > ca.not_after {
+    if leaf_not_after > issuer.issuer_not_after {
         return Err(AppError::bad_request(
-            "requested certificate validity exceeds active intermediate CA validity",
+            "requested certificate validity exceeds active issuer CA validity",
         ));
     }
     Ok(())
@@ -1086,6 +1141,8 @@ pub fn unsuccessful_ocsp(status: OcspRespStatus) -> Result<Vec<u8>, AppError> {
 #[cfg(test)]
 mod tests {
     use ocsp::common::asn1::CertId;
+    use rcgen::BasicConstraints;
+    use std::{fs, path::PathBuf};
 
     use super::*;
 
@@ -1105,6 +1162,8 @@ mod tests {
             dev_allow_unverified_email_login: false,
             public_base_url: "http://localhost:8080".into(),
             cors_allowed_origins: vec!["http://localhost:8080".into()],
+            auth_cookie_secure: false,
+            auth_cookie_domain: None,
             email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
             password_reset_redirect: "http://localhost:8080/reset-password".into(),
             invitation_redirect: "http://localhost:8080/invitations/accept".into(),
@@ -1117,13 +1176,112 @@ mod tests {
             oauth_state_expiry_secs: 600,
             auth_exchange_code_expiry_secs: 300,
             certs_enabled: true,
-            certs_key_encryption_secret: Some("01234567890123456789012345678901".into()),
-            certs_root_ttl_secs: 315_360_000,
-            certs_intermediate_ttl_secs: 157_680_000,
+            certs_ca_mode: crate::config::CertsCaMode::FileIntermediateIssuer,
+            certs_root_ca_cert_path: None,
+            certs_intermediate_ca_cert_path: None,
+            certs_intermediate_ca_key_path: None,
+            certs_root_ca_key_path: None,
             certs_leaf_default_ttl_secs: 2_592_000,
             certs_leaf_max_ttl_secs: 2_592_000,
-            certs_root_common_name: "Atom Root CA".into(),
-            certs_intermediate_common_name: "Atom Intermediate CA".into(),
+        }
+    }
+
+    struct TestCaFiles {
+        _dir: PathBuf,
+        root_cert_path: PathBuf,
+        root_key_path: PathBuf,
+        intermediate_cert_path: PathBuf,
+        intermediate_key_path: PathBuf,
+    }
+
+    fn ca_params_for_test(common_name: &str, valid_for_secs: i64) -> CertificateParams {
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.not_before = OffsetDateTime::now_utc() - Duration::seconds(60);
+        params.not_after = OffsetDateTime::now_utc() + Duration::seconds(valid_for_secs);
+        params
+    }
+
+    fn leaf_params_for_test(common_name: &str) -> CertificateParams {
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params.not_before = OffsetDateTime::now_utc() - Duration::seconds(60);
+        params.not_after = OffsetDateTime::now_utc() + Duration::days(1);
+        params
+    }
+
+    fn test_ca_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("atom-service-certs-{label}-{}", Uuid::new_v4()))
+    }
+
+    fn write_ca_files(
+        label: &str,
+        root_valid_secs: i64,
+        intermediate_valid_secs: i64,
+    ) -> TestCaFiles {
+        let dir = test_ca_dir(label);
+        fs::create_dir_all(&dir).expect("ca dir");
+        let root_key = KeyPair::generate().expect("root key");
+        let root_key_pem = root_key.serialize_pem();
+        let root_params = ca_params_for_test("Atom Test Root", root_valid_secs);
+        let root_cert = root_params.self_signed(&root_key).expect("root cert");
+        let root_issuer = Issuer::new(root_params, root_key);
+
+        let intermediate_key = KeyPair::generate().expect("intermediate key");
+        let intermediate_cert =
+            ca_params_for_test("Atom Test Intermediate", intermediate_valid_secs)
+                .signed_by(&intermediate_key, &root_issuer)
+                .expect("intermediate cert");
+
+        let root_cert_path = dir.join("root-ca.crt");
+        let root_key_path = dir.join("root-ca.key");
+        let intermediate_cert_path = dir.join("intermediate-ca.crt");
+        let intermediate_key_path = dir.join("intermediate-ca.key");
+        fs::write(&root_cert_path, root_cert.pem()).expect("write root cert");
+        fs::write(&root_key_path, root_key_pem).expect("write root key");
+        fs::write(&intermediate_cert_path, intermediate_cert.pem())
+            .expect("write intermediate cert");
+        fs::write(&intermediate_key_path, intermediate_key.serialize_pem())
+            .expect("write intermediate key");
+
+        TestCaFiles {
+            _dir: dir,
+            root_cert_path,
+            root_key_path,
+            intermediate_cert_path,
+            intermediate_key_path,
+        }
+    }
+
+    fn config_for_intermediate(files: &TestCaFiles) -> Config {
+        let mut cfg = config();
+        cfg.certs_ca_mode = crate::config::CertsCaMode::FileIntermediateIssuer;
+        cfg.certs_root_ca_cert_path = Some(files.root_cert_path.to_string_lossy().into_owned());
+        cfg.certs_intermediate_ca_cert_path =
+            Some(files.intermediate_cert_path.to_string_lossy().into_owned());
+        cfg.certs_intermediate_ca_key_path =
+            Some(files.intermediate_key_path.to_string_lossy().into_owned());
+        cfg
+    }
+
+    fn config_for_root(files: &TestCaFiles) -> Config {
+        let mut cfg = config();
+        cfg.certs_ca_mode = crate::config::CertsCaMode::FileRootIssuer;
+        cfg.certs_root_ca_cert_path = Some(files.root_cert_path.to_string_lossy().into_owned());
+        cfg.certs_root_ca_key_path = Some(files.root_key_path.to_string_lossy().into_owned());
+        cfg
+    }
+
+    fn issuer_load_err(cfg: &Config) -> AppError {
+        match load_file_issuer_if_enabled(cfg) {
+            Ok(_) => panic!("expected issuer load failure"),
+            Err(err) => err,
         }
     }
 
@@ -1131,6 +1289,105 @@ mod tests {
     fn normalizes_serial_numbers() {
         assert_eq!(normalize_serial("AA:bb 01").unwrap(), "aabb01");
         assert!(normalize_serial("not-hex").is_err());
+    }
+
+    #[test]
+    fn missing_file_paths_fail_startup() {
+        let err = issuer_load_err(&config());
+        assert!(err
+            .to_string()
+            .contains("ATOM_CERTS_ROOT_CA_CERT_PATH must be set"));
+    }
+
+    #[test]
+    fn root_file_issuer_loads_and_publishes_root_chain() {
+        let files = write_ca_files("root-loads", 86_400, 86_400);
+        let cfg = config_for_root(&files);
+        let issuer = load_file_issuer_if_enabled(&cfg).unwrap().unwrap();
+        let chain = ca_chain(&cfg, Some(&issuer)).unwrap();
+
+        assert_eq!(chain.matches("BEGIN CERTIFICATE").count(), 1);
+    }
+
+    #[test]
+    fn intermediate_file_issuer_publishes_intermediate_then_root_chain() {
+        let files = write_ca_files("intermediate-chain", 86_400, 86_400);
+        let cfg = config_for_intermediate(&files);
+        let issuer = load_file_issuer_if_enabled(&cfg).unwrap().unwrap();
+        let chain = ca_chain(&cfg, Some(&issuer)).unwrap();
+
+        assert_eq!(chain.matches("BEGIN CERTIFICATE").count(), 2);
+        let first_der = parse_x509_pem(chain.as_bytes()).unwrap().1.contents;
+        let (_, first_cert) = x509_parser::parse_x509_certificate(&first_der).unwrap();
+        assert!(first_cert.subject().to_string().contains("Intermediate"));
+    }
+
+    #[test]
+    fn intermediate_private_key_must_match_certificate() {
+        let files = write_ca_files("key-mismatch", 86_400, 86_400);
+        fs::write(
+            &files.intermediate_key_path,
+            KeyPair::generate().unwrap().serialize_pem(),
+        )
+        .expect("replace intermediate key");
+        let err = issuer_load_err(&config_for_intermediate(&files));
+
+        assert!(err
+            .to_string()
+            .contains("issuer private key does not match issuer certificate"));
+    }
+
+    #[test]
+    fn intermediate_must_be_signed_by_root() {
+        let files = write_ca_files("bad-chain", 86_400, 86_400);
+        let unrelated_key = KeyPair::generate().expect("unrelated key");
+        let unrelated_cert = ca_params_for_test("Unrelated Intermediate", 86_400)
+            .self_signed(&unrelated_key)
+            .expect("unrelated cert");
+        fs::write(&files.intermediate_cert_path, unrelated_cert.pem()).expect("replace cert");
+        fs::write(&files.intermediate_key_path, unrelated_key.serialize_pem())
+            .expect("replace key");
+        let err = issuer_load_err(&config_for_intermediate(&files));
+
+        assert!(err
+            .to_string()
+            .contains("intermediate CA is not signed by root CA"));
+    }
+
+    #[test]
+    fn expired_ca_certificate_fails_startup() {
+        let files = write_ca_files("expired", -1, 86_400);
+        let err = issuer_load_err(&config_for_intermediate(&files));
+
+        assert!(err.to_string().contains("root CA is expired"));
+    }
+
+    #[test]
+    fn non_ca_issuer_certificate_fails_startup() {
+        let files = write_ca_files("not-ca", 86_400, 86_400);
+        let key = KeyPair::generate().expect("leaf key");
+        let cert = leaf_params_for_test("not-a-ca")
+            .self_signed(&key)
+            .expect("leaf cert");
+        fs::write(&files.root_cert_path, cert.pem()).expect("replace root cert");
+        fs::write(&files.root_key_path, key.serialize_pem()).expect("replace root key");
+        let err = issuer_load_err(&config_for_root(&files));
+
+        assert!(err.to_string().contains("root CA must be a CA certificate"));
+    }
+
+    #[test]
+    fn leaf_validity_cannot_exceed_file_issuer_validity() {
+        let files = write_ca_files("issuer-validity", 86_400, 60);
+        let cfg = config_for_intermediate(&files);
+        let issuer = load_file_issuer_if_enabled(&cfg).unwrap().unwrap();
+        let err =
+            ensure_issuer_covers_leaf(&issuer, OffsetDateTime::now_utc() + Duration::hours(1))
+                .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("exceeds active issuer CA validity"));
     }
 
     #[test]
@@ -1181,15 +1438,13 @@ mod tests {
 
     #[test]
     fn ocsp_issuer_hashes_must_match_intermediate() {
-        let key = KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048).expect("key");
-        let mut params = ca_params(
-            "Atom Test Intermediate",
-            random_serial().unwrap(),
-            OffsetDateTime::now_utc(),
-            86_400,
-        )
-        .expect("params");
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Atom Test Intermediate");
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let cert = params.self_signed(&key).expect("cert");
         let der = certificate_der_from_pem(&cert.pem()).expect("der");
         let (name_hash, key_hash) = issuer_sha1_hashes_from_der(&der).expect("hashes");

@@ -24,7 +24,7 @@ pub struct CertificateQuery;
 impl CertificateQuery {
     async fn ca_chain(&self, ctx: &Context<'_>) -> Result<String> {
         let state = ctx.data::<AppState>()?;
-        service::ca_chain(&state.pool).await.map_err(gql_error)
+        service::ca_chain(&state.config, state.certificate_issuer.as_deref()).map_err(gql_error)
     }
 
     async fn certificates(
@@ -108,6 +108,7 @@ impl CertificateMutation {
         let issued = service::issue_certificate(
             &state.pool,
             &state.config,
+            state.certificate_issuer.as_deref(),
             service::IssueCertificate {
                 entity_id,
                 ttl_secs: input.ttl_secs,
@@ -147,6 +148,7 @@ impl CertificateMutation {
         let issued = service::issue_certificate_from_csr(
             &state.pool,
             &state.config,
+            state.certificate_issuer.as_deref(),
             service::IssueCertificateFromCsr {
                 entity_id,
                 ttl_secs: input.ttl_secs,
@@ -186,6 +188,7 @@ impl CertificateMutation {
         let issued = service::renew_certificate(
             &state.pool,
             &state.config,
+            state.certificate_issuer.as_deref(),
             service::RenewCertificate {
                 serial_number: input.serial_number,
                 ttl_secs: input.ttl_secs,

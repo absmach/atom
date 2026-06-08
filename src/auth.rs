@@ -1,7 +1,7 @@
 use axum::{
     async_trait,
     extract::{FromRef, FromRequestParts},
-    http::{header, request::Parts},
+    http::{header, request::Parts, HeaderMap, Method},
 };
 use chrono::Utc;
 use jsonwebtoken::{
@@ -17,6 +17,14 @@ use crate::{
     models::enums::{CredentialKind, CredentialStatus, EntityStatus, TenantStatus},
     state::AppState,
 };
+
+pub const AUTH_COOKIE_NAME: &str = "atom_token";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthTokenSource {
+    Authorization,
+    Cookie,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -313,6 +321,79 @@ pub async fn authenticate_token(state: &AppState, token: &str) -> Result<AuthCon
     auth_from_token(state, token).await
 }
 
+pub fn token_from_headers(
+    headers: &HeaderMap,
+) -> Result<Option<(&str, AuthTokenSource)>, AppError> {
+    if let Some(value) = headers.get(header::AUTHORIZATION) {
+        let value = value
+            .to_str()
+            .map_err(|_| AppError::unauthorized("invalid Authorization header"))?;
+        let token = value
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| AppError::unauthorized("Authorization header must use Bearer"))?;
+        return Ok(Some((token, AuthTokenSource::Authorization)));
+    }
+
+    Ok(cookie_token(headers).map(|token| (token, AuthTokenSource::Cookie)))
+}
+
+fn cookie_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in value.split(';') {
+        let (name, value) = part.trim().split_once('=')?;
+        if name == AUTH_COOKIE_NAME && !value.trim().is_empty() {
+            return Some(value.trim());
+        }
+    }
+    None
+}
+
+pub fn is_unsafe_method(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+pub fn require_trusted_origin(
+    headers: &HeaderMap,
+    allowed_origins: &[String],
+) -> Result<(), AppError> {
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        return check_allowed_origin(origin, allowed_origins);
+    }
+
+    if let Some(referer) = headers
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+    {
+        let parsed = url::Url::parse(referer).map_err(|_| AppError::Forbidden)?;
+        let Some(host) = parsed.host_str() else {
+            return Err(AppError::Forbidden);
+        };
+        let mut origin = format!("{}://{}", parsed.scheme(), host);
+        if let Some(port) = parsed.port() {
+            origin.push(':');
+            origin.push_str(&port.to_string());
+        }
+        return check_allowed_origin(&origin, allowed_origins);
+    }
+
+    Err(AppError::Forbidden)
+}
+
+fn check_allowed_origin(origin: &str, allowed_origins: &[String]) -> Result<(), AppError> {
+    let origin = origin.trim_end_matches('/');
+    if allowed_origins
+        .iter()
+        .any(|allowed| allowed.trim_end_matches('/') == origin)
+    {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
 // ─── Admin authorization ──────────────────────────────────────────────────────
 
 /// Scope an authorisation gate evaluates against. M4 introduces tenant and
@@ -529,15 +610,11 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
 
-        let auth_header = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
-
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| AppError::unauthorized("expected Bearer token"))?;
+        let (token, source) = token_from_headers(&parts.headers)?
+            .ok_or_else(|| AppError::unauthorized("missing authentication"))?;
+        if source == AuthTokenSource::Cookie && is_unsafe_method(&parts.method) {
+            require_trusted_origin(&parts.headers, &app_state.config.cors_allowed_origins)?;
+        }
 
         auth_from_token(&app_state, token).await
     }

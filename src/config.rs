@@ -29,6 +29,8 @@ pub struct Config {
     pub dev_allow_unverified_email_login: bool,
     pub public_base_url: String,
     pub cors_allowed_origins: Vec<String>,
+    pub auth_cookie_secure: bool,
+    pub auth_cookie_domain: Option<String>,
     pub email_verification_redirect: String,
     pub password_reset_redirect: String,
     pub invitation_redirect: String,
@@ -41,13 +43,38 @@ pub struct Config {
     pub oauth_state_expiry_secs: u64,
     pub auth_exchange_code_expiry_secs: u64,
     pub certs_enabled: bool,
-    pub certs_key_encryption_secret: Option<String>,
-    pub certs_root_ttl_secs: u64,
-    pub certs_intermediate_ttl_secs: u64,
+    pub certs_ca_mode: CertsCaMode,
+    pub certs_root_ca_cert_path: Option<String>,
+    pub certs_intermediate_ca_cert_path: Option<String>,
+    pub certs_intermediate_ca_key_path: Option<String>,
+    pub certs_root_ca_key_path: Option<String>,
     pub certs_leaf_default_ttl_secs: u64,
     pub certs_leaf_max_ttl_secs: u64,
-    pub certs_root_common_name: String,
-    pub certs_intermediate_common_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertsCaMode {
+    FileIntermediateIssuer,
+    FileRootIssuer,
+}
+
+impl CertsCaMode {
+    pub fn from_env_value(value: &str) -> Result<Self> {
+        match value {
+            "file_intermediate_issuer" => Ok(Self::FileIntermediateIssuer),
+            "file_root_issuer" => Ok(Self::FileRootIssuer),
+            other => anyhow::bail!(
+                "ATOM_CERTS_CA_MODE must be file_intermediate_issuer or file_root_issuer, got {other}"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FileIntermediateIssuer => "file_intermediate_issuer",
+            Self::FileRootIssuer => "file_root_issuer",
+        }
+    }
 }
 
 impl Config {
@@ -59,7 +86,7 @@ impl Config {
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
             listen_addr: std::env::var("LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
-            grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8081".to_string()),
+            grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             jwt_expiry_secs: std::env::var("JWT_EXPIRY_SECS")
                 .unwrap_or_else(|_| "3600".to_string())
                 .parse()
@@ -81,6 +108,13 @@ impl Config {
             signup_enabled: env_bool("ATOM_SIGNUP_ENABLED"),
             dev_allow_unverified_email_login: env_bool("ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
+            auth_cookie_secure: std::env::var("ATOM_AUTH_COOKIE_SECURE")
+                .map(|_| env_bool("ATOM_AUTH_COOKIE_SECURE"))
+                .unwrap_or_else(|_| public_base_url.starts_with("https://")),
+            auth_cookie_domain: std::env::var("ATOM_AUTH_COOKIE_DOMAIN")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             email_verification_redirect: std::env::var("ATOM_EMAIL_VERIFICATION_REDIRECT")
                 .unwrap_or_else(|_| public_url(&public_base_url, "/auth/email/verify")),
             password_reset_redirect: std::env::var("ATOM_PASSWORD_RESET_REDIRECT")
@@ -98,15 +132,18 @@ impl Config {
             oauth_state_expiry_secs: env_u64("ATOM_OAUTH_STATE_EXPIRY_SECS", 600),
             auth_exchange_code_expiry_secs: env_u64("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", 300),
             certs_enabled: env_bool_default("ATOM_CERTS_ENABLED", true),
-            certs_key_encryption_secret: std::env::var("ATOM_CERTS_KEY_ENCRYPTION_SECRET").ok(),
-            certs_root_ttl_secs: env_u64("ATOM_CERTS_ROOT_TTL_SECS", 315_360_000),
-            certs_intermediate_ttl_secs: env_u64("ATOM_CERTS_INTERMEDIATE_TTL_SECS", 157_680_000),
+            certs_ca_mode: CertsCaMode::from_env_value(
+                &std::env::var("ATOM_CERTS_CA_MODE")
+                    .unwrap_or_else(|_| "file_intermediate_issuer".to_string()),
+            )?,
+            certs_root_ca_cert_path: std::env::var("ATOM_CERTS_ROOT_CA_CERT_PATH").ok(),
+            certs_intermediate_ca_cert_path: std::env::var("ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH")
+                .ok(),
+            certs_intermediate_ca_key_path: std::env::var("ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH")
+                .ok(),
+            certs_root_ca_key_path: std::env::var("ATOM_CERTS_ROOT_CA_KEY_PATH").ok(),
             certs_leaf_default_ttl_secs: env_u64("ATOM_CERTS_LEAF_DEFAULT_TTL_SECS", 2_592_000),
             certs_leaf_max_ttl_secs: env_u64("ATOM_CERTS_LEAF_MAX_TTL_SECS", 2_592_000),
-            certs_root_common_name: std::env::var("ATOM_CERTS_ROOT_COMMON_NAME")
-                .unwrap_or_else(|_| "Atom Root CA".to_string()),
-            certs_intermediate_common_name: std::env::var("ATOM_CERTS_INTERMEDIATE_COMMON_NAME")
-                .unwrap_or_else(|_| "Atom Intermediate CA".to_string()),
             public_base_url,
         })
     }

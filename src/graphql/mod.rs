@@ -17,13 +17,12 @@ pub mod types;
 
 use async_graphql::{Response, ServerError};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::{
-    extract::State,
-    http::{header, HeaderMap},
-    Extension,
-};
+use axum::{extract::State, http::HeaderMap, Extension};
 
-use crate::{auth::authenticate_token, state::AppState};
+use crate::{
+    auth::{authenticate_token, require_trusted_origin, token_from_headers, AuthTokenSource},
+    state::AppState,
+};
 
 pub use schema::{build_schema, AtomSchema};
 
@@ -34,31 +33,27 @@ pub async fn graphql_handler(
     req: GraphQLRequest,
 ) -> GraphQLResponse {
     let mut req = req.into_inner();
-    match bearer_token(&headers) {
-        Ok(Some(token)) => match authenticate_token(&state, token).await {
-            Ok(auth) => {
-                req = req.data(auth);
+    match token_from_headers(&headers) {
+        Ok(Some((token, source))) => {
+            if source == AuthTokenSource::Cookie {
+                if let Err(err) =
+                    require_trusted_origin(&headers, &state.config.cors_allowed_origins)
+                {
+                    return graphql_error(err.to_string());
+                }
             }
-            Err(err) => return graphql_error(err.to_string()),
-        },
+            match authenticate_token(&state, token).await {
+                Ok(auth) => {
+                    req = req.data(auth);
+                }
+                Err(err) => return graphql_error(err.to_string()),
+            }
+        }
         Ok(None) => {}
-        Err(err) => return graphql_error(err),
+        Err(err) => return graphql_error(err.to_string()),
     }
 
     schema.execute(req).await.into()
-}
-
-fn bearer_token(headers: &HeaderMap) -> Result<Option<&str>, String> {
-    let Some(value) = headers.get(header::AUTHORIZATION) else {
-        return Ok(None);
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| "invalid Authorization header".to_string())?;
-    value
-        .strip_prefix("Bearer ")
-        .map(Some)
-        .ok_or_else(|| "Authorization header must use Bearer".to_string())
 }
 
 fn graphql_error(message: String) -> GraphQLResponse {
