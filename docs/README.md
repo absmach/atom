@@ -30,6 +30,18 @@ This site follows the same Cloudflare Workers static-assets pattern used by the 
 | Version command | `npx wrangler versions upload` |
 | Root directory  | `/docs`                       |
 
+### Cloudflare Build Watch Paths
+
+Configure this in the Cloudflare dashboard for the `atom-docs` Worker:
+
+| Setting       | Value    |
+|---------------|----------|
+| Include paths | `docs/*` |
+| Exclude paths | empty    |
+
+This keeps the Atom docs Worker from rebuilding when commits only touch files
+outside the `docs/` directory.
+
 ### Architecture
 
 ```mermaid

@@ -712,6 +712,13 @@ Cloudflare build settings:
 | Version command | `npx wrangler versions upload` |
 | Root directory  | `/docs`                       |
 
+Set Cloudflare Workers **Build watch paths** for the `atom-docs` Worker to:
+
+| Setting       | Value    |
+|---------------|----------|
+| Include paths | `docs/*` |
+| Exclude paths | empty    |
+
 ---
 
 ## Roadmap
