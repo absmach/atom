@@ -117,6 +117,22 @@ CREATE TABLE credentials (
 CREATE INDEX idx_creds_entity ON credentials(entity_id);
 CREATE INDEX idx_creds_kind ON credentials(kind);
 CREATE INDEX idx_creds_identifier ON credentials(identifier);
+CREATE UNIQUE INDEX idx_credentials_certificate_serial
+    ON credentials(identifier)
+    WHERE kind = 'certificate' AND identifier IS NOT NULL;
+CREATE INDEX idx_credentials_certificate_status_expiry
+    ON credentials(kind, status, expires_at)
+    WHERE kind = 'certificate';
+
+CREATE TABLE certificate_crl_state (
+    issuer_fingerprint_sha256 TEXT PRIMARY KEY,
+    crl_number BIGINT NOT NULL DEFAULT 0,
+    crl_der BYTEA,
+    this_update TIMESTAMPTZ,
+    next_update TIMESTAMPTZ,
+    dirty BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE sessions (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -813,7 +829,7 @@ CROSS JOIN LATERAL (
     VALUES
         ('credential', NULL)
 ) AS applicability(object_kind, object_type)
-WHERE actions.name IN ('manage', 'revoke')
+WHERE actions.name IN ('read', 'manage', 'rotate', 'revoke')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO action_applicability (action_id, object_kind, object_type)
