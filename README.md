@@ -2,7 +2,7 @@
 
 Simple Identity and Authorization service — a lightweight alternative to Keycloak, written in Rust.
 
-Built for [Magistrala](https://github.com/absmach/magistrala) IoT platform, but generic enough for any cloud-native or edge system.
+Built for the [Magistrala](https://github.com/absmach/magistrala) IoT platform, but generic enough for any cloud-native or edge system.
 
 **License:** Apache-2.0
 
@@ -21,7 +21,7 @@ Built for [Magistrala](https://github.com/absmach/magistrala) IoT platform, but 
 
 ## Documentation source of truth
 
-This README is the quickstart and orientation document. It should not duplicate the full product specification.
+This README is the quick start and orientation document. It should not duplicate the full product specification.
 
 - Product source of truth: [product-docs/PRD.md](product-docs/PRD.md)
 - Access model source of truth: [product-docs/11-access-model-simplification.md](product-docs/11-access-model-simplification.md)
@@ -31,8 +31,6 @@ This README is the quickstart and orientation document. It should not duplicate 
 - Architecture diagrams: [docs/content/docs/architecture/index.mdx](docs/content/docs/architecture/index.mdx)
 - Certificate guide with flow diagram: [docs/content/docs/authentication/certificates.mdx](docs/content/docs/authentication/certificates.mdx)
 - Magistrala integration guide with flow diagram: [docs/content/docs/magistrala-on-atom.mdx](docs/content/docs/magistrala-on-atom.mdx)
-
-Do not use older pre-May-2026 authorization terminology as the product model. Atom now uses Actions, Permission Blocks, Roles, Role Assignments, Direct Policies, Principal Groups, and Object Groups.
 
 ---
 
@@ -57,6 +55,39 @@ Action naming is hybrid:
 - real stored objects use generic actions, for example `read` on `audit_log`, `manage` or `revoke` on `credential`, `create` or `manage` on `tenant`, and `rotate` on `signing_key`;
 - scoped access administration keeps explicit actions: `role.manage` manages roles for a Permission Block scope, and `policy.manage` adds/removes assignments for that scope;
 - operation checks keep operation names such as `authz.check`.
+
+That means Atom does not use one naming style for every action. It chooses the
+name that makes the authorization decision easiest to understand:
+
+| Action style | What it means | Example |
+|--------------|---------------|---------|
+| Generic object action | The action is common, and the object kind gives it meaning. | `read` on `audit_log`, `revoke` on `credential` |
+| Scoped access admin action | The action manages access rules inside a specific scope. | `role.manage` for roles in one tenant or group scope |
+| Runtime operation action | The action protects a service operation, not a stored row. | `authz.check` for services allowed to call the PDP |
+
+For stored objects, the object kind is part of the authorization question:
+
+```text
+Can user1 revoke credential cred-123?
+Can admin1 manage tenant d1?
+Can key-admin rotate signing_key key-1?
+```
+
+These use short generic actions because `credential`, `tenant`, and
+`signing_key` already identify what kind of object is being protected. Action
+Applicability decides which action/object pairs are valid, so `revoke` can be
+valid for credentials without becoming a global action for every object type.
+
+For access administration, `role.manage` and `policy.manage` are intentionally
+more explicit. They do not mean "manage every role everywhere." They mean
+"manage role or policy assignments inside the Permission Block scope being
+checked." For example, a tenant admin can receive `role.manage` for tenant `d1`
+without receiving permission to manage roles in tenant `d2`.
+
+For runtime operations, there may be no normal stored object to protect. A
+service calling Atom's authorization endpoint is asking to perform the operation
+`authz.check`, so Atom keeps that operation name as the action. This makes
+service-to-service permissions and audit logs clear.
 
 Read a normal assignment as one sentence:
 
@@ -123,7 +154,7 @@ cp .env.example .env
 # mount issuer CA files under ATOM_CERTS_CA_DIR when ATOM_CERTS_ENABLED=true
 
 # 2. Start Postgres
-docker-compose up postgres -d
+docker compose up postgres -d
 
 # 3. Run (migrations apply automatically on startup)
 cargo run
@@ -190,7 +221,7 @@ Example:
 POST /api/custom/devices
 ```
 
-can run an inline `createEntity` GraphQL operation with a variables mapping such as:
+can run an inline `createEntity` GraphQL operation with a variable mapping such as:
 
 ```json
 {
@@ -202,13 +233,11 @@ can run an inline `createEntity` GraphQL operation with a variables mapping such
 }
 ```
 
-Custom API endpoints do not inspect raw Postgres tables, do not change REST or GraphQL semantics, and do not add external-system aliases. Every execution is audited with redacted request/response summaries. Paths must stay under `/api/custom/`, request bodies are size-limited and JSON-schema validated when a request schema is configured, and active method/path duplicates are rejected.
+Custom API endpoints do not inspect raw Postgres tables, do not change REST or GraphQL semantics, and do not add external-system aliases. Every execution is audited with redacted request/response summaries. Paths must stay under `/api/custom/`, request bodies are size-limited and JSON Schema validated when a request schema is configured, and active method/path duplicates are rejected.
 
 The Atom Next UI includes admin workflows for tenants, entities, groups, resources, roles, policies, audit, authz debugging, and custom API endpoints. The GraphQL playground includes starter operations, schema introspection search, variables, response viewing, and copyable curl/fetch snippets.
 
-Atom is GraphQL-first for catalog, authorization, audit, roles, assignments, permission blocks, actions, Principal Groups, and Object Groups.
-
-Public non-GraphQL endpoints are intentionally limited to auth, health, JWKS, and custom API endpoint execution. The full API surface is documented in [product-docs/PRD.md](product-docs/PRD.md).
+The API surface is summarized below. The full product behavior is documented in [product-docs/PRD.md](product-docs/PRD.md).
 
 Atom GraphQL is generic. No Magistrala-specific GraphQL aliases exist; use the generic application mappings below.
 
@@ -301,34 +330,70 @@ Generic application mapping:
 
 ## Configuration
 
-| Variable         | Default                                    | Description                     |
-|------------------|--------------------------------------------|---------------------------------|
-| `DATABASE_URL`   | *(required)*                               | Postgres connection string      |
-| `LISTEN_ADDR`    | `0.0.0.0:8080`                             | HTTP bind address               |
-| `GRPC_ADDR`      | `0.0.0.0:8081`                             | gRPC bind address               |
-| `JWT_EXPIRY_SECS`| `3600`                                     | JWT lifetime in seconds         |
-| `ADMIN_SECRET`   | *(optional)*                               | Seeds admin password on first boot |
-| `ADMIN_ENTITY_ID`| `00000000-0000-0000-0000-000000000001`     | Override seeded admin UUID      |
-| `ATOM_SIGNUP_ENABLED` | `false`                              | Enables unauthenticated global human signup |
-| `ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN` | `false`           | Development-only password login before email verification |
-| `ATOM_PUBLIC_BASE_URL` | `http://localhost:8080`             | Public URL used for email verification and OAuth callbacks |
-| `ATOM_EMAIL_VERIFICATION_REDIRECT` | `/auth/email/verify` | URL that verifies email tokens |
-| `ATOM_OAUTH_SUCCESS_REDIRECT` | `/auth/callback` | Frontend URL that receives the OAuth exchange code |
-| `ATOM_OAUTH_ERROR_REDIRECT` | `/auth/callback` | Frontend URL that receives OAuth errors |
-| `ATOM_OIDC_PROVIDERS` | `[]`                                 | JSON array of OIDC providers, for example Google |
-| `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM` | *(optional)*          | SMTP settings for signup verification email |
-| `RUST_LOG`       | `info`                                     | Log level filter                |
+`.env.example` is the local template. These are the main runtime and Compose variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | *(required)* | Postgres connection string |
+| `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP bind address |
+| `GRPC_ADDR` | `0.0.0.0:8081` | gRPC bind address |
+| `JWT_EXPIRY_SECS` | `3600` | JWT lifetime in seconds |
+| `ATOM_JWT_ISSUER` | `ATOM_PUBLIC_BASE_URL` | JWT issuer claim |
+| `ATOM_JWT_AUDIENCE` | `magistrala` | JWT audience claim |
+| `ADMIN_SECRET` | *(optional)* | Seeds the admin password on first boot |
+| `ADMIN_ENTITY_ID` | `00000000-0000-0000-0000-000000000001` | Override seeded admin UUID |
+| `ATOM_SERVICE_SECRET` / `ATOM_SERVICE_ENTITY_ID` | *(optional)* / seeded service UUID | Seeds a service entity password on first boot |
+| `ATOM_MIN_PASSWORD_CHARS` | `12` | Minimum password length |
+| `ATOM_CORS_ALLOWED_ORIGINS` | `ATOM_PUBLIC_BASE_URL` | Comma-separated allowed CORS origins |
+| `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN` | auto-detect HTTPS / *(unset)* | Auth cookie options for UI flows |
+| `ATOM_SIGNUP_ENABLED` | `false` | Enables unauthenticated global human signup |
+| `ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN` | `false` | Development-only password login before email verification |
+| `ATOM_PUBLIC_BASE_URL` | `http://localhost:8080` | Public URL used for issuer and redirect defaults |
+| `ATOM_EMAIL_VERIFICATION_REDIRECT` | `http://localhost:8080/auth/email/verify` | URL that verifies email tokens |
+| `ATOM_PASSWORD_RESET_REDIRECT` | `http://localhost:8080/reset-password` | Frontend URL for password reset tokens |
+| `ATOM_INVITATION_REDIRECT` | `http://localhost:8080/invitations/accept` | Frontend URL for invitation tokens |
+| `ATOM_OAUTH_SUCCESS_REDIRECT` | `http://localhost:8080/auth/callback` | Frontend URL that receives the OAuth exchange code |
+| `ATOM_OAUTH_ERROR_REDIRECT` | `http://localhost:8080/auth/callback` | Frontend URL that receives OAuth errors |
+| `ATOM_OIDC_PROVIDERS` | `[]` | JSON array of OIDC providers, for example Google |
+| `ATOM_EMAIL_VERIFICATION_EXPIRY_SECS` | `86400` | Email verification token lifetime |
+| `ATOM_INVITATION_EXPIRY_SECS` | `604800` | Invitation token lifetime |
+| `ATOM_OAUTH_STATE_EXPIRY_SECS` | `600` | OAuth state token lifetime |
+| `ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS` | `300` | OAuth exchange code lifetime |
+| `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM` | *(optional)* | Required pair for signup and password reset email delivery |
+| `ATOM_SMTP_PORT` / `ATOM_SMTP_TLS` | `587` / `starttls` | SMTP port and TLS mode |
+| `ATOM_SMTP_USERNAME` / `ATOM_SMTP_PASSWORD` | *(optional)* | SMTP credentials |
+| `ATOM_CERTS_ENABLED` | `true` | Enables certificate lifecycle support |
+| `ATOM_CERTS_CA_MODE` | `file_intermediate_issuer` | CA mode: `file_intermediate_issuer` or `file_root_issuer` |
+| `ATOM_CERTS_ROOT_CA_CERT_PATH` | *(optional)* | Mounted root CA certificate path |
+| `ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH` | *(optional)* | Mounted intermediate CA certificate path |
+| `ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH` | *(optional)* | Mounted intermediate CA private key path |
+| `ATOM_CERTS_ROOT_CA_KEY_PATH` | *(optional)* | Mounted root CA private key path for `file_root_issuer` |
+| `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS` | `2592000` | Default issued certificate lifetime |
+| `ATOM_CERTS_LEAF_MAX_TTL_SECS` | `2592000` | Maximum issued certificate lifetime |
+| `ATOM_CERTS_CA_DIR` | `./certs` | Docker Compose host directory mounted at `/certs:ro` |
+| `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `3005` | Docker Compose host ports |
+| `ATOM_GRAPHQL_URL` | `http://atom:8080/graphql` | GraphQL endpoint used by the Dockerized Next UI |
+| `RUST_LOG` | `info` | Log level filter |
 
 ---
 
 ## Authentication
 
-All endpoints except `GET /health`, `POST /auth/login`, email verification,
-OAuth start/callback/exchange, and optionally `POST /auth/signup` require:
+Authenticated REST, GraphQL, and custom endpoint requests use:
 
 ```
 Authorization: Bearer <token>
 ```
+
+The public HTTP routes that do not require an existing Bearer token are
+`GET /health`, `GET /.well-known/jwks.json`, `GET /certs/ca-chain`,
+`GET /certs/crl`, `POST /certs/ocsp`, `GET /auth/public-config`,
+`POST /auth/login`, `GET /auth/email/verify`, `POST /auth/email/resend`,
+`POST /auth/password/reset/request`, `POST /auth/password/reset`,
+`GET /auth/oauth/:provider/start`, `GET /auth/oauth/:provider/callback`,
+`POST /auth/oauth/exchange`, and `POST /auth/signup` when signup is enabled.
+Custom API endpoint execution under `/api/custom/*` follows the configured
+endpoint auth mode.
 
 Two token types are accepted:
 
@@ -378,21 +443,27 @@ curl -s -X POST http://localhost:8080/auth/oauth/exchange \
 
 **API key** — created per entity, long-lived, format `atom_<id>_<secret>`:
 ```bash
-curl -s -X POST http://localhost:8080/entities/<id>/credentials/api-keys \
+curl -s -X POST http://localhost:8080/graphql \
   -H 'Authorization: Bearer eyJ...' \
   -H 'Content-Type: application/json' \
-  -d '{"description": "device-01 production key"}'
-# → {"credential_id":"...", "key":"atom_abc123...", "expires_at":null}
+  -d '{
+    "query": "mutation ($entityId: ID!, $input: CreateApiKeyInput!) { createApiKey(entityId: $entityId, input: $input) { credentialId key expiresAt } }",
+    "variables": {
+      "entityId": "<id>",
+      "input": { "description": "device-01 production key" }
+    }
+  }'
+# → {"data":{"createApiKey":{"credentialId":"...","key":"atom_abc123...","expiresAt":null}}}
 # The key is shown exactly once — store it securely.
 
 # Use it:
-curl http://localhost:8080/entities/<id> \
+curl http://localhost:8080/auth/introspect \
   -H 'Authorization: Bearer atom_abc123...'
 ```
 
 ---
 
-## RBAC And Direct Policies
+## RBAC and Direct Policies
 
 Role-Based Access Control is the normal product model. A role does not contain scope columns directly. A role links to one or more Permission Blocks, and each Permission Block contains the scope, actions, effect, and optional ABAC conditions.
 
@@ -502,21 +573,35 @@ Conditions can be used in Role Permission Blocks or Direct Policy Permission Blo
 
 ## API Surface
 
-Atom is GraphQL-first for catalog, authorization, audit, roles, assignments, permission blocks, actions, Principal Groups, and Object Groups.
+Atom is GraphQL-first for catalog, authorization, audit, roles, assignments, permission blocks, actions, Principal Groups, and Object Groups. GraphQL is available at:
 
-Public non-GraphQL endpoints are intentionally limited to:
+```text
+POST /graphql
+```
+
+Non-GraphQL HTTP endpoints are intentionally limited to auth, health, JWKS,
+public PKI artifacts, and custom API endpoint execution:
 
 ```text
 GET  /health
-POST /graphql
 GET  /.well-known/jwks.json
+GET  /certs/ca-chain
+GET  /certs/crl
+POST /certs/ocsp
+GET  /auth/public-config
 POST /auth/login
 POST /auth/logout
 POST /auth/signup
-POST /auth/introspect
-GET/POST /auth/email/*
-GET/POST /auth/password/reset*
-GET/POST /auth/oauth/*
+GET  /auth/introspect
+GET  /auth/session
+GET  /auth/sessions/:id
+GET  /auth/email/verify
+POST /auth/email/resend
+POST /auth/password/reset/request
+POST /auth/password/reset
+GET  /auth/oauth/:provider/start
+GET  /auth/oauth/:provider/callback
+POST /auth/oauth/exchange
 POST /auth/keys/rotate
 ANY /api/custom/*
 ```
@@ -602,14 +687,14 @@ ObjectGroup ─── where-container; contains entities/resources/child groups
 # Check
 cargo check
 
-# Build (also re-generates gRPC stubs from proto/atom/v1/atom.proto via build.rs)
+# Build (also regenerates gRPC stubs from proto/atom/v1/atom.proto via build.rs)
 cargo build
 
 # Run with live reload
 cargo watch -x run
 
 # Run Postgres only
-docker-compose up postgres -d
+docker compose up postgres -d
 
 # Lint
 cargo clippy -- -D warnings
@@ -727,6 +812,6 @@ Set Cloudflare Workers **Build watch paths** for the `atom-docs` Worker to:
 - [x] OIDC federation (external IdP)
 - [ ] Workload identity (SPIFFE / X.509)
 - [ ] Audit log webhooks
-- [ ] Token introspection endpoint
+- [x] Token introspection endpoint
 - [ ] Rate limiting
 - [ ] Metrics (Prometheus)

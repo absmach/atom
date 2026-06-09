@@ -89,7 +89,7 @@ The current project needs a single PRD because product intent must not be spread
 
 1. Atom is not a full Keycloak clone.
 2. Atom does not provide a hosted login UI in the current scope.
-3. Atom does not implement OAuth/OIDC federation in the current scope.
+3. Atom is not a general-purpose OAuth authorization server; configured OIDC signup/login federation is in scope.
 4. Atom does not provide SCIM provisioning in the current scope.
 5. Atom does not embed permissions into JWTs.
 6. Atom does not replace application domain models; application-specific fields remain in `attributes`.
@@ -1277,9 +1277,9 @@ Atom is successful when:
 ### Phase 5: Future extensions
 
 - SCIM provisioning
-- OIDC federation
+- Additional federation provider capabilities
 - Workload identity with SPIFFE or X.509
-- Token introspection
+- Extended token lifecycle management
 - Audit webhooks
 - Prometheus metrics
 - Rate limiting
