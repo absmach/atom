@@ -1,22 +1,88 @@
 ---
 title: Overview
-description: Atom is a lightweight Identity and Authorization service for IoT and cloud-native systems.
+description: A plain-language overview of Atom, the security control plane for connected software.
 ---
 
-Atom is a single-binary replacement for Keycloak — an HTTP service that combines identity management and authorization in one deployable unit.
+Atom is the security control plane for connected software.
 
-Built for [Magistrala](https://github.com/absmach/magistrala), but generic enough for any cloud-native or edge system.
+It gives one answer to three questions every serious platform must ask:
+
+- Who is this user, device, service, AI agent, workload, or application?
+- How did it prove its identity?
+- What is it allowed to do right now?
+
+Most products start with simple login. As they grow, they add devices, API keys,
+services, AI agents, tenants, certificates, roles, audit logs, and custom
+permission logic. That security logic often becomes scattered across many
+services and databases.
+
+Atom centralizes it in one focused system.
+
+Built for [Magistrala](https://github.com/absmach/magistrala), but generic enough for IoT, AI, SaaS, edge, and cloud-native systems.
+
+## Why it matters
+
+Modern platforms are no longer only people logging into dashboards.
+
+They also have:
+
+- devices sending data;
+- AI agents logging in and calling tools or APIs;
+- services calling other services;
+- customers separated into tenants;
+- certificates used for machine identity;
+- API keys used by long-running clients;
+- operators and auditors asking who had access and why.
+
+Without a shared security control plane, each product team usually builds part
+of this themselves. That creates duplicated work, inconsistent behavior, hidden
+access bugs, and weak auditability.
+
+Atom makes those decisions consistent, visible, and reusable.
 
 ## What it does
 
 | Concern | What Atom provides |
 |---|---|
-| **Identity** | CRUD for any principal type — humans, devices, services, workloads, applications. All are first-class _entities_. |
+| **Identity** | CRUD for any principal type — humans, devices, services, workloads, applications, and AI agents represented through those entity kinds. All are first-class _entities_. |
 | **Authentication** | Password login returning a JWT, long-lived API keys, session management with revocation. |
 | **Authorization** | Actions, Action Applicability, Permission Blocks, Roles, Role Assignments, Direct Policies, and ABAC guardrails evaluated at runtime. |
 | **Grouping** | Principal Groups define who receives roles; Object Groups define where access applies. |
 | **Ownership** | Parent–child relationships between entities. |
 | **Multi-tenancy** | First-class tenants. Magistrala domains map directly to Atom tenants. |
+
+## Where Atom is useful
+
+AI agents can be represented as service, workload, or application entities,
+depending on how the platform runs them.
+
+| Use case | What Atom answers | Why it is valuable |
+|---|---|---|
+| IoT device access | Can `meter-001` publish telemetry? Can this certificate still identify this device? | Device identity, credentials, publish/subscribe authorization, and audit share one model. |
+| AI agent access | Can this agent log in, call this tool, read this data, or act for this tenant? | Agents get explicit, revocable, auditable permissions instead of broad platform keys. |
+| Multi-tenant platforms | Can this operator manage assets in `factory-a` but not `factory-b`? | Tenant isolation becomes a platform capability instead of custom app logic. |
+| Service-to-service permissions | Can this internal service call this API or rotate this credential? | Internal trust becomes explicit, reviewable, and revocable. |
+| Certificate-based identity | Which entity owns this mTLS certificate, and is it still active? | Machine identity works with the same roles, tenants, and audit history as users and API keys. |
+| Audit and investigation | Why was access denied? Who can access this resource? Who revoked this credential? | Operators can answer security questions without reverse-engineering many permission systems. |
+
+## Plain-language summary
+
+Atom is the access-control brain behind a platform.
+
+Applications still do their own business work. IoT systems still move messages.
+AI platforms still run agents and workflows. Atom handles the security questions
+behind those systems:
+
+```text
+Who is this?
+How did it authenticate?
+What can it do?
+Why was it allowed or denied?
+Can we audit that later?
+```
+
+That is the value of Atom: it turns security from scattered custom logic into a
+shared platform capability.
 
 ## Source of truth
 
@@ -29,7 +95,7 @@ This docs site is an operator/developer guide. The product source of truth lives
 
 ## GraphQL
 
-Atom exposes GraphQL at `POST /graphql`. GraphQL uses the same Bearer token authentication as Auth/OIDC REST endpoints. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, actions, permission blocks, role assignments, Direct Policies, authz checks, audit logs, and profile-driven entity creation. Non-GraphQL public endpoints are intentionally limited to Auth/OIDC, health, JWKS, and custom endpoint execution.
+Atom exposes GraphQL at `POST /graphql`. GraphQL uses the same Bearer token authentication as Auth/OIDC REST endpoints. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, actions, permission blocks, role assignments, Direct Policies, authz checks, audit logs, and profile-driven entity creation. Non-GraphQL public endpoints are intentionally limited to Auth/OIDC, health, JWKS, public PKI artifacts, and custom endpoint execution.
 
 The Atom Next UI is a separate optional frontend. In Docker Compose it is enabled with the `atom-ui` profile and uses Atom GraphQL through `ATOM_GRAPHQL_URL`.
 
