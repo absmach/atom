@@ -494,7 +494,8 @@ async fn role_permission_assignments(
                     ELSE NULL
                   END AS object_type
            FROM role_permission_blocks rpb
-           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           -- Deny blocks grant nothing; only allow blocks are assignment risks.
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id AND pb.effect = 'allow'
            JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
            JOIN actions a ON a.id = pba.action_id
            LEFT JOIN LATERAL (

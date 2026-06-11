@@ -350,6 +350,8 @@ pub struct ExpandedRoleGrant {
     pub scope_kind: ScopeKind,
     pub scope_ref: Option<String>,
     pub capability_id: Uuid,
+    pub effect: Effect,
+    pub conditions: Value,
 }
 
 pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
@@ -3739,7 +3741,9 @@ async fn authorized_entity_ids(
                               WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
                               WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
                           END AS scope_ref,
-                          pba.action_id AS capability_id
+                          pba.action_id AS capability_id,
+                          pb.effect,
+                          pb.conditions
                    FROM role_permission_blocks rpb
                    JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
                    JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
@@ -3784,6 +3788,8 @@ async fn authorized_entity_ids(
                                    FROM role_grants rg
                                    JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
                                    WHERE rg.root_role_id = pb.grant_id
+                                     AND rg.effect = 'allow'
+                                     AND rg.conditions = '{}'::jsonb
                                      AND mc.object_kind = 'entity'
                                      AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
                                      AND (
@@ -3839,6 +3845,7 @@ async fn authorized_entity_ids(
                                    FROM role_grants rg
                                    JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
                                    WHERE rg.root_role_id = pb.grant_id
+                                     AND rg.effect = 'deny'
                                      AND mc.object_kind = 'entity'
                                      AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
                                      AND (
@@ -3955,7 +3962,9 @@ async fn authorized_resource_ids(
                               WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
                               WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
                           END AS scope_ref,
-                          pba.action_id AS capability_id
+                          pba.action_id AS capability_id,
+                          pb.effect,
+                          pb.conditions
                    FROM role_permission_blocks rpb
                    JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
                    JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
@@ -4000,6 +4009,8 @@ async fn authorized_resource_ids(
                                    FROM role_grants rg
                                    JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
                                    WHERE rg.root_role_id = pb.grant_id
+                                     AND rg.effect = 'allow'
+                                     AND rg.conditions = '{}'::jsonb
                                      AND mc.object_kind = 'resource'
                                      AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
                                      AND (
@@ -4055,6 +4066,7 @@ async fn authorized_resource_ids(
                                    FROM role_grants rg
                                    JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
                                    WHERE rg.root_role_id = pb.grant_id
+                                     AND rg.effect = 'deny'
                                      AND mc.object_kind = 'resource'
                                      AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
                                      AND (
@@ -4793,7 +4805,9 @@ pub async fn expanded_role_grants_for_roles(
                     WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
                     WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
                   END AS scope_ref,
-                  pba.action_id AS capability_id
+                  pba.action_id AS capability_id,
+                  pb.effect,
+                  pb.conditions
            FROM roles r
            JOIN role_permission_blocks rpb ON rpb.role_id = r.id
            JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
@@ -4820,6 +4834,8 @@ pub async fn expanded_role_grants_for_roles(
                 scope_kind,
                 scope_ref: row.try_get("scope_ref").map_err(db_err)?,
                 capability_id: row.try_get("capability_id").map_err(db_err)?,
+                effect: row.try_get("effect").map_err(db_err)?,
+                conditions: row.try_get("conditions").map_err(db_err)?,
             });
     }
 

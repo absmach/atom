@@ -390,44 +390,64 @@ pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse
             continue;
         }
 
-        let grant_matches = match binding.grant_kind {
-            GrantKind::Capability => cap_id_set.contains(&binding.grant_id),
-            GrantKind::Role => role_grants
-                .get(&binding.grant_id)
-                .map(|grants| {
-                    grants.iter().any(|grant| {
-                        cap_id_set.contains(&grant.capability_id)
-                            && role_scope_matches(
-                                grant,
-                                &object_id_str,
-                                &object.coarse_kind,
-                                &object.kind,
-                                object_tenant_id_str.as_deref(),
-                                object.parent_group_id,
-                                &object.ancestor_group_ids,
-                            )
-                    })
-                })
-                .unwrap_or(false),
-        };
-
-        if !grant_matches {
-            continue;
-        }
-
         if !conditions_match(&binding.conditions, &eval_ctx) {
             continue;
         }
 
-        match binding.effect {
-            Effect::Deny => {
-                return Ok(AuthzResponse::deny(format!(
-                    "explicitly denied by policy {}",
-                    binding.id
-                )));
+        match binding.grant_kind {
+            GrantKind::Capability => {
+                if !cap_id_set.contains(&binding.grant_id) {
+                    continue;
+                }
+                match binding.effect {
+                    Effect::Deny => {
+                        return Ok(AuthzResponse::deny(format!(
+                            "explicitly denied by policy {}",
+                            binding.id
+                        )));
+                    }
+                    Effect::Allow => {
+                        has_allow = true;
+                    }
+                }
             }
-            Effect::Allow => {
-                has_allow = true;
+            // Role-linked permission blocks carry their own effect and
+            // conditions; each matching block is evaluated independently so a
+            // deny block inside a role overrides allows (AGENTS.md invariant).
+            GrantKind::Role => {
+                let Some(grants) = role_grants.get(&binding.grant_id) else {
+                    continue;
+                };
+                for grant in grants {
+                    if !cap_id_set.contains(&grant.capability_id) {
+                        continue;
+                    }
+                    if !role_scope_matches(
+                        grant,
+                        &object_id_str,
+                        &object.coarse_kind,
+                        &object.kind,
+                        object_tenant_id_str.as_deref(),
+                        object.parent_group_id,
+                        &object.ancestor_group_ids,
+                    ) {
+                        continue;
+                    }
+                    if !conditions_match(&grant.conditions, &eval_ctx) {
+                        continue;
+                    }
+                    match grant.effect {
+                        Effect::Deny => {
+                            return Ok(AuthzResponse::deny(format!(
+                                "explicitly denied by role '{}' permission block (policy {})",
+                                grant.role_name, binding.id
+                            )));
+                        }
+                        Effect::Allow => {
+                            has_allow = true;
+                        }
+                    }
+                }
             }
         }
     }
@@ -649,6 +669,8 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
         let mut result = "skipped".to_string();
         let mut skip_reason = None;
         let mut role_path = None;
+        let mut effective_effect = binding.effect.clone();
+        let mut effective_conditions = binding.conditions.clone();
         if !scope_matches_with_groups(
             &binding,
             &object_id_str,
@@ -660,47 +682,80 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
         ) {
             skip_reason = Some("scope_mismatch".to_string());
         } else {
-            let matched_role_grant = match binding.grant_kind {
-                GrantKind::Capability => None,
-                GrantKind::Role => role_grants.get(&binding.grant_id).and_then(|grants| {
-                    grants.iter().find(|grant| {
-                        capability_id_set.contains(&grant.capability_id)
-                            && role_scope_matches(
-                                grant,
-                                &object_id_str,
-                                &object.coarse_kind,
-                                &resource.kind,
-                                object_tenant_id_str.as_deref(),
-                                object.parent_group_id,
-                                &object.ancestor_group_ids,
-                            )
-                    })
-                }),
-            };
-            let grant_matches = match binding.grant_kind {
-                GrantKind::Capability => capability_id_set.contains(&binding.grant_id),
-                GrantKind::Role => matched_role_grant.is_some(),
-            };
-            role_path = matched_role_grant.map(|grant| grant.role_path.clone());
-            if !grant_matches {
-                skip_reason = Some("grant_mismatch".to_string());
-            } else if !conditions_match(&binding.conditions, &eval_ctx) {
-                skip_reason = Some("conditions_mismatch".to_string());
-            } else {
-                result = "matched".to_string();
+            match binding.grant_kind {
+                GrantKind::Capability => {
+                    if !capability_id_set.contains(&binding.grant_id) {
+                        skip_reason = Some("grant_mismatch".to_string());
+                    } else if !conditions_match(&binding.conditions, &eval_ctx) {
+                        skip_reason = Some("conditions_mismatch".to_string());
+                    } else {
+                        result = "matched".to_string();
+                    }
+                }
+                // Role-linked blocks carry their own effect/conditions. Mirror
+                // the evaluate() semantics: among blocks matching capability
+                // and scope, a conditions-matching deny wins over allows.
+                GrantKind::Role => {
+                    if !conditions_match(&binding.conditions, &eval_ctx) {
+                        skip_reason = Some("conditions_mismatch".to_string());
+                    } else {
+                        let candidates: Vec<&repo::ExpandedRoleGrant> = role_grants
+                            .get(&binding.grant_id)
+                            .map(|grants| {
+                                grants
+                                    .iter()
+                                    .filter(|grant| {
+                                        capability_id_set.contains(&grant.capability_id)
+                                            && role_scope_matches(
+                                                grant,
+                                                &object_id_str,
+                                                &object.coarse_kind,
+                                                &resource.kind,
+                                                object_tenant_id_str.as_deref(),
+                                                object.parent_group_id,
+                                                &object.ancestor_group_ids,
+                                            )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if candidates.is_empty() {
+                            skip_reason = Some("grant_mismatch".to_string());
+                        } else {
+                            let matched = candidates
+                                .iter()
+                                .copied()
+                                .filter(|grant| conditions_match(&grant.conditions, &eval_ctx))
+                                .max_by_key(|grant| matches!(grant.effect, Effect::Deny));
+                            match matched {
+                                Some(grant) => {
+                                    result = "matched".to_string();
+                                    role_path = Some(grant.role_path.clone());
+                                    effective_effect = grant.effect.clone();
+                                    effective_conditions = grant.conditions.clone();
+                                }
+                                None => {
+                                    role_path =
+                                        candidates.first().map(|grant| grant.role_path.clone());
+                                    skip_reason = Some("conditions_mismatch".to_string());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
         let evaluated_binding = EvaluatedBinding {
             id: binding.id,
-            effect: binding.effect.clone(),
+            effect: effective_effect,
             grant_kind: binding.grant_kind.clone(),
             grant_id: binding.grant_id,
             role_name,
             role_path,
             scope_kind: binding.scope_kind,
             scope_ref: binding.scope_ref,
-            conditions: binding.conditions,
+            conditions: effective_conditions,
             via,
             result,
             skip_reason,
@@ -1787,5 +1842,183 @@ mod db_tests {
             .bind(t.id)
             .execute(&pool)
             .await;
+    }
+
+    async fn role_fixture(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
+        let entity_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        )
+        .bind(entity_id)
+        .bind(format!("role-block-{entity_id}"))
+        .execute(pool)
+        .await
+        .expect("insert entity");
+
+        let resource_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO resources (id, kind) VALUES ($1, 'channel')")
+            .bind(resource_id)
+            .execute(pool)
+            .await
+            .expect("insert resource");
+
+        let role_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+            .bind(role_id)
+            .bind(format!("role-block-{role_id}"))
+            .execute(pool)
+            .await
+            .expect("insert role");
+        sqlx::query(
+            "INSERT INTO role_assignments (subject_kind, subject_id, role_id) VALUES ('entity', $1, $2)",
+        )
+        .bind(entity_id)
+        .bind(role_id)
+        .execute(pool)
+        .await
+        .expect("assign role");
+
+        (entity_id, resource_id, role_id)
+    }
+
+    async fn link_role_block(
+        pool: &PgPool,
+        role_id: Uuid,
+        resource_id: Uuid,
+        effect: &str,
+        conditions: serde_json::Value,
+    ) -> Uuid {
+        let block_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
+               VALUES ('object', $1, $2, $3)
+               RETURNING id"#,
+        )
+        .bind(resource_id)
+        .bind(effect)
+        .bind(conditions)
+        .fetch_one(pool)
+        .await
+        .expect("insert block");
+        sqlx::query(
+            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+               SELECT $1, id FROM actions WHERE name = 'read'"#,
+        )
+        .bind(block_id)
+        .execute(pool)
+        .await
+        .expect("insert block action");
+        sqlx::query(
+            "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+        )
+        .bind(role_id)
+        .bind(block_id)
+        .execute(pool)
+        .await
+        .expect("link block");
+        block_id
+    }
+
+    async fn cleanup_role_fixture(
+        pool: &PgPool,
+        entity_id: Uuid,
+        resource_id: Uuid,
+        role_id: Uuid,
+    ) {
+        let _ = sqlx::query(
+            r#"DELETE FROM permission_blocks
+               WHERE id IN (
+                 SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1
+               )"#,
+        )
+        .bind(role_id)
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM roles WHERE id = $1")
+            .bind(role_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+            .bind(resource_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+            .bind(entity_id)
+            .execute(pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn role_linked_deny_block_overrides_role_allow() {
+        let pool = pool().await;
+        let (entity_id, resource_id, role_id) = role_fixture(&pool).await;
+        link_role_block(&pool, role_id, resource_id, "allow", json!({})).await;
+        let deny_block = link_role_block(&pool, role_id, resource_id, "deny", json!({})).await;
+
+        let req = AuthzRequest {
+            subject_id: entity_id,
+            action: "read".into(),
+            resource_id: Some(resource_id),
+            object_kind: None,
+            object_id: None,
+            context: json!({}),
+        };
+        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        assert!(
+            !resp.allowed,
+            "deny block linked to a role must override the allow block"
+        );
+
+        let _ = sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
+            .bind(deny_block)
+            .execute(&pool)
+            .await;
+        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        assert!(
+            resp.allowed,
+            "allow block should grant once deny is removed: {}",
+            resp.reason
+        );
+
+        cleanup_role_fixture(&pool, entity_id, resource_id, role_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn role_linked_conditional_block_requires_matching_context() {
+        let pool = pool().await;
+        let (entity_id, resource_id, role_id) = role_fixture(&pool).await;
+        link_role_block(
+            &pool,
+            role_id,
+            resource_id,
+            "allow",
+            json!({"context.mfa_verified": true}),
+        )
+        .await;
+
+        let mut req = AuthzRequest {
+            subject_id: entity_id,
+            action: "read".into(),
+            resource_id: Some(resource_id),
+            object_kind: None,
+            object_id: None,
+            context: json!({}),
+        };
+        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        assert!(
+            !resp.allowed,
+            "conditional role block must not match an empty context"
+        );
+
+        req.context = json!({"mfa_verified": true});
+        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        assert!(
+            resp.allowed,
+            "conditional role block should match the supplied context: {}",
+            resp.reason
+        );
+
+        cleanup_role_fixture(&pool, entity_id, resource_id, role_id).await;
     }
 }
