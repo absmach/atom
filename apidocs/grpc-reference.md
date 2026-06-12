@@ -112,14 +112,6 @@
 
 
 
- 
-
- 
-
- 
-
-
-
 
 <a name="atom-v1-ResolveCertificateRequest"></a>
 
