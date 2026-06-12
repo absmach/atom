@@ -9,9 +9,14 @@
     - [CheckRequest](#atom-v1-CheckRequest)
     - [CheckRequest.ContextEntry](#atom-v1-CheckRequest-ContextEntry)
     - [CheckResponse](#atom-v1-CheckResponse)
+    - [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest)
+    - [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse)
+    - [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest)
+    - [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse)
   
     - [AuthService](#atom-v1-AuthService)
     - [AuthzService](#atom-v1-AuthzService)
+    - [CertificateService](#atom-v1-CertificateService)
   
 - [Scalar Value Types](#scalar-value-types)
 
@@ -107,6 +112,71 @@
 
 
 
+
+<a name="atom-v1-ResolveCertificateRequest"></a>
+
+### ResolveCertificateRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| serial_number | [string](#string) |  |  |
+| fingerprint_sha256 | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="atom-v1-ResolveCertificateResponse"></a>
+
+### ResolveCertificateResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entity_id | [string](#string) |  |  |
+| tenant_id | [string](#string) |  |  |
+| credential_id | [string](#string) |  |  |
+| expires_at | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="atom-v1-RevokeEntityCertificatesRequest"></a>
+
+### RevokeEntityCertificatesRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entity_id | [string](#string) |  |  |
+| reason | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="atom-v1-RevokeEntityCertificatesResponse"></a>
+
+### RevokeEntityCertificatesResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| revoked | [uint64](#uint64) |  |  |
+
+
+
+
+
  
 
  
@@ -134,6 +204,18 @@ Call this on every request to protected downstream resources.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | Check | [CheckRequest](#atom-v1-CheckRequest) | [CheckResponse](#atom-v1-CheckResponse) |  |
+
+
+<a name="atom-v1-CertificateService"></a>
+
+### CertificateService
+CertificateService resolves and revokes Atom certificate credentials for
+runtime services that terminate mTLS outside Atom.
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| ResolveCertificate | [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest) | [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse) |  |
+| RevokeEntityCertificates | [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest) | [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse) |  |
 
  
 

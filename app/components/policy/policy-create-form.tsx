@@ -330,17 +330,21 @@ export function PolicyCreateForm({
               setDraft((prev) => ({ ...prev, permissionBlockId }))
             }
           >
-            <SelectTrigger>
+            <SelectTrigger className="h-auto min-h-10 whitespace-normal py-2 [&>span]:line-clamp-none [&>span]:wrap-break-word [&>span]:text-left">
               <SelectValue placeholder="Choose permission block" />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className="max-w-xs">
               {permissionBlocks.length === 0 ? (
                 <SelectItem disabled value="__empty__">
                   No permission blocks available
                 </SelectItem>
               ) : (
                 permissionBlocks.map((block) => (
-                  <SelectItem key={block.id} value={block.id}>
+                  <SelectItem
+                    key={block.id}
+                    value={block.id}
+                    className="whitespace-normal"
+                  >
                     {permissionBlockLabel(block)}
                   </SelectItem>
                 ))

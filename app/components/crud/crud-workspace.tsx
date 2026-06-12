@@ -1,4 +1,4 @@
-import { AlertCircle, Database } from "lucide-react";
+import { Database } from "lucide-react";
 import { cookies } from "next/headers";
 
 import { CrudTable } from "@/components/crud/crud-table";
@@ -88,18 +88,6 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
           {resource.description}
         </p>
       </div>
-
-      {Object.keys(resource.missing).length ? (
-        <Alert>
-          <AlertCircle className="size-4" />
-          <AlertTitle>Unavailable actions</AlertTitle>
-          <AlertDescription>
-            {Object.entries(resource.missing)
-              .map(([action, reason]) => `${action}: ${reason}`)
-              .join(" ")}
-          </AlertDescription>
-        </Alert>
-      ) : null}
 
       {fetchError ? (
         <Alert variant="destructive">

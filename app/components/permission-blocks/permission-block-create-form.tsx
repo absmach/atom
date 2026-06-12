@@ -379,7 +379,7 @@ export function PermissionBlockCreateForm({
                 setDraft((prev) => resetScopeFields(prev, scopeMode))
               }
             >
-              <SelectTrigger>
+              <SelectTrigger className="**:data-description:hidden">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -391,7 +391,10 @@ export function PermissionBlockCreateForm({
                   <SelectItem key={mode.value} value={mode.value}>
                     <span className="grid gap-0.5">
                       <span>{mode.label}</span>
-                      <span className="text-muted-foreground text-xs">
+                      <span
+                        data-description=""
+                        className="text-muted-foreground text-xs"
+                      >
                         {mode.description}
                       </span>
                     </span>
@@ -622,7 +625,7 @@ export function PermissionBlockCreateForm({
         <Button
           disabled={saveBlock.isPending}
           type="button"
-          variant="ghost"
+          variant="secondary"
           onClick={stepIdx === 0 ? onCancel : previousStep}
         >
           {stepIdx === 0 ? "Cancel" : "Back"}
