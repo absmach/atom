@@ -225,7 +225,7 @@ export function CrudTable({
         renderCell(getValue(), col.key, nameMap),
     })),
     {
-      id: "actions",
+      id: "_row_actions",
       header: () => <span className="sr-only">Actions</span>,
       cell: ({ row }: { row: { original: Row } }) => (
         <TableRowActions
@@ -424,14 +424,15 @@ function TableRowActions({
         />
       ) : resourceKey === "capabilities" ? (
         <>
-          <Button
-            disabled={missingUpdate}
-            onClick={() => defer(() => onEdit.setCapability(row))}
-            size="sm"
-            variant="outline"
-          >
-            Edit
-          </Button>
+          {!missingUpdate && (
+            <Button
+              onClick={() => defer(() => onEdit.setCapability(row))}
+              size="sm"
+              variant="outline"
+            >
+              Edit
+            </Button>
+          )}
           <Button
             disabled={missingDelete || destroyPending}
             onClick={() =>
@@ -456,9 +457,11 @@ function TableRowActions({
         />
       ) : (
         <>
-          <Button disabled={missingUpdate} size="sm" variant="outline">
-            Edit
-          </Button>
+          {!missingUpdate && (
+            <Button size="sm" variant="outline">
+              Edit
+            </Button>
+          )}
           <Button
             disabled={missingDelete || destroyPending}
             onClick={() =>

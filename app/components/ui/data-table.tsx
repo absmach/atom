@@ -124,6 +124,7 @@ export function DataTable<TData, TValue>({
   useEffect(() => {
     setStatusValue(urlStatus);
   }, [urlStatus]);
+  const filterKeysStr = filters.map((f) => f.key).join(",");
   useEffect(() => {
     setFilterValues(
       Object.fromEntries(
@@ -133,7 +134,8 @@ export function DataTable<TData, TValue>({
         ]),
       ),
     );
-  }, [filters, paramKey, searchParams]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKeysStr, paramKey, searchParams]);
 
   const pageCount = total > 0 ? Math.ceil(total / limit) : 1;
 
@@ -311,7 +313,16 @@ export function DataTable<TData, TValue>({
               table.getRowModel().rows.map((row) => (
                 <TableRow key={row.id}>
                   {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
+                    <TableCell
+                      key={cell.id}
+                      className={
+                        (
+                          cell.column.columnDef.meta as
+                            | { className?: string }
+                            | undefined
+                        )?.className
+                      }
+                    >
                       {flexRender(
                         cell.column.columnDef.cell,
                         cell.getContext(),

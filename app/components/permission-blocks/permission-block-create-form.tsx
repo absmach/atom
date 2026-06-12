@@ -379,7 +379,7 @@ export function PermissionBlockCreateForm({
                 setDraft((prev) => resetScopeFields(prev, scopeMode))
               }
             >
-              <SelectTrigger>
+              <SelectTrigger className="h-auto py-3">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
