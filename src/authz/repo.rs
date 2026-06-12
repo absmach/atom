@@ -606,8 +606,10 @@ pub async fn replace_role_permission_block_links(
     unique_block_ids.dedup();
 
     if !unique_block_ids.is_empty() {
-        let count: i64 = sqlx::query_scalar(
-            r#"SELECT COUNT(*)
+        use sqlx::Row;
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) AS total,
+                      COUNT(*) FILTER (WHERE effect = 'deny') AS deny_count
                FROM permission_blocks
                WHERE id = ANY($1::uuid[])
                  AND tenant_id IS NOT DISTINCT FROM $2"#,
@@ -617,9 +619,19 @@ pub async fn replace_role_permission_block_links(
         .fetch_one(pool)
         .await
         .map_err(db_err)?;
-        if count != unique_block_ids.len() as i64 {
+        let total: i64 = row.try_get("total").map_err(db_err)?;
+        let deny_count: i64 = row.try_get("deny_count").map_err(db_err)?;
+        if total != unique_block_ids.len() as i64 {
             return Err(AppError::bad_request(
                 "role permission blocks must exist and belong to the same tenant as the role",
+            ));
+        }
+        // Roles are additive: deny is a targeted exception instrument and is
+        // only attachable as a direct policy. The PDP still evaluates effect
+        // on role blocks, so any pre-existing deny link fails safe (denies).
+        if deny_count > 0 {
+            return Err(AppError::bad_request(
+                "roles are additive: deny permission blocks must be attached as direct policies, not linked to roles",
             ));
         }
     }
@@ -4869,4 +4881,74 @@ fn search_pattern(q: Option<String>) -> Option<String> {
     q.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"))
+}
+
+#[cfg(test)]
+mod db_tests {
+    //! DB-gated repo tests. Each is `#[ignore]` because it needs a live
+    //! Postgres reachable via `DATABASE_URL`.
+    use super::*;
+
+    async fn pool() -> PgPool {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = PgPool::connect(&url).await.expect("connect");
+        sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("load migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        pool
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn deny_blocks_cannot_be_linked_to_roles() {
+        let pool = pool().await;
+        let role_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+            .bind(role_id)
+            .bind(format!("additive-{role_id}"))
+            .execute(&pool)
+            .await
+            .expect("insert role");
+
+        let allow_block: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
+               VALUES ('platform', 'allow', '{}'::jsonb)
+               RETURNING id"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert allow block");
+        let deny_block: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
+               VALUES ('platform', 'deny', '{}'::jsonb)
+               RETURNING id"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert deny block");
+
+        replace_role_permission_block_links(&pool, role_id, &[allow_block])
+            .await
+            .expect("allow blocks must remain linkable");
+
+        let err = replace_role_permission_block_links(&pool, role_id, &[allow_block, deny_block])
+            .await
+            .expect_err("deny blocks must be rejected at the link path");
+        assert!(
+            err.to_string().contains("additive"),
+            "unexpected error: {err}"
+        );
+
+        let _ = sqlx::query("DELETE FROM roles WHERE id = $1")
+            .bind(role_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM permission_blocks WHERE id = ANY($1::uuid[])")
+            .bind(vec![allow_block, deny_block])
+            .execute(&pool)
+            .await;
+    }
 }
