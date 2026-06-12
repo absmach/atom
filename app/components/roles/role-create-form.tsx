@@ -434,11 +434,34 @@ export function RoleCreateForm({
           <ReviewRow label="Description">
             {draft.description || "No description"}
           </ReviewRow>
-          <ReviewRow label="Permission blocks">
-            {selectedBlocks.length > 0
-              ? selectedBlocks.map(permissionBlockLabel).join(", ")
-              : "None"}
-          </ReviewRow>
+          <div className="grid gap-1">
+            <div className="text-xs font-medium uppercase text-muted-foreground">
+              Permission blocks
+            </div>
+            {selectedBlocks.length > 0 ? (
+              <div className="grid gap-2 pt-1">
+                {selectedBlocks.map((block) => (
+                  <div
+                    key={block.id}
+                    className="rounded-md border bg-muted/30 p-2"
+                  >
+                    <div className="text-sm font-medium">
+                      {permissionBlockLabel(block)}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {block.actions.map((action) => (
+                        <Badge key={action.id} variant="secondary">
+                          {action.name}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">None</div>
+            )}
+          </div>
         </div>
       ) : null}
 
