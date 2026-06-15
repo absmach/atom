@@ -22,13 +22,13 @@ help:
 	@echo "First run: cp .env.example .env"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make build               Build and tag Atom backend + Atom UI images for local dev"
-	@echo "  make atom-build          Build and tag only the Atom backend image"
-	@echo "  make ui-build            Build and tag only the Atom UI image"
-	@echo "  make up                  Build and start Postgres, Atom, and Atom UI"
+	@echo "  make build               Rebuild Atom backend + Atom UI images (run after code changes)"
+	@echo "  make atom-build          Rebuild only the Atom backend image"
+	@echo "  make ui-build            Rebuild only the Atom UI image"
+	@echo "  make up                  Start Postgres, Atom, and Atom UI (builds images only if missing)"
 	@echo "  make db                  Start only Postgres (for host 'cargo run')"
 	@echo "  make dev                 Postgres (Docker) + host cargo run (:$(DEV_HTTP_PORT)) + host UI (:$(DEV_UI_PORT)); runs alongside 'make up'"
-	@echo "  make restart             Rebuild and restart Postgres, Atom, and Atom UI"
+	@echo "  make restart             Restart the Compose stack (no rebuild; use 'make build' first)"
 	@echo "  make logs                Follow Atom + Atom UI logs"
 	@echo "  make down                Stop the local Compose stack"
 	@echo "  make docker-build        Build the raw Atom Docker image for BUILD_TARGET"
@@ -74,7 +74,7 @@ ui-build:
 	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) build atom-ui
 
 up:
-	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) up -d --build postgres atom atom-ui
+	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) up -d postgres atom atom-ui
 
 restart: down up
 

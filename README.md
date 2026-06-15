@@ -153,7 +153,8 @@ There is one config file. Copy the example and start the stack:
 # 1. Create your local config
 cp .env.example .env
 
-# 2. Build and start Postgres, Atom, and the Atom Next UI
+# 2. Start Postgres, Atom, and the Atom Next UI
+#    (builds the images the first time; reuses them after)
 make up
 
 # 3. Follow backend and UI logs
@@ -180,11 +181,15 @@ curl -s -X POST http://localhost:8080/auth/login \
   -d '{"identifier": "admin", "secret": "12345678"}'
 ```
 
-Stop or rebuild the stack with:
+`make up` reuses the existing images and does not rebuild. After changing
+backend or UI code, rebuild explicitly:
 
 ```bash
-make down
-make restart
+make build      # or: make atom-build / make ui-build
+make up
+
+make down       # stop the stack
+make restart    # stop and start again (no rebuild)
 ```
 
 GraphQL is available at `POST http://localhost:8080/graphql`. Migrations apply
@@ -292,8 +297,8 @@ Run `make help` to print the current target list from the Makefile.
 | `make build`                | Builds and tags the Atom backend and Atom UI images for local Compose use.             |
 | `make atom-build`           | Builds and tags only the Atom backend image.                                           |
 | `make ui-build`             | Builds and tags only the Atom UI image.                                                |
-| `make up`                   | Builds and starts Postgres, Atom, and Atom UI with `.env`.                             |
-| `make restart`              | Stops the local Compose stack, then rebuilds and starts it again.                      |
+| `make up`                   | Starts Postgres, Atom, and Atom UI with `.env` (builds images only if missing).        |
+| `make restart`              | Stops and starts the Compose stack again (no rebuild; run `make build` first).         |
 | `make logs`                 | Follows Atom backend and Atom UI logs.                                                 |
 | `make down`                 | Stops the local Compose stack.                                                         |
 | `make docker-build`         | Builds the raw Atom Docker image using `BUILD_TARGET`, `IMAGE_NAME`, and `IMAGE_TAG`.  |

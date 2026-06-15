@@ -35,11 +35,14 @@ setup. Edit `ADMIN_SECRET` before first boot to change the admin password.
 make up
 ```
 
-This builds and starts:
+This starts (building the images the first time, then reusing them):
 
 - Atom REST and GraphQL at `http://localhost:8080`
 - Atom Next UI at `http://localhost:3005`
 - Postgres at `127.0.0.1:5432`
+
+After changing backend or UI code, rebuild with `make build` (or
+`make atom-build` / `make ui-build`) before `make up`.
 
 </Step>
 <Step>
@@ -218,19 +221,19 @@ Expected result:
 
 Run `make help` for the current target list.
 
-| Command | What it does |
-|---|---|
-| `make db` | Starts only Postgres (for a host `cargo run`). |
-| `make dev` | Host `cargo run` (:8090) + UI dev (:3000) on the shared Postgres; runs with `make up`. |
-| `make up` | Builds and starts Postgres, Atom, and Atom UI. |
-| `make logs` | Follows Atom backend and Atom UI logs. |
-| `make down` | Stops the local Compose stack. |
-| `make restart` | Stops, rebuilds, and starts the local Compose stack again. |
-| `make build` | Builds Atom backend and Atom UI images. |
-| `make atom-build` | Builds only the Atom backend image. |
-| `make ui-build` | Builds only the Atom UI image. |
-| `make docker-build` | Builds the raw Atom Docker image using Makefile variables. |
-| `make docker-build-release` | Builds the raw release Docker image. |
+| Command                     | What it does                                                                           |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `make db`                   | Starts only Postgres (for a host `cargo run`).                                         |
+| `make dev`                  | Host `cargo run` (:8090) + UI dev (:3000) on the shared Postgres; runs with `make up`. |
+| `make up`                   | Starts Postgres, Atom, and Atom UI (builds images only if missing).                    |
+| `make logs`                 | Follows Atom backend and Atom UI logs.                                                 |
+| `make down`                 | Stops the local Compose stack.                                                         |
+| `make restart`              | Stops and starts the Compose stack again (no rebuild).                                 |
+| `make build`                | Builds Atom backend and Atom UI images.                                                |
+| `make atom-build`           | Builds only the Atom backend image.                                                    |
+| `make ui-build`             | Builds only the Atom UI image.                                                         |
+| `make docker-build`         | Builds the raw Atom Docker image using Makefile variables.                             |
+| `make docker-build-release` | Builds the raw release Docker image.                                                   |
 
 Common overrides:
 
@@ -270,10 +273,10 @@ UI on the host (Ctrl-C stops both; needs host `cargo` and `pnpm`):
 make dev                 # cargo run (:8090) + pnpm dev (:3000), Postgres shared
 ```
 
-| Flow | Backend | UI | Postgres |
-| --- | --- | --- | --- |
-| `make up` (Compose) | `:8080` | `:3005` | `:5432` |
-| `make dev` (host) | `:8090` | `:3000` | `:5432` (same DB) |
+| Flow                | Backend | UI      | Postgres          |
+| ------------------- | ------- | ------- | ----------------- |
+| `make up` (Compose) | `:8080` | `:3005` | `:5432`           |
+| `make dev` (host)   | `:8090` | `:3000` | `:5432` (same DB) |
 
 Log in to either with the same admin credentials (`admin` / `12345678`); both
 read `ADMIN_SECRET` from `.env` and share one database.
