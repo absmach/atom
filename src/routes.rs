@@ -1,5 +1,7 @@
 use axum::{
+    extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method},
+    middleware,
     routing::{any, get, post},
     Extension, Router,
 };
@@ -9,8 +11,8 @@ use tower_http::{
 };
 
 use crate::{
-    api_endpoints::handlers as api_endpoints, certs, graphql, identity::handlers as identity, keys,
-    state::AppState,
+    api_endpoints::handlers as api_endpoints, certs, graphql, health,
+    identity::handlers as identity, keys, rate_limit, state::AppState,
 };
 
 pub fn create_router(state: AppState) -> Router {
@@ -19,13 +21,17 @@ pub fn create_router(state: AppState) -> Router {
         .config
         .cors_allowed_origins
         .iter()
-        .map(|origin| {
-            HeaderValue::from_str(origin)
-                .expect("ATOM_CORS_ALLOWED_ORIGINS contains an invalid origin")
+        .filter_map(|origin| {
+            HeaderValue::from_str(origin).map_or_else(
+                |err| {
+                    tracing::warn!(origin, error = %err, "skipping invalid CORS origin");
+                    None
+                },
+                Some,
+            )
         })
         .collect::<Vec<_>>();
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list(cors_origins))
+    let mut cors = CorsLayer::new()
         .allow_credentials(true)
         .allow_methods([
             Method::GET,
@@ -36,45 +42,86 @@ pub fn create_router(state: AppState) -> Router {
             Method::OPTIONS,
         ])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]);
+    if !cors_origins.is_empty() {
+        cors = cors.allow_origin(AllowOrigin::list(cors_origins));
+    }
+
+    let auth_body_limit = state.config.body_limits.auth_bytes;
+    let graphql_body_limit = state.config.body_limits.graphql_bytes;
+    let custom_body_limit = state.config.body_limits.custom_endpoint_bytes;
+    let rate_limit_state = state.clone();
 
     let app = Router::new()
         // JWKS — unauthenticated, consumed by external verifiers
         .route("/.well-known/jwks.json", get(keys::jwks))
         // Health
-        .route("/health", get(identity::health))
+        .route("/health", get(health::legacy_health))
+        .route("/health/live", get(health::live))
+        .route("/health/ready", get(health::ready))
         // Public PKI artifacts
         .route("/certs/ca-chain", get(certs::http::ca_chain))
         .route("/certs/crl", get(certs::http::crl))
         .route("/certs/ocsp", post(certs::http::ocsp))
         // GraphQL
-        .route("/graphql", post(graphql::graphql_handler))
+        .route(
+            "/graphql",
+            post(graphql::graphql_handler).layer(DefaultBodyLimit::max(graphql_body_limit)),
+        )
         // Custom API endpoint executor
-        .route("/api/custom/*path", any(api_endpoints::custom_endpoint))
+        .route(
+            "/api/custom/*path",
+            any(api_endpoints::custom_endpoint).layer(DefaultBodyLimit::max(custom_body_limit)),
+        )
         // Auth
         .route("/auth/public-config", get(identity::public_auth_config))
-        .route("/auth/signup", post(identity::signup))
-        .route("/auth/login", post(identity::login))
+        .route(
+            "/auth/signup",
+            post(identity::signup).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
+        .route(
+            "/auth/login",
+            post(identity::login).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
         .route("/auth/email/verify", get(identity::verify_email))
-        .route("/auth/email/resend", post(identity::resend_verification))
+        .route(
+            "/auth/email/resend",
+            post(identity::resend_verification).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
         .route(
             "/auth/password/reset/request",
-            post(identity::request_password_reset),
+            post(identity::request_password_reset).layer(DefaultBodyLimit::max(auth_body_limit)),
         )
-        .route("/auth/password/reset", post(identity::reset_password))
+        .route(
+            "/auth/password/reset",
+            post(identity::reset_password).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
         .route("/auth/oauth/:provider/start", get(identity::oauth_start))
         .route(
             "/auth/oauth/:provider/callback",
             get(identity::oauth_callback),
         )
-        .route("/auth/oauth/exchange", post(identity::oauth_exchange))
-        .route("/auth/logout", post(identity::logout))
+        .route(
+            "/auth/oauth/exchange",
+            post(identity::oauth_exchange).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
+        .route(
+            "/auth/logout",
+            post(identity::logout).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
         .route("/auth/introspect", get(identity::introspect))
         .route("/auth/session", get(identity::current_session))
         .route("/auth/sessions/:id", get(identity::get_session))
-        .route("/auth/keys/rotate", post(keys::rotate_keys));
+        .route(
+            "/auth/keys/rotate",
+            post(keys::rotate_keys).layer(DefaultBodyLimit::max(auth_body_limit)),
+        );
 
     app.with_state(state)
         .layer(Extension(graphql_schema))
+        .layer(middleware::from_fn_with_state(
+            rate_limit_state,
+            rate_limit::middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
 }
@@ -89,7 +136,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        config::{Config, OidcProviderConfig, ADMIN_ENTITY_ID},
+        config::{Config, OidcProviderConfig},
         keys::{ActiveKeys, LoadedKey},
         state::AppState,
     };
@@ -219,43 +266,7 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://atom:atom@localhost/atom_test")
             .expect("create lazy test pool");
-        let config = Config {
-            database_url: "postgres://atom:atom@localhost/atom_test".into(),
-            listen_addr: "127.0.0.1:0".into(),
-            grpc_addr: "127.0.0.1:0".into(),
-            jwt_expiry_secs: 3600,
-            jwt_issuer: "http://localhost:8080".to_string(),
-            jwt_audience: "magistrala".to_string(),
-            admin_entity_id: ADMIN_ENTITY_ID,
-            admin_secret: None,
-            service_secret: None,
-            service_entity_id: crate::config::SERVICE_ENTITY_ID,
-            self_registration_enabled: false,
-            dev_allow_unverified_email_login: false,
-            public_base_url: "http://localhost:8080".into(),
-            cors_allowed_origins: vec!["http://localhost:8080".into()],
-            auth_cookie_secure: false,
-            auth_cookie_domain: None,
-            email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
-            password_reset_redirect: "http://localhost:8080/reset-password".into(),
-            invitation_redirect: "http://localhost:8080/invitations/accept".into(),
-            oauth_success_redirect: "http://localhost:8080".into(),
-            oauth_error_redirect: "http://localhost:8080".into(),
-            oidc_providers: vec![],
-            smtp: None,
-            email_verification_expiry_secs: 86_400,
-            invitation_expiry_secs: 604_800,
-            oauth_state_expiry_secs: 600,
-            auth_exchange_code_expiry_secs: 300,
-            certs_enabled: false,
-            certs_ca_mode: crate::config::CertsCaMode::FileIntermediateIssuer,
-            certs_root_ca_cert_path: None,
-            certs_intermediate_ca_cert_path: None,
-            certs_intermediate_ca_key_path: None,
-            certs_root_ca_key_path: None,
-            certs_leaf_default_ttl_secs: 2_592_000,
-            certs_leaf_max_ttl_secs: 2_592_000,
-        };
+        let config = Config::for_tests();
         let primary = LoadedKey {
             kid: "test".into(),
             public_key_pem: String::new(),

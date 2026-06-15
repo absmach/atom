@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::{certs::service::CertificateIssuer, config::Config, keys::ActiveKeys};
+use crate::{
+    certs::service::CertificateIssuer, config::Config, keys::ActiveKeys, rate_limit::RateLimiter,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -10,6 +12,7 @@ pub struct AppState {
     pub config: Config,
     pub keys: Arc<RwLock<ActiveKeys>>,
     pub certificate_issuer: Option<Arc<CertificateIssuer>>,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 impl AppState {
@@ -24,6 +27,7 @@ impl AppState {
             config,
             keys: Arc::new(RwLock::new(keys)),
             certificate_issuer: certificate_issuer.map(Arc::new),
+            rate_limiter: Arc::new(RateLimiter::default()),
         }
     }
 }

@@ -487,9 +487,10 @@ pub async fn check(
     });
     // M3: merge structured details (e.g., tenant lifecycle state) into audit.
     if let Some(extra) = response.details.as_ref().and_then(|v| v.as_object()) {
-        let map = details.as_object_mut().expect("json object");
-        for (k, v) in extra {
-            map.insert(k.clone(), v.clone());
+        if let Some(map) = details.as_object_mut() {
+            for (k, v) in extra {
+                map.insert(k.clone(), v.clone());
+            }
         }
     }
 
@@ -532,10 +533,9 @@ pub async fn explain(
     // a structured field for filtering.
     if response.reason.starts_with("tenant is ") {
         if let Some(state_word) = response.reason.strip_prefix("tenant is ") {
-            details
-                .as_object_mut()
-                .expect("json object")
-                .insert("tenant_status".into(), serde_json::json!(state_word));
+            if let Some(map) = details.as_object_mut() {
+                map.insert("tenant_status".into(), serde_json::json!(state_word));
+            }
         }
     }
 

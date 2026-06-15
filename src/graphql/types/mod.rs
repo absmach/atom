@@ -2173,18 +2173,18 @@ impl From<access_model::AuthzExplainResponse> for AuthzExplainResponse {
             reason: response.reason,
             subject: response
                 .subject
-                .map(|value| serde_json::to_value(value).expect("subject serializes")),
+                .map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null)),
             resource: response
                 .resource
-                .map(|value| serde_json::to_value(value).expect("resource serializes")),
+                .map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null)),
             capability: response
                 .capability
-                .map(|value| serde_json::to_value(value).expect("capability serializes")),
+                .map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null)),
             matched_binding: response
                 .matched_binding
-                .map(|value| serde_json::to_value(value).expect("binding serializes")),
+                .map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null)),
             evaluated_bindings: serde_json::to_value(response.evaluated_bindings)
-                .expect("bindings serialize"),
+                .unwrap_or_else(|_| serde_json::json!([])),
         }
     }
 }

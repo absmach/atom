@@ -1,8 +1,6 @@
-import { Activity, AlertTriangle, ShieldCheck, Users } from "lucide-react";
+import { Activity, ShieldCheck, Users } from "lucide-react";
 import type { Metadata } from "next";
-
-export const metadata: Metadata = { title: "Dashboard" };
-
+import { DashboardOverview } from "@/components/dashboard/dashboard-overview";
 import { RelationshipPanel } from "@/components/relationships/relationship-panel";
 import {
   Card,
@@ -12,11 +10,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
+export const metadata: Metadata = { title: "Dashboard" };
+
 const stats = [
   { label: "Tenant boundary", value: "Global + tenant", icon: ShieldCheck },
   { label: "Access model", value: "Roles + assignments", icon: Users },
   { label: "Audit mode", value: "Query-backed", icon: Activity },
-  { label: "Realtime", value: "Backend todo", icon: AlertTriangle },
+  { label: "Operations", value: "Health + keys", icon: ShieldCheck },
 ];
 
 export default function DashboardPage() {
@@ -50,6 +50,7 @@ export default function DashboardPage() {
           </Card>
         ))}
       </section>
+      <DashboardOverview />
       <RelationshipPanel />
     </div>
   );

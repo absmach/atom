@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod entities;
 pub mod groups;
 pub mod mutation;
+pub mod operations;
 pub mod policies;
 pub mod profiles;
 pub mod query;

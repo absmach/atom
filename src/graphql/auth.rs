@@ -133,7 +133,8 @@ pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {
         | AppError::Unauthorized(_)
         | AppError::Forbidden
         | AppError::Conflict(_)
-        | AppError::PayloadTooLarge(_) => async_graphql::Error::new(err.to_string()),
+        | AppError::PayloadTooLarge(_)
+        | AppError::RateLimited { .. } => async_graphql::Error::new(err.to_string()),
     }
 }
 

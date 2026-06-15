@@ -1,4 +1,4 @@
-use atom::{certs, config, db, grpc, identity, keys, routes, state};
+use atom::{audit, certs, config, db, grpc, identity, keys, routes, state};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -11,7 +11,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::Config::from_env()?;
-    let pool = db::create_pool(&cfg.database_url).await?;
+    let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
 
     sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
         .await?
@@ -26,11 +26,12 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_password_credentials(&pool, cfg.service_entity_id, secret, "service").await?;
     }
 
-    keys::bootstrap_if_needed(&pool).await?;
+    keys::bootstrap_if_needed(&pool, &cfg.signing_keys).await?;
     let certificate_issuer = certs::service::load_file_issuer_if_enabled(&cfg)?;
-    let active_keys = keys::load_active_keys(&pool).await?;
+    let active_keys = keys::load_active_keys(&pool, &cfg.signing_keys).await?;
 
     let state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer);
+    audit::spawn_retention_cleanup(state.clone());
 
     // Spawn gRPC server on a separate port; runs concurrently with HTTP.
     let grpc_addr = cfg.grpc_addr.parse()?;

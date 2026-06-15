@@ -259,7 +259,19 @@ impl CertificateService for AtomCertificates {
 pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
     tracing::info!("grpc listening on {addr}");
 
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<AuthzServiceServer<AtomAuthz>>()
+        .await;
+    health_reporter
+        .set_serving::<AuthServiceServer<AtomAuth>>()
+        .await;
+    health_reporter
+        .set_serving::<CertificateServiceServer<AtomCertificates>>()
+        .await;
+
     Server::builder()
+        .add_service(health_service)
         .add_service(AuthzServiceServer::new(AtomAuthz {
             state: state.clone(),
         }))
