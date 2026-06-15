@@ -5,6 +5,7 @@ import {
   getServerToken,
 } from "@/lib/auth/session";
 import { getGraphqlEndpoint } from "@/lib/graphql/client";
+import { withForwardedClientIpHeaders } from "@/lib/http/client-ip-headers";
 
 const LOGOUT_MUTATION = `
 mutation Logout {
@@ -12,15 +13,15 @@ mutation Logout {
 }
 `;
 
-export async function POST() {
+export async function POST(request: Request) {
   const token = await getServerToken();
   if (token) {
     await fetch(getGraphqlEndpoint(), {
       method: "POST",
-      headers: {
+      headers: withForwardedClientIpHeaders(request, {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
-      },
+      }),
       body: JSON.stringify({ query: LOGOUT_MUTATION, operationName: "Logout" }),
     }).catch(() => undefined);
   }

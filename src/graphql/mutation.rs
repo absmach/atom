@@ -13,6 +13,7 @@ pub struct MutationRoot(
     super::certificates::CertificateMutation,
     super::policies::PolicyMutation,
     super::authz::AuthzMutation,
+    super::operations::OperationsMutation,
 );
 
 pub fn mutation_root() -> MutationRoot {

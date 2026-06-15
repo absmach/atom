@@ -14,4 +14,5 @@ pub struct QueryRoot(
     super::authz::AuthzQuery,
     super::policies::PolicyQuery,
     super::admin::AdminQuery,
+    super::operations::OperationsQuery,
 );

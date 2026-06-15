@@ -78,6 +78,17 @@ const navSections: NavSection[] = [
     ],
   },
   {
+    title: "Operations",
+    items: [
+      { title: "System Health", href: "/operations/health", icon: Activity },
+      {
+        title: "Signing Keys",
+        href: "/operations/signing-keys",
+        icon: KeyRound,
+      },
+    ],
+  },
+  {
     title: "Developer",
     items: [
       { title: "Endpoints", href: "/endpoints", icon: Link2 },

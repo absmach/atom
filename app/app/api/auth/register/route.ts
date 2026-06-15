@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isUiRegistrationEnabled } from "@/lib/auth/registration";
 import { getBackendBaseUrl } from "@/lib/graphql/client";
+import { withForwardedClientIpHeaders } from "@/lib/http/client-ip-headers";
 
 export async function POST(request: Request) {
   if (!isUiRegistrationEnabled()) {
@@ -19,7 +20,9 @@ export async function POST(request: Request) {
 
   const response = await fetch(`${getBackendBaseUrl()}/auth/signup`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: withForwardedClientIpHeaders(request, {
+      "content-type": "application/json",
+    }),
     body: JSON.stringify(body),
     cache: "no-store",
   });

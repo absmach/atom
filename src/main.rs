@@ -1,4 +1,8 @@
-use atom::{certs, config, db, grpc, identity, keys, routes, state};
+use anyhow::Context;
+use atom::{
+    audit, certs, config, db, grpc, identity, keys, routes,
+    state::{self, GrpcRuntimeStatus},
+};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -11,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::Config::from_env()?;
-    let pool = db::create_pool(&cfg.database_url).await?;
+    let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
 
     sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
         .await?
@@ -26,17 +30,26 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_password_credentials(&pool, cfg.service_entity_id, secret, "service").await?;
     }
 
-    keys::bootstrap_if_needed(&pool).await?;
+    keys::bootstrap_if_needed(&pool, &cfg.signing_keys).await?;
     let certificate_issuer = certs::service::load_file_issuer_if_enabled(&cfg)?;
-    let active_keys = keys::load_active_keys(&pool).await?;
+    let active_keys = keys::load_active_keys(&pool, &cfg.signing_keys).await?;
+
+    let grpc_addr = cfg.grpc_addr.parse()?;
+    let grpc_listener = grpc::bind_listener(grpc_addr)
+        .await
+        .with_context(|| format!("failed to bind gRPC listener on {}", cfg.grpc_addr))?;
+    let grpc_bound_addr = grpc_listener.local_addr()?;
 
     let state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer);
+    state
+        .set_grpc_status(GrpcRuntimeStatus::starting(grpc_bound_addr.to_string()))
+        .await;
+    audit::spawn_retention_cleanup(state.clone());
 
     // Spawn gRPC server on a separate port; runs concurrently with HTTP.
-    let grpc_addr = cfg.grpc_addr.parse()?;
     let grpc_state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = grpc::serve(grpc_addr, grpc_state).await {
+        if let Err(e) = grpc::serve(grpc_listener, grpc_state).await {
             tracing::error!("grpc server exited: {e}");
         }
     });
@@ -45,7 +58,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;
     tracing::info!("atom listening on {}", cfg.listen_addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

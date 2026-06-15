@@ -5,10 +5,15 @@ import {
   AlertTriangle,
   Braces,
   Building2,
+  Clock,
+  Database,
   Fingerprint,
+  Gauge,
   GitBranch,
+  KeyRound,
   ScrollText,
   Server,
+  ShieldAlert,
   ShieldCheck,
   Users,
 } from "lucide-react";
@@ -86,6 +91,29 @@ type PostureResponse = {
   authzDenied: Count;
 };
 
+type ProductionPostureResponse = {
+  systemStatus: {
+    dbPool: {
+      maxConnections: number;
+      size: number;
+      idle: number;
+    };
+    signingKeyState: {
+      plaintextCount: number;
+      plaintextAllowed: boolean;
+    } | null;
+    auditRetention: {
+      enabled: boolean;
+      days: number;
+    };
+    rateLimits: {
+      enabled: boolean;
+    };
+  };
+  expiringCredentials: unknown[];
+  authzDenied: Count;
+};
+
 const SUMMARY_QUERY = `
   query DashboardSummary {
     tenants(limit: 1, offset: 0) { total }
@@ -147,6 +175,19 @@ const POSTURE_QUERY = `
   }
 `;
 
+const PRODUCTION_POSTURE_QUERY = `
+  query DashboardProductionPosture {
+    systemStatus {
+      dbPool { maxConnections size idle }
+      signingKeyState { plaintextCount plaintextAllowed }
+      auditRetention { enabled days }
+      rateLimits { enabled }
+    }
+    expiringCredentials(days: 30, limit: 50, offset: 0) { id }
+    authzDenied: auditLogs(event: "authz.check", outcome: deny, limit: 1, offset: 0) { total }
+  }
+`;
+
 const ENTITY_KIND_COLORS = [
   "oklch(0.72 0.15 164)", // human    – green (on-theme)
   "oklch(0.70 0.14 220)", // device   – blue
@@ -171,6 +212,7 @@ export function DashboardOverview() {
   return (
     <div className="grid gap-6">
       <SummaryCards />
+      <ProductionPostureCards />
 
       <section className="grid gap-4 xl:grid-cols-[1fr_1fr]">
         <EntityMixCard />
@@ -182,6 +224,69 @@ export function DashboardOverview() {
         <PostureCard />
       </section>
     </div>
+  );
+}
+
+function ProductionPostureCards() {
+  const query = useQuery({
+    queryKey: ["dashboard", "production-posture"],
+    queryFn: ({ signal }) =>
+      graphqlClient<ProductionPostureResponse>({
+        query: PRODUCTION_POSTURE_QUERY,
+        signal,
+      }),
+  });
+
+  if (query.isLoading) {
+    return (
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {["db", "keys", "audit", "rate", "credentials", "denies"].map(
+          (item) => (
+            <Card key={item}>
+              <CardHeader className="pb-2">
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="mt-3 h-7 w-20" />
+              </CardHeader>
+            </Card>
+          ),
+        )}
+      </section>
+    );
+  }
+
+  if (query.error) {
+    return (
+      <WidgetError
+        error={query.error}
+        title="Production posture is unavailable"
+      />
+    );
+  }
+
+  const cards = buildProductionPostureCards(query.data);
+
+  return (
+    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {cards.map((card) => (
+        <Card key={card.label}>
+          <CardHeader className="pb-2">
+            <CardDescription className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <card.icon className="size-4" />
+                {card.label}
+              </span>
+              <Badge variant={card.risk ? "destructive" : "secondary"}>
+                {card.status}
+              </Badge>
+            </CardDescription>
+            <CardTitle className="text-xl tabular-nums">{card.value}</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            {card.description}
+          </CardContent>
+        </Card>
+      ))}
+    </section>
   );
 }
 
@@ -604,6 +709,78 @@ function buildRiskData(data: RiskResponse | undefined): ChartDatum[] {
       value: data?.expiringCredentials.length ?? 0,
     },
     { label: "Authz denied", value: data?.authzDenied.total ?? 0 },
+  ];
+}
+
+function buildProductionPostureCards(
+  data: ProductionPostureResponse | undefined,
+) {
+  const pool = data?.systemStatus.dbPool;
+  const activeConnections = Math.max(0, (pool?.size ?? 0) - (pool?.idle ?? 0));
+  const poolPressure =
+    pool?.maxConnections && pool.maxConnections > 0
+      ? Math.round((activeConnections / pool.maxConnections) * 100)
+      : 0;
+  const plaintextCount =
+    data?.systemStatus.signingKeyState?.plaintextCount ?? 0;
+  const plaintextAllowed =
+    data?.systemStatus.signingKeyState?.plaintextAllowed ?? false;
+  const auditEnabled = data?.systemStatus.auditRetention.enabled ?? false;
+  const rateLimitsEnabled = data?.systemStatus.rateLimits.enabled ?? false;
+  const expiringCredentials = data?.expiringCredentials.length ?? 0;
+  const denied = data?.authzDenied.total ?? 0;
+
+  return [
+    {
+      label: "DB pool pressure",
+      value: `${poolPressure}%`,
+      status: poolPressure >= 80 ? "high" : "ok",
+      risk: poolPressure >= 80,
+      description: `${activeConnections} active of ${pool?.maxConnections ?? 0} max connections.`,
+      icon: Database,
+    },
+    {
+      label: "Signing key risk",
+      value: formatNumber(plaintextCount),
+      status: plaintextCount > 0 || plaintextAllowed ? "review" : "ok",
+      risk: plaintextCount > 0 || plaintextAllowed,
+      description: plaintextAllowed
+        ? "Plaintext fallback is enabled."
+        : "Plaintext signing key rows.",
+      icon: KeyRound,
+    },
+    {
+      label: "Audit retention",
+      value: `${data?.systemStatus.auditRetention.days ?? 0}d`,
+      status: auditEnabled ? "on" : "off",
+      risk: !auditEnabled,
+      description: "Configured retention window.",
+      icon: Clock,
+    },
+    {
+      label: "Rate limits",
+      value: rateLimitsEnabled ? "On" : "Off",
+      status: rateLimitsEnabled ? "on" : "off",
+      risk: !rateLimitsEnabled,
+      description: "HTTP abuse controls.",
+      icon: Gauge,
+    },
+    {
+      label: "Expiring credentials",
+      value: formatNumber(expiringCredentials),
+      status: expiringCredentials > 0 ? "review" : "ok",
+      risk: expiringCredentials > 0,
+      description: "Credentials expiring within 30 days.",
+      icon: ShieldAlert,
+    },
+    {
+      label: "Recent authz denies",
+      value: formatNumber(denied),
+      status: denied > 0 ? "watch" : "ok",
+      risk: false,
+      description: "Visible deny decisions in audit logs.",
+      icon: AlertTriangle,
+    },
   ];
 }
 

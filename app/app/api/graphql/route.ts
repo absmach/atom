@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getServerToken } from "@/lib/auth/session";
 import { getGraphqlEndpoint } from "@/lib/graphql/client";
+import { withForwardedClientIpHeaders } from "@/lib/http/client-ip-headers";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const CLIENT_CLOSED_REQUEST = 499;
@@ -18,10 +19,10 @@ export async function POST(request: Request) {
   try {
     response = await fetch(getGraphqlEndpoint(), {
       method: "POST",
-      headers: {
+      headers: withForwardedClientIpHeaders(request, {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
-      },
+      }),
       body: request.body,
       duplex: "half",
       signal: AbortSignal.any([

@@ -15,6 +15,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Clock,
   Copy,
   Search,
   SlidersHorizontal,
@@ -26,6 +27,8 @@ import { useTenant } from "@/components/app-shell/tenant-provider";
 import { AuditExportDialog } from "@/components/audit/audit-export-dialog";
 import { StatusBadge } from "@/components/crud/status-badge";
 import { DisplayTimeCell } from "@/components/display-time";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DateTimePicker } from "@/components/ui/date-time-picker";
 import {
@@ -102,6 +105,20 @@ const AUDIT_LOGS_QUERY = `
   }
 `;
 
+const AUDIT_RETENTION_QUERY = `
+  query AuditRetentionStatus {
+    systemStatus {
+      auditRetention {
+        enabled
+        days
+        cleanupIntervalSecs
+        cleanupBatchSize
+        lastCleanup
+      }
+    }
+  }
+`;
+
 // ─── Types / constants ────────────────────────────────────────────────────────
 
 const PAGE_SIZES = [10, 20, 50] as const;
@@ -120,6 +137,18 @@ type AuditLogItem = {
 
 type AuditLogsResponse = {
   auditLogs: { total: number; items: AuditLogItem[] };
+};
+
+type AuditRetentionResponse = {
+  systemStatus: {
+    auditRetention: {
+      enabled: boolean;
+      days: number;
+      cleanupIntervalSecs: number;
+      cleanupBatchSize: number;
+      lastCleanup: Record<string, unknown> | null;
+    };
+  };
 };
 
 // ─── URL param hook ───────────────────────────────────────────────────────────
@@ -212,6 +241,15 @@ export function AuditLogPage() {
     staleTime: 15_000,
     placeholderData: (prev) => prev,
   });
+  const retention = useQuery({
+    queryKey: ["audit", "retention-status"],
+    queryFn: ({ signal }) =>
+      graphqlClient<AuditRetentionResponse>({
+        query: AUDIT_RETENTION_QUERY,
+        signal,
+      }),
+    staleTime: 60_000,
+  });
 
   const items = data?.auditLogs.items ?? [];
   const total = data?.auditLogs.total ?? 0;
@@ -293,6 +331,11 @@ export function AuditLogPage() {
 
   return (
     <>
+      <AuditRetentionStatus
+        error={retention.error}
+        status={retention.data?.systemStatus.auditRetention}
+      />
+
       <AuditTable
         columns={columns}
         data={items}
@@ -321,6 +364,45 @@ export function AuditLogPage() {
         </SheetContent>
       </Sheet>
     </>
+  );
+}
+
+function AuditRetentionStatus({
+  error,
+  status,
+}: {
+  error: Error | null;
+  status?: AuditRetentionResponse["systemStatus"]["auditRetention"];
+}) {
+  if (error) {
+    return (
+      <Alert>
+        <Clock />
+        <AlertTitle>Retention status unavailable</AlertTitle>
+        <AlertDescription>{error.message}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (!status) return null;
+
+  const deletedRows =
+    status.lastCleanup?.deleted_rows ?? status.lastCleanup?.deletedRows ?? 0;
+
+  return (
+    <Alert>
+      <Clock />
+      <AlertTitle className="flex items-center gap-2">
+        Audit retention
+        <Badge variant={status.enabled ? "secondary" : "outline"}>
+          {status.enabled ? "enabled" : "disabled"}
+        </Badge>
+      </AlertTitle>
+      <AlertDescription>
+        {status.days} days · batch {status.cleanupBatchSize} · last cleanup
+        deleted {String(deletedRows)} rows
+      </AlertDescription>
+    </Alert>
   );
 }
 

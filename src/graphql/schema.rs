@@ -10,9 +10,17 @@ use super::{
 pub type AtomSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
 pub fn build_schema(state: AppState) -> AtomSchema {
-    Schema::build(QueryRoot::default(), mutation_root(), EmptySubscription)
+    let limits = state.config.graphql_limits;
+    let builder = Schema::build(QueryRoot::default(), mutation_root(), EmptySubscription)
+        .limit_depth(limits.max_depth)
+        .limit_complexity(limits.max_complexity)
         .data(state)
-        .finish()
+        .disable_suggestions();
+    if limits.introspection_enabled {
+        builder.finish()
+    } else {
+        builder.disable_introspection().finish()
+    }
 }
 
 #[cfg(test)]
@@ -23,7 +31,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::{
-        config::{Config, ADMIN_ENTITY_ID},
+        config::Config,
         keys::{ActiveKeys, LoadedKey},
         state::AppState,
     };
@@ -187,6 +195,8 @@ mod tests {
             "orphanPolicies",
             "unprotectedResources",
             "expiringCredentials",
+            "systemStatus",
+            "signingKeys",
         ] {
             assert!(query_fields.contains(name), "missing query field {name}");
         }
@@ -255,6 +265,7 @@ mod tests {
             "authzCheck",
             "authzExplain",
             "authzBulkCheck",
+            "rotateSigningKeys",
         ] {
             assert!(
                 mutation_fields.contains(name),
@@ -446,43 +457,7 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://atom:atom@localhost/atom_test")
             .expect("create lazy test pool");
-        let config = Config {
-            database_url: "postgres://atom:atom@localhost/atom_test".into(),
-            listen_addr: "127.0.0.1:0".into(),
-            grpc_addr: "127.0.0.1:0".into(),
-            jwt_expiry_secs: 3600,
-            jwt_issuer: "http://localhost:8080".to_string(),
-            jwt_audience: "magistrala".to_string(),
-            admin_entity_id: ADMIN_ENTITY_ID,
-            admin_secret: None,
-            service_secret: None,
-            service_entity_id: crate::config::SERVICE_ENTITY_ID,
-            self_registration_enabled: false,
-            dev_allow_unverified_email_login: false,
-            public_base_url: "http://localhost:8080".into(),
-            cors_allowed_origins: vec!["http://localhost:8080".into()],
-            auth_cookie_secure: false,
-            auth_cookie_domain: None,
-            email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
-            password_reset_redirect: "http://localhost:8080/reset-password".into(),
-            invitation_redirect: "http://localhost:8080/invitations/accept".into(),
-            oauth_success_redirect: "http://localhost:8080".into(),
-            oauth_error_redirect: "http://localhost:8080".into(),
-            oidc_providers: vec![],
-            smtp: None,
-            email_verification_expiry_secs: 86_400,
-            invitation_expiry_secs: 604_800,
-            oauth_state_expiry_secs: 600,
-            auth_exchange_code_expiry_secs: 300,
-            certs_enabled: false,
-            certs_ca_mode: crate::config::CertsCaMode::FileIntermediateIssuer,
-            certs_root_ca_cert_path: None,
-            certs_intermediate_ca_cert_path: None,
-            certs_intermediate_ca_key_path: None,
-            certs_root_ca_key_path: None,
-            certs_leaf_default_ttl_secs: 2_592_000,
-            certs_leaf_max_ttl_secs: 2_592_000,
-        };
+        let config = Config::for_tests();
         let primary = LoadedKey {
             kid: "test".into(),
             public_key_pem: String::new(),

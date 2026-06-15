@@ -4,7 +4,7 @@ use async_graphql::Request;
 use atom::{
     auth::AuthContext,
     certs::service,
-    config::{self, Config},
+    config::Config,
     graphql::build_schema,
     keys::{ActiveKeys, LoadedKey},
     state::AppState,
@@ -24,41 +24,9 @@ use x509_parser::pem::parse_x509_pem;
 
 fn cert_config() -> Config {
     Config {
-        database_url: String::new(),
-        listen_addr: String::new(),
-        grpc_addr: String::new(),
-        jwt_expiry_secs: 3600,
-        jwt_issuer: "http://localhost:8080".into(),
-        jwt_audience: "magistrala".into(),
-        admin_entity_id: config::ADMIN_ENTITY_ID,
-        admin_secret: None,
-        service_secret: None,
-        service_entity_id: config::SERVICE_ENTITY_ID,
-        self_registration_enabled: false,
-        dev_allow_unverified_email_login: false,
-        public_base_url: "http://localhost:8080".into(),
-        cors_allowed_origins: vec!["http://localhost:8080".into()],
-        auth_cookie_secure: false,
-        auth_cookie_domain: None,
-        email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
-        password_reset_redirect: "http://localhost:8080/reset-password".into(),
-        invitation_redirect: "http://localhost:8080/invitations/accept".into(),
-        oauth_success_redirect: "http://localhost:8080".into(),
-        oauth_error_redirect: "http://localhost:8080".into(),
-        oidc_providers: vec![],
-        smtp: None,
-        email_verification_expiry_secs: 86_400,
-        invitation_expiry_secs: 604_800,
-        oauth_state_expiry_secs: 600,
-        auth_exchange_code_expiry_secs: 300,
         certs_enabled: true,
         certs_ca_mode: atom::config::CertsCaMode::FileIntermediateIssuer,
-        certs_root_ca_cert_path: None,
-        certs_intermediate_ca_cert_path: None,
-        certs_intermediate_ca_key_path: None,
-        certs_root_ca_key_path: None,
-        certs_leaf_default_ttl_secs: 2_592_000,
-        certs_leaf_max_ttl_secs: 2_592_000,
+        ..Config::for_tests()
     }
 }
 

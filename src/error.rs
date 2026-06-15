@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -21,6 +21,11 @@ pub enum AppError {
     Conflict(String),
     #[error("{0}")]
     PayloadTooLarge(String),
+    #[error("{message}")]
+    RateLimited {
+        message: String,
+        retry_after_secs: u64,
+    },
     #[error("database error")]
     Database(#[from] sqlx::Error),
     #[error("internal error")]
@@ -44,6 +49,12 @@ impl AppError {
     pub fn payload_too_large(msg: impl Into<String>) -> Self {
         AppError::PayloadTooLarge(msg.into())
     }
+    pub fn rate_limited(msg: impl Into<String>, retry_after_secs: u64) -> Self {
+        AppError::RateLimited {
+            message: msg.into(),
+            retry_after_secs,
+        }
+    }
 }
 
 impl IntoResponse for AppError {
@@ -55,6 +66,20 @@ impl IntoResponse for AppError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::PayloadTooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m.clone()),
+            AppError::RateLimited {
+                message,
+                retry_after_secs,
+            } => {
+                let mut response = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": message})),
+                )
+                    .into_response();
+                if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+                    response.headers_mut().insert(header::RETRY_AFTER, value);
+                }
+                return response;
+            }
             AppError::Database(e) => {
                 if let sqlx::Error::Database(db) = e {
                     match db.code().as_deref() {
@@ -114,6 +139,7 @@ impl From<AppError> for tonic::Status {
             AppError::Forbidden => tonic::Status::permission_denied("forbidden"),
             AppError::Conflict(msg) => tonic::Status::already_exists(msg),
             AppError::PayloadTooLarge(msg) => tonic::Status::invalid_argument(msg),
+            AppError::RateLimited { message, .. } => tonic::Status::resource_exhausted(message),
             AppError::Database(e) => {
                 tracing::error!("db error: {e}");
                 tonic::Status::internal("database error")

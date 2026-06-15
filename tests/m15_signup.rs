@@ -7,53 +7,16 @@
 
 mod common;
 
-use atom::{
-    config::{Config, ADMIN_ENTITY_ID},
-    identity::service,
-    keys,
-    models::session::SignupRequest,
-};
+use atom::{config::Config, identity::service, keys, models::session::SignupRequest};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
 fn config(dev_allow_unverified_email_login: bool) -> Config {
     Config {
-        database_url: String::new(),
-        listen_addr: String::new(),
-        grpc_addr: String::new(),
-        jwt_expiry_secs: 3600,
-        jwt_issuer: "http://localhost:8080".to_string(),
-        jwt_audience: "magistrala".to_string(),
-        admin_entity_id: ADMIN_ENTITY_ID,
-        admin_secret: None,
-        service_secret: None,
-        service_entity_id: atom::config::SERVICE_ENTITY_ID,
         self_registration_enabled: true,
         dev_allow_unverified_email_login,
-        public_base_url: "http://localhost:8080".into(),
-        cors_allowed_origins: vec!["http://localhost:8080".into()],
-        auth_cookie_secure: false,
-        auth_cookie_domain: None,
-        email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
-        password_reset_redirect: "http://localhost:8080/reset-password".into(),
-        invitation_redirect: "http://localhost:8080/invitations/accept".into(),
-        oauth_success_redirect: "http://localhost:8080".into(),
-        oauth_error_redirect: "http://localhost:8080".into(),
-        oidc_providers: vec![],
-        smtp: None,
-        email_verification_expiry_secs: 86_400,
-        invitation_expiry_secs: 604_800,
-        oauth_state_expiry_secs: 600,
-        auth_exchange_code_expiry_secs: 300,
-        certs_enabled: false,
-        certs_ca_mode: atom::config::CertsCaMode::FileIntermediateIssuer,
-        certs_root_ca_cert_path: None,
-        certs_intermediate_ca_cert_path: None,
-        certs_intermediate_ca_key_path: None,
-        certs_root_ca_key_path: None,
-        certs_leaf_default_ttl_secs: 2_592_000,
-        certs_leaf_max_ttl_secs: 2_592_000,
+        ..Config::for_tests()
     }
 }
 
@@ -61,16 +24,19 @@ fn config(dev_allow_unverified_email_login: bool) -> Config {
 #[ignore]
 async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     let pool = common::pool().await;
-    keys::bootstrap_if_needed(&pool)
+    let cfg = config(true);
+    keys::bootstrap_if_needed(&pool, &cfg.signing_keys)
         .await
         .expect("bootstrap keys");
-    let keys = keys::load_active_keys(&pool).await.expect("load keys");
+    let keys = keys::load_active_keys(&pool, &cfg.signing_keys)
+        .await
+        .expect("load keys");
 
     let name = format!("m16-human-{}", Uuid::new_v4());
     let email = format!("{name}@example.test");
     let response = service::signup_human(
         &pool,
-        &config(true),
+        &cfg,
         SignupRequest {
             name: name.clone(),
             email: email.clone(),

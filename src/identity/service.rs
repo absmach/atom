@@ -52,8 +52,6 @@ pub fn verify_secret(secret: &[u8], hash: &str) -> bool {
 }
 
 const DEFAULT_MIN_PASSWORD_CHARS: usize = 12;
-const LOGIN_FAILURE_LIMIT: i64 = 5;
-const LOGIN_FAILURE_WINDOW_SECS: i64 = 15 * 60;
 
 pub fn validate_password_strength(password: &str) -> Result<(), AppError> {
     let min_password_chars = std::env::var("ATOM_MIN_PASSWORD_CHARS")
@@ -139,7 +137,15 @@ async fn do_login_password(
 ) -> Result<LoginResponse, AppError> {
     let login_tenant_id = resolve_login_tenant(pool, requested_tenant_id, tenant_route).await?;
     let attempt_identifier = login_attempt_identifier(identifier);
-    if let Err(err) = ensure_login_not_throttled(pool, &attempt_identifier, login_tenant_id).await {
+    if let Err(err) = ensure_login_not_throttled(
+        pool,
+        &attempt_identifier,
+        login_tenant_id,
+        cfg.login_failure_limit,
+        cfg.login_failure_window_secs,
+    )
+    .await
+    {
         record_login_attempt(pool, &attempt_identifier, login_tenant_id, false).await;
         return Err(err);
     }
@@ -188,6 +194,8 @@ async fn ensure_login_not_throttled(
     pool: &PgPool,
     identifier: &str,
     tenant_id: Option<Uuid>,
+    failure_limit: i64,
+    failure_window_secs: i64,
 ) -> Result<(), AppError> {
     let failures: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
@@ -199,13 +207,16 @@ async fn ensure_login_not_throttled(
     )
     .bind(identifier)
     .bind(tenant_id)
-    .bind(LOGIN_FAILURE_WINDOW_SECS.to_string())
+    .bind(failure_window_secs.to_string())
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
 
-    if failures >= LOGIN_FAILURE_LIMIT {
-        Err(AppError::unauthorized("too many failed login attempts"))
+    if failures >= failure_limit {
+        Err(AppError::rate_limited(
+            "too many failed login attempts",
+            u64::try_from(failure_window_secs).unwrap_or(1),
+        ))
     } else {
         Ok(())
     }
@@ -1053,10 +1064,20 @@ async fn send_verification_email(cfg: &Config, email: &str, token: &str) -> Resu
     }
 
     let mailer = builder.build();
-    mailer
-        .send(message)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("send verification email: {e}")))?;
+    if let Err(err) = mailer.send(message).await {
+        if cfg.dev_allow_unverified_email_login {
+            tracing::warn!(
+                email,
+                verification_url,
+                error = %err,
+                "SMTP send failed; skipping verification email in development bypass mode"
+            );
+            return Ok(());
+        }
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "send verification email: {err}"
+        )));
+    }
     Ok(())
 }
 
@@ -1111,10 +1132,20 @@ async fn send_password_reset_email(
     }
 
     let mailer = builder.build();
-    mailer
-        .send(message)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("send password reset email: {e}")))?;
+    if let Err(err) = mailer.send(message).await {
+        if cfg.dev_allow_unverified_email_login {
+            tracing::warn!(
+                email,
+                reset_url,
+                error = %err,
+                "SMTP send failed; skipping password reset email in development bypass mode"
+            );
+            return Ok(());
+        }
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "send password reset email: {err}"
+        )));
+    }
     Ok(())
 }
 
@@ -1598,15 +1629,17 @@ pub async fn list_credentials(
 
     let summaries = rows
         .into_iter()
-        .map(|r| CredentialSummary {
-            id: r.try_get("id").unwrap(),
-            kind: r.try_get("kind").unwrap(),
-            identifier: r.try_get("identifier").unwrap_or(None),
-            status: r.try_get("status").unwrap(),
-            expires_at: r.try_get("expires_at").unwrap_or(None),
-            created_at: r.try_get("created_at").unwrap(),
+        .map(|r| {
+            Ok(CredentialSummary {
+                id: r.try_get("id").map_err(db_err)?,
+                kind: r.try_get("kind").map_err(db_err)?,
+                identifier: r.try_get("identifier").map_err(db_err)?,
+                status: r.try_get("status").map_err(db_err)?,
+                expires_at: r.try_get("expires_at").map_err(db_err)?,
+                created_at: r.try_get("created_at").map_err(db_err)?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, AppError>>()?;
 
     Ok(summaries)
 }
