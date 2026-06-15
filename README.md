@@ -38,17 +38,17 @@ This README is the quick start and orientation document. It should not duplicate
 
 Atom’s normal product model uses these ideas:
 
-| Atom word | Simple meaning | Example |
-|-----------|----------------|---------|
-| Tenant | Top boundary | Magistrala domain `d1` |
-| Action | One action | `read`, `write`, `publish`, `role.manage` |
-| Action Applicability | Which object types support an action | `publish` is valid for channels, not clients |
-| Permission Block | Scope + actions + effect + conditions | channels in Plant-A -> read, publish |
-| Role | Named collection of Permission Blocks | `Plant Operator` bundles client and channel access |
-| Role Assignment | Gives a role to an entity or Principal Group | assign `Plant Operator` to `user1` |
-| Direct Policy | Gives one Permission Block directly to a subject | `client1` can publish to `channel1` |
-| Principal Group | Collection of identities | `Operators` contains `user1`, `user2`, `mg-service` |
-| Object Group | Boundary/container for objects | `Plant-A` contains clients, channels, child groups |
+| Atom word            | Simple meaning                                   | Example                                             |
+| -------------------- | ------------------------------------------------ | --------------------------------------------------- |
+| Tenant               | Top boundary                                     | Magistrala domain `d1`                              |
+| Action               | One action                                       | `read`, `write`, `publish`, `role.manage`           |
+| Action Applicability | Which object types support an action             | `publish` is valid for channels, not clients        |
+| Permission Block     | Scope + actions + effect + conditions            | channels in Plant-A -> read, publish                |
+| Role                 | Named collection of Permission Blocks            | `Plant Operator` bundles client and channel access  |
+| Role Assignment      | Gives a role to an entity or Principal Group     | assign `Plant Operator` to `user1`                  |
+| Direct Policy        | Gives one Permission Block directly to a subject | `client1` can publish to `channel1`                 |
+| Principal Group      | Collection of identities                         | `Operators` contains `user1`, `user2`, `mg-service` |
+| Object Group         | Boundary/container for objects                   | `Plant-A` contains clients, channels, child groups  |
 
 Action naming is hybrid:
 
@@ -59,11 +59,11 @@ Action naming is hybrid:
 That means Atom does not use one naming style for every action. It chooses the
 name that makes the authorization decision easiest to understand:
 
-| Action style | What it means | Example |
-|--------------|---------------|---------|
-| Generic object action | The action is common, and the object kind gives it meaning. | `read` on `audit_log`, `revoke` on `credential` |
-| Scoped access admin action | The action manages access rules inside a specific scope. | `role.manage` for roles in one tenant or group scope |
-| Runtime operation action | The action protects a service operation, not a stored row. | `authz.check` for services allowed to call the PDP |
+| Action style               | What it means                                               | Example                                              |
+| -------------------------- | ----------------------------------------------------------- | ---------------------------------------------------- |
+| Generic object action      | The action is common, and the object kind gives it meaning. | `read` on `audit_log`, `revoke` on `credential`      |
+| Scoped access admin action | The action manages access rules inside a specific scope.    | `role.manage` for roles in one tenant or group scope |
+| Runtime operation action   | The action protects a service operation, not a stored row.  | `authz.check` for services allowed to call the PDP   |
 
 For stored objects, the object kind is part of the authorization question:
 
@@ -147,11 +147,11 @@ Object Group           = where
 
 ## Quick start
 
-Use the Makefile for local Docker Compose development:
+There is one config file. Copy the example and start the stack:
 
 ```bash
-# 1. Create .env.dev and local dev CA files under certs/
-make dev-env
+# 1. Create your local config
+cp .env.example .env
 
 # 2. Build and start Postgres, Atom, and the Atom Next UI
 make up
@@ -160,12 +160,25 @@ make up
 make logs
 ```
 
-`make up` runs Docker Compose with `.env.dev`, `--profile default`, and
+`.env.example` ships working local defaults: admin login `admin` /
+`12345678`, password login allowed before email verification
+(`ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN=true`), and certificates disabled, so a
+fresh copy boots with no SMTP, OAuth, or CA setup.
+
+`make up` runs Docker Compose with `.env`, `--profile default`, and
 `--profile atom-ui`. It starts:
 
-- Atom REST/GraphQL on `http://localhost:18080`
+- Atom REST/GraphQL on `http://localhost:8080`
 - Atom Next UI on `http://localhost:3005`
 - Postgres on `127.0.0.1:5432`
+
+Log in to get a token:
+
+```bash
+curl -s -X POST http://localhost:8080/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier": "admin", "secret": "12345678"}'
+```
 
 Stop or rebuild the stack with:
 
@@ -174,50 +187,77 @@ make down
 make restart
 ```
 
-GraphQL is available at `POST /graphql` in both images. With the Makefile
-Compose flow, use `POST http://localhost:18080/graphql`.
+GraphQL is available at `POST http://localhost:8080/graphql`. Migrations apply
+automatically on startup.
 
-To run Atom directly with Cargo instead of the Compose backend:
+### Backend development with Cargo
+
+Run Atom on the host and keep only Postgres in Docker. Postgres is published on
+`127.0.0.1:5432`, and `.env` points `DATABASE_URL` at `localhost:5432`, so
+`cargo run` connects with no extra setup:
 
 ```bash
-# 1. Copy and edit config
-cp .env.example .env
-# set ADMIN_SECRET on first boot to create the admin password
-# set ATOM_CERTS_ENABLED=false for a minimal local run, or point certificate
-# paths at host files under certs/
-
-# 2. Start Postgres
-docker compose --env-file .env up -d postgres
-
-# 3. Run Atom on LISTEN_ADDR, default http://localhost:8080
-cargo run
+make db        # start only Postgres
+cargo run      # Atom on http://localhost:8080
 ```
 
-Migrations apply automatically on startup.
+Do not run `make up` and `cargo run` at the same time — both bind `8080`. Use
+`make db` for the Cargo flow, or override `ATOM_HTTP_PORT` for the Compose
+backend.
 
-Certificate support is enabled by default. Atom loads issuer CA material from mounted files and does not store CA certificates or CA private keys in Postgres. Production deployments should use `ATOM_CERTS_CA_MODE=file_intermediate_issuer` with root certificate, intermediate certificate, and intermediate private key files mounted read-only; `file_root_issuer` is supported for local/dev when only root certificate and root private key files exist. Public PKI endpoints are available at `GET /certs/ca-chain`, `GET /certs/crl`, and `POST /certs/ocsp`.
+### UI development
 
-The Atom Next UI is a separate optional service. In the Makefile-backed Docker
-Compose flow it is enabled by default with the `atom-ui` profile and is
-available at `http://localhost:3005`. Registration UI is exposed at `/register`
-when `ATOM_UI_REGISTRATION_ENABLED=true` and backend self-registration is
-enabled.
+For frontend work, run the Next UI from source against a running backend
+instead of the `atom-ui` container (which would also bind `3005`).
 
-Shared Magistrala/Cube deployments may consume `ghcr.io/absmach/atom:latest` and `ghcr.io/absmach/atom-ui:latest`, but those tags are mutable. Before consuming `latest`, publish both images from the same stabilized Atom commit. Production deployments that need immutability should override the image with a digest or fixed release tag.
-
-For local UI development, run the backend and frontend separately:
+The shortcut runs Postgres (Docker) plus Atom and the UI on the host in one
+command (Ctrl-C stops both; needs host `cargo` and `pnpm`):
 
 ```bash
-# backend on http://localhost:8080
-cargo run
+make dev                 # Postgres + cargo run (:8080) + pnpm dev (:3000)
+```
 
-# Next UI on http://localhost:3000
+Or run the pieces yourself:
+
+```bash
+make db && cargo run     # or: make up   (backend on :8080)
+
 cd app
 pnpm install
-pnpm dev
+pnpm dev                 # Next UI on http://localhost:3000
 ```
 
-When using the dev Docker backend on `http://localhost:8081`, set `ATOM_GRAPHQL_URL=http://localhost:8081/graphql` for the Next UI.
+The dev UI calls `http://localhost:8080/graphql` (already allowed by the
+default `ATOM_CORS_ALLOWED_ORIGINS`).
+
+### Certificates (optional)
+
+Certificates are off by default for local dev. To enable the PKI endpoints
+(`GET /certs/ca-chain`, `GET /certs/crl`, `POST /certs/ocsp`), generate a local
+root CA and flip the cert vars in `.env`:
+
+```bash
+mkdir -p certs
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout certs/root-ca.key -out certs/root-ca.crt -days 3650 \
+  -subj "/CN=Atom Dev Root CA" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+# in .env:
+#   ATOM_CERTS_ENABLED=true
+#   ATOM_CERTS_CA_MODE=file_root_issuer
+#   ATOM_CERTS_ROOT_CA_CERT_PATH=/certs/root-ca.crt   (host: ./certs/root-ca.crt for cargo run)
+#   ATOM_CERTS_ROOT_CA_KEY_PATH=/certs/root-ca.key
+```
+
+Compose mounts `./certs` at `/certs:ro`; a host `cargo run` reads the files
+directly, so use `./certs/...` paths there. Production should use
+`ATOM_CERTS_CA_MODE=file_intermediate_issuer` with root certificate,
+intermediate certificate, and intermediate private key files mounted
+read-only. Atom never stores CA certificates or CA private keys in Postgres.
+
+### Port overrides
 
 If a host port is already occupied, override only the host-side port:
 
@@ -225,25 +265,28 @@ If a host port is already occupied, override only the host-side port:
 POSTGRES_HOST_PORT=55432 ATOM_HTTP_PORT=28080 ATOM_UI_HTTP_PORT=3006 make up
 ```
 
-The Atom container still connects to Postgres through Docker DNS at `postgres:5432`.
+The Atom container still connects to Postgres through Docker DNS at
+`postgres:5432`.
+
+Shared Magistrala/Cube deployments may consume `ghcr.io/absmach/atom:latest` and `ghcr.io/absmach/atom-ui:latest`, but those tags are mutable. Before consuming `latest`, publish both images from the same stabilized Atom commit. Production deployments that need immutability should override the image with a digest or fixed release tag.
 
 ## Makefile commands
 
 Run `make help` to print the current target list from the Makefile.
 
-| Command | What it does |
-|---------|--------------|
-| `make dev-env` | Creates `.env.dev` with local defaults and generates local dev CA files under `certs/` if needed. |
-| `make build` | Builds and tags the Atom backend and Atom UI images for local Compose use. |
-| `make atom-build` | Builds and tags only the Atom backend image. |
-| `make ui-build` | Builds and tags only the Atom UI image. |
-| `make up` | Builds and starts Postgres, Atom, and Atom UI with `.env.dev`. |
-| `make restart` | Stops the local Compose stack, then rebuilds and starts it again. |
-| `make logs` | Follows Atom backend and Atom UI logs. |
-| `make down` | Stops the local Compose stack. |
-| `make docker-build` | Builds the raw Atom Docker image using `BUILD_TARGET`, `IMAGE_NAME`, and `IMAGE_TAG`. |
-| `make docker-build-release` | Builds the raw release Docker image. |
-| `make docker-build-dev` | Builds the raw dev Docker image. |
+| Command                     | What it does                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------- |
+| `make db`                   | Starts only Postgres (for a host `cargo run`).                                        |
+| `make dev`                  | Postgres (Docker) + host `cargo run` + host UI dev server; Ctrl-C stops both.         |
+| `make build`                | Builds and tags the Atom backend and Atom UI images for local Compose use.            |
+| `make atom-build`           | Builds and tags only the Atom backend image.                                          |
+| `make ui-build`             | Builds and tags only the Atom UI image.                                               |
+| `make up`                   | Builds and starts Postgres, Atom, and Atom UI with `.env`.                            |
+| `make restart`              | Stops the local Compose stack, then rebuilds and starts it again.                     |
+| `make logs`                 | Follows Atom backend and Atom UI logs.                                                |
+| `make down`                 | Stops the local Compose stack.                                                        |
+| `make docker-build`         | Builds the raw Atom Docker image using `BUILD_TARGET`, `IMAGE_NAME`, and `IMAGE_TAG`. |
+| `make docker-build-release` | Builds the raw release Docker image.                                                  |
 
 Common overrides:
 
@@ -309,7 +352,7 @@ Profiles keep Atom's internal runtime/authz kind separate from user/domain subty
 ```graphql
 mutation {
   login(input: {
-    identifier: "atom-admin",
+    identifier: "admin",
     secret: "change-me",
     kind: "password"
   }) {
@@ -389,58 +432,57 @@ Generic application mapping:
 
 `.env.example` is the local template. These are the main runtime and Compose variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | *(required)* | Postgres connection string |
-| `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP bind address |
-| `GRPC_ADDR` | `0.0.0.0:8081` | gRPC bind address |
-| `JWT_EXPIRY_SECS` | `3600` | JWT lifetime in seconds |
-| `ATOM_JWT_ISSUER` | `ATOM_PUBLIC_BASE_URL` | JWT issuer claim |
-| `ATOM_JWT_AUDIENCE` | `magistrala` | JWT audience claim |
-| `ADMIN_SECRET` | *(optional)* | Seeds the admin password on first boot |
-| `ADMIN_ENTITY_ID` | `00000000-0000-0000-0000-000000000001` | Override seeded admin UUID |
-| `ATOM_SERVICE_SECRET` / `ATOM_SERVICE_ENTITY_ID` | *(optional)* / seeded service UUID | Seeds a service entity password on first boot |
-| `ATOM_MIN_PASSWORD_CHARS` | `12` | Minimum password length |
-| `ATOM_CORS_ALLOWED_ORIGINS` | `ATOM_PUBLIC_BASE_URL` | Comma-separated allowed CORS origins |
-| `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN` | auto-detect HTTPS / *(unset)* | Auth cookie options for UI flows |
-| `ATOM_SELF_REGISTRATION_ENABLED` | `true` | Enables unauthenticated global human self-registration |
-| `ATOM_UI_REGISTRATION_ENABLED` | `true` | UI service only; exposes `/register` and the login-page signup link |
-| `ATOM_SIGNUP_ENABLED` | *(legacy alias)* | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED` |
-| `ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN` | `false` | Development-only password login before email verification |
-| `ATOM_PUBLIC_BASE_URL` | `http://localhost:8080` | Public URL used for issuer and redirect defaults |
-| `ATOM_EMAIL_VERIFICATION_REDIRECT` | `http://localhost:8080/auth/email/verify` | URL that verifies email tokens |
-| `ATOM_PASSWORD_RESET_REDIRECT` | `http://localhost:8080/reset-password` | Frontend URL for password reset tokens |
-| `ATOM_INVITATION_REDIRECT` | `http://localhost:8080/invitations/accept` | Frontend URL for invitation tokens |
-| `ATOM_OAUTH_SUCCESS_REDIRECT` | `http://localhost:8080/auth/callback` | Frontend URL that receives the OAuth exchange code |
-| `ATOM_OAUTH_ERROR_REDIRECT` | `http://localhost:8080/auth/callback` | Frontend URL that receives OAuth errors |
-| `ATOM_OIDC_PROVIDERS` | `[]` | JSON array of OIDC providers, for example Google |
-| `ATOM_EMAIL_VERIFICATION_EXPIRY_SECS` | `86400` | Email verification token lifetime |
-| `ATOM_INVITATION_EXPIRY_SECS` | `604800` | Invitation token lifetime |
-| `ATOM_OAUTH_STATE_EXPIRY_SECS` | `600` | OAuth state token lifetime |
-| `ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS` | `300` | OAuth exchange code lifetime |
-| `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM` | *(optional)* | Required pair for signup and password reset email delivery |
-| `ATOM_SMTP_PORT` / `ATOM_SMTP_TLS` | `587` / `starttls` | SMTP port and TLS mode |
-| `ATOM_SMTP_USERNAME` / `ATOM_SMTP_PASSWORD` | *(optional)* | SMTP credentials |
-| `ATOM_CERTS_ENABLED` | `true` | Enables certificate lifecycle support |
-| `ATOM_CERTS_CA_MODE` | `file_intermediate_issuer` | CA mode: `file_intermediate_issuer` or `file_root_issuer` |
-| `ATOM_CERTS_ROOT_CA_CERT_PATH` | *(optional)* | Mounted root CA certificate path |
-| `ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH` | *(optional)* | Mounted intermediate CA certificate path |
-| `ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH` | *(optional)* | Mounted intermediate CA private key path |
-| `ATOM_CERTS_ROOT_CA_KEY_PATH` | *(optional)* | Mounted root CA private key path for `file_root_issuer` |
-| `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS` | `2592000` | Default issued certificate lifetime |
-| `ATOM_CERTS_LEAF_MAX_TTL_SECS` | `2592000` | Maximum issued certificate lifetime |
-| `ATOM_CERTS_CA_DIR` | `./certs` | Docker Compose host directory mounted at `/certs:ro` |
-| `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `3005` | Docker Compose host ports; `.env.dev` generated by `make dev-env` sets `ATOM_HTTP_PORT=18080` |
-| `ATOM_GRAPHQL_URL` | `http://atom:8080/graphql` | GraphQL endpoint used by the Dockerized Next UI |
-| `RUST_LOG` | `info` | Log level filter |
+| Variable                                                      | Default                                    | Description                                                         |
+| ------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------- |
+| `DATABASE_URL`                                                | *(required)*                               | Postgres connection string                                          |
+| `LISTEN_ADDR`                                                 | `0.0.0.0:8080`                             | HTTP bind address                                                   |
+| `GRPC_ADDR`                                                   | `0.0.0.0:8081`                             | gRPC bind address                                                   |
+| `JWT_EXPIRY_SECS`                                             | `3600`                                     | JWT lifetime in seconds                                             |
+| `ATOM_JWT_ISSUER`                                             | `ATOM_PUBLIC_BASE_URL`                     | JWT issuer claim                                                    |
+| `ATOM_JWT_AUDIENCE`                                           | `magistrala`                               | JWT audience claim                                                  |
+| `ADMIN_SECRET`                                                | *(optional)*                               | Seeds the admin password on first boot                              |
+| `ADMIN_ENTITY_ID`                                             | `00000000-0000-0000-0000-000000000001`     | Override seeded admin UUID                                          |
+| `ATOM_SERVICE_SECRET` / `ATOM_SERVICE_ENTITY_ID`              | *(optional)* / seeded service UUID         | Seeds a service entity password on first boot                       |
+| `ATOM_MIN_PASSWORD_CHARS`                                     | `12`                                       | Minimum password length                                             |
+| `ATOM_CORS_ALLOWED_ORIGINS`                                   | `ATOM_PUBLIC_BASE_URL`                     | Comma-separated allowed CORS origins                                |
+| `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN`         | auto-detect HTTPS / *(unset)*              | Auth cookie options for UI flows                                    |
+| `ATOM_SELF_REGISTRATION_ENABLED`                              | `true`                                     | Enables unauthenticated global human self-registration              |
+| `ATOM_UI_REGISTRATION_ENABLED`                                | `true`                                     | UI service only; exposes `/register` and the login-page signup link |
+| `ATOM_SIGNUP_ENABLED`                                         | *(legacy alias)*                           | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED`      |
+| `ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN`                           | `false`                                    | Development-only password login before email verification           |
+| `ATOM_PUBLIC_BASE_URL`                                        | `http://localhost:8080`                    | Public URL used for issuer and redirect defaults                    |
+| `ATOM_EMAIL_VERIFICATION_REDIRECT`                            | `http://localhost:8080/auth/email/verify`  | URL that verifies email tokens                                      |
+| `ATOM_PASSWORD_RESET_REDIRECT`                                | `http://localhost:8080/reset-password`     | Frontend URL for password reset tokens                              |
+| `ATOM_INVITATION_REDIRECT`                                    | `http://localhost:8080/invitations/accept` | Frontend URL for invitation tokens                                  |
+| `ATOM_OAUTH_SUCCESS_REDIRECT`                                 | `http://localhost:8080/auth/callback`      | Frontend URL that receives the OAuth exchange code                  |
+| `ATOM_OAUTH_ERROR_REDIRECT`                                   | `http://localhost:8080/auth/callback`      | Frontend URL that receives OAuth errors                             |
+| `ATOM_OIDC_PROVIDERS`                                         | `[]`                                       | JSON array of OIDC providers, for example Google                    |
+| `ATOM_EMAIL_VERIFICATION_EXPIRY_SECS`                         | `86400`                                    | Email verification token lifetime                                   |
+| `ATOM_INVITATION_EXPIRY_SECS`                                 | `604800`                                   | Invitation token lifetime                                           |
+| `ATOM_OAUTH_STATE_EXPIRY_SECS`                                | `600`                                      | OAuth state token lifetime                                          |
+| `ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS`                         | `300`                                      | OAuth exchange code lifetime                                        |
+| `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM`                           | *(optional)*                               | Required pair for signup and password reset email delivery          |
+| `ATOM_SMTP_PORT` / `ATOM_SMTP_TLS`                            | `587` / `starttls`                         | SMTP port and TLS mode                                              |
+| `ATOM_SMTP_USERNAME` / `ATOM_SMTP_PASSWORD`                   | *(optional)*                               | SMTP credentials                                                    |
+| `ATOM_CERTS_ENABLED`                                          | `true`                                     | Enables certificate lifecycle support                               |
+| `ATOM_CERTS_CA_MODE`                                          | `file_intermediate_issuer`                 | CA mode: `file_intermediate_issuer` or `file_root_issuer`           |
+| `ATOM_CERTS_ROOT_CA_CERT_PATH`                                | *(optional)*                               | Mounted root CA certificate path                                    |
+| `ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH`                        | *(optional)*                               | Mounted intermediate CA certificate path                            |
+| `ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH`                         | *(optional)*                               | Mounted intermediate CA private key path                            |
+| `ATOM_CERTS_ROOT_CA_KEY_PATH`                                 | *(optional)*                               | Mounted root CA private key path for `file_root_issuer`             |
+| `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS`                            | `2592000`                                  | Default issued certificate lifetime                                 |
+| `ATOM_CERTS_LEAF_MAX_TTL_SECS`                                | `2592000`                                  | Maximum issued certificate lifetime                                 |
+| `ATOM_CERTS_CA_DIR`                                           | `./certs`                                  | Docker Compose host directory mounted at `/certs:ro`                |
+| `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `3005`                   | Docker Compose host ports                                           |
+| `ATOM_GRAPHQL_URL`                                            | `http://atom:8080/graphql`                 | GraphQL endpoint used by the Dockerized Next UI                     |
+| `RUST_LOG`                                                    | `info`                                     | Log level filter                                                    |
 
 ---
 
 ## Authentication
 
-The examples below use `http://localhost:8080`, which is the default direct
-`cargo run` address. If you started Atom with `make up`, use
-`http://localhost:18080` instead.
+The examples below use `http://localhost:8080`, the default address for both
+the `make up` Compose backend and a direct `cargo run`.
 
 Authenticated REST, GraphQL, and custom endpoint requests use:
 
@@ -490,7 +532,7 @@ curl -s -X POST http://localhost:8080/auth/email/resend \
   -d '{"email": "alice@example.com"}'
 ```
 
-For local development only, `ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN=true`
+For local development only, `ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN=true`
 allows password login before verification while still rejecting inactive or
 suspended entities.
 
@@ -701,17 +743,17 @@ active | inactive | frozen | deleted
 
 ### Magistrala Domain -> Atom Tenant
 
-| Magistrala field | Atom field |
-|---|---|
-| domain `id` | `tenants.id` |
-| domain `name` | `tenants.name` |
-| `route` | `tenants.route` |
-| `metadata` | `tenants.attributes` |
-| `tags` | `tenants.tags` |
-| `enabled` | `status = active` |
-| `disabled` | `status = inactive` |
-| `freezed` | `status = frozen` |
-| `deleted` | `status = deleted` |
+| Magistrala field | Atom field           |
+| ---------------- | -------------------- |
+| domain `id`      | `tenants.id`         |
+| domain `name`    | `tenants.name`       |
+| `route`          | `tenants.route`      |
+| `metadata`       | `tenants.attributes` |
+| `tags`           | `tenants.tags`       |
+| `enabled`        | `status = active`    |
+| `disabled`       | `status = inactive`  |
+| `freezed`        | `status = frozen`    |
+| `deleted`        | `status = deleted`   |
 
 Reuse the Magistrala domain UUID as the Atom `tenants.id`. Objects in that domain carry the same UUID in their `tenant_id` column.
 
@@ -858,17 +900,17 @@ pnpm run deploy
 
 Cloudflare build settings:
 
-| Setting         | Value                         |
-|-----------------|-------------------------------|
-| Build command   | `pnpm run build`              |
-| Deploy command  | `npx wrangler deploy`         |
+| Setting         | Value                          |
+| --------------- | ------------------------------ |
+| Build command   | `pnpm run build`               |
+| Deploy command  | `npx wrangler deploy`          |
 | Version command | `npx wrangler versions upload` |
-| Root directory  | `/docs`                       |
+| Root directory  | `/docs`                        |
 
 Set Cloudflare Workers **Build watch paths** for the `atom-docs` Worker to:
 
 | Setting       | Value    |
-|---------------|----------|
+| ------------- | -------- |
 | Include paths | `docs/*` |
 | Exclude paths | empty    |
 

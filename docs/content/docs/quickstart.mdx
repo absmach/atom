@@ -7,8 +7,8 @@ description: Get Atom running and make your first authorization check.
 
 - Docker and Docker Compose
 - `make`
-- `openssl` for local dev certificate files
 - `jq` for command examples
+- `openssl` only if you enable certificates (off by default in dev env)
 
 ## Steps
 
@@ -18,11 +18,13 @@ description: Get Atom running and make your first authorization check.
 ### Create Local Dev Config
 
 ```bash
-make dev-env
+cp .env.example .env
 ```
 
-This creates `.env.dev` with local defaults and generates local root CA files
-under `certs/` if they do not already exist.
+There is one config file. `.env.example` ships working local defaults — admin
+login `admin` / `12345678`, password login allowed before email verification,
+and certificates disabled — so a fresh copy boots with no SMTP, OAuth, or CA
+setup. Edit `ADMIN_SECRET` before first boot to change the admin password.
 
 </Step>
 <Step>
@@ -35,12 +37,9 @@ make up
 
 This builds and starts:
 
-- Atom REST and GraphQL at `http://localhost:18080`
+- Atom REST and GraphQL at `http://localhost:8080`
 - Atom Next UI at `http://localhost:3005`
 - Postgres at `127.0.0.1:5432`
-
-The default local admin password in `.env.dev` is `12345678`. Edit
-`ADMIN_SECRET` in `.env.dev` before first boot if you want a different password.
 
 </Step>
 <Step>
@@ -59,9 +58,9 @@ Atom applies migrations automatically on startup.
 ### Log In
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:18080/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"identifier": "atom-admin", "secret": "12345678"}' \
+  -d '{"identifier": "admin", "secret": "12345678"}' \
   | jq -r .token)
 ```
 
@@ -70,10 +69,10 @@ TOKEN=$(curl -s -X POST http://localhost:18080/auth/login \
 
 ### Create A Tenant, Device, And Channel
 
-Use GraphQL at `POST http://localhost:18080/graphql`.
+Use GraphQL at `POST http://localhost:8080/graphql`.
 
 ```bash
-curl -s http://localhost:18080/graphql \
+curl -s http://localhost:8080/graphql \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -221,7 +220,8 @@ Run `make help` for the current target list.
 
 | Command | What it does |
 |---|---|
-| `make dev-env` | Creates `.env.dev` with local defaults and local dev CA files. |
+| `make db` | Starts only Postgres (for a host `cargo run`). |
+| `make dev` | Postgres (Docker) + host `cargo run` + host UI dev server; Ctrl-C stops both. |
 | `make up` | Builds and starts Postgres, Atom, and Atom UI. |
 | `make logs` | Follows Atom backend and Atom UI logs. |
 | `make down` | Stops the local Compose stack. |
@@ -231,7 +231,6 @@ Run `make help` for the current target list.
 | `make ui-build` | Builds only the Atom UI image. |
 | `make docker-build` | Builds the raw Atom Docker image using Makefile variables. |
 | `make docker-build-release` | Builds the raw release Docker image. |
-| `make docker-build-dev` | Builds the raw dev Docker image. |
 
 Common overrides:
 
@@ -248,20 +247,43 @@ COMPOSE_PROFILES="--profile default" make up
 
 ## Direct Cargo Development
 
-Use this path when you want to run the Rust service directly on your host
-instead of inside the Compose backend:
+Run the Rust service on your host and keep only Postgres in Docker. Postgres is
+published on `127.0.0.1:5432` and `.env` points `DATABASE_URL` at
+`localhost:5432`, so this works with no extra setup:
 
 ```bash
-cp .env.example .env
-# set ADMIN_SECRET on first boot
-# set ATOM_CERTS_ENABLED=false for a minimal local run, or configure cert paths
-
-docker compose --env-file .env up -d postgres
-cargo run
+make db        # start only Postgres
+cargo run      # Atom on http://localhost:8080
 ```
 
-The direct Cargo backend listens on `http://localhost:8080` by default. The
-Makefile Compose backend listens on `http://localhost:18080`.
+Both the Cargo backend and the `make up` Compose backend bind
+`http://localhost:8080`, so run only one at a time (`make db` for Cargo, or
+override `ATOM_HTTP_PORT` for the Compose flow).
+
+## UI Development
+
+For frontend work, run the Next UI from source against a running backend
+instead of the `atom-ui` container (which also binds `3005`).
+
+The shortcut runs Postgres (Docker) plus Atom and the UI on the host in one
+command (Ctrl-C stops both; needs host `cargo` and `pnpm`):
+
+```bash
+make dev                 # Postgres + cargo run (:8080) + pnpm dev (:3000)
+```
+
+Or run the pieces yourself:
+
+```bash
+make db && cargo run     # or: make up   (backend on :8080)
+
+cd app
+pnpm install
+pnpm dev                 # Next UI on http://localhost:3000
+```
+
+The dev UI calls `http://localhost:8080/graphql`, already allowed by the
+default `ATOM_CORS_ALLOWED_ORIGINS` in `.env`.
 
 ## What Just Happened
 

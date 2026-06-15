@@ -110,7 +110,7 @@ impl Config {
                 "ATOM_SIGNUP_ENABLED",
                 true,
             ),
-            dev_allow_unverified_email_login: env_bool("ATOM_DEV_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
+            dev_allow_unverified_email_login: env_bool("ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
             auth_cookie_secure: std::env::var("ATOM_AUTH_COOKIE_SECURE")
                 .map(|_| env_bool("ATOM_AUTH_COOKIE_SECURE"))
