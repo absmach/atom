@@ -220,6 +220,9 @@ make dev       # cargo run (:8090) + pnpm dev (:3000), Postgres shared
 | `make up` (Compose) | `:8080` | `:3005` | `:5432`           |
 | `make dev` (host)   | `:8090` | `:3000` | `:5432` (same DB) |
 
+Log in to either with the same admin credentials (`admin` / `12345678`); both
+read `ADMIN_SECRET` from `.env` and share one database.
+
 Run both at once to compare a code change against the released image — they
 share the one Postgres volume. Override ports with `DEV_HTTP_PORT` and
 `DEV_UI_PORT` if needed.
