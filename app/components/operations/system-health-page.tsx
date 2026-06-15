@@ -66,6 +66,7 @@ type SystemStatus = {
   };
   rateLimits: {
     enabled: boolean;
+    trustedProxyCidrs: string[];
     policies: Array<{
       category: string;
       maxRequests: number;
@@ -114,6 +115,7 @@ const SYSTEM_STATUS_QUERY = `
       }
       rateLimits {
         enabled
+        trustedProxyCidrs
         policies { category maxRequests windowSecs }
       }
     }
@@ -266,11 +268,22 @@ export function SystemHealthPage() {
           <CardHeader>
             <CardTitle className="text-base">Rate Limits</CardTitle>
             <CardDescription>
-              {status.rateLimits.enabled ? "enabled" : "disabled"}
+              {status.rateLimits.enabled ? "enabled" : "disabled"} ·{" "}
+              {status.rateLimits.trustedProxyCidrs.length > 0
+                ? `${status.rateLimits.trustedProxyCidrs.length} trusted proxy CIDR`
+                : "no trusted proxies"}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid gap-2">
+              <div className="rounded-md border px-3 py-2 text-sm">
+                <div className="font-medium">Trusted proxies</div>
+                <div className="mt-1 break-all text-muted-foreground">
+                  {status.rateLimits.trustedProxyCidrs.length > 0
+                    ? status.rateLimits.trustedProxyCidrs.join(", ")
+                    : "none configured"}
+                </div>
+              </div>
               {status.rateLimits.policies.map((policy) => (
                 <div
                   className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm"

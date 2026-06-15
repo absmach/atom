@@ -1,6 +1,11 @@
 use std::net::SocketAddr;
 
-use tonic::{metadata::MetadataMap, transport::Server, Request, Response, Status};
+use tokio::net::TcpListener;
+use tonic::{
+    metadata::MetadataMap,
+    transport::{server::TcpIncoming, Server},
+    Request, Response, Status,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -9,7 +14,7 @@ use crate::{
     authz::{access, engine},
     certs,
     models::{enums::AuditOutcome, policy::AuthzRequest},
-    state::AppState,
+    state::{AppState, GrpcRuntimeStatus},
 };
 
 // Generated code from proto/atom.proto
@@ -256,8 +261,23 @@ impl CertificateService for AtomCertificates {
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
-pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
+pub async fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    TcpListener::bind(addr).await
+}
+
+pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()> {
+    let addr = listener.local_addr()?;
     tracing::info!("grpc listening on {addr}");
+    let incoming = match TcpIncoming::from_listener(listener, true, None) {
+        Ok(incoming) => incoming,
+        Err(err) => {
+            let message = format!("gRPC listener setup failed on {addr}: {err}");
+            state
+                .set_grpc_status(GrpcRuntimeStatus::error(addr.to_string(), message.clone()))
+                .await;
+            anyhow::bail!(message);
+        }
+    };
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -270,7 +290,11 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
         .set_serving::<CertificateServiceServer<AtomCertificates>>()
         .await;
 
-    Server::builder()
+    state
+        .set_grpc_status(GrpcRuntimeStatus::serving(addr.to_string()))
+        .await;
+
+    let result = Server::builder()
         .add_service(health_service)
         .add_service(AuthzServiceServer::new(AtomAuthz {
             state: state.clone(),
@@ -278,9 +302,124 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
         .add_service(AuthServiceServer::new(AtomAuth {
             state: state.clone(),
         }))
-        .add_service(CertificateServiceServer::new(AtomCertificates { state }))
-        .serve(addr)
-        .await?;
+        .add_service(CertificateServiceServer::new(AtomCertificates {
+            state: state.clone(),
+        }))
+        .serve_with_incoming(incoming)
+        .await;
 
-    Ok(())
+    match result {
+        Ok(()) => {
+            state
+                .set_grpc_status(GrpcRuntimeStatus::error(
+                    addr.to_string(),
+                    format!("gRPC server stopped on {addr}"),
+                ))
+                .await;
+            Ok(())
+        }
+        Err(err) => {
+            let message = format!("gRPC server exited on {addr}: {err}");
+            state
+                .set_grpc_status(GrpcRuntimeStatus::error(addr.to_string(), message))
+                .await;
+            Err(err.into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Config,
+        keys::{ActiveKeys, LoadedKey},
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::time::{sleep, Duration};
+    use tonic_health::pb::{
+        health_check_response::ServingStatus, health_client::HealthClient, HealthCheckRequest,
+    };
+
+    #[tokio::test]
+    async fn bind_listener_fails_when_address_is_in_use() {
+        let first = bind_listener("127.0.0.1:0".parse().expect("addr"))
+            .await
+            .expect("first listener");
+        let addr = first.local_addr().expect("local addr");
+
+        let err = bind_listener(addr).await.expect_err("address in use");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
+    async fn grpc_health_service_reports_serving() {
+        let listener = bind_listener("127.0.0.1:0".parse().expect("addr"))
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let state = test_state();
+        let grpc_state = state.clone();
+        tokio::spawn(async move {
+            let _ = serve(listener, grpc_state).await;
+        });
+
+        let mut client = health_client(addr).await;
+        let response = client
+            .check(HealthCheckRequest {
+                service: String::new(),
+            })
+            .await
+            .expect("health response")
+            .into_inner();
+
+        assert_eq!(response.status, ServingStatus::Serving as i32);
+        assert_eq!(
+            state.grpc_status().await.state,
+            crate::state::GrpcRuntimeState::Serving
+        );
+    }
+
+    async fn health_client(addr: SocketAddr) -> HealthClient<tonic::transport::Channel> {
+        let endpoint = format!("http://{addr}");
+        for _ in 0..20 {
+            if let Ok(channel) = tonic::transport::Channel::from_shared(endpoint.clone())
+                .expect("health endpoint")
+                .connect()
+                .await
+            {
+                return HealthClient::new(channel);
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        let channel = tonic::transport::Channel::from_shared(endpoint)
+            .expect("health endpoint")
+            .connect()
+            .await
+            .expect("connect health client");
+        HealthClient::new(channel)
+    }
+
+    fn test_state() -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://atom:atom@localhost/atom_test")
+            .expect("create lazy test pool");
+        let primary = LoadedKey {
+            kid: "test".into(),
+            public_key_pem: String::new(),
+            private_key_pem: String::new(),
+            x_b64: String::new(),
+            y_b64: String::new(),
+        };
+        AppState::new(
+            pool,
+            Config::for_tests(),
+            ActiveKeys {
+                primary,
+                standby: None,
+            },
+            None,
+        )
+    }
 }

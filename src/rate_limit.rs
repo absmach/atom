@@ -1,19 +1,19 @@
 use std::{
-    collections::hash_map::DefaultHasher,
     collections::HashMap,
-    hash::{Hash, Hasher},
+    net::{IpAddr, SocketAddr},
     sync::Mutex,
     time::{Duration, Instant},
 };
 
 use axum::{
     body::Body,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
+use ipnet::IpNet;
 use serde::Serialize;
 
 use crate::{
@@ -54,6 +54,7 @@ pub struct RateLimitPolicyStatus {
 pub struct RateLimitStatus {
     pub enabled: bool,
     pub policies: Vec<RateLimitPolicyStatus>,
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -121,7 +122,11 @@ pub async fn middleware(State(state): State<AppState>, req: Request<Body>, next:
     }
 
     let policy = policy_for_category(cfg, category);
-    let client = client_key(req.headers());
+    let peer_addr = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0);
+    let client = client_key(req.headers(), peer_addr, &cfg.trusted_proxy_cidrs);
     match state.rate_limiter.check(category, client, policy) {
         Ok(()) => next.run(req).await,
         Err(retry_after_secs) => rate_limited_response(retry_after_secs),
@@ -138,6 +143,11 @@ pub fn status(cfg: &RateLimitConfig) -> RateLimitStatus {
             policy_status(RateLimitCategory::CustomEndpoints, cfg.custom_endpoints),
             policy_status(RateLimitCategory::AdminRoutes, cfg.admin_routes),
         ],
+        trusted_proxy_cidrs: cfg
+            .trusted_proxy_cidrs
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
     }
 }
 
@@ -193,34 +203,52 @@ fn category_for_path(path: &str) -> Option<RateLimitCategory> {
     None
 }
 
-fn client_key(headers: &HeaderMap) -> String {
-    forwarded_client(headers)
-        .or_else(|| hashed_header(headers, header::AUTHORIZATION.as_str()))
-        .unwrap_or_else(|| "anonymous".to_string())
+fn client_key(
+    headers: &HeaderMap,
+    peer_addr: Option<SocketAddr>,
+    trusted_proxy_cidrs: &[IpNet],
+) -> String {
+    let Some(peer_addr) = peer_addr else {
+        tracing::warn!("rate limit peer address missing; using unknown peer bucket");
+        return "ip:unknown-peer".to_string();
+    };
+    let peer_ip = peer_addr.ip();
+
+    if is_trusted_proxy(peer_ip, trusted_proxy_cidrs) {
+        if let Some(forwarded_ip) = forwarded_client(headers, trusted_proxy_cidrs) {
+            return format!("ip:{forwarded_ip}");
+        }
+    }
+
+    format!("ip:{peer_ip}")
 }
 
-fn forwarded_client(headers: &HeaderMap) -> Option<String> {
+fn forwarded_client(headers: &HeaderMap, trusted_proxy_cidrs: &[IpNet]) -> Option<IpAddr> {
+    forwarded_for_client(headers, trusted_proxy_cidrs).or_else(|| real_ip_client(headers))
+}
+
+fn forwarded_for_client(headers: &HeaderMap, trusted_proxy_cidrs: &[IpNet]) -> Option<IpAddr> {
+    headers.get("x-forwarded-for").and_then(|value| {
+        value.to_str().ok().and_then(|value| {
+            value.split(',').rev().find_map(|part| {
+                let ip = part.trim().parse::<IpAddr>().ok()?;
+                (!is_trusted_proxy(ip, trusted_proxy_cidrs)).then_some(ip)
+            })
+        })
+    })
+}
+
+fn real_ip_client(headers: &HeaderMap) -> Option<IpAddr> {
     headers
-        .get("x-forwarded-for")
+        .get("x-real-ip")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| format!("ip:{value}"))
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|value| value.to_str().ok())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| format!("ip:{value}"))
-        })
+        .and_then(|value| value.parse::<IpAddr>().ok())
 }
 
-fn hashed_header(headers: &HeaderMap, name: &str) -> Option<String> {
-    let mut hasher = DefaultHasher::new();
-    headers.get(name)?.as_bytes().hash(&mut hasher);
-    Some(format!("header:{:x}", hasher.finish()))
+fn is_trusted_proxy(ip: IpAddr, trusted_proxy_cidrs: &[IpNet]) -> bool {
+    trusted_proxy_cidrs.iter().any(|cidr| cidr.contains(&ip))
 }
 
 fn rate_limited_response(retry_after_secs: u64) -> Response {
@@ -238,6 +266,7 @@ fn rate_limited_response(retry_after_secs: u64) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     #[test]
     fn limiter_denies_after_limit_until_window_resets() {
@@ -257,9 +286,91 @@ mod tests {
     }
 
     #[test]
+    fn rate_limited_response_keeps_429_and_retry_after() {
+        let response = rate_limited_response(7);
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("7")
+        );
+    }
+
+    #[test]
     fn health_paths_are_not_limited() {
         assert_eq!(category_for_path("/health"), None);
         assert_eq!(category_for_path("/health/live"), None);
         assert_eq!(category_for_path("/health/ready"), None);
+    }
+
+    #[test]
+    fn untrusted_peer_ignores_spoofed_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.10"));
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.11"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token"),
+        );
+
+        let key = client_key(
+            &headers,
+            Some(addr("203.0.113.5:1234")),
+            &[cidr("10.0.0.0/8")],
+        );
+
+        assert_eq!(key, "ip:203.0.113.5");
+    }
+
+    #[test]
+    fn trusted_peer_honors_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.10"));
+
+        let key = client_key(&headers, Some(addr("10.1.2.3:1234")), &[cidr("10.0.0.0/8")]);
+
+        assert_eq!(key, "ip:198.51.100.10");
+    }
+
+    #[test]
+    fn x_forwarded_for_skips_trusted_proxy_hops_from_the_right() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.10, 10.1.1.1, 10.2.2.2"),
+        );
+
+        let key = client_key(&headers, Some(addr("10.3.3.3:1234")), &[cidr("10.0.0.0/8")]);
+
+        assert_eq!(key, "ip:198.51.100.10");
+    }
+
+    #[test]
+    fn invalid_forwarded_headers_fall_back_to_peer_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        headers.insert("x-real-ip", HeaderValue::from_static("also-not-an-ip"));
+
+        let key = client_key(&headers, Some(addr("10.1.2.3:1234")), &[cidr("10.0.0.0/8")]);
+
+        assert_eq!(key, "ip:10.1.2.3");
+    }
+
+    #[test]
+    fn missing_headers_use_peer_ip_not_anonymous() {
+        let key = client_key(&HeaderMap::new(), Some(addr("203.0.113.5:1234")), &[]);
+
+        assert_eq!(key, "ip:203.0.113.5");
+    }
+
+    fn addr(value: &str) -> SocketAddr {
+        value.parse().expect("socket address")
+    }
+
+    fn cidr(value: &str) -> IpNet {
+        value.parse().expect("cidr")
     }
 }

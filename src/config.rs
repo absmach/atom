@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ipnet::IpNet;
 use serde::Deserialize;
 use std::{fmt, str::FromStr};
 use uuid::Uuid;
@@ -149,7 +150,7 @@ pub struct RateLimitPolicyConfig {
     pub window_secs: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RateLimitConfig {
     pub enabled: bool,
     pub auth_routes: RateLimitPolicyConfig,
@@ -157,6 +158,7 @@ pub struct RateLimitConfig {
     pub graphql: RateLimitPolicyConfig,
     pub custom_endpoints: RateLimitPolicyConfig,
     pub admin_routes: RateLimitPolicyConfig,
+    pub trusted_proxy_cidrs: Vec<IpNet>,
 }
 
 impl Default for RateLimitConfig {
@@ -183,6 +185,7 @@ impl Default for RateLimitConfig {
                 max_requests: 300,
                 window_secs: 60,
             },
+            trusted_proxy_cidrs: Vec::new(),
         }
     }
 }
@@ -575,6 +578,7 @@ fn rate_limits_from_env() -> Result<RateLimitConfig> {
             "ATOM_HTTP_RATE_LIMIT_ADMIN_WINDOW_SECS",
             default.admin_routes,
         )?,
+        trusted_proxy_cidrs: trusted_proxy_cidrs_from_env()?,
     })
 }
 
@@ -594,6 +598,23 @@ fn rate_limit_policy_from_env(
         anyhow::bail!("{window_name} must be greater than zero");
     }
     Ok(policy)
+}
+
+fn trusted_proxy_cidrs_from_env() -> Result<Vec<IpNet>> {
+    let value = match std::env::var("ATOM_TRUSTED_PROXY_CIDRS") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return Ok(Vec::new()),
+    };
+
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|cidr| !cidr.is_empty())
+        .map(|cidr| {
+            cidr.parse::<IpNet>()
+                .with_context(|| format!("ATOM_TRUSTED_PROXY_CIDRS contains invalid CIDR {cidr}"))
+        })
+        .collect()
 }
 
 fn body_limits_from_env() -> Result<BodyLimitConfig> {
@@ -765,6 +786,20 @@ mod tests {
         std::env::remove_var("DATABASE_URL");
     }
 
+    #[test]
+    fn trusted_proxy_cidrs_must_be_valid() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        std::env::set_var("DATABASE_URL", "postgres://atom:atom@localhost/atom");
+        std::env::set_var("ATOM_TRUSTED_PROXY_CIDRS", "10.0.0.0/8,not-a-cidr");
+
+        let err = Config::from_env().expect_err("invalid trusted proxy cidr");
+        assert!(err.to_string().contains("ATOM_TRUSTED_PROXY_CIDRS"));
+
+        clear_hardening_env();
+        std::env::remove_var("DATABASE_URL");
+    }
+
     fn clear_hardening_env() {
         for name in [
             "ATOM_DB_MAX_CONNECTIONS",
@@ -783,6 +818,7 @@ mod tests {
             "ATOM_LOGIN_FAILURE_LIMIT",
             "ATOM_LOGIN_FAILURE_WINDOW_SECS",
             "ATOM_RATE_LIMIT_ENABLED",
+            "ATOM_TRUSTED_PROXY_CIDRS",
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
         ] {
             std::env::remove_var(name);

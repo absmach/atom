@@ -463,6 +463,7 @@ Generic application mapping:
 | `ATOM_AUDIT_CLEANUP_INTERVAL_SECS` / `ATOM_AUDIT_CLEANUP_BATCH_SIZE` | `86400` / `5000` | Audit cleanup cadence and batch size |
 | `ATOM_LOGIN_FAILURE_LIMIT` / `ATOM_LOGIN_FAILURE_WINDOW_SECS` | `5` / `900` | Password login throttle |
 | `ATOM_RATE_LIMIT_ENABLED` | `true` | Enables in-process HTTP rate limits |
+| `ATOM_TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated proxy CIDRs whose forwarded client IP headers Atom may trust |
 | `ATOM_HTTP_RATE_LIMIT_AUTH_ROUTES` / `ATOM_HTTP_RATE_LIMIT_AUTH_WINDOW_SECS` | `30` / `60` | Auth route rate-limit policy |
 | `ATOM_HTTP_RATE_LIMIT_PUBLIC_ROUTES` / `ATOM_HTTP_RATE_LIMIT_PUBLIC_WINDOW_SECS` | `120` / `60` | JWKS and public PKI rate-limit policy |
 | `ATOM_HTTP_RATE_LIMIT_GRAPHQL` / `ATOM_HTTP_RATE_LIMIT_GRAPHQL_WINDOW_SECS` | `120` / `60` | GraphQL rate-limit policy |
@@ -482,6 +483,7 @@ Generic application mapping:
 | `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN` | auto-detect HTTPS / *(unset)* | Auth cookie options for UI flows |
 | `ATOM_SELF_REGISTRATION_ENABLED` | `true` | Enables unauthenticated global human self-registration |
 | `ATOM_UI_REGISTRATION_ENABLED` | `true` | UI service only; exposes `/register` and the login-page signup link |
+| `ATOM_UI_FORWARD_CLIENT_IP_HEADERS` | `false` | UI service only; forwards client IP headers to Atom proxy calls when explicitly enabled |
 | `ATOM_SIGNUP_ENABLED` | *(legacy alias)* | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED` |
 | `ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN` | `false` | Development-only password login before email verification |
 | `ATOM_PUBLIC_BASE_URL` | `http://localhost:8080` | Public URL used for issuer and redirect defaults |
@@ -510,6 +512,13 @@ Generic application mapping:
 | `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8081` / `18081` / `3005` | Docker Compose host ports |
 | `ATOM_GRAPHQL_URL` | `http://atom:8080/graphql` | GraphQL endpoint used by the Dockerized Next UI |
 | `RUST_LOG` | `info` | Log level filter |
+
+Rate limiting uses the socket peer IP by default. `X-Forwarded-For` and
+`X-Real-IP` are ignored unless the immediate peer IP is inside
+`ATOM_TRUSTED_PROXY_CIDRS`. Keep this empty unless Atom is behind a proxy or
+ingress that overwrites client IP headers. If the Atom UI is also proxying
+requests to Atom, enable `ATOM_UI_FORWARD_CLIENT_IP_HEADERS=true` only behind an
+upstream proxy that sanitizes those headers.
 
 ---
 

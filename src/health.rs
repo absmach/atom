@@ -6,7 +6,10 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::{keys, rate_limit, state::AppState};
+use crate::{
+    keys, rate_limit,
+    state::{AppState, GrpcRuntimeState},
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,13 +88,14 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let migrations = migrations_check(state).await;
     let (signing_keys, signing_key_state) = signing_keys_check(state).await;
     let certificate_issuer = certificate_issuer_check(state);
-    let ready = matches!(&database.status, ComponentStatus::Ok)
-        && matches!(&migrations.status, ComponentStatus::Ok)
-        && matches!(&signing_keys.status, ComponentStatus::Ok)
-        && matches!(
-            &certificate_issuer.status,
-            ComponentStatus::Ok | ComponentStatus::Disabled
-        );
+    let grpc_ready = grpc_check(state).await;
+    let ready = readiness_ok(
+        &database,
+        &migrations,
+        &signing_keys,
+        &certificate_issuer,
+        &grpc_ready,
+    );
     let status = if ready {
         ComponentStatus::Ok
     } else {
@@ -100,10 +104,6 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let http_ready = ComponentCheck {
         status: status.clone(),
         message: if ready { "ready" } else { "not ready" }.to_string(),
-    };
-    let grpc_ready = ComponentCheck {
-        status: ComponentStatus::Ok,
-        message: format!("serving on {}", state.config.grpc_addr),
     };
     let response = SystemStatus {
         status,
@@ -124,6 +124,23 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status_code, Json(response))
+}
+
+fn readiness_ok(
+    database: &ComponentCheck,
+    migrations: &ComponentCheck,
+    signing_keys: &ComponentCheck,
+    certificate_issuer: &ComponentCheck,
+    grpc_ready: &ComponentCheck,
+) -> bool {
+    matches!(&database.status, ComponentStatus::Ok)
+        && matches!(&migrations.status, ComponentStatus::Ok)
+        && matches!(&signing_keys.status, ComponentStatus::Ok)
+        && matches!(
+            &certificate_issuer.status,
+            ComponentStatus::Ok | ComponentStatus::Disabled
+        )
+        && matches!(&grpc_ready.status, ComponentStatus::Ok)
 }
 
 async fn database_check(state: &AppState) -> ComponentCheck {
@@ -232,6 +249,24 @@ fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
     }
 }
 
+async fn grpc_check(state: &AppState) -> ComponentCheck {
+    let status = state.grpc_status().await;
+    match status.state {
+        GrpcRuntimeState::Starting => ComponentCheck {
+            status: ComponentStatus::Degraded,
+            message: status.message,
+        },
+        GrpcRuntimeState::Serving => ComponentCheck {
+            status: ComponentStatus::Ok,
+            message: status.message,
+        },
+        GrpcRuntimeState::Error => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: status.message,
+        },
+    }
+}
+
 fn db_pool_status(state: &AppState) -> DbPoolStatus {
     DbPoolStatus {
         max_connections: state.config.db_pool.max_connections,
@@ -242,6 +277,48 @@ fn db_pool_status(state: &AppState) -> DbPoolStatus {
         max_lifetime_secs: state.config.db_pool.max_lifetime_secs,
         size: state.pool.size(),
         idle: state.pool.num_idle(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{readiness_ok, ComponentCheck, ComponentStatus};
+
+    fn check(status: ComponentStatus) -> ComponentCheck {
+        ComponentCheck {
+            status,
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn readiness_requires_serving_grpc() {
+        let database = check(ComponentStatus::Ok);
+        let migrations = check(ComponentStatus::Ok);
+        let signing_keys = check(ComponentStatus::Ok);
+        let certificate_issuer = check(ComponentStatus::Disabled);
+
+        assert!(!readiness_ok(
+            &database,
+            &migrations,
+            &signing_keys,
+            &certificate_issuer,
+            &check(ComponentStatus::Degraded),
+        ));
+        assert!(!readiness_ok(
+            &database,
+            &migrations,
+            &signing_keys,
+            &certificate_issuer,
+            &check(ComponentStatus::Error),
+        ));
+        assert!(readiness_ok(
+            &database,
+            &migrations,
+            &signing_keys,
+            &certificate_issuer,
+            &check(ComponentStatus::Ok),
+        ));
     }
 }
 

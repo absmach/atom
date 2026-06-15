@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getServerToken } from "@/lib/auth/session";
 import { getGraphqlEndpoint } from "@/lib/graphql/client";
+import { withForwardedClientIpHeaders } from "@/lib/http/client-ip-headers";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const CLIENT_CLOSED_REQUEST = 499;
@@ -27,12 +28,12 @@ async function proxyCustomEndpoint(
   try {
     response = await fetch(backend, {
       method: request.method,
-      headers: {
+      headers: withForwardedClientIpHeaders(request, {
         accept: request.headers.get("accept") ?? "application/json",
         authorization: `Bearer ${token}`,
         "content-type":
           request.headers.get("content-type") ?? "application/json",
-      },
+      }),
       body: request.method === "GET" ? undefined : request.body,
       duplex: "half",
       signal: AbortSignal.any([

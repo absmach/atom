@@ -86,6 +86,7 @@ pub struct GqlRateLimitPolicyStatus {
 pub struct GqlRateLimitStatus {
     pub enabled: bool,
     pub policies: Vec<GqlRateLimitPolicyStatus>,
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(SimpleObject)]
@@ -180,6 +181,7 @@ impl From<health::SystemStatus> for GqlSystemStatus {
             audit_retention: status.audit_retention.into(),
             rate_limits: GqlRateLimitStatus {
                 enabled: status.rate_limits.enabled,
+                trusted_proxy_cidrs: status.rate_limits.trusted_proxy_cidrs,
                 policies: status
                     .rate_limits
                     .policies

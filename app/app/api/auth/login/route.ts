@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AUTH_COOKIE, AUTH_META_COOKIE } from "@/lib/auth/session";
 import { getGraphqlEndpoint } from "@/lib/graphql/client";
+import { withForwardedClientIpHeaders } from "@/lib/http/client-ip-headers";
 
 const LOGIN_MUTATION = `
 mutation Login($input: LoginInput!) {
@@ -17,7 +18,9 @@ export async function POST(request: Request) {
   const body = await request.json();
   const response = await fetch(getGraphqlEndpoint(), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: withForwardedClientIpHeaders(request, {
+      "content-type": "application/json",
+    }),
     body: JSON.stringify({
       query: LOGIN_MUTATION,
       variables: {
