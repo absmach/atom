@@ -23,19 +23,19 @@ This site follows the same Cloudflare Workers static-assets pattern used by the 
 
 ### Cloudflare Build Settings
 
-| Setting         | Value                         |
-|-----------------|-------------------------------|
-| Build command   | `pnpm run build`              |
-| Deploy command  | `npx wrangler deploy`         |
+| Setting         | Value                          |
+| --------------- | ------------------------------ |
+| Build command   | `pnpm run build`               |
+| Deploy command  | `npx wrangler deploy`          |
 | Version command | `npx wrangler versions upload` |
-| Root directory  | `/docs`                       |
+| Root directory  | `/docs`                        |
 
 ### Cloudflare Build Watch Paths
 
 Configure this in the Cloudflare dashboard for the `atom-docs` Worker:
 
 | Setting       | Value    |
-|---------------|----------|
+| ------------- | -------- |
 | Include paths | `docs/*` |
 | Exclude paths | empty    |
 
@@ -73,10 +73,10 @@ NEXT_PUBLIC_BASE_URL=https://www.absmach.eu/docs/atom
 
 ## Project Structure
 
-| Path                              | Description                                |
-|-----------------------------------|--------------------------------------------|
-| `app/[[...slug]]/page.tsx`        | Docs page renderer                         |
-| `content/docs`                    | MDX source files                           |
-| `lib/source.ts`                   | Fumadocs source adapter                    |
-| `scripts/nest-static-export.mjs`  | Moves static export under `/docs/atom`     |
-| `wrangler.jsonc`                  | Cloudflare Workers static-assets config    |
+| Path                             | Description                             |
+| -------------------------------- | --------------------------------------- |
+| `app/[[...slug]]/page.tsx`       | Docs page renderer                      |
+| `content/docs`                   | MDX source files                        |
+| `lib/source.ts`                  | Fumadocs source adapter                 |
+| `scripts/nest-static-export.mjs` | Moves static export under `/docs/atom`  |
+| `wrangler.jsonc`                 | Cloudflare Workers static-assets config |

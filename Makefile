@@ -11,6 +11,10 @@ COMPOSE ?= docker compose
 COMPOSE_PROFILES ?= --profile default --profile atom-ui
 DEV_ENV_FILE ?= .env
 COMPOSE_ENV = ATOM_IMAGE="$(ATOM_IMAGE)" ATOM_UI_IMAGE="$(ATOM_UI_IMAGE)"
+# Ports for the host `make dev` flow. Kept distinct from the Compose ports
+# (8080 / 3005) so `make up` and `make dev` can run at once on one Postgres.
+DEV_HTTP_PORT ?= 8090
+DEV_UI_PORT ?= 3000
 
 .PHONY: help db dev build atom-build ui-build up down logs restart docker-build docker-build-release
 
@@ -23,7 +27,7 @@ help:
 	@echo "  make ui-build            Build and tag only the Atom UI image"
 	@echo "  make up                  Build and start Postgres, Atom, and Atom UI"
 	@echo "  make db                  Start only Postgres (for host 'cargo run')"
-	@echo "  make dev                 Postgres (Docker) + host cargo run + host UI dev server"
+	@echo "  make dev                 Postgres (Docker) + host cargo run (:$(DEV_HTTP_PORT)) + host UI (:$(DEV_UI_PORT)); runs alongside 'make up'"
 	@echo "  make restart             Rebuild and restart Postgres, Atom, and Atom UI"
 	@echo "  make logs                Follow Atom + Atom UI logs"
 	@echo "  make down                Stop the local Compose stack"
@@ -34,6 +38,8 @@ help:
 	@echo "  COMPOSE=$(COMPOSE)"
 	@echo "  COMPOSE_PROFILES=$(COMPOSE_PROFILES)"
 	@echo "  DEV_ENV_FILE=$(DEV_ENV_FILE)"
+	@echo "  DEV_HTTP_PORT=$(DEV_HTTP_PORT)"
+	@echo "  DEV_UI_PORT=$(DEV_UI_PORT)"
 	@echo "  IMAGE_NAME=$(IMAGE_NAME)"
 	@echo "  IMAGE_TAG=$(IMAGE_TAG)"
 	@echo "  ATOM_IMAGE=$(ATOM_IMAGE)"
@@ -46,13 +52,16 @@ db:
 	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) up -d postgres
 
 # Full host dev loop: Postgres in Docker, Atom and the Next UI on the host.
-# Backend on :8080, UI on :3000. Ctrl-C stops both. Do not run alongside `make up`.
+# Backend on :$(DEV_HTTP_PORT), UI on :$(DEV_UI_PORT), sharing the Compose
+# Postgres. Distinct from `make up` (8080 / 3005), so both can run at once.
+# Ctrl-C stops both host processes.
 dev: db
 	@command -v cargo >/dev/null 2>&1 || { echo "cargo is required for 'make dev'"; exit 1; }
 	@command -v pnpm  >/dev/null 2>&1 || { echo "pnpm is required for 'make dev'"; exit 1; }
 	@trap 'kill 0' INT TERM EXIT; \
-	cargo run & \
-	( cd app && pnpm install --frozen-lockfile && pnpm dev ) & \
+	LISTEN_ADDR=0.0.0.0:$(DEV_HTTP_PORT) ATOM_PUBLIC_BASE_URL=http://localhost:$(DEV_HTTP_PORT) cargo run & \
+	( cd app && pnpm install --frozen-lockfile && \
+	  ATOM_GRAPHQL_URL=http://localhost:$(DEV_HTTP_PORT)/graphql PORT=$(DEV_UI_PORT) pnpm dev ) & \
 	wait
 
 build:

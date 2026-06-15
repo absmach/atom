@@ -221,7 +221,7 @@ Run `make help` for the current target list.
 | Command | What it does |
 |---|---|
 | `make db` | Starts only Postgres (for a host `cargo run`). |
-| `make dev` | Postgres (Docker) + host `cargo run` + host UI dev server; Ctrl-C stops both. |
+| `make dev` | Host `cargo run` (:8090) + UI dev (:3000) on the shared Postgres; runs with `make up`. |
 | `make up` | Builds and starts Postgres, Atom, and Atom UI. |
 | `make logs` | Follows Atom backend and Atom UI logs. |
 | `make down` | Stops the local Compose stack. |
@@ -256,34 +256,41 @@ make db        # start only Postgres
 cargo run      # Atom on http://localhost:8080
 ```
 
-Both the Cargo backend and the `make up` Compose backend bind
-`http://localhost:8080`, so run only one at a time (`make db` for Cargo, or
-override `ATOM_HTTP_PORT` for the Compose flow).
+Plain `cargo run` uses `LISTEN_ADDR` from `.env` (`8080`), so it collides with
+`make up`. To run both at once, use `make dev` (below), which moves the host
+backend to a separate port.
 
-## UI Development
+## UI Development And Running Everything At Once
 
-For frontend work, run the Next UI from source against a running backend
-instead of the `atom-ui` container (which also binds `3005`).
-
-The shortcut runs Postgres (Docker) plus Atom and the UI on the host in one
-command (Ctrl-C stops both; needs host `cargo` and `pnpm`):
+The host dev flow uses its own ports so it can run **alongside** `make up` on
+the same Postgres. `make dev` starts Postgres (Docker) plus Atom and the Next
+UI on the host (Ctrl-C stops both; needs host `cargo` and `pnpm`):
 
 ```bash
-make dev                 # Postgres + cargo run (:8080) + pnpm dev (:3000)
+make dev                 # cargo run (:8090) + pnpm dev (:3000), Postgres shared
 ```
 
-Or run the pieces yourself:
+| Flow | Backend | UI | Postgres |
+| --- | --- | --- | --- |
+| `make up` (Compose) | `:8080` | `:3005` | `:5432` |
+| `make dev` (host) | `:8090` | `:3000` | `:5432` (same DB) |
+
+Run both together to compare a code change against the released image — they
+share one Postgres volume. Override with `DEV_HTTP_PORT` / `DEV_UI_PORT`.
+
+To run the UI pieces yourself instead:
 
 ```bash
-make db && cargo run     # or: make up   (backend on :8080)
+make db && cargo run     # backend on :8080
 
 cd app
 pnpm install
-pnpm dev                 # Next UI on http://localhost:3000
+ATOM_GRAPHQL_URL=http://localhost:8080/graphql pnpm dev   # UI on :3000
 ```
 
-The dev UI calls `http://localhost:8080/graphql`, already allowed by the
-default `ATOM_CORS_ALLOWED_ORIGINS` in `.env`.
+The dev UI reads the backend GraphQL endpoint from `ATOM_GRAPHQL_URL`
+(server-side). Origins `:3000` and `:3005` are already allowed by the default
+`ATOM_CORS_ALLOWED_ORIGINS` in `.env`.
 
 ## What Just Happened
 

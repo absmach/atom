@@ -201,34 +201,42 @@ make db        # start only Postgres
 cargo run      # Atom on http://localhost:8080
 ```
 
-Do not run `make up` and `cargo run` at the same time — both bind `8080`. Use
-`make db` for the Cargo flow, or override `ATOM_HTTP_PORT` for the Compose
-backend.
+Plain `cargo run` uses `LISTEN_ADDR` from `.env` (`8080`), so it collides with
+`make up`. To run both together, use `make dev` (below), which moves the host
+backend to a separate port.
 
-### UI development
+### UI development and running everything at once
 
-For frontend work, run the Next UI from source against a running backend
-instead of the `atom-ui` container (which would also bind `3005`).
-
-The shortcut runs Postgres (Docker) plus Atom and the UI on the host in one
-command (Ctrl-C stops both; needs host `cargo` and `pnpm`):
+The host dev flow uses its own ports so it can run **alongside** `make up` on
+the same Postgres. `make dev` starts Postgres (Docker) plus Atom and the Next
+UI on the host (Ctrl-C stops both; needs host `cargo` and `pnpm`):
 
 ```bash
-make dev                 # Postgres + cargo run (:8080) + pnpm dev (:3000)
+make dev       # cargo run (:8090) + pnpm dev (:3000), Postgres shared
 ```
 
-Or run the pieces yourself:
+| Flow                | Backend | UI      | Postgres          |
+| ------------------- | ------- | ------- | ----------------- |
+| `make up` (Compose) | `:8080` | `:3005` | `:5432`           |
+| `make dev` (host)   | `:8090` | `:3000` | `:5432` (same DB) |
+
+Run both at once to compare a code change against the released image — they
+share the one Postgres volume. Override ports with `DEV_HTTP_PORT` and
+`DEV_UI_PORT` if needed.
+
+To run the UI pieces yourself instead:
 
 ```bash
-make db && cargo run     # or: make up   (backend on :8080)
+make db && cargo run     # backend on :8080
 
 cd app
 pnpm install
-pnpm dev                 # Next UI on http://localhost:3000
+ATOM_GRAPHQL_URL=http://localhost:8080/graphql pnpm dev   # UI on :3000
 ```
 
-The dev UI calls `http://localhost:8080/graphql` (already allowed by the
-default `ATOM_CORS_ALLOWED_ORIGINS`).
+The dev UI reads the backend GraphQL endpoint from `ATOM_GRAPHQL_URL`
+(server-side). Browser origins `:3000` and `:3005` are already allowed by the
+default `ATOM_CORS_ALLOWED_ORIGINS`.
 
 ### Certificates (optional)
 
@@ -274,19 +282,19 @@ Shared Magistrala/Cube deployments may consume `ghcr.io/absmach/atom:latest` and
 
 Run `make help` to print the current target list from the Makefile.
 
-| Command                     | What it does                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------- |
-| `make db`                   | Starts only Postgres (for a host `cargo run`).                                        |
-| `make dev`                  | Postgres (Docker) + host `cargo run` + host UI dev server; Ctrl-C stops both.         |
-| `make build`                | Builds and tags the Atom backend and Atom UI images for local Compose use.            |
-| `make atom-build`           | Builds and tags only the Atom backend image.                                          |
-| `make ui-build`             | Builds and tags only the Atom UI image.                                               |
-| `make up`                   | Builds and starts Postgres, Atom, and Atom UI with `.env`.                            |
-| `make restart`              | Stops the local Compose stack, then rebuilds and starts it again.                     |
-| `make logs`                 | Follows Atom backend and Atom UI logs.                                                |
-| `make down`                 | Stops the local Compose stack.                                                        |
-| `make docker-build`         | Builds the raw Atom Docker image using `BUILD_TARGET`, `IMAGE_NAME`, and `IMAGE_TAG`. |
-| `make docker-build-release` | Builds the raw release Docker image.                                                  |
+| Command                     | What it does                                                                           |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `make db`                   | Starts only Postgres (for a host `cargo run`).                                         |
+| `make dev`                  | Host `cargo run` (:8090) + UI dev (:3000) on the shared Postgres; runs with `make up`. |
+| `make build`                | Builds and tags the Atom backend and Atom UI images for local Compose use.             |
+| `make atom-build`           | Builds and tags only the Atom backend image.                                           |
+| `make ui-build`             | Builds and tags only the Atom UI image.                                                |
+| `make up`                   | Builds and starts Postgres, Atom, and Atom UI with `.env`.                             |
+| `make restart`              | Stops the local Compose stack, then rebuilds and starts it again.                      |
+| `make logs`                 | Follows Atom backend and Atom UI logs.                                                 |
+| `make down`                 | Stops the local Compose stack.                                                         |
+| `make docker-build`         | Builds the raw Atom Docker image using `BUILD_TARGET`, `IMAGE_NAME`, and `IMAGE_TAG`.  |
+| `make docker-build-release` | Builds the raw release Docker image.                                                   |
 
 Common overrides:
 
