@@ -6,6 +6,7 @@ import {
 import { FallbackCreateForm } from "@/components/crud/table/quick-create-form";
 import { singularize } from "@/components/crud/table/utils";
 import { EntityCreateForm } from "@/components/entities/entity-create-form";
+import { ActionAssignmentRuleCreateForm } from "@/components/guardrails/action-assignment-rule-create-form";
 import { PermissionBlockCreateForm } from "@/components/permission-blocks/permission-block-create-form";
 import { PolicyCreateForm } from "@/components/policy/policy-create-form";
 import { ProfileCreateForm } from "@/components/profiles/profile-create-form";
@@ -95,6 +96,12 @@ export function CrudCreateSheet({
               onSaved={onRefresh}
             />
           ) : null}
+          {resource.key === "action-assignment-rules" ? (
+            <ActionAssignmentRuleCreateForm
+              onCancel={() => onOpenChange(false)}
+              onSaved={onRefresh}
+            />
+          ) : null}
           {resource.key === "policies" ? (
             <PolicyCreateForm
               onCancel={() => onOpenChange(false)}
@@ -125,6 +132,7 @@ function usesFallbackCreateForm(resourceKey: string) {
     "permission-blocks",
     "capability-actions",
     "capabilities",
+    "action-assignment-rules",
     "policies",
   ].includes(resourceKey);
 }

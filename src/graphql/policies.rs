@@ -1,10 +1,13 @@
 use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
+    audit,
     auth::{require_capability, Scope},
     authz::repo as authz_repo,
     models::{
+        action_assignment_rule::{CreateActionAssignmentRule, ListActionAssignmentRules},
         capability::{CreateCapability, ListCapabilities, UpdateCapability},
+        enums::AuditOutcome,
         policy::{
             CreateDirectPolicy, CreatePermissionBlock, CreateRoleAssignment, ListDirectPolicies,
             ListPermissionBlocks, ListRoleAssignments,
@@ -17,11 +20,14 @@ use crate::{
 use super::{
     auth::{gql_error, require_auth, require_policy_read, require_role_read, scope_for_tenant},
     types::{
-        parse_effect_or_default, parse_id, parse_optional_id, parse_optional_subject_kind,
-        parse_subject_kind, Action, ActionApplicabilityEntry, ActionApplicabilityList, ActionList,
-        AddActionApplicabilityInput, CreateActionInput, CreateDirectPolicyInput,
-        CreatePermissionBlockInput, CreateRoleAssignmentInput, CreateRoleInput, DirectPolicy,
-        DirectPolicyList, GqlSubjectKind, PermissionBlock, PermissionBlockList,
+        parse_effect_or_default, parse_id, parse_object_kind,
+        parse_optional_action_assignment_decision, parse_optional_entity_kind, parse_optional_id,
+        parse_optional_subject_kind, parse_subject_kind, Action, ActionApplicabilityEntry,
+        ActionApplicabilityList, ActionAssignmentRule, ActionAssignmentRuleList, ActionList,
+        AddActionApplicabilityInput, CreateActionAssignmentRuleInput, CreateActionInput,
+        CreateDirectPolicyInput, CreatePermissionBlockInput, CreateRoleAssignmentInput,
+        CreateRoleInput, DirectPolicy, DirectPolicyList, GqlActionAssignmentRuleDecision,
+        GqlEntityKind, GqlSubjectKind, PermissionBlock, PermissionBlockList,
         RemoveActionApplicabilityInput, Role, RoleAssignment, RoleAssignmentList, RoleList,
         UpdateActionInput, UpdateRoleInput,
     },
@@ -137,6 +143,47 @@ impl PolicyQuery {
                 .into_iter()
                 .map(ActionApplicabilityEntry)
                 .collect(),
+            total: list.total,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn action_assignment_rules(
+        &self,
+        ctx: &Context<'_>,
+        tenant_id: Option<ID>,
+        entity_kind: Option<GqlEntityKind>,
+        action_name: Option<String>,
+        object_kind: Option<String>,
+        object_type: Option<String>,
+        decision: Option<GqlActionAssignmentRuleDecision>,
+        #[graphql(default = 50)] limit: i64,
+        #[graphql(default = 0)] offset: i64,
+    ) -> Result<ActionAssignmentRuleList> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
+        require_policy_read(&state.pool, auth.entity_id, tenant_id).await?;
+        let object_kind = object_kind
+            .map(|value| parse_object_kind(value, "objectKind"))
+            .transpose()?;
+        let list = authz_repo::list_action_assignment_rules(
+            &state.pool,
+            ListActionAssignmentRules {
+                tenant_id,
+                entity_kind: parse_optional_entity_kind(entity_kind),
+                action_name,
+                object_kind,
+                object_type,
+                decision: parse_optional_action_assignment_decision(decision),
+                limit,
+                offset,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(ActionAssignmentRuleList {
+            items: list.items.into_iter().map(ActionAssignmentRule).collect(),
             total: list.total,
         })
     }
@@ -456,6 +503,62 @@ impl PolicyMutation {
         Ok(true)
     }
 
+    async fn create_action_assignment_rule(
+        &self,
+        ctx: &Context<'_>,
+        input: CreateActionAssignmentRuleInput,
+    ) -> Result<ActionAssignmentRule> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let tenant_id = parse_optional_id(input.tenant_id.clone(), "tenantId")?;
+        require_capability(
+            &state.pool,
+            auth.entity_id,
+            "policy.manage",
+            scope_for_tenant(tenant_id),
+        )
+        .await
+        .map_err(gql_error)?;
+        let rule = authz_repo::create_action_assignment_rule(
+            &state.pool,
+            CreateActionAssignmentRule {
+                tenant_id,
+                entity_kind: input.entity_kind.into(),
+                action_name: input.action_name,
+                object_kind: parse_object_kind(input.object_kind, "objectKind")?,
+                object_type: input.object_type,
+                decision: input.decision.into(),
+                is_absolute: input.is_absolute.unwrap_or(false),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        audit_action_assignment_rule(&state.pool, auth.entity_id, &rule, "create").await;
+        Ok(ActionAssignmentRule(rule))
+    }
+
+    async fn delete_action_assignment_rule(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let id = parse_id(id, "id")?;
+        let existing = authz_repo::get_action_assignment_rule(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        require_capability(
+            &state.pool,
+            auth.entity_id,
+            "policy.manage",
+            scope_for_tenant(existing.tenant_id),
+        )
+        .await
+        .map_err(gql_error)?;
+        let rule = authz_repo::delete_action_assignment_rule(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        audit_action_assignment_rule(&state.pool, auth.entity_id, &rule, "delete").await;
+        Ok(true)
+    }
+
     async fn update_action(
         &self,
         ctx: &Context<'_>,
@@ -674,4 +777,30 @@ impl PolicyMutation {
             .map_err(gql_error)?;
         Ok(true)
     }
+}
+
+async fn audit_action_assignment_rule(
+    pool: &sqlx::PgPool,
+    actor_id: uuid::Uuid,
+    rule: &crate::models::action_assignment_rule::ActionAssignmentRule,
+    action: &str,
+) {
+    audit::write(
+        pool,
+        Some(actor_id),
+        rule.tenant_id,
+        &format!("action_assignment_rule.{action}"),
+        AuditOutcome::Allow,
+        serde_json::json!({
+            "rule_id": rule.id,
+            "entity_kind": &rule.entity_kind,
+            "action_name": rule.action_name,
+            "object_kind": rule.object_kind.as_str(),
+            "object_type": &rule.object_type,
+            "decision": &rule.decision,
+            "is_absolute": rule.is_absolute,
+            "transport": "graphql",
+        }),
+    )
+    .await;
 }

@@ -186,6 +186,7 @@ mod tests {
             "actions",
             "action",
             "actionApplicability",
+            "actionAssignmentRules",
             "permissionBlocks",
             "permissionBlock",
             "roleAssignments",
@@ -256,6 +257,8 @@ mod tests {
             "deleteAction",
             "addActionApplicability",
             "removeActionApplicability",
+            "createActionAssignmentRule",
+            "deleteActionAssignmentRule",
             "createPermissionBlock",
             "deletePermissionBlock",
             "createRoleAssignment",
@@ -421,6 +424,8 @@ mod tests {
                   effect: __type(name: "Effect") { enumValues { name } }
                   credentialKind: __type(name: "CredentialKind") { enumValues { name } }
                   auditOutcome: __type(name: "AuditOutcome") { enumValues { name } }
+                  assignmentRuleDecision: __type(name: "ActionAssignmentRuleDecision") { enumValues { name } }
+                  createAssignmentRuleDecision: __type(name: "CreateActionAssignmentRuleDecision") { enumValues { name } }
                 }
                 "#,
             ))
@@ -450,6 +455,14 @@ mod tests {
         assert_eq!(
             enum_names(&data, "auditOutcome"),
             set(&["allow", "deny", "error"])
+        );
+        assert_eq!(
+            enum_names(&data, "assignmentRuleDecision"),
+            set(&["allow", "deny", "require_override"])
+        );
+        assert_eq!(
+            enum_names(&data, "createAssignmentRuleDecision"),
+            set(&["allow", "deny"])
         );
     }
 

@@ -7,11 +7,11 @@ use crate::{
     authz::repo as authz_repo,
     identity::{repo as identity_repo, service as identity_service},
     models::{
-        access as access_model, api_endpoint as api_endpoint_model, capability as capability_model,
-        entity as entity_model,
+        access as access_model, action_assignment_rule as action_assignment_rule_model,
+        api_endpoint as api_endpoint_model, capability as capability_model, entity as entity_model,
         enums::{
-            AuditOutcome, CredentialKind, CredentialStatus, Effect, EntityKind, EntityStatus,
-            GrantKind, ScopeKind, SubjectKind, TenantStatus,
+            ActionAssignmentDecision, AuditOutcome, CredentialKind, CredentialStatus, Effect,
+            EntityKind, EntityStatus, GrantKind, ObjectKind, ScopeKind, SubjectKind, TenantStatus,
         },
         group as group_model, policy as policy_model, profile as profile_model,
         resource as resource_model, role as role_model, session as session_model,
@@ -78,6 +78,24 @@ pub enum GqlScopeKind {
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 #[graphql(name = "Effect", rename_items = "snake_case")]
 pub enum GqlEffect {
+    Allow,
+    Deny,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "ActionAssignmentRuleDecision", rename_items = "snake_case")]
+pub enum GqlActionAssignmentRuleDecision {
+    Allow,
+    Deny,
+    RequireOverride,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(
+    name = "CreateActionAssignmentRuleDecision",
+    rename_items = "snake_case"
+)]
+pub enum GqlCreateActionAssignmentRuleDecision {
     Allow,
     Deny,
 }
@@ -911,6 +929,47 @@ impl ActionApplicabilityEntry {
     }
 }
 
+pub struct ActionAssignmentRule(pub action_assignment_rule_model::ActionAssignmentRule);
+
+#[Object]
+impl ActionAssignmentRule {
+    async fn id(&self) -> ID {
+        id(self.0.id)
+    }
+
+    async fn tenant_id(&self) -> Option<ID> {
+        self.0.tenant_id.map(id)
+    }
+
+    async fn entity_kind(&self) -> GqlEntityKind {
+        GqlEntityKind::from(&self.0.entity_kind)
+    }
+
+    async fn action_name(&self) -> &str {
+        &self.0.action_name
+    }
+
+    async fn object_kind(&self) -> &str {
+        self.0.object_kind.as_str()
+    }
+
+    async fn object_type(&self) -> Option<&str> {
+        self.0.object_type.as_deref()
+    }
+
+    async fn decision(&self) -> GqlActionAssignmentRuleDecision {
+        GqlActionAssignmentRuleDecision::from(self.0.decision)
+    }
+
+    async fn is_absolute(&self) -> bool {
+        self.0.is_absolute
+    }
+
+    async fn created_at(&self) -> String {
+        timestamp(self.0.created_at)
+    }
+}
+
 pub struct CapabilityApplicability(pub capability_model::CapabilityApplicability);
 
 #[Object]
@@ -1595,6 +1654,17 @@ pub struct RemoveActionApplicabilityInput {
 }
 
 #[derive(InputObject)]
+pub struct CreateActionAssignmentRuleInput {
+    pub tenant_id: Option<ID>,
+    pub entity_kind: GqlEntityKind,
+    pub action_name: String,
+    pub object_kind: String,
+    pub object_type: Option<String>,
+    pub decision: GqlCreateActionAssignmentRuleDecision,
+    pub is_absolute: Option<bool>,
+}
+
+#[derive(InputObject)]
 pub struct CreatePolicyInput {
     pub tenant_id: Option<ID>,
     pub subject_kind: GqlSubjectKind,
@@ -1848,6 +1918,23 @@ pub struct ActionApplicabilityList {
 #[Object]
 impl ActionApplicabilityList {
     async fn items(&self) -> &[ActionApplicabilityEntry] {
+        &self.items
+    }
+
+    async fn total(&self) -> i64 {
+        self.total
+    }
+}
+
+#[derive(Default)]
+pub struct ActionAssignmentRuleList {
+    pub items: Vec<ActionAssignmentRule>,
+    pub total: i64,
+}
+
+#[Object]
+impl ActionAssignmentRuleList {
+    async fn items(&self) -> &[ActionAssignmentRule] {
         &self.items
     }
 
@@ -2257,6 +2344,12 @@ pub fn parse_effect_or_default(value: Option<GqlEffect>) -> Effect {
     value.map(Effect::from).unwrap_or_default()
 }
 
+pub fn parse_optional_action_assignment_decision(
+    value: Option<GqlActionAssignmentRuleDecision>,
+) -> Option<ActionAssignmentDecision> {
+    value.map(ActionAssignmentDecision::from)
+}
+
 pub fn parse_optional_audit_outcome(value: Option<GqlAuditOutcome>) -> Option<AuditOutcome> {
     value.map(AuditOutcome::from)
 }
@@ -2267,6 +2360,23 @@ pub fn parse_optional_credential_kind(value: Option<GqlCredentialKind>) -> Optio
 
 pub fn parse_scope_kind(value: GqlScopeKind) -> ScopeKind {
     ScopeKind::from(value)
+}
+
+pub fn parse_object_kind(value: String, name: &str) -> async_graphql::Result<ObjectKind> {
+    match value.as_str() {
+        "entity" => Ok(ObjectKind::Entity),
+        "resource" => Ok(ObjectKind::Resource),
+        "group" => Ok(ObjectKind::Group),
+        "tenant" => Ok(ObjectKind::Tenant),
+        "role" => Ok(ObjectKind::Role),
+        "policy" => Ok(ObjectKind::Policy),
+        "credential" => Ok(ObjectKind::Credential),
+        "audit_log" => Ok(ObjectKind::AuditLog),
+        "signing_key" => Ok(ObjectKind::SigningKey),
+        _ => Err(async_graphql::Error::new(format!(
+            "{name} must be a valid object kind"
+        ))),
+    }
 }
 
 pub fn parse_optional_tenant_status(value: Option<GqlTenantStatus>) -> Option<TenantStatus> {
@@ -2421,6 +2531,39 @@ impl From<&Effect> for GqlEffect {
         match effect {
             Effect::Allow => GqlEffect::Allow,
             Effect::Deny => GqlEffect::Deny,
+        }
+    }
+}
+
+impl From<GqlActionAssignmentRuleDecision> for ActionAssignmentDecision {
+    fn from(decision: GqlActionAssignmentRuleDecision) -> Self {
+        match decision {
+            GqlActionAssignmentRuleDecision::Allow => ActionAssignmentDecision::Allow,
+            GqlActionAssignmentRuleDecision::Deny => ActionAssignmentDecision::Deny,
+            GqlActionAssignmentRuleDecision::RequireOverride => {
+                ActionAssignmentDecision::RequireOverride
+            }
+        }
+    }
+}
+
+impl From<GqlCreateActionAssignmentRuleDecision> for ActionAssignmentDecision {
+    fn from(decision: GqlCreateActionAssignmentRuleDecision) -> Self {
+        match decision {
+            GqlCreateActionAssignmentRuleDecision::Allow => ActionAssignmentDecision::Allow,
+            GqlCreateActionAssignmentRuleDecision::Deny => ActionAssignmentDecision::Deny,
+        }
+    }
+}
+
+impl From<ActionAssignmentDecision> for GqlActionAssignmentRuleDecision {
+    fn from(decision: ActionAssignmentDecision) -> Self {
+        match decision {
+            ActionAssignmentDecision::Allow => GqlActionAssignmentRuleDecision::Allow,
+            ActionAssignmentDecision::Deny => GqlActionAssignmentRuleDecision::Deny,
+            ActionAssignmentDecision::RequireOverride => {
+                GqlActionAssignmentRuleDecision::RequireOverride
+            }
         }
     }
 }

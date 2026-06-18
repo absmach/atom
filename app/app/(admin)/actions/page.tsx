@@ -13,6 +13,7 @@ export default async function ActionsPage({
     <div className="grid gap-8">
       <CrudWorkspace resourceKey="capability-actions" searchParams={sp} />
       <CrudWorkspace resourceKey="capabilities" searchParams={sp} />
+      <CrudWorkspace resourceKey="action-assignment-rules" searchParams={sp} />
     </div>
   );
 }

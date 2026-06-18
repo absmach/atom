@@ -172,6 +172,21 @@ async fn action_assignment_rules_table_exists_with_object_type() {
             .expect("read decision");
     assert_eq!(decision, "allow");
 
+    let dup = sqlx::query(
+        "INSERT INTO action_assignment_rules
+           (id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
+         VALUES ($1, 'device', 'publish', 'resource', 'resource:channel', 'allow', true)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .execute(&p)
+    .await
+    .expect_err("duplicate rule must be rejected");
+    let duplicate_code = dup
+        .as_database_error()
+        .and_then(|err| err.code())
+        .map(|code| code.into_owned());
+    assert_eq!(duplicate_code.as_deref(), Some("23505"));
+
     let _ = sqlx::query("DELETE FROM action_assignment_rules WHERE id = $1")
         .bind(id)
         .execute(&p)

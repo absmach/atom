@@ -21,13 +21,20 @@ use crate::{
             SubjectRoleAssignment, SubjectRoleAssignmentList, SubjectRoleAssignmentsQuery,
             UnprotectedResourceItem, UnprotectedResourcesQuery, UnprotectedResourcesResponse,
         },
+        action_assignment_rule::{
+            ActionAssignmentRule, ActionAssignmentRuleList, CreateActionAssignmentRule,
+            ListActionAssignmentRules,
+        },
         capability::{
             Capability, CapabilityApplicability, CapabilityApplicabilityEntry,
             CapabilityApplicabilityInput, CapabilityApplicabilityList, CreateCapability,
             ListCapabilities,
         },
         entity::Entity,
-        enums::{CredentialKind, Effect, GrantKind, ScopeKind, SubjectKind},
+        enums::{
+            ActionAssignmentDecision, CredentialKind, Effect, GrantKind, ObjectKind, ScopeKind,
+            SubjectKind,
+        },
         group::Group,
         policy::{
             CreateDirectPolicy, CreatePermissionBlock, CreatePolicyBinding, CreateRoleAssignment,
@@ -621,6 +628,8 @@ pub async fn replace_role_permission_block_links(
             ));
         }
     }
+    crate::guardrails::validate_role_permission_block_links(pool, role_id, &unique_block_ids)
+        .await?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
@@ -2239,6 +2248,187 @@ pub async fn list_capability_applicability(
     Ok(CapabilityApplicabilityList { items, total })
 }
 
+pub async fn get_action_assignment_rule(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<ActionAssignmentRule, AppError> {
+    sqlx::query_as::<_, ActionAssignmentRule>(
+        r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
+                  decision, is_absolute, created_at
+           FROM action_assignment_rules
+           WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => {
+            AppError::not_found(format!("action assignment rule {id} not found"))
+        }
+        other => AppError::Database(other),
+    })
+}
+
+pub async fn list_action_assignment_rules(
+    pool: &PgPool,
+    params: ListActionAssignmentRules,
+) -> Result<ActionAssignmentRuleList, AppError> {
+    let limit = params.limit.clamp(1, 100);
+    let offset = params.offset.max(0);
+    let action_name = normalize_optional_text(params.action_name);
+    let action_pattern = action_name.as_ref().map(|value| format!("%{value}%"));
+    let object_type = normalize_optional_text(params.object_type);
+
+    let items = sqlx::query_as::<_, ActionAssignmentRule>(
+        r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
+                  decision, is_absolute, created_at
+           FROM action_assignment_rules
+           WHERE tenant_id IS NOT DISTINCT FROM $3
+             AND ($4::text IS NULL OR entity_kind = $4)
+             AND ($5::text IS NULL OR action_name ILIKE $5)
+             AND ($6::text IS NULL OR object_kind = $6)
+             AND ($7::text IS NULL OR object_type = $7)
+             AND ($8::text IS NULL OR decision = $8)
+           ORDER BY entity_kind, action_name, object_kind, object_type NULLS FIRST, decision
+           LIMIT $1 OFFSET $2"#,
+    )
+    .bind(limit)
+    .bind(offset)
+    .bind(params.tenant_id)
+    .bind(&params.entity_kind)
+    .bind(&action_pattern)
+    .bind(params.object_kind)
+    .bind(&object_type)
+    .bind(params.decision)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let total = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM action_assignment_rules
+           WHERE tenant_id IS NOT DISTINCT FROM $1
+             AND ($2::text IS NULL OR entity_kind = $2)
+             AND ($3::text IS NULL OR action_name ILIKE $3)
+             AND ($4::text IS NULL OR object_kind = $4)
+             AND ($5::text IS NULL OR object_type = $5)
+             AND ($6::text IS NULL OR decision = $6)"#,
+    )
+    .bind(params.tenant_id)
+    .bind(&params.entity_kind)
+    .bind(&action_pattern)
+    .bind(params.object_kind)
+    .bind(&object_type)
+    .bind(params.decision)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
+    Ok(ActionAssignmentRuleList { items, total })
+}
+
+pub async fn create_action_assignment_rule(
+    pool: &PgPool,
+    req: CreateActionAssignmentRule,
+) -> Result<ActionAssignmentRule, AppError> {
+    let action_name = req.action_name.trim().to_string();
+    if action_name.is_empty() {
+        return Err(AppError::bad_request("actionName is required"));
+    }
+    if req.decision == ActionAssignmentDecision::RequireOverride {
+        return Err(AppError::bad_request(
+            "require_override guardrail creation is not available in v1",
+        ));
+    }
+    if req.tenant_id.is_some() && req.decision != ActionAssignmentDecision::Deny {
+        return Err(AppError::bad_request(
+            "tenant-specific guardrail rules can only deny in v1",
+        ));
+    }
+    if req.tenant_id.is_some() && req.is_absolute {
+        return Err(AppError::bad_request(
+            "tenant-specific guardrail rules cannot be absolute",
+        ));
+    }
+
+    let object_type = normalize_optional_text(req.object_type);
+    validate_rule_object_type(req.object_kind, object_type.as_deref())?;
+
+    let action_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE name = $1)")
+            .bind(&action_name)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+    if !action_exists {
+        return Err(AppError::bad_request(format!(
+            "actionName references unknown action {action_name}"
+        )));
+    }
+
+    let duplicate: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+             SELECT 1
+             FROM action_assignment_rules
+             WHERE tenant_id IS NOT DISTINCT FROM $1
+               AND entity_kind = $2
+               AND action_name = $3
+               AND object_kind = $4
+               AND object_type IS NOT DISTINCT FROM $5
+           )"#,
+    )
+    .bind(req.tenant_id)
+    .bind(&req.entity_kind)
+    .bind(&action_name)
+    .bind(req.object_kind)
+    .bind(&object_type)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+    if duplicate {
+        return Err(AppError::conflict("action assignment rule already exists"));
+    }
+
+    sqlx::query_as::<_, ActionAssignmentRule>(
+        r#"INSERT INTO action_assignment_rules
+             (tenant_id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id, tenant_id, entity_kind, action_name, object_kind, object_type,
+                     decision, is_absolute, created_at"#,
+    )
+    .bind(req.tenant_id)
+    .bind(req.entity_kind)
+    .bind(action_name)
+    .bind(req.object_kind)
+    .bind(object_type)
+    .bind(req.decision)
+    .bind(req.is_absolute)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn delete_action_assignment_rule(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<ActionAssignmentRule, AppError> {
+    sqlx::query_as::<_, ActionAssignmentRule>(
+        r#"DELETE FROM action_assignment_rules
+           WHERE id = $1
+           RETURNING id, tenant_id, entity_kind, action_name, object_kind, object_type,
+                     decision, is_absolute, created_at"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => {
+            AppError::not_found(format!("action assignment rule {id} not found"))
+        }
+        other => AppError::Database(other),
+    })
+}
+
 pub async fn add_capability_applicability(
     pool: &PgPool,
     capability_id: Uuid,
@@ -2318,6 +2508,29 @@ pub async fn remove_capability_applicability(
         return Err(AppError::not_found(
             "capability applicability row not found",
         ));
+    }
+    Ok(())
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_rule_object_type(
+    object_kind: ObjectKind,
+    object_type: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(object_type) = object_type {
+        let (prefix, suffix) = object_type.split_once(':').ok_or_else(|| {
+            AppError::bad_request("objectType must be namespaced as object_kind:type")
+        })?;
+        if prefix != object_kind.as_str() || suffix.is_empty() {
+            return Err(AppError::bad_request(
+                "objectType namespace must match objectKind",
+            ));
+        }
     }
     Ok(())
 }
@@ -2713,6 +2926,7 @@ pub async fn create_direct_policy(
     req: CreateDirectPolicy,
 ) -> Result<DirectPolicy, AppError> {
     validate_direct_policy(pool, &req).await?;
+    crate::guardrails::validate_direct_policy(pool, &req).await?;
     sqlx::query_as::<_, DirectPolicy>(
         r#"INSERT INTO direct_policies
              (tenant_id, subject_kind, subject_id, permission_block_id)

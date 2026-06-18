@@ -1,0 +1,170 @@
+---
+title: Assignment Guardrails
+description: Assignment-time rules that prevent unsafe access state from being created.
+---
+
+Assignment guardrails decide whether Atom should allow a permission to be
+assigned in the first place.
+
+Runtime authorization asks:
+
+```text
+Can subject S perform action A on object O right now?
+```
+
+Assignment guardrails ask:
+
+```text
+Is it safe to create this role link, direct policy, permission block link, or group membership?
+```
+
+This keeps the PDP generic. `/authz/check` still evaluates the current access
+state with deny-overrides-allow. Guardrails run earlier, when access state is
+created or changed, so unsafe grants do not enter the system unnoticed.
+
+## Rule Shape
+
+Guardrail rules live in `action_assignment_rules`.
+
+| Field | Meaning |
+|---|---|
+| `tenantId` | `null` for a global rule, or a tenant ID for a tenant-specific rule. |
+| `entityKind` | Kind of subject receiving access, such as `human`, `device`, or `service`. |
+| `actionName` | Existing action name, such as `publish`, `manage`, or `policy.manage`. |
+| `objectKind` | Protected object kind, such as `resource`, `entity`, `role`, `policy`, or `signing_key`. |
+| `objectType` | Optional namespaced subtype, such as `resource:channel` or `entity:device`. |
+| `decision` | `allow`, `deny`, or existing `require_override` rows. New v1 rules can only be `allow` or `deny`. |
+| `isAbsolute` | Global absolute rules cannot be overridden by tenant-specific rules. |
+| `createdAt` | Rule creation timestamp. |
+
+`objectType` must be namespaced when present. Use values like
+`resource:channel`, not only `channel`.
+
+## Decisions
+
+| Decision | Meaning |
+|---|---|
+| `allow` | The assignment can be created if other validation also passes. |
+| `deny` | The assignment is rejected. |
+| `require_override` | Existing rows can be displayed, but new override creation is deferred in v1. |
+
+Tenant-scoped v1 rules can only be stricter `deny` rules. They always use
+`isAbsolute = false`.
+
+Global platform rules may use `allow` or `deny`. Only global rules may be
+absolute.
+
+## Where Guardrails Apply
+
+Atom validates guardrails when access could be created through:
+
+- role assignments;
+- composite role assignments;
+- direct policies;
+- linking permission blocks to roles;
+- group membership changes that would make a subject inherit access.
+
+This matters because access can be hidden behind a role, a direct policy, or a
+principal group. Guardrails check the resulting assignment effect, not just the
+API object being written.
+
+## Examples
+
+| Entity kind | Action | Object kind | Object type | Decision |
+|---|---|---|---|---|
+| `device` | `publish` | `resource` | `resource:channel` | `allow` |
+| `device` | `subscribe` | `resource` | `resource:channel` | `allow` |
+| `device` | `manage` | `resource` | `resource:channel` | `deny` |
+| `device` | `delete` | `resource` | `resource:channel` | `deny` |
+| `human` | `manage` | `resource` | `resource:channel` | `allow` |
+| `service` | `policy.manage` | `policy` | `null` | `allow` |
+
+These examples do not grant access by themselves. They only say whether Atom may
+create access records that would grant those actions. A matching permission
+block and assignment are still required for runtime authorization to allow a
+request.
+
+## Authorization To Manage Rules
+
+Listing global guardrails requires the same policy-read access used by policy
+and action administration views.
+
+Creating or deleting global guardrails requires platform `policy.manage`.
+
+Creating or deleting tenant guardrails requires tenant-scoped `policy.manage`
+for the selected tenant. Tenant admins cannot create global rules and cannot
+create tenant `allow` or absolute rules in v1.
+
+## GraphQL
+
+List rules:
+
+```graphql
+query AssignmentGuardrails($tenantId: ID, $limit: Int = 50, $offset: Int = 0) {
+  actionAssignmentRules(tenantId: $tenantId, limit: $limit, offset: $offset) {
+    total
+    items {
+      id
+      tenantId
+      entityKind
+      actionName
+      objectKind
+      objectType
+      decision
+      isAbsolute
+      createdAt
+    }
+  }
+}
+```
+
+Create a global rule:
+
+```graphql
+mutation {
+  createActionAssignmentRule(input: {
+    tenantId: null
+    entityKind: device
+    actionName: "manage"
+    objectKind: "resource"
+    objectType: "resource:channel"
+    decision: deny
+    isAbsolute: true
+  }) {
+    id
+    decision
+    isAbsolute
+  }
+}
+```
+
+Delete a rule:
+
+```graphql
+mutation {
+  deleteActionAssignmentRule(id: "00000000-0000-0000-0000-000000000000")
+}
+```
+
+The output enum `ActionAssignmentRuleDecision` includes `allow`, `deny`, and
+`require_override`. The create-input enum `CreateActionAssignmentRuleDecision`
+includes only `allow` and `deny`.
+
+## Atom UI
+
+Open the Atom UI and go to `/actions`. The Actions page has three workspaces:
+
+- Actions;
+- Action Applicability;
+- Assignment Guardrails.
+
+The Assignment Guardrails table shows scope, tenant, entity kind, action, object
+kind, object type, decision, absolute, and created timestamp. It supports
+filters for entity kind, action name, object kind, and decision.
+
+The create form uses the current tenant switcher:
+
+- in global context, it sends `tenantId: null`;
+- in tenant context, it sends the selected tenant ID;
+- tenant context only allows `deny` and forces `isAbsolute: false`;
+- `require_override` is not shown in the create selector in v1.

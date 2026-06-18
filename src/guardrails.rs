@@ -4,17 +4,10 @@ use uuid::Uuid;
 use crate::{
     error::{db_err, AppError},
     models::{
-        enums::{GrantKind, ScopeKind, SubjectKind},
-        policy::CreatePolicyBinding,
+        enums::{ActionAssignmentDecision as GuardrailDecision, GrantKind, ScopeKind, SubjectKind},
+        policy::{CreateDirectPolicy, CreatePolicyBinding},
     },
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardrailDecision {
-    Allow,
-    Deny,
-    RequireOverride,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
@@ -333,6 +326,72 @@ pub async fn validate_group_member(
     validate_assignments(pool, &assignments).await
 }
 
+pub async fn validate_direct_policy(
+    pool: &PgPool,
+    req: &CreateDirectPolicy,
+) -> Result<(), AppError> {
+    let entity_kinds = subject_entity_kinds(pool, req.subject_kind.clone(), req.subject_id).await?;
+    let permission_blocks = permission_block_assignments(pool, &[req.permission_block_id]).await?;
+    let assignments = entity_kinds
+        .into_iter()
+        .flat_map(|entity_kind| {
+            permission_blocks.iter().map(move |block| Assignment {
+                entity_kind: entity_kind.clone(),
+                capability_name: block.capability_name.clone(),
+                object_kind: block.object_kind.clone(),
+                object_type: block.object_type.clone(),
+                tenant_id: req.tenant_id,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    validate_assignments(pool, &assignments).await
+}
+
+pub async fn validate_role_permission_block_links(
+    pool: &PgPool,
+    role_id: Uuid,
+    permission_block_ids: &[Uuid],
+) -> Result<(), AppError> {
+    if permission_block_ids.is_empty() {
+        return Ok(());
+    }
+
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"SELECT ra.tenant_id, e.kind AS entity_kind
+           FROM role_assignments ra
+           JOIN entities e ON ra.subject_kind = 'entity' AND e.id = ra.subject_id
+           WHERE ra.role_id = $1
+           UNION ALL
+           SELECT ra.tenant_id, e.kind AS entity_kind
+           FROM role_assignments ra
+           JOIN group_members gm ON ra.subject_kind = 'group' AND gm.group_id = ra.subject_id
+           JOIN entities e ON e.id = gm.entity_id
+           WHERE ra.role_id = $1"#,
+    )
+    .bind(role_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let permission_blocks = permission_block_assignments(pool, permission_block_ids).await?;
+    let mut assignments = Vec::new();
+    for row in rows {
+        let tenant_id: Option<Uuid> = row.try_get("tenant_id").map_err(db_err)?;
+        let entity_kind: String = row.try_get("entity_kind").map_err(db_err)?;
+        assignments.extend(permission_blocks.iter().map(|block| Assignment {
+            entity_kind: entity_kind.clone(),
+            capability_name: block.capability_name.clone(),
+            object_kind: block.object_kind.clone(),
+            object_type: block.object_type.clone(),
+            tenant_id,
+        }));
+    }
+
+    validate_assignments(pool, &assignments).await
+}
+
 async fn assignments_for_policy(
     pool: &PgPool,
     req: &CreatePolicyBinding,
@@ -382,19 +441,13 @@ async fn load_rules(pool: &PgPool) -> Result<Vec<Rule>, AppError> {
     .map_err(db_err)?
     .into_iter()
     .map(|row| {
-        let decision: String = row.try_get("decision").map_err(db_err)?;
         Ok(Rule {
             tenant_id: row.try_get("tenant_id").map_err(db_err)?,
             entity_kind: row.try_get("entity_kind").map_err(db_err)?,
             capability_name: row.try_get("capability_name").map_err(db_err)?,
             object_kind: row.try_get("object_kind").map_err(db_err)?,
             object_type: row.try_get("object_type").map_err(db_err)?,
-            decision: match decision.as_str() {
-                "allow" => GuardrailDecision::Allow,
-                "deny" => GuardrailDecision::Deny,
-                "require_override" => GuardrailDecision::RequireOverride,
-                _ => GuardrailDecision::Deny,
-            },
+            decision: row.try_get("decision").map_err(db_err)?,
             is_absolute: row.try_get("is_absolute").map_err(db_err)?,
         })
     })
@@ -520,6 +573,79 @@ async fn role_permission_assignments(
            WHERE rpb.role_id = ANY($1::uuid[])"#,
     )
     .bind(role_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .map(|row| {
+        Ok(RoleCapabilityAssignment {
+            capability_name: row.try_get("capability_name").map_err(db_err)?,
+            object_kind: row.try_get("object_kind").map_err(db_err)?,
+            object_type: row.try_get("object_type").map_err(db_err)?,
+        })
+    })
+    .collect()
+}
+
+async fn permission_block_assignments(
+    pool: &PgPool,
+    permission_block_ids: &[Uuid],
+) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
+    if permission_block_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    use sqlx::Row;
+    sqlx::query(
+        r#"SELECT a.name AS capability_name,
+                  CASE
+                    WHEN pb.scope_mode = 'platform' THEN 'platform'
+                    WHEN pb.scope_mode = 'tenant' THEN 'tenant'
+                    WHEN pb.scope_mode IN ('object_kind', 'object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_kind
+                    WHEN pb.scope_mode IN ('group', 'group_child_groups', 'group_descendant_groups') THEN 'group'
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(
+                      target_resource.object_kind,
+                      target_entity.object_kind,
+                      target_group.object_kind,
+                      target_tenant.object_kind,
+                      'object'
+                    )
+                    ELSE 'unknown'
+                  END AS object_kind,
+                  CASE
+                    WHEN pb.scope_mode IN ('object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_type
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(
+                      target_resource.object_type,
+                      target_entity.object_type
+                    )
+                    ELSE NULL
+                  END AS object_type
+           FROM permission_blocks pb
+           JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+           JOIN actions a ON a.id = pba.action_id
+           LEFT JOIN LATERAL (
+             SELECT 'resource'::text AS object_kind, 'resource:' || kind::text AS object_type
+             FROM resources
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_resource ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT 'entity'::text AS object_kind, 'entity:' || kind::text AS object_type
+             FROM entities
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_entity ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT 'group'::text AS object_kind
+             FROM object_groups
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_group ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT 'tenant'::text AS object_kind
+             FROM tenants
+             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+           ) target_tenant ON TRUE
+           WHERE pb.id = ANY($1::uuid[])"#,
+    )
+    .bind(permission_block_ids)
     .fetch_all(pool)
     .await
     .map_err(db_err)?

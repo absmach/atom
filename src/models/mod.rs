@@ -1,4 +1,5 @@
 pub mod access;
+pub mod action_assignment_rule;
 pub mod api_endpoint;
 pub mod capability;
 pub mod entity;

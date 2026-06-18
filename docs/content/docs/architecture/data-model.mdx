@@ -17,6 +17,7 @@ Atom stores security state in Postgres. All primary keys are UUIDs. Most objects
   role[Role]
   block[Permission Block]
   action[Action]
+  guardrail[Assignment Guardrail]
   assignment[Role Assignment]
   direct[Direct Policy]
   audit[Audit Log]
@@ -36,13 +37,16 @@ Atom stores security state in Postgres. All primary keys are UUIDs. Most objects
   entity --> direct
   principalGroup --> direct
   block --> action
+  guardrail --> action
+  guardrail --> assignment
+  guardrail --> direct
   objectGroup --> block
   resource --> block
   credential --> certState
   entity --> audit
 `} />
 
-**What this means:** entities prove identity with credentials. Roles and direct policies connect subjects to permission blocks. Permission blocks say where actions apply. Audit logs record what happened.
+**What this means:** entities prove identity with credentials. Roles and direct policies connect subjects to permission blocks. Permission blocks say where actions apply. Assignment guardrails prevent unsafe access state from being created. Audit logs record what happened.
 
 ## Core Tables
 
@@ -58,6 +62,7 @@ Atom stores security state in Postgres. All primary keys are UUIDs. Most objects
 | `roles` | Friendly names for sets of permission blocks. |
 | `actions` | Operation names such as `read`, `publish`, `manage`, and `authz.check`. |
 | `action_applicability` | Defines which actions are valid for which protected object kinds/types. |
+| `action_assignment_rules` | Defines which entity kinds may be assigned which actions on protected object kinds/types. |
 | `permission_blocks` | The access rule: scope, effect, optional conditions, and object boundary. |
 | `permission_block_actions` | Links actions to a permission block. |
 | `role_permission_blocks` | Links permission blocks to roles. |
@@ -84,6 +89,7 @@ The authorization model is split deliberately:
 
 - `actions` name the operation;
 - `action_applicability` says where the operation is valid, but does not grant access;
+- `action_assignment_rules` say whether access may be assigned to an entity kind;
 - `permission_blocks` define the actual rule;
 - `roles` bundle permission blocks;
 - `role_assignments` give roles to subjects;

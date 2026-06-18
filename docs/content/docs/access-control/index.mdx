@@ -32,6 +32,7 @@ Permission Block is the only place where scope and actions are defined.
 | Action | Operation name such as `read`, `publish`, `subscribe`, or `manage`. |
 | Action Applicability | Valid action/object pair, such as `publish` on `resource:channel`. |
 | Permission Block | Scope, actions, effect, and optional conditions. |
+| Assignment Guardrail | Assignment-time rule that allows or blocks an action from being granted to an entity kind. |
 | Role | Friendly name for a set of permission blocks. |
 | Role Assignment | Gives a role to an entity or principal group. |
 | Direct Policy | Gives one permission block directly to an entity or principal group. |
@@ -46,6 +47,7 @@ Permission Block is the only place where scope and actions are defined.
 - Scope and actions live in permission blocks.
 - Role assignments do not define scope.
 - Direct policies do not redefine scope.
+- Assignment guardrails prevent unsafe access state from being created.
 - Groups do not grant access by themselves; assignments and permission blocks do.
 
 ## Actions And Applicability
@@ -76,11 +78,26 @@ Examples:
 Invalid pairs, such as `publish` on an entity or `execute` on a channel, are
 rejected before permission blocks are evaluated.
 
+## Assignment Guardrails
+
+Assignment Guardrails validate whether it is safe to create access state, such
+as a role assignment, direct policy, role-to-permission-block link, or group
+membership that would grant inherited access.
+
+They are different from runtime authorization. `/authz/check` answers whether
+the current subject may perform the current action on the current object.
+Assignment Guardrails run when access is being assigned or changed.
+
+For example, Atom can allow devices to receive `publish` on
+`resource:channel`, while denying devices from receiving `manage` on
+`resource:channel`.
+
 ## Where To Go Next
 
 <Cards>
   <Card title="Roles" href="/access-control/rbac" description="How named roles bundle permission blocks." />
   <Card title="Conditions" href="/access-control/abac" description="How JSON conditions narrow a permission block." />
   <Card title="Permission Blocks" href="/access-control/policies" description="The source of scope, actions, allow, deny, and conditions." />
+  <Card title="Assignment Guardrails" href="/access-control/assignment-guardrails" description="How Atom blocks unsafe access from being assigned." />
   <Card title="Evaluation" href="/access-control/evaluation" description="How Atom turns the model into an allow or deny answer." />
 </Cards>

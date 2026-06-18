@@ -447,6 +447,20 @@ function TableRowActions({
             Delete
           </Button>
         </>
+      ) : resourceKey === "action-assignment-rules" ? (
+        <Button
+          disabled={missingDelete || destroyPending}
+          onClick={() =>
+            onDelete(
+              `Delete assignment guardrail "${String(row.entityKind)} ${String(row.actionName)} ${String(row.objectKind)}:${String(row.objectType ?? "NULL")}"? This cannot be undone.`,
+            )
+          }
+          size="sm"
+          variant="outline"
+          className="border-red-500/50 text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:border-red-500/40 dark:text-red-400"
+        >
+          Delete
+        </Button>
       ) : resourceKey === "policies" ? (
         <DeleteActionButtons
           isDestroyPending={destroyPending}

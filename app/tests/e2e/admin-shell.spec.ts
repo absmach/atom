@@ -33,6 +33,7 @@ test("authenticated admin can reach core workflows", async ({ page }) => {
     ["/resources", "Resources"],
     ["/roles", "Roles"],
     ["/actions", "Actions"],
+    ["/actions", "Assignment Guardrails"],
     ["/authz", "Authorization debugger"],
     ["/audit", "Audit Logs"],
     ["/endpoints", "API Endpoints"],

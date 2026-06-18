@@ -1,4 +1,4 @@
 {
   "title": "Access Control",
-  "pages": ["index", "rbac", "abac", "policies", "evaluation"]
+  "pages": ["index", "rbac", "abac", "policies", "assignment-guardrails", "evaluation"]
 }

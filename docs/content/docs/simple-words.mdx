@@ -41,6 +41,7 @@ Can this certificate still identify this client?
 | Action | One operation someone wants to do | `read`, `publish`, `subscribe`, `manage` |
 | Action Applicability | Whether an action makes sense for a kind of object | `publish` is valid for channels |
 | Permission Block | The actual access rule: where, what actions, allow or deny | Channels in Plant-A can be published to |
+| Assignment Guardrail | A safety rule for what access may be assigned | Devices may publish to channels but may not manage them |
 | Role | A friendly name for a set of permission blocks | `Plant-A Publisher` |
 | Role Assignment | Gives a role to an entity or group | Give `Plant-A Publisher` to `meter-001` |
 | Direct Policy | Gives one permission block directly without a role | Allow one service to publish to one channel |
@@ -86,6 +87,10 @@ Atom checks roles, direct policies, principal groups, object groups, deny rules,
 Action Applicability is only a validity check. It can say "`publish` is a valid
 action for channels," but it does not give anyone permission. A role assignment
 or direct policy must still point to a permission block that grants the action.
+
+Assignment Guardrails are another safety check. They do not answer whether a
+live request is allowed. They answer whether Atom should let an administrator
+create access state, such as giving a device a role that can `manage` channels.
 
 ## Certificates In One Sentence
 

@@ -46,7 +46,7 @@ Atom makes those decisions consistent, visible, and reusable.
 |---|---|
 | **Identity** | CRUD for any principal type — humans, devices, services, workloads, applications, and AI agents represented through those entity kinds. All are first-class _entities_. |
 | **Authentication** | Password login returning a JWT, long-lived API keys, session management with revocation. |
-| **Authorization** | Actions, Action Applicability, Permission Blocks, Roles, Role Assignments, Direct Policies, and ABAC guardrails evaluated at runtime. |
+| **Authorization** | Actions, Action Applicability, Assignment Guardrails, Permission Blocks, Roles, Role Assignments, Direct Policies, and ABAC conditions. |
 | **Grouping** | Principal Groups define who receives roles; Object Groups define where access applies. |
 | **Ownership** | Parent–child relationships between entities. |
 | **Multi-tenancy** | First-class tenants. Magistrala domains map directly to Atom tenants. |
@@ -95,7 +95,7 @@ This docs site is an operator/developer guide. The product source of truth lives
 
 ## GraphQL
 
-Atom exposes GraphQL at `POST /graphql`. GraphQL uses the same Bearer token authentication as Auth/OIDC REST endpoints. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, actions, permission blocks, role assignments, Direct Policies, authz checks, audit logs, and profile-driven entity creation. Non-GraphQL public endpoints are intentionally limited to Auth/OIDC, health, JWKS, public PKI artifacts, and custom endpoint execution.
+Atom exposes GraphQL at `POST /graphql`. GraphQL uses the same Bearer token authentication as Auth/OIDC REST endpoints. The schema covers health, login/logout/session lookup, tenants, profiles, profile versions, entities, resources, groups, credentials, ownerships, roles, actions, Action Applicability, Assignment Guardrails, permission blocks, role assignments, Direct Policies, authz checks, audit logs, and profile-driven entity creation. Non-GraphQL public endpoints are intentionally limited to Auth/OIDC, health, JWKS, public PKI artifacts, and custom endpoint execution.
 
 The Atom Next UI is a separate optional frontend. In Docker Compose it is enabled with the `atom-ui` profile and uses Atom GraphQL through `ATOM_GRAPHQL_URL`.
 
@@ -200,6 +200,6 @@ Generic application mapping uses Atom operations directly: a domain-like app cal
   <Card title="Architecture" href="/architecture" description="System diagram, modules, storage, and deployment shape." />
   <Card title="Certificates" href="/authentication/certificates" description="CA files, certificate credentials, CRL, OCSP, and runtime lookup." />
   <Card title="Magistrala On Atom" href="/magistrala-on-atom" description="How domains, clients, channels, FluxMQ, and Atom fit together." />
-  <Card title="Access Control" href="/access-control" description="Actions, applicability, permission blocks, roles, assignments, direct policies, and evaluation." />
+  <Card title="Access Control" href="/access-control" description="Actions, applicability, assignment guardrails, permission blocks, roles, assignments, direct policies, and evaluation." />
   <Card title="Quickstart" href="/quickstart" description="Get Atom running and make your first authorization check." />
 </Cards>
