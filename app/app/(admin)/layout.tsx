@@ -8,6 +8,7 @@ import {
 import { getEntityProfile } from "@/lib/entity/profile";
 
 export const dynamic = "force-dynamic";
+const REAUTH_PATH = "/login?reauth=1";
 
 export default async function AdminLayout({
   children,
@@ -17,17 +18,17 @@ export default async function AdminLayout({
   const session = await getServerSession();
   const token = await getServerToken();
   if (!session || !token || isExpired(session.expiresAt)) {
-    redirect("/login");
+    redirect(REAUTH_PATH);
   }
 
   let profile: Awaited<ReturnType<typeof getEntityProfile>>;
   try {
     profile = await getEntityProfile(session.entityId);
   } catch {
-    redirect("/login");
+    redirect(REAUTH_PATH);
   }
   if (!profile) {
-    redirect("/login");
+    redirect(REAUTH_PATH);
   }
 
   return (

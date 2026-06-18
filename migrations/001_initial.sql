@@ -765,38 +765,10 @@ CROSS JOIN LATERAL (
         ('entity', 'entity:service'),
         ('entity', 'entity:workload'),
         ('entity', 'entity:application'),
-        ('resource', 'resource:channel'),
-        ('resource', 'resource:rule'),
-        ('resource', 'resource:report'),
-        ('resource', 'resource:alarm'),
         ('group', NULL)
 ) AS applicability(object_kind, object_type)
 WHERE actions.name IN ('read', 'write', 'delete')
 ;
-
-INSERT INTO action_applicability (action_id, object_kind, object_type)
-SELECT id, 'resource', 'resource:channel'
-FROM actions
-WHERE name IN ('read', 'write', 'delete', 'manage', 'publish', 'subscribe')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO action_applicability (action_id, object_kind, object_type)
-SELECT id, 'resource', 'resource:rule'
-FROM actions
-WHERE name IN ('read', 'write', 'delete', 'manage', 'execute')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO action_applicability (action_id, object_kind, object_type)
-SELECT id, 'resource', 'resource:report'
-FROM actions
-WHERE name IN ('read', 'write', 'delete', 'manage', 'execute')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO action_applicability (action_id, object_kind, object_type)
-SELECT id, 'resource', 'resource:alarm'
-FROM actions
-WHERE name IN ('read', 'write', 'delete', 'manage')
-ON CONFLICT DO NOTHING;
 
 INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, object_kind, object_type
@@ -965,8 +937,6 @@ VALUES
     ('device', 'manage', 'resource', NULL, 'deny', TRUE),
     ('device', 'delete', 'resource', NULL, 'deny', TRUE),
     ('device', 'write', 'resource', NULL, 'deny', TRUE),
-    ('device', 'publish', 'resource', 'resource:channel', 'allow', FALSE),
-    ('device', 'subscribe', 'resource', 'resource:channel', 'allow', FALSE),
     ('human', 'manage', 'resource', NULL, 'allow', FALSE),
     ('human', 'manage', 'entity', NULL, 'allow', FALSE),
     ('human', 'manage', 'group', NULL, 'allow', FALSE),

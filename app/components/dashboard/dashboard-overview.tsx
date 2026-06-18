@@ -86,7 +86,9 @@ type RiskResponse = {
 };
 
 type PostureResponse = {
-  policies: CountWithItems<{ effect: string; scopeKind: string }>;
+  policies: CountWithItems<{
+    permissionBlock: { effect: string; scopeKind: string };
+  }>;
   authzAllowed: Count;
   authzDenied: Count;
 };
@@ -130,7 +132,7 @@ const SUMMARY_QUERY = `
     groupsActive: groups(status: active, limit: 1, offset: 0) { total }
     groupsInactive: groups(status: inactive, limit: 1, offset: 0) { total }
     resources(limit: 1, offset: 0) { total }
-    policies(limit: 1, offset: 0) { total }
+    policies: directPolicies(limit: 1, offset: 0) { total }
     roles(limit: 1, offset: 0) { total }
     auditLogs(limit: 1, offset: 0) { total }
   }
@@ -166,9 +168,14 @@ const RISK_QUERY = `
 
 const POSTURE_QUERY = `
   query DashboardPosture {
-    policies(limit: 200, offset: 0) {
+    policies: directPolicies(limit: 200, offset: 0) {
       total
-      items { effect scopeKind }
+      items {
+        permissionBlock {
+          effect
+          scopeKind: scopeMode
+        }
+      }
     }
     authzAllowed: auditLogs(event: "authz.check", outcome: allow, limit: 1, offset: 0) { total }
     authzDenied: auditLogs(event: "authz.check", outcome: deny, limit: 1, offset: 0) { total }
@@ -804,12 +811,13 @@ function topCounts<T extends Record<string, unknown>>(
 }
 
 function policyStats(items: PostureResponse["policies"]["items"]) {
-  const allow = items.filter((item) => item.effect === "allow").length;
-  const deny = items.filter((item) => item.effect === "deny").length;
+  const blocks = items.map((item) => item.permissionBlock);
+  const allow = blocks.filter((block) => block.effect === "allow").length;
+  const deny = blocks.filter((block) => block.effect === "deny").length;
   return {
     allow,
     deny,
-    scopes: topCounts(items, "scopeKind", 5),
+    scopes: topCounts(blocks, "scopeKind", 5),
   };
 }
 
