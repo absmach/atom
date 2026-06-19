@@ -100,7 +100,7 @@ Create an Atom tenant. The tenant ID is the Magistrala domain ID.
 {
   "id": "domain-uuid",
   "name": "factory-1",
-  "route": "factory-1",
+  "alias": "factory-1",
   "attributes": {
     "magistrala": {
       "metadata": {
@@ -163,11 +163,11 @@ Create a tenant-owned resource.
 {
   "kind": "channel",
   "name": "temperature",
+  "alias": "temperature",
   "tenant_id": "domain-uuid",
   "owner_id": "alice-entity-id",
   "attributes": {
     "magistrala": {
-      "route": "factory-1.temperature",
       "status": "enabled",
       "tags": ["temperature"]
     }

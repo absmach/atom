@@ -37,7 +37,11 @@ pub struct CreateEntity {
 pub struct UpdateEntity {
     pub name: Option<String>,
     pub kind: Option<EntityKind>,
-    pub alias: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::alias::deserialize_alias_update"
+    )]
+    pub alias: Option<Option<String>>,
     pub tenant_id: Option<Uuid>,
     pub profile_id: Option<Uuid>,
     pub profile_version_id: Option<Uuid>,

@@ -75,6 +75,7 @@ const CREATE_ENTITY_MUTATION = `
       profileId
       profileVersionId
       name
+      alias
       tenantId
       status
       createdAt
@@ -91,6 +92,7 @@ const UPDATE_ENTITY_MUTATION = `
       profileId
       profileVersionId
       name
+      alias
       tenantId
       status
       updatedAt
@@ -133,6 +135,7 @@ type ProfileVersionsData = {
 
 const entityFormSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
+  alias: z.string().trim(),
   kind: z.enum(ENTITY_KINDS),
   tenantId: z.string().trim(),
   profileId: z.string().trim(),
@@ -202,6 +205,7 @@ type EntityFormValues = z.infer<typeof entityFormSchema>;
 export type EntityFormInitialValues = {
   id: string;
   name: string;
+  alias: string;
   kind: (typeof ENTITY_KINDS)[number];
   tenantId: string;
   profileId: string;
@@ -211,6 +215,7 @@ export type EntityFormInitialValues = {
 
 const defaultValues: EntityFormValues = {
   name: "",
+  alias: "",
   kind: "human",
   tenantId: "",
   profileId: "",
@@ -243,6 +248,7 @@ export function EntityCreateForm({
     defaultValues: entity
       ? {
           name: entity.name,
+          alias: entity.alias,
           kind: entity.kind,
           tenantId: entity.tenantId,
           profileId: entity.profileId,
@@ -340,14 +346,17 @@ export function EntityCreateForm({
           query: UPDATE_ENTITY_MUTATION,
           variables: {
             id: entity.id,
-            input: removeEmptyValues({
-              name: values.name,
-              kind: values.kind,
-              tenantId: values.tenantId,
-              profileId: values.profileId,
-              profileVersionId: values.profileVersionId,
-              attributes,
-            }),
+            input: {
+              ...removeEmptyValues({
+                name: values.name,
+                kind: values.kind,
+                tenantId: values.tenantId,
+                profileId: values.profileId,
+                profileVersionId: values.profileVersionId,
+                attributes,
+              }),
+              alias: values.alias || null,
+            },
           },
         });
       } else {
@@ -356,6 +365,7 @@ export function EntityCreateForm({
           variables: {
             input: removeEmptyValues({
               name: values.name,
+              alias: values.alias,
               kind: values.kind,
               tenantId: values.tenantId,
               profileId: values.profileId,
@@ -382,6 +392,7 @@ export function EntityCreateForm({
     <Form {...form}>
       <form className="grid gap-4" onSubmit={form.handleSubmit(submit)}>
         <TextField form={form} label="Name" name="name" required />
+        <TextField form={form} label="Alias" name="alias" />
         <KindSelectField form={form} disabled={Boolean(profileId)} />
         <TenantSelectField form={form} />
         <ProfileSelectField form={form} profiles={profiles} />
@@ -424,7 +435,7 @@ function TextField({
 }: {
   form: UseFormReturn<EntityFormValues>;
   label: string;
-  name: "name";
+  name: "name" | "alias";
   required?: boolean;
 }) {
   return (

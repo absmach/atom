@@ -198,13 +198,15 @@ pub async fn update_resource(
         .and_then(|attrs| attrs.get("parent_group_id"))
         .map(parent_group_id_from_value)
         .transpose()?;
-    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
+    let alias = crate::models::alias::validate_alias_update(req.alias)?;
+    let alias_is_set = alias.is_some();
+    let alias = alias.flatten();
     let mut tx = pool.begin().await.map_err(db_err)?;
     let resource = sqlx::query_as::<_, Resource>(
         r#"UPDATE resources
            SET name       = COALESCE($2, name),
                attributes = COALESCE($3, attributes),
-               alias      = COALESCE($4, alias),
+               alias      = CASE WHEN $4 THEN $5 ELSE alias END,
                updated_at = now()
            WHERE id = $1
            RETURNING id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at"#,
@@ -212,6 +214,7 @@ pub async fn update_resource(
     .bind(id)
     .bind(req.name)
     .bind(req.attributes)
+    .bind(alias_is_set)
     .bind(alias)
     .fetch_one(&mut *tx)
     .await
@@ -243,10 +246,10 @@ pub async fn delete_resource(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
-/// The UUIDs a alias path resolves to.
+/// The UUIDs an alias path resolves to.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedAlias {
-    pub tenant_id: Uuid,
+    pub tenant_id: Option<Uuid>,
     pub object_id: Uuid,
 }
 
@@ -254,6 +257,7 @@ pub struct ResolvedAlias {
 ///
 /// Two-level: first resolve the tenant (by id, or case-folded `alias`), then the
 /// object (entity or resource) by its case-folded `alias` within that tenant.
+/// Global objects are selected explicitly and resolve with no tenant UUID.
 /// Resolution is capability-neutral — it reveals only the UUIDs; the actual
 /// authorization gate is the subsequent `authz` check by UUID. Returns
 /// `NotFound` if either level is missing.
@@ -261,22 +265,30 @@ pub async fn resolve_alias(
     pool: &PgPool,
     tenant_id: Option<Uuid>,
     tenant_alias: Option<&str>,
+    global: bool,
     class: AliasObjectClass,
     object_alias: &str,
 ) -> Result<ResolvedAlias, AppError> {
-    let tenant_id = match (tenant_id, tenant_alias) {
-        (Some(id), _) => id,
-        (None, Some(alias)) => {
-            sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenants WHERE lower(alias) = lower($1)")
-                .bind(alias)
-                .fetch_optional(pool)
-                .await
-                .map_err(db_err)?
-                .ok_or_else(|| AppError::not_found(format!("tenant alias '{alias}' not found")))?
+    let tenant_alias = tenant_alias
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty());
+    let tenant_id = match (tenant_id, tenant_alias, global) {
+        (Some(id), None, false) => Some(id),
+        (None, Some(alias), false) => {
+            let id = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM tenants WHERE lower(alias) = lower($1)",
+            )
+            .bind(alias)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::not_found(format!("tenant alias '{alias}' not found")))?;
+            Some(id)
         }
-        (None, None) => {
+        (None, None, true) => None,
+        _ => {
             return Err(AppError::bad_request(
-                "provide tenant_id or tenant_alias to resolve a alias",
+                "provide exactly one tenant selector: tenant_id, tenant_alias, or global",
             ))
         }
     };
@@ -289,12 +301,12 @@ pub async fn resolve_alias(
     let sql = match class {
         AliasObjectClass::Entity => {
             "SELECT id FROM entities \
-             WHERE COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid) = $1 \
+             WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
                AND lower(alias) = $2"
         }
         AliasObjectClass::Resource => {
             "SELECT id FROM resources \
-             WHERE COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid) = $1 \
+             WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
                AND lower(alias) = $2"
         }
     };
@@ -306,9 +318,10 @@ pub async fn resolve_alias(
         .await
         .map_err(db_err)?
         .ok_or_else(|| {
-            AppError::not_found(format!(
-                "alias '{object_alias}' not found in tenant {tenant_id}"
-            ))
+            let scope = tenant_id
+                .map(|id| format!("tenant {id}"))
+                .unwrap_or_else(|| "global scope".to_string());
+            AppError::not_found(format!("alias '{object_alias}' not found in {scope}"))
         })?;
 
     Ok(ResolvedAlias {

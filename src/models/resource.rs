@@ -31,7 +31,11 @@ pub struct CreateResource {
 #[derive(Debug, Deserialize)]
 pub struct UpdateResource {
     pub name: Option<String>,
-    pub alias: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::alias::deserialize_alias_update"
+    )]
+    pub alias: Option<Option<String>>,
     pub attributes: Option<Value>,
 }
 

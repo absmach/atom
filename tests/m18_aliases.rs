@@ -13,9 +13,12 @@ mod common;
 use common::pool;
 
 use atom::authz::repo as authz_repo;
+use atom::identity::repo as identity_repo;
 use atom::models::alias::AliasObjectClass;
-use atom::models::resource::CreateResource;
-use atom::models::tenant::CreateTenant;
+use atom::models::entity::{CreateEntity, UpdateEntity};
+use atom::models::enums::EntityKind;
+use atom::models::resource::{CreateResource, UpdateResource};
+use atom::models::tenant::{CreateTenant, UpdateTenant};
 use atom::tenants::repo as tenant_repo;
 use serde_json::json;
 use uuid::Uuid;
@@ -90,17 +93,19 @@ async fn resolve_alias_resolves_tenant_and_object() {
     let resource = authz_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
         .await
         .expect("create resource");
+    let tenant_lookup = format!("  {}  ", tenant_alias.to_uppercase());
 
     let resolved = authz_repo::resolve_alias(
         &p,
         None,
-        Some(&tenant_alias),
+        Some(&tenant_lookup),
+        false,
         AliasObjectClass::Resource,
         &object_alias,
     )
     .await
     .expect("resolve by tenant alias + object alias");
-    assert_eq!(resolved.tenant_id, tenant_id);
+    assert_eq!(resolved.tenant_id, Some(tenant_id));
     assert_eq!(resolved.object_id, resource.id);
 
     // Unknown object alias → NotFound.
@@ -108,6 +113,7 @@ async fn resolve_alias_resolves_tenant_and_object() {
         &p,
         Some(tenant_id),
         None,
+        false,
         AliasObjectClass::Resource,
         "does-not-exist",
     )
@@ -130,12 +136,159 @@ async fn resolve_alias_is_case_insensitive() {
         &p,
         Some(tenant_id),
         None,
+        false,
         AliasObjectClass::Resource,
         "WaterMeters",
     )
     .await
     .expect("case-insensitive resolve");
     assert_eq!(resolved.object_id, resource.id);
+}
+
+#[tokio::test]
+#[ignore]
+async fn resolve_alias_supports_explicit_global_scope() {
+    let p = pool().await;
+    let object_alias = slug("global");
+    let resource = authz_repo::create_resource(
+        &p,
+        CreateResource {
+            id: None,
+            kind: "resource:global".to_string(),
+            name: Some("global".to_string()),
+            alias: Some(object_alias.clone()),
+            tenant_id: None,
+            owner_id: None,
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("create global resource");
+
+    let resolved = authz_repo::resolve_alias(
+        &p,
+        None,
+        None,
+        true,
+        AliasObjectClass::Resource,
+        &object_alias,
+    )
+    .await
+    .expect("resolve global resource");
+
+    assert_eq!(resolved.tenant_id, None);
+    assert_eq!(resolved.object_id, resource.id);
+}
+
+#[tokio::test]
+#[ignore]
+async fn alias_updates_can_clear_existing_values() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p, &slug("tenant")).await;
+    let entity = identity_repo::create_entity(
+        &p,
+        CreateEntity {
+            id: None,
+            kind: Some(EntityKind::Device),
+            profile_id: None,
+            profile_version_id: None,
+            name: slug("device"),
+            alias: Some(slug("entity")),
+            tenant_id: Some(tenant_id),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("create entity");
+    let resource = authz_repo::create_resource(&p, resource_req(tenant_id, &slug("resource")))
+        .await
+        .expect("create resource");
+
+    let entity = identity_repo::update_entity(
+        &p,
+        entity.id,
+        UpdateEntity {
+            name: None,
+            kind: None,
+            alias: Some(None),
+            tenant_id: None,
+            profile_id: None,
+            profile_version_id: None,
+            status: None,
+            attributes: None,
+        },
+    )
+    .await
+    .expect("clear entity alias");
+    let resource = authz_repo::update_resource(
+        &p,
+        resource.id,
+        UpdateResource {
+            name: None,
+            alias: Some(None),
+            attributes: None,
+        },
+    )
+    .await
+    .expect("clear resource alias");
+    let tenant = tenant_repo::update_tenant(
+        &p,
+        tenant_id,
+        UpdateTenant {
+            name: None,
+            alias: Some(None),
+            tags: None,
+            attributes: None,
+        },
+        None,
+    )
+    .await
+    .expect("clear tenant alias");
+
+    assert_eq!(entity.alias, None);
+    assert_eq!(resource.alias, None);
+    assert_eq!(tenant.alias, None);
+}
+
+#[tokio::test]
+#[ignore]
+async fn database_rejects_uuid_shaped_aliases() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p, &slug("tenant")).await;
+    let uuid_alias = "465358f9-07f4-4ea0-8cbb-2abc654442bd";
+
+    for result in [
+        sqlx::query("INSERT INTO tenants (name, alias) VALUES ($1, $2)")
+            .bind(slug("bad-tenant"))
+            .bind(uuid_alias)
+            .execute(&p)
+            .await,
+        sqlx::query(
+            "INSERT INTO entities (kind, name, alias, tenant_id) \
+             VALUES ('device', $1, $2, $3)",
+        )
+        .bind(slug("bad-entity"))
+        .bind(uuid_alias)
+        .bind(tenant_id)
+        .execute(&p)
+        .await,
+        sqlx::query(
+            "INSERT INTO resources (kind, name, alias, tenant_id) \
+             VALUES ('resource:channel', $1, $2, $3)",
+        )
+        .bind("bad resource")
+        .bind(uuid_alias)
+        .bind(tenant_id)
+        .execute(&p)
+        .await,
+    ] {
+        let err = result.expect_err("UUID-shaped alias must violate a CHECK constraint");
+        let code = err
+            .as_database_error()
+            .and_then(|db| db.code())
+            .map(|code| code.into_owned());
+        assert_eq!(code.as_deref(), Some("23514"));
+    }
 }
 
 #[tokio::test]

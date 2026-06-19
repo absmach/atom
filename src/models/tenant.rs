@@ -33,7 +33,11 @@ pub struct CreateTenant {
 #[derive(Debug, Deserialize)]
 pub struct UpdateTenant {
     pub name: Option<String>,
-    pub alias: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::alias::deserialize_alias_update"
+    )]
+    pub alias: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     pub attributes: Option<Value>,
 }

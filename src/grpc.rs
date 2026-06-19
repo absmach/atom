@@ -287,16 +287,15 @@ impl AliasService for AtomAlias {
         };
         let tenant_alias = (!req.tenant_alias.is_empty()).then_some(req.tenant_alias.as_str());
 
-        let class = if req.object_kind.eq_ignore_ascii_case("entity") {
-            AliasObjectClass::Entity
-        } else {
-            AliasObjectClass::Resource
-        };
+        let class = parse_alias_object_class(&req.object_kind).ok_or_else(|| {
+            Status::invalid_argument("invalid object_kind: expected 'entity' or 'resource'")
+        })?;
 
         let resolved = repo::resolve_alias(
             &self.state.pool,
             tenant_id,
             tenant_alias,
+            req.global,
             class,
             &req.object_alias,
         )
@@ -304,9 +303,23 @@ impl AliasService for AtomAlias {
         .map_err(Status::from)?;
 
         Ok(Response::new(ResolveAliasResponse {
-            tenant_id: resolved.tenant_id.to_string(),
+            tenant_id: resolved
+                .tenant_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
             object_id: resolved.object_id.to_string(),
         }))
+    }
+}
+
+fn parse_alias_object_class(value: &str) -> Option<AliasObjectClass> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("entity") {
+        Some(AliasObjectClass::Entity)
+    } else if value.eq_ignore_ascii_case("resource") {
+        Some(AliasObjectClass::Resource)
+    } else {
+        None
     }
 }
 
@@ -436,6 +449,19 @@ mod tests {
             state.grpc_status().await.state,
             crate::state::GrpcRuntimeState::Serving
         );
+    }
+
+    #[test]
+    fn alias_object_kind_rejects_unknown_values() {
+        assert_eq!(
+            parse_alias_object_class("entity"),
+            Some(AliasObjectClass::Entity)
+        );
+        assert_eq!(
+            parse_alias_object_class(" RESOURCE "),
+            Some(AliasObjectClass::Resource)
+        );
+        assert_eq!(parse_alias_object_class("entitiy"), None);
     }
 
     async fn health_client(addr: SocketAddr) -> HealthClient<tonic::transport::Channel> {

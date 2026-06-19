@@ -300,6 +300,24 @@ async fn create_list_and_get_tenant() {
         tenant_id
     );
 
+    let cleared = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              updateTenant(id: "{tenant_id}", input: {{ alias: null }}) {{
+                id
+                alias
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(cleared.errors.is_empty(), "{:?}", cleared.errors);
+    assert!(
+        cleared.data.into_json().expect("json data")["updateTenant"]["alias"].is_null(),
+        "explicit GraphQL null must clear an existing alias"
+    );
+
     delete_tenant_row(&pool, tenant_id.parse().expect("tenant uuid")).await;
 }
 

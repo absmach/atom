@@ -281,7 +281,7 @@ impl TenantMutation {
             tenant_id,
             tenant_model::UpdateTenant {
                 name: input.name,
-                alias: input.alias,
+                alias: input.alias.into(),
                 tags: input.tags,
                 attributes: input.attributes,
             },

@@ -205,7 +205,9 @@ pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result
         validate_existing_entity_attributes(pool, id, attrs).await?;
     }
 
-    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
+    let alias = crate::models::alias::validate_alias_update(req.alias)?;
+    let alias_is_set = alias.is_some();
+    let alias = alias.flatten();
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let entity = sqlx::query_as::<_, Entity>(
@@ -217,7 +219,7 @@ pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result
                profile_version_id = COALESCE($6, profile_version_id),
                status             = COALESCE($7, status),
                attributes         = COALESCE($8, attributes),
-               alias              = COALESCE($9, alias),
+               alias              = CASE WHEN $9 THEN $10 ELSE alias END,
                updated_at         = now()
            WHERE id = $1
            RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
@@ -231,6 +233,7 @@ pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result
     .bind(req.profile_version_id)
     .bind(req.status)
     .bind(attributes)
+    .bind(alias_is_set)
     .bind(alias)
     .fetch_one(&mut *tx)
     .await

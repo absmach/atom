@@ -166,7 +166,7 @@ Needs:
 
 ### Tenant
 
-A tenant is a first-class isolation boundary with `name`, optional `route`, `tags`, `attributes`, lifecycle status, and audit fields.
+A tenant is a first-class isolation boundary with `name`, optional `alias`, `tags`, `attributes`, lifecycle status, and audit fields.
 
 Status values:
 

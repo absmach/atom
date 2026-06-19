@@ -1,6 +1,6 @@
 # gRPC API Reference
 
-Atom exposes three gRPC services on port **8081** by default, configurable with `GRPC_ADDR`.
+Atom exposes four gRPC services on port **8081** by default, configurable with `GRPC_ADDR`.
 
 The proto source lives at [`proto/atom/v1/atom.proto`](../proto/atom/v1/atom.proto). The generated proto reference lives at [`apidocs/grpc-reference.md`](./grpc-reference.md) and should be regenerated only when the proto changes.
 
@@ -18,7 +18,7 @@ Runtime services should call Atom over the service network. The default containe
 
 ### Authentication Metadata
 
-`AuthzService.Check`, `CertificateService.ResolveCertificate`, and `CertificateService.RevokeEntityCertificates` require gRPC metadata:
+`AuthzService.Check`, `AliasService.ResolveAlias`, `CertificateService.ResolveCertificate`, and `CertificateService.RevokeEntityCertificates` require gRPC metadata:
 
 ```text
 authorization: Bearer <jwt-or-api-key>
@@ -145,6 +145,58 @@ This RPC does not require authorization metadata because the token to validate i
 grpcurl -plaintext \
   -d '{"token": "'"$ATOM_TOKEN"'"}' \
   atom:8081 atom.v1.AuthService/Authenticate
+```
+
+---
+
+### `atom.v1.AliasService`
+
+Alias resolution converts human-friendly tenant/entity/resource handles into canonical UUIDs. Resolution does not grant access; callers must authorize the returned object UUID separately with `AuthzService.Check`.
+
+#### `ResolveAlias`
+
+```text
+rpc ResolveAlias(ResolveAliasRequest) returns (ResolveAliasResponse)
+```
+
+Requires `authorization: Bearer <token>` metadata.
+
+Exactly one tenant selector is required:
+
+- `tenant_id` for a tenant UUID;
+- `tenant_alias` for a case-insensitive tenant alias;
+- `global = true` for an entity or resource whose `tenant_id` is null.
+
+`object_kind` must be exactly `entity` or `resource` (case-insensitive). Other values return `INVALID_ARGUMENT`.
+
+**Request: `ResolveAliasRequest`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `tenant_id` | `string` UUID | conditional | Tenant UUID selector. |
+| `tenant_alias` | `string` | conditional | Tenant alias selector. |
+| `global` | `bool` | conditional | Select the global null-tenant namespace. |
+| `object_kind` | `string` | yes | `entity` or `resource`. |
+| `object_alias` | `string` | yes | Object alias within the selected namespace. |
+
+**Response: `ResolveAliasResponse`**
+
+| Field | Type | Description |
+|---|---|---|
+| `tenant_id` | `string` UUID | Resolved tenant; empty for global objects. |
+| `object_id` | `string` UUID | Resolved entity or resource UUID. |
+
+**Example**
+
+```bash
+grpcurl -plaintext \
+  -H 'authorization: Bearer '"$ATOM_TOKEN" \
+  -d '{
+    "tenant_alias": "factory-a",
+    "object_kind": "resource",
+    "object_alias": "telemetry"
+  }' \
+  atom:8081 atom.v1.AliasService/ResolveAlias
 ```
 
 ---

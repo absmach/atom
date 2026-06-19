@@ -3302,7 +3302,7 @@
                 "method": "GET",
                 "header": [],
                 "url": {
-                  "raw": "{{base_url}}/tenants?name=&route=&status=active&limit=20&offset=0",
+                  "raw": "{{base_url}}/tenants?name=&alias=&status=active&limit=20&offset=0",
                   "host": [
                     "{{base_url}}"
                   ],
@@ -3355,7 +3355,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"name\": \"tenant-{{run_id}}\",\n  \"route\": \"tenant-{{run_id}}\",\n  \"tags\": [\n    \"postman\"\n  ],\n  \"attributes\": {\n    \"source\": \"postman\"\n  }\n}",
+                  "raw": "{\n  \"name\": \"tenant-{{run_id}}\",\n  \"alias\": \"tenant-{{run_id}}\",\n  \"tags\": [\n    \"postman\"\n  ],\n  \"attributes\": {\n    \"source\": \"postman\"\n  }\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -3403,7 +3403,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"name\": \"tenant-updated-{{run_id}}\",\n  \"route\": \"tenant-updated-{{run_id}}\",\n  \"tags\": [\n    \"postman\",\n    \"updated\"\n  ],\n  \"attributes\": {\n    \"updated_by\": \"postman\"\n  }\n}",
+                  "raw": "{\n  \"name\": \"tenant-updated-{{run_id}}\",\n  \"alias\": \"tenant-updated-{{run_id}}\",\n  \"tags\": [\n    \"postman\",\n    \"updated\"\n  ],\n  \"attributes\": {\n    \"updated_by\": \"postman\"\n  }\n}",
                   "options": {
                     "raw": {
                       "language": "json"

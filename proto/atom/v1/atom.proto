@@ -87,19 +87,21 @@ message RevokeEntityCertificatesResponse {
 }
 
 message ResolveAliasRequest {
-  // Tenant selector — exactly one of these identifies the domain. tenant_id
-  // wins if both are set; tenant_alias is the case-folded tenant slug.
+  // Tenant selector — exactly one of tenant_id, tenant_alias, or global must
+  // be set. tenant_alias is the case-folded tenant slug.
   string tenant_id    = 1;
   string tenant_alias = 2;
   // Which table the object alias addresses: "entity" (clients/devices) or
-  // "resource" (channels). Anything other than "entity" is treated as a
-  // resource. Generic on purpose — no domain/channel vocabulary.
+  // "resource" (channels). Other values are rejected. Generic on purpose —
+  // no domain/channel vocabulary.
   string object_kind  = 3;
   // The object's alias slug, unique within the tenant.
   string object_alias = 4;
+  // Resolve an entity or resource whose tenant_id is NULL.
+  bool global = 5;
 }
 
 message ResolveAliasResponse {
-  string tenant_id = 1;
+  string tenant_id = 1; // empty string for global objects
   string object_id = 2;
 }

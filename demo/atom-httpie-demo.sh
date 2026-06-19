@@ -52,7 +52,7 @@ PUBLISH_CAP="$(jq -r '.items[] | select(.name=="publish" and .resource_kind==nul
 
 call "Create tenant: factory-$RUN_ID" POST "$BASE_URL/tenants" "$AUTH" \
   name="factory-$RUN_ID" \
-  route="factory-$RUN_ID" \
+  alias="factory-$RUN_ID" \
   tags:='["demo","factory"]' \
   attributes:='{"region":"demo","plan":"gold"}'
 TENANT_ID="$(jq -r '.id' "$tmp/last.json")"

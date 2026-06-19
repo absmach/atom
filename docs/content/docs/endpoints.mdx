@@ -136,7 +136,7 @@ Keys use dot notation to build nested GraphQL variable objects:
 ```json
 {
   "input.name":   "$body.name",
-  "input.route":  "$body.route",
+  "input.alias":  "$body.alias",
   "input.tags":   "$body.tags"
 }
 ```
@@ -147,7 +147,7 @@ This produces the GraphQL variables:
 {
   "input": {
     "name":  "<value of body.name>",
-    "route": "<value of body.route>",
+    "alias": "<value of body.alias>",
     "tags":  "<value of body.tags>"
   }
 }
@@ -202,7 +202,7 @@ Validation failures return **400 Bad Request** with a message listing the schema
   "required": ["name"],
   "properties": {
     "name":     { "type": "string" },
-    "route":    { "type": "string" },
+    "alias":    { "type": "string" },
     "tenantId": { "type": "string" }
   }
 }
@@ -390,7 +390,7 @@ Sensitive keys (`password`, `secret`, `token`, `authorization`, `apikey`, `api_k
 ```graphql
 mutation CreateTenant($input: CreateTenantInput!) {
   createTenant(input: $input) {
-    id name route status createdAt
+    id name alias status createdAt
   }
 }
 ```
@@ -398,7 +398,7 @@ mutation CreateTenant($input: CreateTenantInput!) {
 ```json title="variablesMapping"
 {
   "input.name":  "$body.name",
-  "input.route": "$body.route"
+  "input.alias": "$body.alias"
 }
 ```
 
@@ -408,7 +408,7 @@ mutation CreateTenant($input: CreateTenantInput!) {
   "required": ["name"],
   "properties": {
     "name":  { "type": "string" },
-    "route": { "type": "string" }
+    "alias": { "type": "string" }
   }
 }
 ```
@@ -419,7 +419,7 @@ POST /api/custom/tenants
 Authorization: Bearer <token>
 Content-Type: application/json
 
-{ "name": "Acme", "route": "acme" }
+{ "name": "Acme", "alias": "acme" }
 ```
 
 **Response:**
@@ -428,7 +428,7 @@ Content-Type: application/json
   "createTenant": {
     "id":        "3334383c-e62c-4452-a88b-cd099942e7d2",
     "name":      "Acme",
-    "route":     "acme",
+    "alias":     "acme",
     "status":    "active",
     "createdAt": "2026-05-18T09:36:07.015819+00:00"
   }

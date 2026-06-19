@@ -395,12 +395,14 @@ mutation {
   createEntity(input: {
     profileId: "client-profile-id",
     name: "meter-001",
+    alias: "meter-001",
     attributes: {
       serial_no: "WM-001"
     }
   }) {
     id
     kind
+    alias
     profileId
     profileVersionId
     attributes
@@ -411,6 +413,7 @@ mutation {
   createResource(input: {
     kind: "channel",
     name: "telemetry",
+    alias: "telemetry",
     attributes: {
       topic: "telemetry"
     }
@@ -418,6 +421,7 @@ mutation {
     id
     kind
     name
+    alias
     attributes
   }
 }
@@ -792,7 +796,7 @@ active | inactive | frozen | deleted
 | ---------------- | -------------------- |
 | domain `id`      | `tenants.id`         |
 | domain `name`    | `tenants.name`       |
-| `route`          | `tenants.route`      |
+| domain `route`   | `tenants.alias`      |
 | `metadata`       | `tenants.attributes` |
 | `tags`           | `tenants.tags`       |
 | `enabled`        | `status = active`    |

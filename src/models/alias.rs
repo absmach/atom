@@ -7,6 +7,7 @@
 //! alias-addressing and id-addressing can never collide.
 
 use crate::error::AppError;
+use serde::{Deserialize, Deserializer};
 
 /// Maximum slug length (DNS-label-like).
 pub const MAX_ALIAS_LEN: usize = 63;
@@ -68,6 +69,25 @@ pub fn validate_alias_opt(alias: Option<String>) -> Result<Option<String>, AppEr
     }
 }
 
+/// Validate an optional alias update while preserving patch semantics:
+/// `None` leaves the field unchanged, `Some(None)` clears it, and
+/// `Some(Some(value))` validates and stores the normalized alias.
+pub fn validate_alias_update(
+    alias: Option<Option<String>>,
+) -> Result<Option<Option<String>>, AppError> {
+    alias.map(validate_alias_opt).transpose()
+}
+
+/// Serde helper for PATCH-style alias fields. A missing field remains
+/// `None`, explicit JSON `null` becomes `Some(None)`, and a string becomes
+/// `Some(Some(value))`.
+pub fn deserialize_alias_update<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 fn is_uuid_shaped(s: &str) -> bool {
     uuid::Uuid::parse_str(s).is_ok()
 }
@@ -106,6 +126,39 @@ mod tests {
         assert_eq!(
             validate_alias_opt(Some("chan".into())).unwrap(),
             Some("chan".to_string())
+        );
+    }
+
+    #[test]
+    fn update_preserves_undefined_clear_and_value_states() {
+        assert_eq!(validate_alias_update(None).unwrap(), None);
+        assert_eq!(validate_alias_update(Some(None)).unwrap(), Some(None));
+        assert_eq!(
+            validate_alias_update(Some(Some(" Sensor-01 ".into()))).unwrap(),
+            Some(Some("sensor-01".to_string()))
+        );
+    }
+
+    #[test]
+    fn patch_deserialization_distinguishes_missing_null_and_value() {
+        #[derive(Deserialize)]
+        struct Patch {
+            #[serde(default, deserialize_with = "deserialize_alias_update")]
+            alias: Option<Option<String>>,
+        }
+
+        assert_eq!(serde_json::from_str::<Patch>("{}").unwrap().alias, None);
+        assert_eq!(
+            serde_json::from_str::<Patch>(r#"{"alias":null}"#)
+                .unwrap()
+                .alias,
+            Some(None)
+        );
+        assert_eq!(
+            serde_json::from_str::<Patch>(r#"{"alias":"sensor"}"#)
+                .unwrap()
+                .alias,
+            Some(Some("sensor".to_string()))
         );
     }
 }

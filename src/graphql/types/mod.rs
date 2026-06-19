@@ -1,4 +1,4 @@
-use async_graphql::{Context, Enum, InputObject, Object, Result, ID};
+use async_graphql::{Context, Enum, InputObject, MaybeUndefined, Object, Result, ID};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
@@ -1457,7 +1457,7 @@ pub struct CreateEntityInput {
 pub struct UpdateEntityInput {
     pub name: Option<String>,
     pub kind: Option<GqlEntityKind>,
-    pub alias: Option<String>,
+    pub alias: MaybeUndefined<String>,
     pub tenant_id: Option<ID>,
     pub profile_id: Option<ID>,
     pub profile_version_id: Option<ID>,
@@ -1477,7 +1477,7 @@ pub struct CreateTenantInput {
 #[derive(InputObject)]
 pub struct UpdateTenantInput {
     pub name: Option<String>,
-    pub alias: Option<String>,
+    pub alias: MaybeUndefined<String>,
     pub tags: Option<Vec<String>>,
     pub attributes: Option<Value>,
 }
@@ -1510,7 +1510,7 @@ pub struct CreateResourceInput {
 #[derive(InputObject)]
 pub struct UpdateResourceInput {
     pub name: Option<String>,
-    pub alias: Option<String>,
+    pub alias: MaybeUndefined<String>,
     pub attributes: Option<Value>,
 }
 

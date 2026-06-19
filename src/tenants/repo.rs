@@ -443,20 +443,23 @@ pub async fn update_tenant(
     req: UpdateTenant,
     updated_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
+    let alias = crate::models::alias::validate_alias_update(req.alias)?;
+    let alias_is_set = alias.is_some();
+    let alias = alias.flatten();
     sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET name       = COALESCE($2, name),
-               alias      = COALESCE($3, alias),
-               tags       = COALESCE($4, tags),
-               attributes = COALESCE($5, attributes),
-               updated_by = $6,
+               alias      = CASE WHEN $3 THEN $4 ELSE alias END,
+               tags       = COALESCE($5, tags),
+               attributes = COALESCE($6, attributes),
+               updated_by = $7,
                updated_at = now()
            WHERE id = $1
            RETURNING {TENANT_COLS}"#,
     ))
     .bind(id)
     .bind(req.name)
+    .bind(alias_is_set)
     .bind(alias)
     .bind(req.tags)
     .bind(req.attributes)

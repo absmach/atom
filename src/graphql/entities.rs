@@ -195,7 +195,7 @@ impl EntityMutation {
             entity_model::UpdateEntity {
                 name: input.name,
                 kind: parse_optional_entity_kind(input.kind),
-                alias: input.alias,
+                alias: input.alias.into(),
                 tenant_id: parse_optional_id(input.tenant_id, "tenantId")?,
                 profile_id: parse_optional_id(input.profile_id, "profileId")?,
                 profile_version_id: parse_optional_id(

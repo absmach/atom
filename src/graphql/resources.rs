@@ -173,7 +173,7 @@ impl ResourceMutation {
             id,
             UpdateResource {
                 name: input.name,
-                alias: input.alias,
+                alias: input.alias.into(),
                 attributes: input.attributes,
             },
         )

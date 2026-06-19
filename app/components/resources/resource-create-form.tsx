@@ -33,7 +33,7 @@ import { GLOBAL_TENANT } from "@/lib/tenant/context";
 const CREATE_RESOURCE_MUTATION = `
   mutation CreateResource($input: CreateResourceInput!) {
     createResource(input: $input) {
-      id kind name tenantId ownerId attributes createdAt updatedAt
+      id kind name alias tenantId ownerId attributes createdAt updatedAt
     }
   }
 `;
@@ -41,7 +41,7 @@ const CREATE_RESOURCE_MUTATION = `
 const UPDATE_RESOURCE_MUTATION = `
   mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {
     updateResource(id: $id, input: $input) {
-      id kind name tenantId ownerId attributes createdAt updatedAt
+      id kind name alias tenantId ownerId attributes createdAt updatedAt
     }
   }
 `;
@@ -82,6 +82,7 @@ const attributesSchema = z.string().superRefine((val, ctx) => {
 const createSchema = z.object({
   kind: z.string().trim().min(1, "Kind is required."),
   name: z.string().trim(),
+  alias: z.string().trim(),
   tenantId: z.string(),
   ownerId: z.string(),
   attributes: attributesSchema,
@@ -89,6 +90,7 @@ const createSchema = z.object({
 
 const editSchema = z.object({
   name: z.string().trim(),
+  alias: z.string().trim(),
   attributes: attributesSchema,
 });
 
@@ -101,6 +103,7 @@ export type ResourceFormInitialValues = {
   id: string;
   kind: string;
   name: string;
+  alias: string;
   tenantId: string;
   ownerId: string;
   attributes: unknown;
@@ -140,6 +143,7 @@ function CreateForm({
     defaultValues: {
       kind: "",
       name: "",
+      alias: "",
       tenantId: "",
       ownerId: "",
       attributes: "{}",
@@ -154,6 +158,7 @@ function CreateForm({
           input: {
             kind: values.kind,
             name: values.name || undefined,
+            alias: values.alias || undefined,
             tenantId: values.tenantId || undefined,
             ownerId: values.ownerId || undefined,
             attributes: parseAttributes(values.attributes),
@@ -175,6 +180,7 @@ function CreateForm({
       >
         <KindField form={form} />
         <NameField form={form} />
+        <AliasField form={form} />
         <TenantSelectField form={form} tenants={tenants} />
         <OwnerSelectField form={form} entities={entities} />
         <AttributesField control={form.control} />
@@ -203,6 +209,7 @@ function EditForm({
     resolver: zodResolver(editSchema),
     defaultValues: {
       name: resource.name,
+      alias: resource.alias,
       attributes: stringifyAttributes(resource.attributes),
     },
   });
@@ -215,6 +222,7 @@ function EditForm({
           id: resource.id,
           input: {
             name: values.name || undefined,
+            alias: values.alias || null,
             attributes: parseAttributes(values.attributes),
           },
         },
@@ -236,6 +244,7 @@ function EditForm({
         <ReadOnlyField label="Tenant" value={resource.tenantId || "—"} />
         <ReadOnlyField label="Owner" value={resource.ownerId || "—"} />
         <EditNameField form={form} />
+        <EditAliasField form={form} />
         <EditAttributesField control={form.control} />
         <FormActions
           isPending={save.isPending}
@@ -285,6 +294,24 @@ function NameField({ form }: { form: UseFormReturn<CreateFormValues> }) {
   );
 }
 
+function AliasField({ form }: { form: UseFormReturn<CreateFormValues> }) {
+  return (
+    <FormField
+      control={form.control}
+      name="alias"
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>Alias</FormLabel>
+          <FormControl>
+            <Input {...field} />
+          </FormControl>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  );
+}
+
 function EditNameField({ form }: { form: UseFormReturn<EditFormValues> }) {
   return (
     <FormField
@@ -293,6 +320,24 @@ function EditNameField({ form }: { form: UseFormReturn<EditFormValues> }) {
       render={({ field }) => (
         <FormItem>
           <FormLabel>Name</FormLabel>
+          <FormControl>
+            <Input {...field} />
+          </FormControl>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  );
+}
+
+function EditAliasField({ form }: { form: UseFormReturn<EditFormValues> }) {
+  return (
+    <FormField
+      control={form.control}
+      name="alias"
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>Alias</FormLabel>
           <FormControl>
             <Input {...field} />
           </FormControl>

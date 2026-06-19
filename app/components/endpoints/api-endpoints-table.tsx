@@ -245,15 +245,17 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
     values: {
       key: "create_entity",
       name: "Create Entity",
-      description: "Creates an entity with a name, kind, and optional tenant.",
+      description:
+        "Creates an entity with a name, kind, optional alias, and optional tenant.",
       method: "POST",
       path: "/api/custom/entities",
       operationKind: "mutation",
-      graphql: `mutation CreateEntity($input: CreateEntityInput!) {\n  createEntity(input: $input) {\n    id\n    name\n    kind\n    status\n    createdAt\n  }\n}`,
+      graphql: `mutation CreateEntity($input: CreateEntityInput!) {\n  createEntity(input: $input) {\n    id\n    name\n    alias\n    kind\n    status\n    createdAt\n  }\n}`,
       authMode: "caller_context",
       variablesMapping: JSON.stringify(
         {
           "input.name": "$body.name",
+          "input.alias": "$body.alias",
           "input.kind": "$body.kind",
           "input.tenantId": "$body.tenantId",
         },
@@ -266,6 +268,7 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
           required: ["name"],
           properties: {
             name: { type: "string" },
+            alias: { type: "string" },
             kind: { type: "string" },
             tenantId: { type: "string" },
           },
@@ -283,16 +286,17 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
     values: {
       key: "update_entity",
       name: "Update Entity",
-      description: "Updates an entity's name or attributes.",
+      description: "Updates an entity's name, alias, or attributes.",
       method: "PATCH",
       path: "/api/custom/entities/update",
       operationKind: "mutation",
-      graphql: `mutation UpdateEntity($id: ID!, $input: UpdateEntityInput!) {\n  updateEntity(id: $id, input: $input) {\n    id\n    name\n    kind\n    status\n    updatedAt\n  }\n}`,
+      graphql: `mutation UpdateEntity($id: ID!, $input: UpdateEntityInput!) {\n  updateEntity(id: $id, input: $input) {\n    id\n    name\n    alias\n    kind\n    status\n    updatedAt\n  }\n}`,
       authMode: "caller_context",
       variablesMapping: JSON.stringify(
         {
           id: "$query.id",
           "input.name": "$body.name",
+          "input.alias": "$body.alias",
           "input.attributes": "$body.attributes",
         },
         null,
@@ -303,6 +307,7 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
           type: "object",
           properties: {
             name: { type: "string" },
+            alias: { type: ["string", "null"] },
             attributes: { type: "object" },
           },
         },
@@ -319,14 +324,20 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
     values: {
       key: "create_resource",
       name: "Create Resource",
-      description: "Creates a resource that can be referenced in policies.",
+      description:
+        "Creates a resource with an optional alias that can be referenced in policies.",
       method: "POST",
       path: "/api/custom/resources",
       operationKind: "mutation",
-      graphql: `mutation CreateResource($input: CreateResourceInput!) {\n  createResource(input: $input) {\n    id\n    name\n    kind\n    status\n    createdAt\n  }\n}`,
+      graphql: `mutation CreateResource($input: CreateResourceInput!) {\n  createResource(input: $input) {\n    id\n    name\n    alias\n    kind\n    createdAt\n  }\n}`,
       authMode: "caller_context",
       variablesMapping: JSON.stringify(
-        { "input.name": "$body.name", "input.kind": "$body.kind" },
+        {
+          "input.name": "$body.name",
+          "input.alias": "$body.alias",
+          "input.kind": "$body.kind",
+          "input.tenantId": "$body.tenantId",
+        },
         null,
         2,
       ),
@@ -336,7 +347,9 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
           required: ["name"],
           properties: {
             name: { type: "string" },
+            alias: { type: "string" },
             kind: { type: "string" },
+            tenantId: { type: "string" },
           },
         },
         null,
@@ -352,21 +365,30 @@ const ENDPOINT_PRESETS: EndpointPreset[] = [
     values: {
       key: "update_resource",
       name: "Update Resource",
-      description: "Updates a resource's name or attributes.",
+      description: "Updates a resource's name, alias, or attributes.",
       method: "PATCH",
       path: "/api/custom/resources/update",
       operationKind: "mutation",
-      graphql: `mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {\n  updateResource(id: $id, input: $input) {\n    id\n    name\n    kind\n    status\n    updatedAt\n  }\n}`,
+      graphql: `mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {\n  updateResource(id: $id, input: $input) {\n    id\n    name\n    alias\n    kind\n    updatedAt\n  }\n}`,
       authMode: "caller_context",
       variablesMapping: JSON.stringify(
-        { id: "$query.id", "input.name": "$body.name" },
+        {
+          id: "$query.id",
+          "input.name": "$body.name",
+          "input.alias": "$body.alias",
+          "input.attributes": "$body.attributes",
+        },
         null,
         2,
       ),
       requestSchema: JSON.stringify(
         {
           type: "object",
-          properties: { name: { type: "string" } },
+          properties: {
+            name: { type: "string" },
+            alias: { type: ["string", "null"] },
+            attributes: { type: "object" },
+          },
         },
         null,
         2,

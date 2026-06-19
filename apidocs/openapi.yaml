@@ -205,6 +205,9 @@ components:
           $ref: '#/components/schemas/EntityKind'
         name:
           type: string
+        alias:
+          type: string
+          nullable: true
         tenant_id:
           type: string
           format: uuid
@@ -252,6 +255,8 @@ components:
         name:
           type: string
           example: sensor-01
+        alias:
+          type: string
         tenant_id:
           type: string
           format: uuid
@@ -263,6 +268,9 @@ components:
       properties:
         name:
           type: string
+        alias:
+          type: string
+          nullable: true
         status:
           $ref: '#/components/schemas/EntityStatus'
         attributes:
@@ -597,6 +605,9 @@ components:
         name:
           type: string
           nullable: true
+        alias:
+          type: string
+          nullable: true
         tenant_id:
           type: string
           format: uuid
@@ -625,6 +636,8 @@ components:
           example: channel
         name:
           type: string
+        alias:
+          type: string
         tenant_id:
           type: string
           format: uuid
@@ -639,6 +652,9 @@ components:
       properties:
         name:
           type: string
+        alias:
+          type: string
+          nullable: true
         attributes:
           type: object
 
@@ -899,7 +915,7 @@ components:
           format: uuid
         name:
           type: string
-        route:
+        alias:
           type: string
           nullable: true
         status:
@@ -933,8 +949,9 @@ components:
         name:
           type: string
           example: factory-1
-        route:
+        alias:
           type: string
+          nullable: true
         tags:
           type: array
           items:
@@ -947,8 +964,9 @@ components:
       properties:
         name:
           type: string
-        route:
+        alias:
           type: string
+          nullable: true
         tags:
           type: array
           items:
@@ -2384,7 +2402,7 @@ paths:
           in: query
           schema:
             type: string
-        - name: route
+        - name: alias
           in: query
           schema:
             type: string
@@ -2425,7 +2443,7 @@ paths:
               $ref: '#/components/schemas/CreateTenant'
             example:
               name: factory-1
-              route: factory-1
+              alias: factory-1
               tags: [pilot]
               attributes:
                 magistrala:

@@ -77,7 +77,7 @@ Every `tenants`, `entities`, and `resources` row may carry an optional `alias`: 
 
 - **Slug shape.** An alias is a lowercase slug of 1–63 characters using `a–z`, `0–9`, and `-`, with no leading or trailing dash. It is case-folded on write, may not be UUID-shaped, and is validated both in the service and by a database `CHECK`.
 - **Uniqueness.** Tenant aliases are unique across the platform. Entity and resource aliases are unique **within their tenant**, so the same alias (for example `watermeters`) may be reused in different tenants.
-- **Resolution.** `AliasService.ResolveAlias` (gRPC) resolves a tenant alias plus an object alias to the underlying UUIDs in one call, so a caller can address objects by name and then authorize by UUID. Resolution is capability-neutral; the authorization gate is the subsequent `authz` check by UUID.
+- **Resolution.** `AliasService.ResolveAlias` (gRPC) resolves a tenant alias plus an object alias to the underlying UUIDs in one call. Global entities and resources use the request's explicit `global` selector. Resolution is capability-neutral; the authorization gate is the subsequent `authz` check by UUID.
 
 Aliases stay an alias, not a replacement: rename one and every UUID-keyed grant, session, and audit row is unaffected.
 

@@ -124,10 +124,11 @@
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| tenant_id | [string](#string) |  | Tenant selector — exactly one of these identifies the domain. tenant_id wins if both are set; tenant_alias is the case-folded tenant slug. |
+| tenant_id | [string](#string) |  | Tenant selector — exactly one of tenant_id, tenant_alias, or global must be set. tenant_alias is the case-folded tenant slug. |
 | tenant_alias | [string](#string) |  |  |
-| object_kind | [string](#string) |  | Which table the object alias addresses: &#34;entity&#34; (clients/devices) or &#34;resource&#34; (channels). Anything other than &#34;entity&#34; is treated as a resource. Generic on purpose — no domain/channel vocabulary. |
+| object_kind | [string](#string) |  | Which table the object alias addresses: &#34;entity&#34; (clients/devices) or &#34;resource&#34; (channels). Other values are rejected. Generic on purpose — no domain/channel vocabulary. |
 | object_alias | [string](#string) |  | The object&#39;s alias slug, unique within the tenant. |
+| global | [bool](#bool) |  | Resolve an entity or resource whose tenant_id is NULL. |
 
 
 
@@ -142,7 +143,7 @@
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| tenant_id | [string](#string) |  |  |
+| tenant_id | [string](#string) |  | empty string for global objects |
 | object_id | [string](#string) |  |  |
 
 
