@@ -360,94 +360,31 @@ pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse
 
     let tenant_ctx = load_tenant_context(pool, object.tenant_id).await?;
     let eval_ctx = build_context(&entity_ctx, &object, tenant_ctx.as_ref(), &req.context);
-    let bindings = repo::load_bindings_for_entity(pool, req.subject_id).await?;
 
-    // Collect all role IDs referenced by bindings and batch-load their capabilities.
-    // This eliminates the N+1 that would occur from per-binding role lookups.
-    let role_ids: Vec<_> = bindings
-        .iter()
-        .filter(|b| b.grant_kind == GrantKind::Role)
-        .map(|b| b.grant_id)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    let role_grants = repo::expanded_role_grants_for_roles(pool, &role_ids).await?;
+    // Single canonical grant expansion: direct policies and role-linked blocks,
+    // group membership already resolved recursively, each grant carrying its own
+    // scope/effect/conditions. One match loop replaces the direct/role split.
+    let grants = repo::effective_grants_for_subject(pool, req.subject_id).await?;
 
     let object_id_str = object.id.to_string();
     let object_tenant_id_str = object.tenant_id.map(|t| t.to_string());
+    let target = ScopeMatchObject {
+        object_id: &object_id_str,
+        coarse_kind: &object.coarse_kind,
+        sub_kind: &object.kind,
+        tenant_id: object_tenant_id_str.as_deref(),
+        parent_group_id: object.parent_group_id,
+        ancestor_group_ids: &object.ancestor_group_ids,
+    };
     let mut has_allow = false;
 
-    for binding in &bindings {
-        if !scope_matches_with_groups(
-            binding,
-            &object_id_str,
-            &object.coarse_kind,
-            &object.kind,
-            object_tenant_id_str.as_deref(),
-            object.parent_group_id,
-            &object.ancestor_group_ids,
-        ) {
+    for grant in &grants {
+        if !grant_applies(grant, &target, &cap_id_set, &eval_ctx) {
             continue;
         }
-
-        match binding.grant_kind {
-            GrantKind::Capability => {
-                if !cap_id_set.contains(&binding.grant_id) {
-                    continue;
-                }
-                if !conditions_match(&binding.conditions, &eval_ctx) {
-                    continue;
-                }
-                match binding.effect {
-                    Effect::Deny => {
-                        return Ok(AuthzResponse::deny(format!(
-                            "explicitly denied by policy {}",
-                            binding.id
-                        )));
-                    }
-                    Effect::Allow => {
-                        has_allow = true;
-                    }
-                }
-            }
-            GrantKind::Role => {
-                let Some(grants) = role_grants.get(&binding.grant_id) else {
-                    continue;
-                };
-                // Each role-linked block carries its own effect and conditions; the
-                // role-assignment edge does not. Evaluate them per grant so role-linked
-                // deny blocks override and role-linked conditional blocks are honoured.
-                for grant in grants {
-                    if !cap_id_set.contains(&grant.capability_id) {
-                        continue;
-                    }
-                    if !role_scope_matches(
-                        grant,
-                        &object_id_str,
-                        &object.coarse_kind,
-                        &object.kind,
-                        object_tenant_id_str.as_deref(),
-                        object.parent_group_id,
-                        &object.ancestor_group_ids,
-                    ) {
-                        continue;
-                    }
-                    if !conditions_match(&grant.conditions, &eval_ctx) {
-                        continue;
-                    }
-                    match grant.effect {
-                        Effect::Deny => {
-                            return Ok(AuthzResponse::deny(format!(
-                                "explicitly denied by role {} block",
-                                grant.role_name
-                            )));
-                        }
-                        Effect::Allow => {
-                            has_allow = true;
-                        }
-                    }
-                }
-            }
+        match grant.effect {
+            Effect::Deny => return Ok(AuthzResponse::deny(deny_reason(grant))),
+            Effect::Allow => has_allow = true,
         }
     }
 
@@ -455,6 +392,32 @@ pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse
         Ok(AuthzResponse::allow())
     } else {
         Ok(AuthzResponse::deny("no matching allow policy"))
+    }
+}
+
+/// Whether a canonical grant matches the request: assignment tenant boundary →
+/// block scope (group-aware) → action → conditions. Effect is applied by the
+/// caller so deny can short-circuit.
+fn grant_applies(
+    grant: &repo::EffectiveGrant,
+    target: &ScopeMatchObject<'_>,
+    cap_id_set: &std::collections::HashSet<Uuid>,
+    eval_ctx: &serde_json::Value,
+) -> bool {
+    if let Some(boundary) = grant.tenant_boundary {
+        if target.tenant_id.and_then(|id| id.parse::<Uuid>().ok()) != Some(boundary) {
+            return false;
+        }
+    }
+    cap_id_set.contains(&grant.capability_id)
+        && scope_values_match(&grant.scope_kind, grant.scope_ref.as_deref(), target)
+        && conditions_match(&grant.conditions, eval_ctx)
+}
+
+fn deny_reason(grant: &repo::EffectiveGrant) -> String {
+    match &grant.role_name {
+        Some(role) => format!("explicitly denied by role '{role}' block"),
+        None => "explicitly denied by direct policy".to_string(),
     }
 }
 

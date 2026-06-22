@@ -454,6 +454,32 @@ pub struct ExpandedRoleGrant {
     pub conditions: Value,
 }
 
+/// One fully-expanded effective grant for a subject: a single permission
+/// block's scope/effect/conditions/action, reachable either directly (a direct
+/// policy) or through a role the subject holds. Group membership is already
+/// resolved (recursively) on the subject side, so every reader can evaluate a
+/// flat list of grants without re-deriving "what does this subject have".
+///
+/// This is the single canonical grant representation consumed by the PDP and
+/// (incrementally) the other authorization readers.
+#[derive(Debug, Clone)]
+pub struct EffectiveGrant {
+    /// `None` for a direct policy; `Some(role_id)` when the grant is reached
+    /// through a role assignment (kept for `explain` provenance).
+    pub role_id: Option<Uuid>,
+    pub role_name: Option<String>,
+    /// Assignment-level tenant boundary (`direct_policies.tenant_id` /
+    /// `role_assignments.tenant_id`). When `Some`, the grant applies only to
+    /// objects owned by this tenant.
+    pub tenant_boundary: Option<Uuid>,
+    /// The permission block's own scope.
+    pub scope_kind: ScopeKind,
+    pub scope_ref: Option<String>,
+    pub capability_id: Uuid,
+    pub effect: Effect,
+    pub conditions: Value,
+}
+
 pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
     let id = Uuid::new_v4();
     sqlx::query_as::<_, Role>(
@@ -5152,6 +5178,113 @@ pub async fn expanded_role_grants_for_roles(
     }
 
     Ok(map)
+}
+
+/// Canonical grant expansion for a subject: the single flat list of effective
+/// grants (direct policies and role-linked blocks), with the subject's group
+/// membership resolved recursively. Each grant carries the permission block's
+/// real scope, effect and conditions plus the assignment-level tenant boundary,
+/// so a reader can decide access by matching tenant → block scope → action →
+/// conditions and applying the effect (deny overrides allow).
+pub async fn effective_grants_for_subject(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Vec<EffectiveGrant>, AppError> {
+    use sqlx::Row;
+    // The scope-column derivation is shared by both branches; permission_blocks
+    // store scope as columns, the readers compare a (scope_kind, scope_ref) pair.
+    let rows = sqlx::query(
+        r#"WITH RECURSIVE subject_groups(group_id) AS (
+               SELECT gm.group_id
+               FROM group_members gm
+               JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+               WHERE gm.entity_id = $1
+               UNION
+               SELECT gh.parent_id
+               FROM group_hierarchy gh
+               JOIN subject_groups sg ON sg.group_id = gh.child_id
+               JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
+           )
+           SELECT NULL::uuid AS role_id,
+                  NULL::text AS role_name,
+                  dp.tenant_id AS tenant_boundary,
+                  CASE
+                    WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
+                    WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
+                    WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
+                    WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
+                    ELSE pb.scope_mode
+                  END AS scope_kind,
+                  CASE
+                    WHEN pb.scope_mode = 'platform' THEN NULL
+                    WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
+                    WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
+                    WHEN pb.scope_mode = 'object_type' THEN pb.object_type
+                    WHEN pb.scope_mode = 'object' THEN pb.object_id::text
+                    WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
+                    WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
+                    WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
+                  END AS scope_ref,
+                  pba.action_id AS capability_id,
+                  pb.effect,
+                  pb.conditions
+           FROM direct_policies dp
+           JOIN permission_blocks pb ON pb.id = dp.permission_block_id
+           JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+           WHERE (dp.subject_kind = 'entity' AND dp.subject_id = $1)
+              OR (dp.subject_kind = 'group' AND dp.subject_id IN (SELECT group_id FROM subject_groups))
+           UNION ALL
+           SELECT ra.role_id AS role_id,
+                  r.name AS role_name,
+                  ra.tenant_id AS tenant_boundary,
+                  CASE
+                    WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
+                    WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
+                    WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
+                    WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
+                    ELSE pb.scope_mode
+                  END AS scope_kind,
+                  CASE
+                    WHEN pb.scope_mode = 'platform' THEN NULL
+                    WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
+                    WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
+                    WHEN pb.scope_mode = 'object_type' THEN pb.object_type
+                    WHEN pb.scope_mode = 'object' THEN pb.object_id::text
+                    WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
+                    WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
+                    WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
+                  END AS scope_ref,
+                  pba.action_id AS capability_id,
+                  pb.effect,
+                  pb.conditions
+           FROM role_assignments ra
+           JOIN roles r ON r.id = ra.role_id
+           JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+           WHERE (ra.subject_kind = 'entity' AND ra.subject_id = $1)
+              OR (ra.subject_kind = 'group' AND ra.subject_id IN (SELECT group_id FROM subject_groups))"#,
+    )
+    .bind(entity_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let scope_kind_text: String = row.try_get("scope_kind").map_err(db_err)?;
+            Ok(EffectiveGrant {
+                role_id: row.try_get("role_id").map_err(db_err)?,
+                role_name: row.try_get("role_name").map_err(db_err)?,
+                tenant_boundary: row.try_get("tenant_boundary").map_err(db_err)?,
+                scope_kind: parse_scope_kind_text(&scope_kind_text)?,
+                scope_ref: row.try_get("scope_ref").map_err(db_err)?,
+                capability_id: row.try_get("capability_id").map_err(db_err)?,
+                effect: row.try_get("effect").map_err(db_err)?,
+                conditions: row.try_get("conditions").map_err(db_err)?,
+            })
+        })
+        .collect()
 }
 
 pub async fn find_capability_ids_by_name(
