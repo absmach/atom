@@ -464,10 +464,15 @@ pub struct ExpandedRoleGrant {
 /// (incrementally) the other authorization readers.
 #[derive(Debug, Clone)]
 pub struct EffectiveGrant {
+    /// The permission block backing this grant (for `explain` provenance).
+    pub block_id: Uuid,
     /// `None` for a direct policy; `Some(role_id)` when the grant is reached
     /// through a role assignment (kept for `explain` provenance).
     pub role_id: Option<Uuid>,
     pub role_name: Option<String>,
+    /// How the subject reaches the grant: `"direct"` for an entity-targeted
+    /// assignment, or `"group:<path>"` when reached through a principal group.
+    pub via: String,
     /// Assignment-level tenant boundary (`direct_policies.tenant_id` /
     /// `role_assignments.tenant_id`). When `Some`, the grant applies only to
     /// objects owned by this tenant.
@@ -5191,22 +5196,26 @@ pub async fn effective_grants_for_subject(
     entity_id: Uuid,
 ) -> Result<Vec<EffectiveGrant>, AppError> {
     use sqlx::Row;
-    // The scope-column derivation is shared by both branches; permission_blocks
-    // store scope as columns, the readers compare a (scope_kind, scope_ref) pair.
+    // The scope-column derivation and the group-path provenance are shared by
+    // both branches; permission_blocks store scope as columns, the readers
+    // compare a (scope_kind, scope_ref) pair, and `via` records how the subject
+    // reaches the grant (directly or through a principal group).
     let rows = sqlx::query(
-        r#"WITH RECURSIVE subject_groups(group_id) AS (
-               SELECT gm.group_id
+        r#"WITH RECURSIVE subject_groups(group_id, path) AS (
+               SELECT gm.group_id, g.name
                FROM group_members gm
                JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
                WHERE gm.entity_id = $1
-               UNION
-               SELECT gh.parent_id
+               UNION ALL
+               SELECT gh.parent_id, parent.name || ' -> ' || sg.path
                FROM group_hierarchy gh
                JOIN subject_groups sg ON sg.group_id = gh.child_id
                JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
            )
-           SELECT NULL::uuid AS role_id,
+           SELECT pb.id AS block_id,
+                  NULL::uuid AS role_id,
                   NULL::text AS role_name,
+                  CASE WHEN dp.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
                   dp.tenant_id AS tenant_boundary,
                   CASE
                     WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
@@ -5231,11 +5240,14 @@ pub async fn effective_grants_for_subject(
            FROM direct_policies dp
            JOIN permission_blocks pb ON pb.id = dp.permission_block_id
            JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+           LEFT JOIN subject_groups sg ON dp.subject_kind = 'group' AND sg.group_id = dp.subject_id
            WHERE (dp.subject_kind = 'entity' AND dp.subject_id = $1)
-              OR (dp.subject_kind = 'group' AND dp.subject_id IN (SELECT group_id FROM subject_groups))
+              OR (dp.subject_kind = 'group' AND sg.group_id IS NOT NULL)
            UNION ALL
-           SELECT ra.role_id AS role_id,
+           SELECT pb.id AS block_id,
+                  ra.role_id AS role_id,
                   r.name AS role_name,
+                  CASE WHEN ra.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
                   ra.tenant_id AS tenant_boundary,
                   CASE
                     WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
@@ -5262,8 +5274,9 @@ pub async fn effective_grants_for_subject(
            JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
            JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
            JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+           LEFT JOIN subject_groups sg ON ra.subject_kind = 'group' AND sg.group_id = ra.subject_id
            WHERE (ra.subject_kind = 'entity' AND ra.subject_id = $1)
-              OR (ra.subject_kind = 'group' AND ra.subject_id IN (SELECT group_id FROM subject_groups))"#,
+              OR (ra.subject_kind = 'group' AND sg.group_id IS NOT NULL)"#,
     )
     .bind(entity_id)
     .fetch_all(pool)
@@ -5274,8 +5287,10 @@ pub async fn effective_grants_for_subject(
         .map(|row| {
             let scope_kind_text: String = row.try_get("scope_kind").map_err(db_err)?;
             Ok(EffectiveGrant {
+                block_id: row.try_get("block_id").map_err(db_err)?,
                 role_id: row.try_get("role_id").map_err(db_err)?,
                 role_name: row.try_get("role_name").map_err(db_err)?,
+                via: row.try_get("via").map_err(db_err)?,
                 tenant_boundary: row.try_get("tenant_boundary").map_err(db_err)?,
                 scope_kind: parse_scope_kind_text(&scope_kind_text)?,
                 scope_ref: row.try_get("scope_ref").map_err(db_err)?,

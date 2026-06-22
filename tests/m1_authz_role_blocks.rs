@@ -282,5 +282,25 @@ async fn role_linked_conditional_allow_block_honours_conditions() {
         resp.reason
     );
 
+    // explain must reach the same decision as evaluate for both cases: both go
+    // through the single canonical grant expansion and the shared matcher, so a
+    // disagreement would mean explain has drifted from the real decision.
+    let explained_unmet = atom::authz::engine::explain(&p, &deny_req)
+        .await
+        .expect("explain unmet");
+    assert!(
+        !explained_unmet.allowed,
+        "explain must agree with evaluate (deny when condition unmet): {}",
+        explained_unmet.reason
+    );
+    let explained_met = atom::authz::engine::explain(&p, &allow_req)
+        .await
+        .expect("explain met");
+    assert!(
+        explained_met.allowed,
+        "explain must agree with evaluate (allow when condition met): {}",
+        explained_met.reason
+    );
+
     cleanup(&p, tenant_id, entity_id, channel_id).await;
 }
