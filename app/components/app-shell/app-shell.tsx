@@ -115,7 +115,7 @@ export function AppShell({
             <SidebarTrigger />
           </header>
           <main>
-            <div className="mx-auto flex w-full max-w-400 flex-col gap-6 p-4 sm:p-6 lg:p-8">
+            <div className="mx-auto flex w-full flex-col gap-6 p-4 sm:p-6 lg:p-8">
               {children}
             </div>
           </main>
