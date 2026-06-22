@@ -23,7 +23,6 @@ import { GLOBAL_TENANT } from "@/lib/tenant/context";
 import { cn } from "@/lib/utils";
 
 const TENANT_NONE = "__platform__";
-const NO_OBJECT_TYPE = "__none__";
 const STEPS = ["Boundary", "Scope", "Actions", "Conditions", "Review"] as const;
 
 const TENANTS_QUERY = `
@@ -64,21 +63,6 @@ const CREATE_PERMISSION_BLOCK_MUTATION = `
     }
   }
 `;
-
-const ENTITY_TYPES = [
-  { value: "entity:human", label: "Human user" },
-  { value: "entity:device", label: "Device/client" },
-  { value: "entity:service", label: "Service" },
-  { value: "entity:workload", label: "Workload" },
-  { value: "entity:application", label: "Application" },
-] as const;
-
-const RESOURCE_TYPES = [
-  { value: "resource:channel", label: "Channel" },
-  { value: "resource:rule", label: "Rule" },
-  { value: "resource:report", label: "Report" },
-  { value: "resource:alarm", label: "Alarm" },
-] as const;
 
 const OBJECT_KINDS = [
   { value: "entity", label: "Entity" },
@@ -433,31 +417,24 @@ export function PermissionBlockCreateForm({
 
           {needsObjectType(draft.scopeMode, draft.objectKind) ? (
             <Field label="Object type">
-              <Select
-                value={draft.objectType || NO_OBJECT_TYPE}
-                onValueChange={(objectType) =>
+              <Input
+                value={draft.objectType}
+                onChange={(event) =>
                   setDraft((prev) => ({
                     ...prev,
-                    objectType: objectType === NO_OBJECT_TYPE ? "" : objectType,
+                    objectType: event.target.value,
                     actionIds: [],
                   }))
                 }
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Choose object type" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NO_OBJECT_TYPE}>No subtype</SelectItem>
-                  {objectTypeOptions(draft.objectKind).map((type) => (
-                    <SelectItem key={type.value} value={type.value}>
-                      {type.label} ({type.value})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                placeholder={
+                  draft.objectKind === "entity"
+                    ? "e.g. entity:human"
+                    : "e.g. resource:invoice"
+                }
+              />
               <p className="text-xs text-muted-foreground">
-                For entity/resource scopes this is stored as a namespaced value,
-                for example `resource:channel`.
+                Stored as a namespaced value, e.g. `resource:invoice` or
+                `entity:human`.
               </p>
             </Field>
           ) : null}
@@ -758,12 +735,6 @@ function objectKindOptions(scopeMode: ScopeMode) {
     );
   }
   return OBJECT_KINDS;
-}
-
-function objectTypeOptions(objectKind: string) {
-  if (objectKind === "entity") return ENTITY_TYPES;
-  if (objectKind === "resource") return RESOURCE_TYPES;
-  return [];
 }
 
 function actionFilterForScope(draft: Draft) {
