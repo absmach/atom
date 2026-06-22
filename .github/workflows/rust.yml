@@ -7,6 +7,7 @@ on:
       - "src/**"
       - "migrations/**"
       - "proto/**"
+      - "tests/**"
       - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -21,6 +22,21 @@ jobs:
   ci:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: atom
+          POSTGRES_PASSWORD: atom
+          POSTGRES_DB: atom
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -42,5 +58,31 @@ jobs:
       - name: cargo clippy
         run: cargo clippy -- -D warnings
 
-      - name: cargo test
-        run: cargo test
+      - name: Compile tests
+        run: cargo test --no-run --locked
+
+      # The DB-gated tests (#[ignore]) need Postgres. They share global rows
+      # (the seeded admin, tenants, roles) and some assert on listings, so they
+      # are not isolated enough to share one database across binaries running in
+      # parallel. Run each test binary against its own freshly-created database,
+      # single-threaded, so every binary starts from a clean migrated schema.
+      - name: Run tests (each binary against a fresh database)
+        env:
+          PGPASSWORD: atom
+          MAINT_URL: postgres://atom:atom@localhost:5432/atom
+        run: |
+          set -euo pipefail
+          command -v psql >/dev/null || {
+            sudo apt-get update && sudo apt-get install -y postgresql-client
+          }
+          psql "$MAINT_URL" -c "SELECT 1" >/dev/null
+          run_one() {
+            psql "$MAINT_URL" -c "DROP DATABASE IF EXISTS atom_test;" >/dev/null
+            psql "$MAINT_URL" -c "CREATE DATABASE atom_test;" >/dev/null
+            DATABASE_URL="postgres://atom:atom@localhost:5432/atom_test" \
+              cargo test "$@" -- --include-ignored --test-threads=1
+          }
+          run_one --lib
+          for f in tests/*.rs; do
+            run_one --test "$(basename "$f" .rs)"
+          done

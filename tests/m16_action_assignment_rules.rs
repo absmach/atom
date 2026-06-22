@@ -158,12 +158,24 @@ async fn repo_validates_action_assignment_rule_creation() {
 #[ignore]
 async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     let p = common::pool().await;
+    // object_kind permission blocks require a tenant (schema CHECK), so scope
+    // the whole scenario to one tenant. The seeded device→manage→resource deny
+    // is an absolute global rule, so it still fires for a tenant-scoped grant.
+    let tenant_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+        .bind(tenant_id)
+        .bind(format!("m16-tenant-{tenant_id}"))
+        .execute(&p)
+        .await
+        .expect("insert tenant");
+
     let device_id = uuid::Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'device', $2, 'active')",
+        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
     )
     .bind(device_id)
     .bind(format!("m16-device-{device_id}"))
+    .bind(tenant_id)
     .execute(&p)
     .await
     .expect("insert device");
@@ -177,7 +189,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     let block = repo::create_permission_block(
         &p,
         CreatePermissionBlock {
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             scope_mode: "object_kind".into(),
             object_kind: Some("resource".into()),
             object_type: None,
@@ -194,7 +206,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     let direct_policy = repo::create_direct_policy(
         &p,
         CreateDirectPolicy {
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             subject_kind: SubjectKind::Entity,
             subject_id: device_id,
             permission_block_id: block.id,
@@ -208,7 +220,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
         &p,
         CreateRole {
             name: format!("m16-role-{}", uuid::Uuid::new_v4()),
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             description: None,
         },
     )
@@ -217,7 +229,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     repo::create_role_assignment(
         &p,
         CreateRoleAssignment {
-            tenant_id: None,
+            tenant_id: Some(tenant_id),
             subject_kind: SubjectKind::Entity,
             subject_id: device_id,
             role_id: role.id,
