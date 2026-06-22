@@ -82,24 +82,22 @@ export function CapabilityInspectDetails({ row }: { row: Row | null }) {
         </Field>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        {row.createdAt ? (
-          <Field label="Created">
-            <DisplayTimeCell
-              action={Action.Created}
-              time={String(row.createdAt)}
-            />
-          </Field>
-        ) : null}
-        {row.updatedAt ? (
-          <Field label="Updated">
-            <DisplayTimeCell
-              action={Action.Updated}
-              time={String(row.updatedAt)}
-            />
-          </Field>
-        ) : null}
-      </div>
+      {row.createdAt ? (
+        <Field label="Created">
+          <DisplayTimeCell
+            action={Action.Created}
+            time={String(row.createdAt)}
+          />
+        </Field>
+      ) : null}
+      {row.updatedAt ? (
+        <Field label="Updated">
+          <DisplayTimeCell
+            action={Action.Updated}
+            time={String(row.updatedAt)}
+          />
+        </Field>
+      ) : null}
     </div>
   );
 }

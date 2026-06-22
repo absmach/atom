@@ -356,7 +356,6 @@ export const crudResources: CrudResource[] = [
     ],
     columns: [
       { key: "actionName", label: "Action", priority: "high" },
-      { key: "actionId", label: "Action ID", priority: "medium" },
       { key: "objectKind", label: "Object kind", priority: "high" },
       { key: "objectType", label: "Object type", priority: "high" },
       { key: "description", label: "Description", priority: "low" },

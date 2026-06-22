@@ -47,7 +47,9 @@ export function CrudInspectSheet({
       >
         <SheetHeader>
           <SheetTitle>
-            {`Inspect ${String(inspected?.name ?? inspected?.displayName ?? inspected?.id ?? "")}`}
+            {resource.key === "capabilities"
+              ? "Inspect Action Applicability"
+              : `Inspect ${String(inspected?.name ?? inspected?.displayName ?? inspected?.id ?? "")}`}
           </SheetTitle>
           <SheetDescription>
             Detail view for this {resource.title.toLowerCase()} item.
