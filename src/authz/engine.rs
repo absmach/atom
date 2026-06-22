@@ -390,44 +390,63 @@ pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse
             continue;
         }
 
-        let grant_matches = match binding.grant_kind {
-            GrantKind::Capability => cap_id_set.contains(&binding.grant_id),
-            GrantKind::Role => role_grants
-                .get(&binding.grant_id)
-                .map(|grants| {
-                    grants.iter().any(|grant| {
-                        cap_id_set.contains(&grant.capability_id)
-                            && role_scope_matches(
-                                grant,
-                                &object_id_str,
-                                &object.coarse_kind,
-                                &object.kind,
-                                object_tenant_id_str.as_deref(),
-                                object.parent_group_id,
-                                &object.ancestor_group_ids,
-                            )
-                    })
-                })
-                .unwrap_or(false),
-        };
-
-        if !grant_matches {
-            continue;
-        }
-
-        if !conditions_match(&binding.conditions, &eval_ctx) {
-            continue;
-        }
-
-        match binding.effect {
-            Effect::Deny => {
-                return Ok(AuthzResponse::deny(format!(
-                    "explicitly denied by policy {}",
-                    binding.id
-                )));
+        match binding.grant_kind {
+            GrantKind::Capability => {
+                if !cap_id_set.contains(&binding.grant_id) {
+                    continue;
+                }
+                if !conditions_match(&binding.conditions, &eval_ctx) {
+                    continue;
+                }
+                match binding.effect {
+                    Effect::Deny => {
+                        return Ok(AuthzResponse::deny(format!(
+                            "explicitly denied by policy {}",
+                            binding.id
+                        )));
+                    }
+                    Effect::Allow => {
+                        has_allow = true;
+                    }
+                }
             }
-            Effect::Allow => {
-                has_allow = true;
+            GrantKind::Role => {
+                let Some(grants) = role_grants.get(&binding.grant_id) else {
+                    continue;
+                };
+                // Each role-linked block carries its own effect and conditions; the
+                // role-assignment edge does not. Evaluate them per grant so role-linked
+                // deny blocks override and role-linked conditional blocks are honoured.
+                for grant in grants {
+                    if !cap_id_set.contains(&grant.capability_id) {
+                        continue;
+                    }
+                    if !role_scope_matches(
+                        grant,
+                        &object_id_str,
+                        &object.coarse_kind,
+                        &object.kind,
+                        object_tenant_id_str.as_deref(),
+                        object.parent_group_id,
+                        &object.ancestor_group_ids,
+                    ) {
+                        continue;
+                    }
+                    if !conditions_match(&grant.conditions, &eval_ctx) {
+                        continue;
+                    }
+                    match grant.effect {
+                        Effect::Deny => {
+                            return Ok(AuthzResponse::deny(format!(
+                                "explicitly denied by role {} block",
+                                grant.role_name
+                            )));
+                        }
+                        Effect::Allow => {
+                            has_allow = true;
+                        }
+                    }
+                }
             }
         }
     }
@@ -649,6 +668,7 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
         let mut result = "skipped".to_string();
         let mut skip_reason = None;
         let mut role_path = None;
+        let mut decision_effect_conditions: Option<(Effect, serde_json::Value)> = None;
         if !scope_matches_with_groups(
             &binding,
             &object_id_str,
@@ -660,21 +680,40 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
         ) {
             skip_reason = Some("scope_mismatch".to_string());
         } else {
+            // A role-assignment edge does not carry the role block's effect/conditions;
+            // those live on each expanded grant. Pick the grant that determines the
+            // outcome (a condition-matching deny overrides, then a condition-matching
+            // allow), and evaluate with its own effect/conditions.
             let matched_role_grant = match binding.grant_kind {
                 GrantKind::Capability => None,
                 GrantKind::Role => role_grants.get(&binding.grant_id).and_then(|grants| {
-                    grants.iter().find(|grant| {
-                        capability_id_set.contains(&grant.capability_id)
-                            && role_scope_matches(
-                                grant,
-                                &object_id_str,
-                                &object.coarse_kind,
-                                &resource.kind,
-                                object_tenant_id_str.as_deref(),
-                                object.parent_group_id,
-                                &object.ancestor_group_ids,
-                            )
-                    })
+                    let candidates: Vec<&repo::ExpandedRoleGrant> = grants
+                        .iter()
+                        .filter(|grant| {
+                            capability_id_set.contains(&grant.capability_id)
+                                && role_scope_matches(
+                                    grant,
+                                    &object_id_str,
+                                    &object.coarse_kind,
+                                    &resource.kind,
+                                    object_tenant_id_str.as_deref(),
+                                    object.parent_group_id,
+                                    &object.ancestor_group_ids,
+                                )
+                        })
+                        .collect();
+                    candidates
+                        .iter()
+                        .find(|g| {
+                            g.effect == Effect::Deny && conditions_match(&g.conditions, &eval_ctx)
+                        })
+                        .or_else(|| {
+                            candidates
+                                .iter()
+                                .find(|g| conditions_match(&g.conditions, &eval_ctx))
+                        })
+                        .or_else(|| candidates.first())
+                        .copied()
                 }),
             };
             let grant_matches = match binding.grant_kind {
@@ -682,25 +721,37 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
                 GrantKind::Role => matched_role_grant.is_some(),
             };
             role_path = matched_role_grant.map(|grant| grant.role_path.clone());
+            // For role bindings the decision uses the matched grant's effect/conditions.
+            let (decision_effect, decision_conditions) =
+                match (&binding.grant_kind, matched_role_grant) {
+                    (GrantKind::Role, Some(grant)) => {
+                        (grant.effect.clone(), grant.conditions.clone())
+                    }
+                    _ => (binding.effect.clone(), binding.conditions.clone()),
+                };
             if !grant_matches {
                 skip_reason = Some("grant_mismatch".to_string());
-            } else if !conditions_match(&binding.conditions, &eval_ctx) {
+            } else if !conditions_match(&decision_conditions, &eval_ctx) {
                 skip_reason = Some("conditions_mismatch".to_string());
             } else {
                 result = "matched".to_string();
             }
+
+            decision_effect_conditions = Some((decision_effect, decision_conditions));
         }
 
+        let (binding_effect, binding_conditions) = decision_effect_conditions
+            .unwrap_or_else(|| (binding.effect.clone(), binding.conditions.clone()));
         let evaluated_binding = EvaluatedBinding {
             id: binding.id,
-            effect: binding.effect.clone(),
+            effect: binding_effect,
             grant_kind: binding.grant_kind.clone(),
             grant_id: binding.grant_id,
             role_name,
             role_path,
             scope_kind: binding.scope_kind,
             scope_ref: binding.scope_ref,
-            conditions: binding.conditions,
+            conditions: binding_conditions,
             via,
             result,
             skip_reason,
