@@ -120,6 +120,37 @@ async fn check(
 
 #[tokio::test]
 #[ignore]
+async fn non_object_conditions_are_rejected_on_write() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let actor = entity(&p, "human", json!({})).await;
+
+    // A non-object conditions value is malformed policy: the write path must
+    // reject it so the PDP never has to fail closed on stored data.
+    let err = atom::authz::repo::create_policy(
+        &p,
+        CreatePolicyBinding {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: actor,
+            grant_kind: GrantKind::Capability,
+            grant_id: capability_id(&p, "read").await,
+            scope_kind: ScopeKind::Tenant,
+            scope_ref: Some(tenant_id.to_string()),
+            effect: Effect::Allow,
+            conditions: json!("oops"),
+        },
+    )
+    .await
+    .expect_err("non-object conditions must be rejected");
+    assert!(
+        format!("{err:?}").contains("conditions must be a JSON object"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn timestamp_operator_against_request_context_gates_access() {
     let p = pool().await;
     let tenant_id = tenant(&p).await;

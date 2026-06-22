@@ -4,9 +4,11 @@ use serde_json::Value;
 /// Evaluate flat-map ABAC conditions against the evaluation context.
 /// Keys are dot-paths; all entries must match (AND logic).
 pub fn conditions_match(conditions: &Value, ctx: &Value) -> bool {
-    let map = match conditions.as_object() {
-        Some(m) => m,
-        None => return true,
+    // Fail closed on malformed policy: a non-object `conditions` value is not a
+    // valid condition set and must never match every request. An empty object
+    // means "no conditions" and matches unconditionally.
+    let Some(map) = conditions.as_object() else {
+        return false;
     };
 
     if map.is_empty() {
@@ -175,6 +177,24 @@ mod tests {
             &json!({"context.time": {"lt": "2026-04-29T00:00:00Z"}}),
             &ctx
         ));
+    }
+
+    #[test]
+    fn empty_object_conditions_match_unconditionally() {
+        let ctx = json!({"entity": {"kind": "human"}});
+        assert!(conditions_match(&json!({}), &ctx));
+    }
+
+    #[test]
+    fn non_object_conditions_fail_closed() {
+        let ctx = json!({"entity": {"kind": "human"}});
+        // Malformed policy: a string/array/number/bool/null is not a condition
+        // set and must never match every request.
+        assert!(!conditions_match(&json!("oops"), &ctx));
+        assert!(!conditions_match(&json!(["a", "b"]), &ctx));
+        assert!(!conditions_match(&json!(42), &ctx));
+        assert!(!conditions_match(&json!(true), &ctx));
+        assert!(!conditions_match(&Value::Null, &ctx));
     }
 
     #[test]

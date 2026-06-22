@@ -1329,16 +1329,25 @@ pub async fn list_permission_blocks(
     Ok(PermissionBlockList { items, total })
 }
 
+/// Normalize and validate ABAC conditions for storage. `null` becomes `{}`;
+/// any non-object value is rejected so the PDP never has to fail closed on
+/// malformed policy at decision time (and matches the DB CHECK constraint).
+fn normalize_conditions(conditions: Value) -> Result<Value, AppError> {
+    if conditions.is_null() {
+        return Ok(serde_json::json!({}));
+    }
+    if conditions.is_object() {
+        return Ok(conditions);
+    }
+    Err(AppError::bad_request("conditions must be a JSON object"))
+}
+
 pub async fn create_permission_block(
     pool: &PgPool,
     req: CreatePermissionBlock,
 ) -> Result<PermissionBlock, AppError> {
     validate_permission_block_input(pool, &req).await?;
-    let conditions = if req.conditions.is_null() {
-        serde_json::json!({})
-    } else {
-        req.conditions
-    };
+    let conditions = normalize_conditions(req.conditions)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO permission_blocks
@@ -2719,11 +2728,7 @@ pub async fn create_policy(
     let should_sync_membership = req.tenant_id.is_some()
         && req.subject_kind == SubjectKind::Entity
         && req.effect == Effect::Allow;
-    let conditions = if req.conditions.is_null() {
-        serde_json::json!({})
-    } else {
-        req.conditions
-    };
+    let conditions = normalize_conditions(req.conditions)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     match req.grant_kind {
         GrantKind::Role => {
