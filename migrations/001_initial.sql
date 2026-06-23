@@ -13,7 +13,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE tenants (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT        NOT NULL,
-    route       TEXT,
+    alias       TEXT,
     status      TEXT        NOT NULL DEFAULT 'active'
                             CHECK (status IN ('active', 'inactive', 'frozen', 'deleted')),
     tags        TEXT[]      NOT NULL DEFAULT '{}',
@@ -21,11 +21,22 @@ CREATE TABLE tenants (
     created_by  UUID,
     updated_by  UUID,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ
+    updated_at  TIMESTAMPTZ,
+    CONSTRAINT chk_tenants_alias_slug
+        CHECK (alias IS NULL OR alias ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'),
+    CONSTRAINT chk_tenants_alias_not_uuid
+        CHECK (
+            alias IS NULL OR alias !~ (
+                '^([0-9a-f]{32}|'
+                '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
+            )
+        )
 );
 
 CREATE UNIQUE INDEX idx_tenants_name ON tenants(name);
-CREATE UNIQUE INDEX idx_tenants_route ON tenants(route) WHERE route IS NOT NULL;
+CREATE UNIQUE INDEX idx_tenants_alias
+    ON tenants (lower(alias))
+    WHERE alias IS NOT NULL;
 CREATE INDEX idx_tenants_status ON tenants(status);
 CREATE INDEX idx_tenants_attrs ON tenants USING GIN(attributes);
 CREATE INDEX idx_tenants_tags ON tenants USING GIN(tags);
@@ -77,13 +88,23 @@ CREATE TABLE entities (
     id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     kind               TEXT        NOT NULL CHECK (kind IN ('human', 'device', 'service', 'workload', 'application')),
     name               TEXT        NOT NULL,
-    tenant_id          UUID        REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id          UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     status             TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
     attributes         JSONB       NOT NULL DEFAULT '{}',
     profile_id         UUID        REFERENCES profiles(id),
     profile_version_id UUID        REFERENCES profile_versions(id),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ
+    updated_at         TIMESTAMPTZ,
+    alias              TEXT,
+    CONSTRAINT chk_entities_alias_slug
+        CHECK (alias IS NULL OR alias ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'),
+    CONSTRAINT chk_entities_alias_not_uuid
+        CHECK (
+            alias IS NULL OR alias !~ (
+                '^([0-9a-f]{32}|'
+                '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
+            )
+        )
 );
 
 CREATE INDEX idx_entities_kind ON entities(kind);
@@ -92,7 +113,14 @@ CREATE INDEX idx_entities_name ON entities(name);
 CREATE INDEX idx_entities_attrs ON entities USING GIN(attributes);
 CREATE INDEX idx_entities_profile ON entities(profile_id);
 CREATE INDEX idx_entities_profile_version ON entities(profile_version_id);
-CREATE UNIQUE INDEX idx_entities_name_tenant ON entities(name, tenant_id);
+CREATE UNIQUE INDEX idx_entities_name_tenant
+    ON entities (
+        name,
+        COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+    );
+CREATE UNIQUE INDEX idx_entities_alias
+    ON entities (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(alias))
+    WHERE alias IS NOT NULL;
 
 ALTER TABLE tenants
     ADD CONSTRAINT tenants_created_by_fkey
@@ -247,13 +275,17 @@ CREATE INDEX idx_auth_login_attempts_created
     ON auth_login_attempts(created_at DESC);
 
 CREATE TABLE signing_keys (
-    kid         TEXT        PRIMARY KEY,
-    algorithm   TEXT        NOT NULL DEFAULT 'ES256',
-    public_key  TEXT        NOT NULL,
-    private_key TEXT        NOT NULL,
-    status      TEXT        NOT NULL DEFAULT 'primary'
-                            CHECK (status IN ('primary', 'standby', 'retired')),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    kid                        TEXT        PRIMARY KEY,
+    algorithm                  TEXT        NOT NULL DEFAULT 'ES256',
+    public_key                 TEXT        NOT NULL,
+    private_key                TEXT,
+    status                     TEXT        NOT NULL DEFAULT 'primary'
+                                           CHECK (status IN ('primary', 'standby', 'retired')),
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    private_key_ciphertext     BYTEA,
+    private_key_nonce          BYTEA,
+    private_key_key_id         TEXT,
+    private_key_encryption_alg TEXT
 );
 
 CREATE INDEX idx_signing_keys_status ON signing_keys(status);
@@ -367,13 +399,26 @@ CREATE TABLE resources (
     owner_id    UUID        REFERENCES entities(id) ON DELETE SET NULL,
     attributes  JSONB       NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ
+    updated_at  TIMESTAMPTZ,
+    alias       TEXT,
+    CONSTRAINT chk_resources_alias_slug
+        CHECK (alias IS NULL OR alias ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'),
+    CONSTRAINT chk_resources_alias_not_uuid
+        CHECK (
+            alias IS NULL OR alias !~ (
+                '^([0-9a-f]{32}|'
+                '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
+            )
+        )
 );
 
 CREATE INDEX idx_resources_kind ON resources(kind);
 CREATE INDEX idx_resources_tenant ON resources(tenant_id);
 CREATE INDEX idx_resources_owner ON resources(owner_id);
 CREATE INDEX idx_resources_attrs ON resources USING GIN(attributes);
+CREATE UNIQUE INDEX idx_resources_alias
+    ON resources (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(alias))
+    WHERE alias IS NOT NULL;
 
 CREATE TABLE object_group_entities (
     group_id    UUID        NOT NULL REFERENCES object_groups(id) ON DELETE CASCADE,
@@ -462,6 +507,8 @@ CREATE TABLE permission_blocks (
     conditions  JSONB       NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT permission_blocks_conditions_is_object
+        CHECK (jsonb_typeof(conditions) = 'object'),
     CHECK (
         (scope_mode = 'platform' AND tenant_id IS NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
         OR (scope_mode = 'tenant' AND tenant_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
@@ -612,6 +659,10 @@ CREATE INDEX idx_audit_tenant ON audit_logs(tenant_id);
 CREATE INDEX idx_audit_entity ON audit_logs(entity_id);
 CREATE INDEX idx_audit_event ON audit_logs(event);
 CREATE INDEX idx_audit_time ON audit_logs(created_at DESC);
+CREATE INDEX idx_audit_tenant_time
+    ON audit_logs(tenant_id, created_at DESC);
+CREATE INDEX idx_audit_event_time
+    ON audit_logs(event, created_at DESC);
 
 CREATE TABLE action_assignment_rules (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -627,6 +678,14 @@ CREATE TABLE action_assignment_rules (
 
 CREATE INDEX idx_aar_tenant ON action_assignment_rules(tenant_id);
 CREATE INDEX idx_aar_lookup ON action_assignment_rules(entity_kind, action_name, object_kind);
+CREATE UNIQUE INDEX idx_aar_unique_rule
+    ON action_assignment_rules (
+        COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid),
+        entity_kind,
+        action_name,
+        object_kind,
+        COALESCE(object_type, '')
+    );
 
 CREATE TABLE tenant_invitations (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -765,6 +824,7 @@ CROSS JOIN LATERAL (
         ('entity', 'entity:service'),
         ('entity', 'entity:workload'),
         ('entity', 'entity:application'),
+        ('resource', NULL),
         ('group', NULL)
 ) AS applicability(object_kind, object_type)
 WHERE actions.name IN ('read', 'write', 'delete')
@@ -824,6 +884,18 @@ INSERT INTO action_applicability (action_id, object_kind, object_type)
 SELECT id, 'signing_key', NULL
 FROM actions
 WHERE actions.name = 'rotate'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, 'resource', 'resource:channel'
+FROM actions
+WHERE name IN ('publish', 'subscribe')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO action_applicability (action_id, object_kind, object_type)
+SELECT id, 'resource', 'resource:rule'
+FROM actions
+WHERE name = 'execute'
 ON CONFLICT DO NOTHING;
 
 INSERT INTO entities (id, kind, name, status, attributes)

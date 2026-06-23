@@ -38,15 +38,18 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  function setTenant(next: TenantSelection) {
+  const setTenant = React.useCallback((next: TenantSelection) => {
     setSelection(next);
     // biome-ignore lint/suspicious/noDocumentCookie: non-sensitive tenant context persisted for server-side query filtering.
     document.cookie = `${TENANT_COOKIE}=${next.id}; path=/; sameSite=lax`;
-  }
+  }, []);
+
+  const value = React.useMemo(
+    () => ({ selection, setTenant }),
+    [selection, setTenant],
+  );
 
   return (
-    <TenantContext.Provider value={{ selection, setTenant }}>
-      {children}
-    </TenantContext.Provider>
+    <TenantContext.Provider value={value}>{children}</TenantContext.Provider>
   );
 }

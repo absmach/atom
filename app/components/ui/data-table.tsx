@@ -48,6 +48,8 @@ import {
 } from "@/components/ui/table";
 
 const PAGE_SIZES = [10, 20, 50] as const;
+const EMPTY_FILTERS: NonNullable<DataTableProps<unknown, unknown>["filters"]> =
+  [];
 
 export type DataTableProps<TData, TValue> = {
   columns: ColumnDef<TData, TValue>[];
@@ -89,7 +91,7 @@ export function DataTable<TData, TValue>({
   searchPlaceholder = "Search…",
   noResultsMessage = "No results.",
   statusFilter,
-  filters = [],
+  filters = EMPTY_FILTERS,
   toolbar,
 }: DataTableProps<TData, TValue>) {
   const router = useRouter();
@@ -126,13 +128,14 @@ export function DataTable<TData, TValue>({
     setStatusValue(urlStatus);
   }, [urlStatus]);
   useEffect(() => {
-    setFilterValues(
-      Object.fromEntries(
-        filters.map((filter) => [
-          filter.key,
-          searchParams.get(`${paramKey}.${filter.key}`) ?? "",
-        ]),
-      ),
+    const nextValues = Object.fromEntries(
+      filters.map((filter) => [
+        filter.key,
+        searchParams.get(`${paramKey}.${filter.key}`) ?? "",
+      ]),
+    );
+    setFilterValues((current) =>
+      recordsEqual(current, nextValues) ? current : nextValues,
     );
   }, [filters, paramKey, searchParams]);
 
@@ -414,6 +417,18 @@ export function DataTable<TData, TValue>({
         </div>
       </div>
     </div>
+  );
+}
+
+function recordsEqual(
+  left: Record<string, string>,
+  right: Record<string, string>,
+) {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => left[key] === right[key])
   );
 }
 
