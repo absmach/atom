@@ -470,7 +470,10 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://atom:atom@localhost/atom_test")
             .expect("create lazy test pool");
-        let config = Config::for_tests();
+        let mut config = Config::for_tests();
+        // These tests introspect the schema (__schema/__type), which is disabled
+        // by default; turn it on for the test schema.
+        config.graphql_limits.introspection_enabled = true;
         let primary = LoadedKey {
             kid: "test".into(),
             public_key_pem: String::new(),

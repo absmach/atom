@@ -219,7 +219,10 @@ impl Default for GraphqlLimitConfig {
         Self {
             max_depth: 20,
             max_complexity: 1_000,
-            introspection_enabled: true,
+            // Off by default: introspection exposes the full schema, so
+            // production is safe without remembering to disable it. Dev opts in
+            // with ATOM_GRAPHQL_INTROSPECTION_ENABLED=true.
+            introspection_enabled: false,
         }
     }
 }
@@ -752,6 +755,22 @@ mod tests {
         assert_eq!(cfg.login_failure_limit, 5);
         assert_eq!(cfg.login_failure_window_secs, 900);
         assert!(cfg.rate_limits.enabled);
+        assert!(
+            !cfg.graphql_limits.introspection_enabled,
+            "GraphQL introspection must default off"
+        );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn graphql_introspection_opts_in_via_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_GRAPHQL_INTROSPECTION_ENABLED", "true");
+
+        let cfg = Config::from_env().expect("config");
         assert!(cfg.graphql_limits.introspection_enabled);
 
         clear_hardening_env();
