@@ -305,58 +305,140 @@ async fn group_ancestor_ids(pool: &PgPool, group_id: Uuid) -> Result<Vec<Uuid>, 
     .map_err(AppError::Database)
 }
 
-pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse, AppError> {
+/// Everything `evaluate` and `explain` need once the request has been resolved
+/// far enough to run the grant-match loop. Built once by [`load_decision_context`]
+/// so the two readers cannot diverge on how they load policy.
+struct ReadyContext {
+    subject: ExplainSubject,
+    resource: ResourceSummary,
+    object: ProtectedObject,
+    capability: ExplainCapability,
+    capability_ids: std::collections::HashSet<Uuid>,
+    grants: Vec<repo::EffectiveGrant>,
+    eval_ctx: Value,
+}
+
+/// A request that short-circuited before the grant loop (subject/object/action
+/// problems, or the tenant-lifecycle deny). `response` is the full PDP response
+/// — it carries the tenant-lifecycle audit `details` — and `subject`/`resource`
+/// are whatever was resolved before the stop, for `explain` to surface.
+struct DeniedContext {
+    response: AuthzResponse,
+    subject: Option<ExplainSubject>,
+    resource: Option<ResourceSummary>,
+}
+
+enum DecisionContext {
+    Ready(Box<ReadyContext>),
+    Denied(DeniedContext),
+}
+
+fn denied(
+    response: AuthzResponse,
+    subject: Option<ExplainSubject>,
+    resource: Option<ResourceSummary>,
+) -> DecisionContext {
+    DecisionContext::Denied(DeniedContext {
+        response,
+        subject,
+        resource,
+    })
+}
+
+/// Shared context loader for `evaluate` and `explain`: resolves the subject, the
+/// protected object, the tenant lifecycle, the applicable actions, the single
+/// canonical grant expansion, and the ABAC context — exactly once, with one set
+/// of queries. Either short-circuits with [`DecisionContext::Denied`] (carrying
+/// the full PDP response so audit details survive) or returns a `Ready` context
+/// for the shared `match_grant` loop. Centralising this is what stops `explain`
+/// from drifting from the real decision (it previously inlined its own subject
+/// and action SQL).
+async fn load_decision_context(
+    pool: &PgPool,
+    req: &AuthzRequest,
+) -> Result<DecisionContext, AppError> {
     use sqlx::Row;
 
-    let entity_row =
-        sqlx::query("SELECT id, kind, tenant_id, attributes, status FROM entities WHERE id = $1")
-            .bind(req.subject_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(AppError::Database)?;
+    let entity_row = sqlx::query(
+        "SELECT id, name, kind, tenant_id, status, attributes FROM entities WHERE id = $1",
+    )
+    .bind(req.subject_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?;
 
-    let entity_row = match entity_row {
-        Some(r) => r,
-        None => return Ok(AuthzResponse::deny("subject not found")),
+    let Some(entity_row) = entity_row else {
+        return Ok(denied(AuthzResponse::deny("subject not found"), None, None));
     };
 
-    let entity_status: EntityStatus = entity_row.try_get("status").map_err(AppError::Database)?;
-    if entity_status != EntityStatus::Active {
-        return Ok(AuthzResponse::deny("subject is not active"));
-    }
-    let entity_ctx = EntityEvalContext {
+    let subject = ExplainSubject {
         id: entity_row.try_get("id").map_err(AppError::Database)?,
+        name: entity_row.try_get("name").map_err(AppError::Database)?,
         kind: entity_row.try_get("kind").map_err(AppError::Database)?,
+        status: entity_row.try_get("status").map_err(AppError::Database)?,
+    };
+    let entity_ctx = EntityEvalContext {
+        id: subject.id,
+        kind: subject.kind.clone(),
         tenant_id: entity_row
             .try_get("tenant_id")
             .map_err(AppError::Database)?,
-        status: entity_status,
+        status: subject.status.clone(),
         attributes: entity_row
             .try_get("attributes")
             .map_err(AppError::Database)?,
     };
 
+    if subject.status != EntityStatus::Active {
+        return Ok(denied(
+            AuthzResponse::deny("subject is not active"),
+            Some(subject),
+            None,
+        ));
+    }
+
     let object = match resolve_object(pool, req).await? {
         Some(obj) => obj,
-        None => return Ok(AuthzResponse::deny(object_not_found_reason(req))),
+        None => {
+            return Ok(denied(
+                AuthzResponse::deny(object_not_found_reason(req)),
+                Some(subject),
+                None,
+            ));
+        }
+    };
+
+    let resource = ResourceSummary {
+        id: object.id,
+        kind: object.kind.clone(),
+        name: object.name.clone(),
+        tenant_id: object.tenant_id,
     };
 
     // M3: deny when the object's owning tenant is not active. Skips for
-    // platform/global objects (tenant_id = None).
+    // platform/global objects (tenant_id = None). The deny carries audit
+    // `details`, so it is surfaced through the full response.
     if let Some(deny) = check_tenant_lifecycle(pool, &object).await? {
-        return Ok(deny);
+        return Ok(denied(deny, Some(subject), Some(resource)));
     }
 
     let cap_ids =
         repo::find_capability_ids_by_name(pool, &req.action, &object.coarse_kind, &object.kind)
             .await?;
     if cap_ids.is_empty() {
-        return Ok(AuthzResponse::deny(format!(
-            "unknown action '{}'",
-            req.action
-        )));
+        return Ok(denied(
+            AuthzResponse::deny(format!("unknown action '{}'", req.action)),
+            Some(subject),
+            Some(resource),
+        ));
     }
-    let cap_id_set = cap_ids
+    // The lookup filters on `c.name = req.action`, so every applicable action is
+    // the requested one; the first id (ordered by id) represents it for explain.
+    let capability = ExplainCapability {
+        id: cap_ids[0],
+        name: req.action.clone(),
+    };
+    let capability_ids = cap_ids
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
@@ -369,20 +451,47 @@ pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse
     // scope/effect/conditions. One match loop replaces the direct/role split.
     let grants = repo::effective_grants_for_subject(pool, req.subject_id).await?;
 
-    let object_id_str = object.id.to_string();
-    let object_tenant_id_str = object.tenant_id.map(|t| t.to_string());
-    let target = ScopeMatchObject {
-        object_id: &object_id_str,
+    Ok(DecisionContext::Ready(Box::new(ReadyContext {
+        subject,
+        resource,
+        object,
+        capability,
+        capability_ids,
+        grants,
+        eval_ctx,
+    })))
+}
+
+/// Build the scope-match target from a resolved object. The owned id/tenant
+/// strings must outlive the returned borrow, so they are passed in by the caller.
+fn scope_target<'a>(
+    object: &'a ProtectedObject,
+    object_id_str: &'a str,
+    object_tenant_id_str: Option<&'a str>,
+) -> ScopeMatchObject<'a> {
+    ScopeMatchObject {
+        object_id: object_id_str,
         coarse_kind: &object.coarse_kind,
         sub_kind: &object.kind,
-        tenant_id: object_tenant_id_str.as_deref(),
+        tenant_id: object_tenant_id_str,
         parent_group_id: object.parent_group_id,
         ancestor_group_ids: &object.ancestor_group_ids,
-    };
-    let mut has_allow = false;
+    }
+}
 
-    for grant in &grants {
-        if match_grant(grant, &target, &cap_id_set, &eval_ctx).is_some() {
+pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse, AppError> {
+    let ctx = match load_decision_context(pool, req).await? {
+        DecisionContext::Denied(denied) => return Ok(denied.response),
+        DecisionContext::Ready(ctx) => ctx,
+    };
+
+    let object_id_str = ctx.object.id.to_string();
+    let object_tenant_id_str = ctx.object.tenant_id.map(|t| t.to_string());
+    let target = scope_target(&ctx.object, &object_id_str, object_tenant_id_str.as_deref());
+
+    let mut has_allow = false;
+    for grant in &ctx.grants {
+        if match_grant(grant, &target, &ctx.capability_ids, &ctx.eval_ctx).is_some() {
             continue;
         }
         match grant.effect {
@@ -432,159 +541,38 @@ fn deny_reason(grant: &repo::EffectiveGrant) -> String {
 }
 
 pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainResponse, AppError> {
-    use sqlx::Row;
-
-    let entity_row = sqlx::query(
-        "SELECT id, name, kind, tenant_id, status, attributes FROM entities WHERE id = $1",
-    )
-    .bind(req.subject_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let entity_row = match entity_row {
-        Some(row) => row,
-        None => {
+    let ctx = match load_decision_context(pool, req).await? {
+        DecisionContext::Denied(denied) => {
             return Ok(AuthzExplainResponse {
                 allowed: false,
-                reason: "subject not found".to_string(),
-                subject: None,
-                resource: None,
+                reason: denied.response.reason,
+                subject: denied.subject,
+                resource: denied.resource,
                 capability: None,
                 matched_binding: None,
                 evaluated_bindings: Vec::new(),
             });
         }
+        DecisionContext::Ready(ctx) => ctx,
     };
+    let ReadyContext {
+        subject,
+        resource,
+        object,
+        capability,
+        capability_ids,
+        grants,
+        eval_ctx,
+    } = *ctx;
 
-    let subject = ExplainSubject {
-        id: entity_row.try_get("id").map_err(AppError::Database)?,
-        name: entity_row.try_get("name").map_err(AppError::Database)?,
-        kind: entity_row.try_get("kind").map_err(AppError::Database)?,
-        status: entity_row.try_get("status").map_err(AppError::Database)?,
-    };
-    let entity_ctx = EntityEvalContext {
-        id: subject.id,
-        kind: subject.kind.clone(),
-        tenant_id: entity_row
-            .try_get("tenant_id")
-            .map_err(AppError::Database)?,
-        status: subject.status.clone(),
-        attributes: entity_row
-            .try_get("attributes")
-            .map_err(AppError::Database)?,
-    };
-
-    if subject.status != EntityStatus::Active {
-        return Ok(AuthzExplainResponse {
-            allowed: false,
-            reason: "subject is not active".to_string(),
-            subject: Some(subject),
-            resource: None,
-            capability: None,
-            matched_binding: None,
-            evaluated_bindings: Vec::new(),
-        });
-    }
-
-    let object = match resolve_object(pool, req).await? {
-        Some(obj) => obj,
-        None => {
-            return Ok(AuthzExplainResponse {
-                allowed: false,
-                reason: object_not_found_reason(req),
-                subject: Some(subject),
-                resource: None,
-                capability: None,
-                matched_binding: None,
-                evaluated_bindings: Vec::new(),
-            });
-        }
-    };
-
-    let resource = ResourceSummary {
-        id: object.id,
-        kind: object.kind.clone(),
-        name: object.name.clone(),
-        tenant_id: object.tenant_id,
-    };
-    let tenant_ctx = load_tenant_context(pool, object.tenant_id).await?;
-
-    // M3: tenant-lifecycle short-circuit, surfaced through explain so callers
-    // see "tenant is frozen" rather than a confusing scope_mismatch loop.
-    if let Some(deny) = check_tenant_lifecycle(pool, &object).await? {
-        return Ok(AuthzExplainResponse {
-            allowed: false,
-            reason: deny.reason,
-            subject: Some(subject),
-            resource: Some(resource),
-            capability: None,
-            matched_binding: None,
-            evaluated_bindings: Vec::new(),
-        });
-    }
-
-    let cap_rows = sqlx::query(
-        r#"SELECT DISTINCT c.id, c.name
-           FROM actions c
-           JOIN action_applicability ca ON ca.action_id = c.id
-           WHERE c.name = $1
-             AND ca.object_kind = $2
-             AND (ca.object_type IS NULL OR ca.object_type = $3)
-           ORDER BY c.id"#,
-    )
-    .bind(&req.action)
-    .bind(&object.coarse_kind)
-    .bind(format!("{}:{}", object.coarse_kind, object.kind))
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
-    if cap_rows.is_empty() {
-        return Ok(AuthzExplainResponse {
-            allowed: false,
-            reason: format!("unknown action '{}'", req.action),
-            subject: Some(subject),
-            resource: Some(resource),
-            capability: None,
-            matched_binding: None,
-            evaluated_bindings: Vec::new(),
-        });
-    }
-    let capability_ids = cap_rows
-        .iter()
-        .map(|row| row.try_get("id").map_err(AppError::Database))
-        .collect::<Result<Vec<Uuid>, AppError>>()?;
-    let capability_id_set = capability_ids
-        .iter()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    let cap_row = &cap_rows[0];
-    let capability = ExplainCapability {
-        id: cap_row.try_get("id").map_err(AppError::Database)?,
-        name: cap_row.try_get("name").map_err(AppError::Database)?,
-    };
-
-    // Same canonical grant expansion the PDP uses, so explain cannot disagree
-    // with the real decision.
-    let grants = repo::effective_grants_for_subject(pool, req.subject_id).await?;
-
-    let eval_ctx = build_context(&entity_ctx, &object, tenant_ctx.as_ref(), &req.context);
     let object_id_str = object.id.to_string();
     let object_tenant_id_str = object.tenant_id.map(|t| t.to_string());
-    let target = ScopeMatchObject {
-        object_id: &object_id_str,
-        coarse_kind: &object.coarse_kind,
-        sub_kind: &resource.kind,
-        tenant_id: object_tenant_id_str.as_deref(),
-        parent_group_id: object.parent_group_id,
-        ancestor_group_ids: &object.ancestor_group_ids,
-    };
+    let target = scope_target(&object, &object_id_str, object_tenant_id_str.as_deref());
     let mut evaluated = Vec::new();
     let mut allow_match = None;
 
     for grant in &grants {
-        let (result, skip_reason) = match match_grant(grant, &target, &capability_id_set, &eval_ctx)
-        {
+        let (result, skip_reason) = match match_grant(grant, &target, &capability_ids, &eval_ctx) {
             None => ("matched".to_string(), None),
             Some(reason) => ("skipped".to_string(), Some(reason.to_string())),
         };
