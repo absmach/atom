@@ -2,11 +2,12 @@ use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
     auth::Scope,
-    authz::engine,
+    authz::{engine, repo as authz_repo},
     identity::repo,
     models::{
+        access::AuthorizedObjectIdsQuery,
         enums::EntityStatus,
-        group::{CreateGroup, ListGroups, UpdateGroup},
+        group::{CreateGroup, UpdateGroup},
         policy::AuthzRequest,
     },
     state::AppState,
@@ -14,8 +15,7 @@ use crate::{
 
 use super::{
     auth::{
-        gql_error, require_any_capability, require_auth, require_list_access, require_read_access,
-        scope_for_tenant,
+        gql_error, require_any_capability, require_auth, require_read_access, scope_for_tenant,
     },
     types::{
         parse_id, parse_optional_entity_status, parse_optional_id, CreateGroupInput, Entity,
@@ -42,26 +42,18 @@ impl GroupQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_list_access(&state.pool, auth.entity_id, tenant_id).await?;
-        let list = repo::list_groups(
-            &state.pool,
-            ListGroups {
-                q,
-                tenant_id,
-                group_type: None,
-                parent_id: parse_optional_id(parent_id, "parentId")?,
-                status: parse_optional_entity_status(status),
-                limit: limit.map(i64::from).unwrap_or(20),
-                offset: offset.map(i64::from).unwrap_or(0),
-            },
+        authorized_group_list(
+            state,
+            auth.entity_id,
+            None,
+            q,
+            tenant_id,
+            parse_optional_id(parent_id, "parentId")?,
+            parse_optional_entity_status(status),
+            limit,
+            offset,
         )
         .await
-        .map_err(gql_error)?;
-
-        Ok(GroupList {
-            items: list.items.into_iter().map(Group::from).collect(),
-            total: list.total,
-        })
     }
 
     async fn group(&self, ctx: &Context<'_>, id: ID) -> Result<Group> {
@@ -133,40 +125,22 @@ impl GroupQuery {
         let group = repo::get_group(&state.pool, parent_id)
             .await
             .map_err(gql_error)?;
+        // Reading the parent is a precondition for enumerating its children; the
+        // per-child read decision is then made by authorized listing below, so
+        // paging and totals reflect the actual authorized set.
         require_read_access(&state.pool, auth.entity_id, group.tenant_id, parent_id).await?;
-        let list = repo::list_child_groups(
-            &state.pool,
-            parent_id,
-            limit.map(i64::from).unwrap_or(20),
-            offset.map(i64::from).unwrap_or(0),
+        authorized_group_list(
+            state,
+            auth.entity_id,
+            None,
+            None,
+            None,
+            Some(parent_id),
+            None,
+            limit,
+            offset,
         )
         .await
-        .map_err(gql_error)?;
-        let mut authorized = Vec::new();
-        for item in list.items {
-            let allowed = engine::evaluate(
-                &state.pool,
-                &AuthzRequest {
-                    subject_id: auth.entity_id,
-                    action: "read".to_string(),
-                    resource_id: None,
-                    object_kind: Some("group".to_string()),
-                    object_id: Some(item.id),
-                    context: serde_json::Value::Null,
-                },
-            )
-            .await
-            .map_err(gql_error)?
-            .allowed;
-            if allowed {
-                authorized.push(Group::from(item));
-            }
-        }
-        let total = authorized.len() as i64;
-        Ok(GroupList {
-            items: authorized,
-            total,
-        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -183,25 +157,18 @@ impl GroupQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_list_access(&state.pool, auth.entity_id, tenant_id).await?;
-        let list = repo::list_groups(
-            &state.pool,
-            ListGroups {
-                q,
-                tenant_id,
-                group_type: Some("object".to_string()),
-                parent_id: parse_optional_id(parent_id, "parentId")?,
-                status: parse_optional_entity_status(status),
-                limit: limit.map(i64::from).unwrap_or(20),
-                offset: offset.map(i64::from).unwrap_or(0),
-            },
+        authorized_group_list(
+            state,
+            auth.entity_id,
+            Some("object".to_string()),
+            q,
+            tenant_id,
+            parse_optional_id(parent_id, "parentId")?,
+            parse_optional_entity_status(status),
+            limit,
+            offset,
         )
         .await
-        .map_err(gql_error)?;
-        Ok(GroupList {
-            items: list.items.into_iter().map(Group::from).collect(),
-            total: list.total,
-        })
     }
 
     async fn principal_groups(
@@ -216,26 +183,60 @@ impl GroupQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_list_access(&state.pool, auth.entity_id, tenant_id).await?;
-        let list = repo::list_groups(
-            &state.pool,
-            ListGroups {
-                q,
-                tenant_id,
-                group_type: Some("principal".to_string()),
-                parent_id: None,
-                status: parse_optional_entity_status(status),
-                limit: limit.map(i64::from).unwrap_or(20),
-                offset: offset.map(i64::from).unwrap_or(0),
-            },
+        authorized_group_list(
+            state,
+            auth.entity_id,
+            Some("principal".to_string()),
+            q,
+            tenant_id,
+            None,
+            parse_optional_entity_status(status),
+            limit,
+            offset,
         )
         .await
-        .map_err(gql_error)?;
-        Ok(GroupList {
-            items: list.items.into_iter().map(Group::from).collect(),
-            total: list.total,
-        })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn authorized_group_list(
+    state: &AppState,
+    subject_id: uuid::Uuid,
+    group_type: Option<String>,
+    q: Option<String>,
+    tenant_id: Option<uuid::Uuid>,
+    parent_group_id: Option<uuid::Uuid>,
+    status: Option<EntityStatus>,
+    limit: Option<i32>,
+    offset: Option<i32>,
+) -> Result<GroupList> {
+    let authorized = authz_repo::authorized_object_ids(
+        &state.pool,
+        AuthorizedObjectIdsQuery {
+            subject_id,
+            action: "read".to_string(),
+            object_kind: "group".to_string(),
+            object_type: None,
+            tenant_id,
+            q,
+            profile_id: None,
+            entity_status: status,
+            group_type,
+            parent_group_id,
+            include_descendants: false,
+            limit: limit.map(i64::from).unwrap_or(20),
+            offset: offset.map(i64::from).unwrap_or(0),
+        },
+    )
+    .await
+    .map_err(gql_error)?;
+    let items = repo::list_groups_by_ids(&state.pool, &authorized.ids)
+        .await
+        .map_err(gql_error)?;
+    Ok(GroupList {
+        items: items.into_iter().map(Group::from).collect(),
+        total: authorized.total,
+    })
 }
 
 #[derive(Default)]

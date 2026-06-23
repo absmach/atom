@@ -633,6 +633,25 @@ pub async fn get_group(pool: &PgPool, id: Uuid) -> Result<Group, AppError> {
     })
 }
 
+pub async fn list_groups_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Group>, AppError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, Group>(
+        r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
+                  g.status, g.attributes, g.created_at, g.updated_at
+           FROM groups g
+           LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
+           WHERE g.id = ANY($1::uuid[])
+           ORDER BY array_position($1::uuid[], g.id)"#,
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
+}
+
 pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);

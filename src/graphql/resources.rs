@@ -71,6 +71,7 @@ impl ResourceQuery {
                 q,
                 profile_id: None,
                 entity_status: None,
+                group_type: None,
                 parent_group_id,
                 include_descendants: include_descendants.unwrap_or(false),
                 limit: limit.map(i64::from).unwrap_or(20),

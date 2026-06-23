@@ -48,6 +48,7 @@ impl AuthzQuery {
                 q: input.q,
                 profile_id: None,
                 entity_status: None,
+                group_type: None,
                 parent_group_id: None,
                 include_descendants: false,
                 limit: input.limit.map(i64::from).unwrap_or(100),

@@ -97,6 +97,10 @@ pub struct AuthorizedObjectIdsQuery {
     pub q: Option<String>,
     pub profile_id: Option<Uuid>,
     pub entity_status: Option<EntityStatus>,
+    /// Only used when `object_kind == "group"`: restricts candidates to a
+    /// single group type (`"object"` or `"principal"`). `None` lists both.
+    #[serde(default)]
+    pub group_type: Option<String>,
     pub parent_group_id: Option<Uuid>,
     pub include_descendants: bool,
     #[serde(default = "default_limit")]

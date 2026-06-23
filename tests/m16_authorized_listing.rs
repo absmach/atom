@@ -190,6 +190,7 @@ async fn authorized(
             q: None,
             profile_id: None,
             entity_status: None,
+            group_type: None,
             parent_group_id: None,
             include_descendants: false,
             limit: 100,
@@ -591,4 +592,224 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
         .bind(channel_id)
         .execute(&pool)
         .await;
+}
+
+async fn authorized_groups(
+    pool: &sqlx::PgPool,
+    subject_id: Uuid,
+    tenant_id: Uuid,
+    group_type: Option<&str>,
+    parent_group_id: Option<Uuid>,
+    limit: i64,
+) -> atom::models::access::AuthorizedObjectIdsResponse {
+    atom::authz::repo::authorized_object_ids(
+        pool,
+        AuthorizedObjectIdsQuery {
+            subject_id,
+            action: "read".to_string(),
+            object_kind: "group".to_string(),
+            object_type: None,
+            tenant_id: Some(tenant_id),
+            q: None,
+            profile_id: None,
+            entity_status: None,
+            group_type: group_type.map(ToOwned::to_owned),
+            parent_group_id,
+            include_descendants: false,
+            limit,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("authorized group listing")
+}
+
+async fn link_object_groups(pool: &sqlx::PgPool, tenant_id: Uuid, parent_id: Uuid, child_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
+    )
+    .bind(parent_id)
+    .bind(child_id)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("link object groups");
+}
+
+/// The core #8 fix: an `object_kind = 'group'` grant lists every matching group
+/// with a correct `total` and honours `limit`/`offset`, instead of the old
+/// per-item PDP loop that paged first and then under-filled the page and
+/// reported only the page's authorized count as the total.
+#[tokio::test]
+#[ignore]
+async fn authorized_group_listing_object_kind_paginates_with_total() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m8-group-object-kind").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    let read_id = action_id(&pool, "read").await;
+
+    let mut group_ids = Vec::new();
+    for i in 0..3 {
+        group_ids.push(make_group(&pool, tenant_id, "object", &format!("og-{i}")).await);
+    }
+
+    let role_id = make_role_with_block(
+        &pool,
+        tenant_id,
+        "object_kind",
+        Some("group"),
+        None,
+        None,
+        read_id,
+    )
+    .await;
+    assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
+
+    let page = authorized_groups(&pool, subject_id, tenant_id, Some("object"), None, 2).await;
+    assert_eq!(page.total, 3, "total must reflect the full authorized set");
+    assert_eq!(page.ids.len(), 2, "limit must cap the page, not the count");
+    for id in &page.ids {
+        assert!(group_ids.contains(id));
+    }
+}
+
+/// `group_child_groups` (→ `group_child_kind`) lists only the parent's direct
+/// child groups — not the parent itself, not deeper descendants.
+#[tokio::test]
+#[ignore]
+async fn authorized_group_listing_child_kind_lists_direct_children_only() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m8-group-child-kind").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    let read_id = action_id(&pool, "read").await;
+
+    let parent = make_group(&pool, tenant_id, "object", "parent").await;
+    let child_a = make_group(&pool, tenant_id, "object", "child-a").await;
+    let child_b = make_group(&pool, tenant_id, "object", "child-b").await;
+    let grandchild = make_group(&pool, tenant_id, "object", "grandchild").await;
+    link_object_groups(&pool, tenant_id, parent, child_a).await;
+    link_object_groups(&pool, tenant_id, parent, child_b).await;
+    link_object_groups(&pool, tenant_id, child_a, grandchild).await;
+
+    let role_id = make_role_with_block(
+        &pool,
+        tenant_id,
+        "object_group_child_kind",
+        None,
+        None,
+        Some(parent),
+        read_id,
+    )
+    .await;
+    assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
+
+    let listing = authorized_groups(&pool, subject_id, tenant_id, Some("object"), None, 100).await;
+    let mut ids = listing.ids;
+    ids.sort();
+    let mut expected = vec![child_a, child_b];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert_eq!(listing.total, 2);
+}
+
+/// `group_descendant_groups` (→ `group_descendant_kind`) lists every descendant
+/// group of the scoped parent, at any depth, but not the parent itself.
+#[tokio::test]
+#[ignore]
+async fn authorized_group_listing_descendant_kind_lists_whole_subtree() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m8-group-descendant-kind").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    let read_id = action_id(&pool, "read").await;
+
+    let parent = make_group(&pool, tenant_id, "object", "parent").await;
+    let child = make_group(&pool, tenant_id, "object", "child").await;
+    let grandchild = make_group(&pool, tenant_id, "object", "grandchild").await;
+    link_object_groups(&pool, tenant_id, parent, child).await;
+    link_object_groups(&pool, tenant_id, child, grandchild).await;
+
+    let role_id = make_role_with_block(
+        &pool,
+        tenant_id,
+        "object_group_descendant_kind",
+        None,
+        None,
+        Some(parent),
+        read_id,
+    )
+    .await;
+    assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
+
+    let listing = authorized_groups(&pool, subject_id, tenant_id, Some("object"), None, 100).await;
+    let mut ids = listing.ids;
+    ids.sort();
+    let mut expected = vec![child, grandchild];
+    expected.sort();
+    assert_eq!(
+        ids, expected,
+        "descendant scope must cover the whole subtree"
+    );
+    assert_eq!(listing.total, 2);
+}
+
+/// An object-level deny on one group overrides a broad `object_kind` allow,
+/// removing just that group from the listing — matching PDP deny-override.
+#[tokio::test]
+#[ignore]
+async fn authorized_group_listing_object_deny_overrides_allow() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m8-group-deny").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    let read_id = action_id(&pool, "read").await;
+
+    let allowed = make_group(&pool, tenant_id, "object", "allowed").await;
+    let denied = make_group(&pool, tenant_id, "object", "denied").await;
+
+    let allow_role = make_role_with_block(
+        &pool,
+        tenant_id,
+        "object_kind",
+        Some("group"),
+        None,
+        None,
+        read_id,
+    )
+    .await;
+    assign_role_to_entity(&pool, tenant_id, subject_id, allow_role).await;
+
+    let deny_block: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .bind(denied)
+    .fetch_one(&pool)
+    .await
+    .expect("insert deny block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(deny_block)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("deny action");
+    sqlx::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
+    )
+    .bind(tenant_id)
+    .bind(subject_id)
+    .bind(deny_block)
+    .execute(&pool)
+    .await
+    .expect("assign deny");
+
+    let listing = authorized_groups(&pool, subject_id, tenant_id, Some("object"), None, 100).await;
+    assert_eq!(
+        listing.ids,
+        vec![allowed],
+        "deny must remove only the denied group"
+    );
+    assert_eq!(listing.total, 1);
 }

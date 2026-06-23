@@ -93,6 +93,7 @@ impl EntityQuery {
                 q,
                 profile_id: parse_optional_id(profile_id, "profileId")?,
                 entity_status: parsed_status,
+                group_type: None,
                 parent_group_id,
                 include_descendants: include_descendants.unwrap_or(false),
                 limit: limit.map(i64::from).unwrap_or(20),
