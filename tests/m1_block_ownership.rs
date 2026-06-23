@@ -370,3 +370,50 @@ async fn role_delete_keeps_shared_block() {
         "role B must still link the block"
     );
 }
+
+/// The live GraphQL deleteDirectPolicy path (delete_direct_policy) must GC an
+/// orphaned block, like delete_policy.
+#[tokio::test]
+#[ignore]
+async fn direct_policy_delete_collects_orphaned_block() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let subject = make_human(&p, tenant_id).await;
+    let (policy_id, block_id) = make_direct_policy(&p, tenant_id, subject).await;
+
+    atom::authz::repo::delete_direct_policy(&p, policy_id)
+        .await
+        .expect("delete direct policy");
+
+    assert!(
+        !block_exists(&p, block_id).await,
+        "delete_direct_policy must garbage-collect the now-unreferenced block"
+    );
+}
+
+/// delete_direct_policy must not destroy a block another role still links.
+#[tokio::test]
+#[ignore]
+async fn direct_policy_delete_keeps_shared_block() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let subject = make_human(&p, tenant_id).await;
+    let (policy_id, block_id) = make_direct_policy(&p, tenant_id, subject).await;
+    let role = make_role(&p, tenant_id).await;
+
+    atom::authz::repo::replace_role_permission_block_links(&p, role, &[block_id])
+        .await
+        .expect("link block to role");
+    atom::authz::repo::delete_direct_policy(&p, policy_id)
+        .await
+        .expect("delete direct policy");
+
+    assert!(
+        block_exists(&p, block_id).await,
+        "a block still linked to a role must survive direct-policy deletion"
+    );
+    assert!(
+        role_links_block(&p, role, block_id).await,
+        "the role must still link the block"
+    );
+}

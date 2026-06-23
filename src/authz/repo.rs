@@ -3265,14 +3265,21 @@ pub async fn get_direct_policy(pool: &PgPool, id: Uuid) -> Result<DirectPolicy, 
 }
 
 pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let block_id: Option<Uuid> = sqlx::query_scalar(
+        "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let Some(block_id) = block_id else {
         return Err(AppError::not_found(format!("direct policy {id} not found")));
-    }
+    };
+    // The block is shared: GC it only if removing this policy left it
+    // unreferenced (mirrors delete_policy).
+    delete_orphaned_blocks(&mut tx, &[block_id]).await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
