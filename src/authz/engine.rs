@@ -1451,6 +1451,285 @@ mod db_tests {
         "00000000-0000-0000-0000-000000000001".parse().unwrap()
     }
 
+    /// The PDP matches a grant's scope against an object in Rust
+    /// (`scope_values_match`); authorized listing matches the same scope in SQL
+    /// (`grant_scope_matches`, migration 001). They must agree exactly, or the
+    /// canonical-expansion unification would silently let listing and the PDP
+    /// diverge. This pins the two implementations together over every scope kind.
+    #[tokio::test]
+    #[ignore]
+    async fn rust_and_sql_scope_matching_agree() {
+        let pool = pool().await;
+        let tenant = Uuid::new_v4();
+        let object = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let parent = Uuid::new_v4();
+        let ancestor = Uuid::new_v4();
+
+        struct Case {
+            kind: ScopeKind,
+            text: &'static str,
+            scope_ref: Option<String>,
+            coarse: &'static str,
+            sub: &'static str,
+            object_tenant: Option<Uuid>,
+            parent_group: Option<Uuid>,
+            ancestors: Vec<Uuid>,
+            expected: bool,
+        }
+
+        let cases = vec![
+            Case {
+                kind: ScopeKind::Platform,
+                text: "platform",
+                scope_ref: None,
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::Tenant,
+                text: "tenant",
+                scope_ref: Some(tenant.to_string()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::Tenant,
+                text: "tenant",
+                scope_ref: Some(other.to_string()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::Tenant,
+                text: "tenant",
+                scope_ref: Some(tenant.to_string()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: None,
+                parent_group: None,
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::ObjectKind,
+                text: "object_kind",
+                scope_ref: Some("entity".into()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::ObjectKind,
+                text: "object_kind",
+                scope_ref: Some("resource".into()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::ObjectType,
+                text: "object_type",
+                scope_ref: Some("entity:human".into()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::ObjectType,
+                text: "object_type",
+                scope_ref: Some("entity:human".into()),
+                coarse: "entity",
+                sub: "device",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::Object,
+                text: "object",
+                scope_ref: Some(object.to_string()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::Object,
+                text: "object",
+                scope_ref: Some(other.to_string()),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::GroupObjectType,
+                text: "group_object_type",
+                scope_ref: Some(format!("{parent}:entity:human")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::GroupObjectType,
+                text: "group_object_type",
+                scope_ref: Some(format!("{parent}:entity:human")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: None,
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::GroupTreeObjectType,
+                text: "group_tree_object_type",
+                scope_ref: Some(format!("{ancestor}:entity:human")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![ancestor],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::GroupTreeObjectType,
+                text: "group_tree_object_type",
+                scope_ref: Some(format!("{parent}:entity:human")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::GroupChildKind,
+                text: "group_child_kind",
+                scope_ref: Some(format!("{parent}:group")),
+                coarse: "group",
+                sub: "group",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::GroupChildKind,
+                text: "group_child_kind",
+                scope_ref: Some(format!("{parent}:group")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![],
+                expected: false,
+            },
+            Case {
+                kind: ScopeKind::GroupDescendantKind,
+                text: "group_descendant_kind",
+                scope_ref: Some(format!("{parent}:group")),
+                coarse: "group",
+                sub: "group",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::GroupDescendantKind,
+                text: "group_descendant_kind",
+                scope_ref: Some(format!("{ancestor}:group")),
+                coarse: "group",
+                sub: "group",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![ancestor],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::GroupDescendantKind,
+                text: "group_descendant_kind",
+                scope_ref: Some(format!("{other}:group")),
+                coarse: "group",
+                sub: "group",
+                object_tenant: Some(tenant),
+                parent_group: Some(parent),
+                ancestors: vec![ancestor],
+                expected: false,
+            },
+        ];
+
+        let object_str = object.to_string();
+        for case in cases {
+            let tenant_str = case.object_tenant.map(|t| t.to_string());
+            let target = ScopeMatchObject {
+                object_id: &object_str,
+                coarse_kind: case.coarse,
+                sub_kind: case.sub,
+                tenant_id: tenant_str.as_deref(),
+                parent_group_id: case.parent_group,
+                ancestor_group_ids: &case.ancestors,
+            };
+            let rust = scope_values_match(&case.kind, case.scope_ref.as_deref(), &target);
+
+            let sql: bool =
+                sqlx::query_scalar("SELECT grant_scope_matches($1, $2, $3, $4, $5, $6, $7, $8)")
+                    .bind(case.text)
+                    .bind(case.scope_ref.as_deref())
+                    .bind(case.coarse)
+                    .bind(case.sub)
+                    .bind(object)
+                    .bind(case.object_tenant)
+                    .bind(case.parent_group)
+                    .bind(&case.ancestors)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("grant_scope_matches");
+
+            assert_eq!(
+                rust, sql,
+                "Rust/SQL scope match disagree for {} ref={:?}",
+                case.text, case.scope_ref
+            );
+            assert_eq!(
+                rust, case.expected,
+                "unexpected match result for {} ref={:?}",
+                case.text, case.scope_ref
+            );
+        }
+    }
+
     #[tokio::test]
     #[ignore]
     async fn admin_can_manage_tenant_via_object_kind() {

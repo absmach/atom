@@ -47,8 +47,9 @@ src/
      mod.rs
      engine.rs         — PDP: batch-loads role capabilities, evaluates RBAC/ABAC,
      │                    deny-overrides-allow; unit-tested in #[cfg(test)]
-     repo.rs           — sqlx queries; effective_grants_for_subject() is the canonical
-                          runtime grant expansion
+     repo.rs           — sqlx queries; effective_grants_for_subject() wraps the
+                          canonical subject_effective_grants() SQL function, shared
+                          by the PDP and every authorized-listing reader
 migrations/
   001_initial.sql      — full schema + action seeds and bootstrap access data
 ```
@@ -61,7 +62,7 @@ migrations/
 - **Typed enums:** all constrained domain fields (`EntityKind`, `Effect`, `ScopeKind`, etc.) are Rust enums deriving `sqlx::Type` + serde. Invalid values are rejected at deserialization — no manual validators in handlers.
 - **No special user type:** every principal is an `Entity` with a `kind` field.
 - **Online authorization:** tokens carry no permissions; every authz check (GraphQL `authzCheck` / gRPC `AuthzService.Check`) hits the DB, so revocation and policy changes take effect immediately.
-- **One canonical grant expansion:** `repo::effective_grants_for_subject` is the single reader of "what does this subject hold" for the *runtime* path — the PDP (`engine::evaluate`), `explain`, and the control-plane gates all consume it. Group membership is resolved recursively; each grant carries its own scope/effect/conditions. Do not reintroduce a second flattener. (The assignment-time guardrail validators in `guardrails.rs` still read `effective_access_edges()` with their own recursive group CTE — folding them onto the canonical expansion is tracked future work, not yet done.)
+- **One canonical grant expansion:** the `subject_effective_grants(uuid)` SQL function (in migration `001`) is the single "what does this subject hold" expansion for the *runtime* path. The PDP (`engine::evaluate`), `explain`, and the control-plane gates consume it through `repo::effective_grants_for_subject`; the authorized-listing readers (`authorized_object_ids` for entity/resource/group) select from it directly and filter candidates with the shared `grant_scope_matches(...)` SQL predicate, which mirrors the PDP's Rust `scope_values_match` (a parity test pins them together). The scope_mode→(scope_kind, scope_ref) mapping lives once in the `permission_block_scopes` view. Group membership is resolved recursively; each grant carries its own scope/effect/conditions. Do not reintroduce a per-reader flattener or a parallel listing evaluator. (`effective_access_edges()` still backs the non-listing readers — audit/tenant filters and object-edge lookups — and the assignment-time guardrail validators in `guardrails.rs`; converging those onto the canonical expansion is tracked future work.)
 - **Audit log:** `audit::write()` is fire-and-forget — it logs failures but never propagates them to the caller. Called from service (login) and handlers (logout, credential ops, authz check).
 
 ## Authorization Model (PDP)
@@ -202,6 +203,6 @@ The runtime is production-hardened: configurable DB pool, five-category IP rate 
 - No `PUT /groups/:id` — groups are immutable after creation (name/tenant change would break policy references).
 - Enum variants must stay in sync with DB CHECK constraints — changing a variant's serialized name is a schema-breaking change requiring a migration.
 - `audit::write()` must never be `?`-propagated — it is always fire-and-forget to avoid blocking auth decisions on audit failures.
-- `effective_grants_for_subject` is the one canonical grant expansion for the runtime path — the PDP, `explain`, and the control-plane gates all read it. Do not add a second flattener or reintroduce per-binding role lookups. (Assignment-time guardrails still read `effective_access_edges()`; converging them is future work.)
+- `subject_effective_grants(uuid)` (in migration `001`) is the one canonical grant expansion for the runtime path — the PDP, `explain`, the control-plane gates, and the authorized-listing readers all consume it (the listers add the shared `grant_scope_matches` SQL predicate, which mirrors the PDP's Rust scope matching). Do not add a second flattener, a per-listing-reader role expansion, or a parallel listing evaluator. (Assignment-time guardrails and the non-listing readers still read `effective_access_edges()`; converging them is future work.)
 - Role-linked permission blocks carry their own effect and conditions through expansion — a role-linked deny must override, and a role-linked conditional must stay conditional. Never re-flatten role edges to a hard-coded `allow`/`{}`.
 - Permission blocks are shared and immutable: never `DELETE FROM permission_blocks` by role. Unlink the role's links, then GC only blocks left unreferenced (`unlink_role_blocks_and_gc`).

@@ -645,6 +645,156 @@ SELECT
 FROM role_assignments ra;
 $$;
 
+-- ─── Canonical grant expansion ─────────────────────────────────────────────────
+-- One source of truth for the runtime authorization path, shared by the PDP
+-- (`engine::evaluate` via `repo::effective_grants_for_subject`) and every
+-- authorized-listing reader. Keeps the scope mapping, the subject grant
+-- expansion, and the scope predicate from drifting across readers.
+
+-- Single scope mapping: a permission block's stored scope columns projected into
+-- the canonical (scope_kind, scope_ref) pair the readers compare against.
+CREATE VIEW permission_block_scopes AS
+SELECT
+    pb.id AS permission_block_id,
+    CASE
+        WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
+        WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
+        WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
+        WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
+        ELSE pb.scope_mode
+    END AS scope_kind,
+    CASE
+        WHEN pb.scope_mode = 'platform' THEN NULL
+        WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
+        WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
+        WHEN pb.scope_mode = 'object_type' THEN pb.object_type
+        WHEN pb.scope_mode = 'object' THEN pb.object_id::text
+        WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
+        WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
+        WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
+    END AS scope_ref
+FROM permission_blocks pb;
+
+-- Single subject grant expansion: direct policies and role-linked permission
+-- blocks for one subject, principal-group membership resolved recursively. Each
+-- row is one fully expanded grant carrying its block's own scope/effect/
+-- conditions and the assignment-level tenant boundary.
+CREATE FUNCTION subject_effective_grants(p_entity_id UUID)
+RETURNS TABLE(
+    assignment_id   UUID,
+    block_id        UUID,
+    role_id         UUID,
+    role_name       TEXT,
+    via             TEXT,
+    tenant_boundary UUID,
+    scope_kind      TEXT,
+    scope_ref       TEXT,
+    capability_id   UUID,
+    effect          TEXT,
+    conditions      JSONB
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE subject_groups(group_id, path) AS (
+        SELECT gm.group_id, g.name
+        FROM group_members gm
+        JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+        WHERE gm.entity_id = p_entity_id
+        UNION ALL
+        SELECT gh.parent_id, parent.name || ' -> ' || sg.path
+        FROM group_hierarchy gh
+        JOIN subject_groups sg ON sg.group_id = gh.child_id
+        JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
+    )
+    SELECT dp.id AS assignment_id,
+           pb.id AS block_id,
+           NULL::uuid AS role_id,
+           NULL::text AS role_name,
+           CASE WHEN dp.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
+           dp.tenant_id AS tenant_boundary,
+           pbs.scope_kind,
+           pbs.scope_ref,
+           pba.action_id AS capability_id,
+           pb.effect,
+           pb.conditions
+    FROM direct_policies dp
+    JOIN permission_blocks pb ON pb.id = dp.permission_block_id
+    JOIN permission_block_scopes pbs ON pbs.permission_block_id = pb.id
+    JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+    LEFT JOIN subject_groups sg ON dp.subject_kind = 'group' AND sg.group_id = dp.subject_id
+    WHERE (dp.subject_kind = 'entity' AND dp.subject_id = p_entity_id)
+       OR (dp.subject_kind = 'group' AND sg.group_id IS NOT NULL)
+    UNION ALL
+    SELECT ra.id AS assignment_id,
+           pb.id AS block_id,
+           ra.role_id AS role_id,
+           r.name AS role_name,
+           CASE WHEN ra.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
+           ra.tenant_id AS tenant_boundary,
+           pbs.scope_kind,
+           pbs.scope_ref,
+           pba.action_id AS capability_id,
+           pb.effect,
+           pb.conditions
+    FROM role_assignments ra
+    JOIN roles r ON r.id = ra.role_id
+    JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
+    JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+    JOIN permission_block_scopes pbs ON pbs.permission_block_id = pb.id
+    JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+    LEFT JOIN subject_groups sg ON ra.subject_kind = 'group' AND sg.group_id = ra.subject_id
+    WHERE (ra.subject_kind = 'entity' AND ra.subject_id = p_entity_id)
+       OR (ra.subject_kind = 'group' AND sg.group_id IS NOT NULL)
+$$;
+
+-- Single scope predicate: whether a grant's (scope_kind, scope_ref) covers a
+-- candidate object. Set-based mirror of the Rust `scope_values_match` used by
+-- the PDP; a parity test pins the two together. `p_ancestors` is the candidate's
+-- recursive ancestor-group ids. Written without sublinks so PostgreSQL can
+-- inline it into the listing queries (an `IN (SELECT unnest(...))` form would
+-- block inlining and make this a per-candidate function call).
+CREATE FUNCTION grant_scope_matches(
+    p_scope_kind    TEXT,
+    p_scope_ref     TEXT,
+    p_coarse_kind   TEXT,
+    p_sub_kind      TEXT,
+    p_object_id     UUID,
+    p_object_tenant UUID,
+    p_parent_group  UUID,
+    p_ancestors     UUID[]
+)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE p_scope_kind
+        WHEN 'platform' THEN TRUE
+        WHEN 'tenant' THEN p_object_tenant IS NOT NULL AND p_scope_ref = p_object_tenant::text
+        WHEN 'object_kind' THEN p_scope_ref = p_coarse_kind
+        WHEN 'object_type' THEN p_scope_ref = p_coarse_kind || ':' || p_sub_kind
+        WHEN 'object' THEN p_scope_ref = p_object_id::text
+        WHEN 'group_object_type' THEN
+            p_parent_group IS NOT NULL
+            AND p_scope_ref = p_parent_group::text || ':' || p_coarse_kind || ':' || p_sub_kind
+        WHEN 'group_tree_object_type' THEN
+            substr(p_scope_ref, strpos(p_scope_ref, ':') + 1) = p_coarse_kind || ':' || p_sub_kind
+            AND split_part(p_scope_ref, ':', 1)::uuid = ANY(p_ancestors)
+        WHEN 'group_child_kind' THEN
+            p_coarse_kind = 'group'
+            AND p_parent_group IS NOT NULL
+            AND p_scope_ref = p_parent_group::text || ':group'
+        WHEN 'group_descendant_kind' THEN
+            p_coarse_kind = 'group'
+            AND (
+                (p_parent_group IS NOT NULL AND p_scope_ref = p_parent_group::text || ':group')
+                OR (split_part(p_scope_ref, ':', 2) = 'group'
+                    AND split_part(p_scope_ref, ':', 1)::uuid = ANY(p_ancestors))
+            )
+        ELSE FALSE
+    END
+$$;
+
 CREATE TABLE audit_logs (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,

@@ -3496,28 +3496,22 @@ async fn authorized_entity_ids(
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
 
-    let sql = r#"WITH RECURSIVE subject_groups(group_id) AS (
-                   SELECT gm.group_id
-                   FROM group_members gm
-                   JOIN groups g ON g.id = gm.group_id
-                    AND g.status = 'active'
-                    AND g.group_type = 'principal'
-                   WHERE gm.entity_id = $1
-                   UNION ALL
-                   SELECT gh.parent_id
-                   FROM group_hierarchy gh
-                   JOIN subject_groups sg ON sg.group_id = gh.child_id
-                   JOIN groups parent ON parent.id = gh.parent_id
-                    AND parent.status = 'active'
-                    AND parent.group_type = 'principal'
-               ),
-               target_groups(id) AS (
+    let sql = r#"WITH RECURSIVE target_groups(id) AS (
                    SELECT $8::uuid WHERE $8::uuid IS NOT NULL
                    UNION ALL
                    SELECT gh.child_id
                    FROM group_hierarchy gh
                    JOIN target_groups tg ON tg.id = gh.parent_id
                    WHERE $9::boolean
+               ),
+               grants AS (
+                   SELECT * FROM subject_effective_grants($1)
+               ),
+               caps AS (
+                   SELECT a.id AS capability_id, aa.object_type
+                   FROM actions a
+                   JOIN action_applicability aa ON aa.action_id = a.id
+                   WHERE a.name = $2 AND aa.object_kind = 'entity'
                ),
                candidates AS (
                    SELECT e.id, e.kind::text AS sub_kind, e.tenant_id, e.created_at,
@@ -3540,156 +3534,40 @@ async fn authorized_entity_ids(
                    FROM candidate_ancestors ca
                    JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
                ),
-               matching_capabilities AS (
-                   SELECT c.id AS capability_id, ca.object_kind, ca.object_type
-                   FROM actions c
-                   JOIN action_applicability ca ON ca.action_id = c.id
-                   WHERE c.name = $2
-               ),
-               role_grants AS (
-                   SELECT rpb.role_id AS root_role_id,
-                          CASE
-                              WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
-                              WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
-                              WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
-                              WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
-                              ELSE pb.scope_mode
-                          END AS scope_kind,
-                          CASE
-                              WHEN pb.scope_mode = 'platform' THEN NULL
-                              WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
-                              WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
-                              WHEN pb.scope_mode = 'object_type' THEN pb.object_type
-                              WHEN pb.scope_mode = 'object' THEN pb.object_id::text
-                              WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
-                              WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
-                              WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
-                          END AS scope_ref,
-                          pba.action_id AS capability_id,
-                          pb.effect AS effect,
-                          pb.conditions AS conditions
-                   FROM role_permission_blocks rpb
-                   JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-                   JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+               candidate_ancestor_ids AS (
+                   SELECT object_id, array_agg(ancestor_id) AS ancestors
+                   FROM candidate_ancestors
+                   GROUP BY object_id
                ),
                authorized AS (
                    SELECT c.id, c.created_at
                    FROM candidates c
+                   LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
                    WHERE EXISTS (
-                       SELECT 1
-                       FROM effective_access_edges() pb
-                       WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
-                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
-                         AND pb.effect = 'allow'
-                         AND pb.conditions = '{}'::jsonb
-                         AND (
-                             (
-                               pb.grant_kind = 'capability'
-                               AND EXISTS (
-                                   SELECT 1 FROM matching_capabilities mc
-                                   WHERE mc.capability_id = pb.grant_id
-                                     AND mc.object_kind = 'entity'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
-                               )
-                               AND (
-                                   pb.scope_kind = 'platform'
-                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
-                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'entity')
-                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'entity:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
-                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                       SELECT 1 FROM candidate_ancestors ca
-                                       WHERE ca.object_id = c.id
-                                         AND pb.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
-                                   ))
-                               )
-                             )
-                             OR (
-                               pb.grant_kind = 'role'
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM role_grants rg
-                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
-                                   WHERE rg.root_role_id = pb.grant_id
-                                     AND mc.object_kind = 'entity'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
-                                     AND (
-                                         rg.scope_kind = 'platform'
-                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
-                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'entity')
-                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'entity:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
-                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                             SELECT 1 FROM candidate_ancestors ca
-                                             WHERE ca.object_id = c.id
-                                               AND rg.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
-                                         ))
-                                     )
-                                     AND rg.effect = 'allow'
-                                     AND rg.conditions = '{}'::jsonb
-                               )
-                             )
+                       SELECT 1 FROM grants g
+                       WHERE g.effect = 'allow' AND g.conditions = '{}'::jsonb
+                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = g.capability_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
                          )
+                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'entity', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND NOT EXISTS (
-                       SELECT 1
-                       FROM effective_access_edges() pb
-                         WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
-                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
-                         AND (
-                             (
-                               pb.effect = 'deny'
-                               AND pb.grant_kind = 'capability'
-                               AND EXISTS (
-                                   SELECT 1 FROM matching_capabilities mc
-                                   WHERE mc.capability_id = pb.grant_id
-                                     AND mc.object_kind = 'entity'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
-                               )
-                               AND (
-                                   pb.scope_kind = 'platform'
-                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
-                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'entity')
-                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'entity:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
-                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                       SELECT 1 FROM candidate_ancestors ca
-                                       WHERE ca.object_id = c.id
-                                         AND pb.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
-                                   ))
-                               )
-                             )
-                             OR (
-                               pb.grant_kind = 'role'
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM role_grants rg
-                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
-                                   WHERE rg.root_role_id = pb.grant_id
-                                     AND mc.object_kind = 'entity'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
-                                     AND (
-                                         rg.scope_kind = 'platform'
-                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
-                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'entity')
-                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'entity:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
-                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':entity:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                             SELECT 1 FROM candidate_ancestors ca
-                                             WHERE ca.object_id = c.id
-                                               AND rg.scope_ref = ca.ancestor_id::text || ':entity:' || c.sub_kind
-                                         ))
-                                     )
-                                     AND rg.effect = 'deny'
-                               )
-                             )
+                       SELECT 1 FROM grants g
+                       WHERE g.effect = 'deny'
+                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = g.capability_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
                          )
+                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'entity', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                )
                SELECT id, COUNT(*) OVER() AS total
@@ -3793,28 +3671,22 @@ async fn authorized_resource_rows(
              LIMIT $8 OFFSET $9"
         }
     };
-    let sql = r#"WITH RECURSIVE subject_groups(group_id) AS (
-                   SELECT gm.group_id
-                   FROM group_members gm
-                   JOIN groups g ON g.id = gm.group_id
-                    AND g.status = 'active'
-                    AND g.group_type = 'principal'
-                   WHERE gm.entity_id = $1
-                   UNION ALL
-                   SELECT gh.parent_id
-                   FROM group_hierarchy gh
-                   JOIN subject_groups sg ON sg.group_id = gh.child_id
-                   JOIN groups parent ON parent.id = gh.parent_id
-                    AND parent.status = 'active'
-                    AND parent.group_type = 'principal'
-               ),
-               target_groups(id) AS (
+    let sql = r#"WITH RECURSIVE target_groups(id) AS (
                    SELECT $6::uuid WHERE $6::uuid IS NOT NULL
                    UNION ALL
                    SELECT gh.child_id
                    FROM group_hierarchy gh
                    JOIN target_groups tg ON tg.id = gh.parent_id
                    WHERE $7::boolean
+               ),
+               grants AS (
+                   SELECT * FROM subject_effective_grants($1)
+               ),
+               caps AS (
+                   SELECT a.id AS capability_id, aa.object_type
+                   FROM actions a
+                   JOIN action_applicability aa ON aa.action_id = a.id
+                   WHERE a.name = $2 AND aa.object_kind = 'resource'
                ),
                candidates AS (
                    SELECT r.id, r.kind AS sub_kind, r.tenant_id, r.created_at,
@@ -3835,156 +3707,40 @@ async fn authorized_resource_rows(
                    FROM candidate_ancestors ca
                    JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
                ),
-               matching_capabilities AS (
-                   SELECT c.id AS capability_id, ca.object_kind, ca.object_type
-                   FROM actions c
-                   JOIN action_applicability ca ON ca.action_id = c.id
-                   WHERE c.name = $2
-               ),
-               role_grants AS (
-                   SELECT rpb.role_id AS root_role_id,
-                          CASE
-                              WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
-                              WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
-                              WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
-                              WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
-                              ELSE pb.scope_mode
-                          END AS scope_kind,
-                          CASE
-                              WHEN pb.scope_mode = 'platform' THEN NULL
-                              WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
-                              WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
-                              WHEN pb.scope_mode = 'object_type' THEN pb.object_type
-                              WHEN pb.scope_mode = 'object' THEN pb.object_id::text
-                              WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
-                              WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
-                              WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
-                          END AS scope_ref,
-                          pba.action_id AS capability_id,
-                          pb.effect AS effect,
-                          pb.conditions AS conditions
-                   FROM role_permission_blocks rpb
-                   JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-                   JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+               candidate_ancestor_ids AS (
+                   SELECT object_id, array_agg(ancestor_id) AS ancestors
+                   FROM candidate_ancestors
+                   GROUP BY object_id
                ),
                authorized AS (
                    SELECT c.id, c.sub_kind, c.created_at
                    FROM candidates c
+                   LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
                    WHERE EXISTS (
-                       SELECT 1
-                       FROM effective_access_edges() pb
-                       WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
-                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
-                         AND pb.effect = 'allow'
-                         AND pb.conditions = '{}'::jsonb
-                         AND (
-                             (
-                               pb.grant_kind = 'capability'
-                               AND EXISTS (
-                                   SELECT 1 FROM matching_capabilities mc
-                                   WHERE mc.capability_id = pb.grant_id
-                                     AND mc.object_kind = 'resource'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
-                               )
-                               AND (
-                                   pb.scope_kind = 'platform'
-                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
-                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'resource')
-                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'resource:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
-                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                       SELECT 1 FROM candidate_ancestors ca
-                                       WHERE ca.object_id = c.id
-                                         AND pb.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
-                                   ))
-                               )
-                             )
-                             OR (
-                               pb.grant_kind = 'role'
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM role_grants rg
-                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
-                                   WHERE rg.root_role_id = pb.grant_id
-                                     AND mc.object_kind = 'resource'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
-                                     AND (
-                                         rg.scope_kind = 'platform'
-                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
-                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'resource')
-                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'resource:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
-                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                             SELECT 1 FROM candidate_ancestors ca
-                                             WHERE ca.object_id = c.id
-                                               AND rg.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
-                                         ))
-                                     )
-                                     AND rg.effect = 'allow'
-                                     AND rg.conditions = '{}'::jsonb
-                               )
-                             )
+                       SELECT 1 FROM grants g
+                       WHERE g.effect = 'allow' AND g.conditions = '{}'::jsonb
+                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = g.capability_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
                          )
+                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'resource', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND NOT EXISTS (
-                       SELECT 1
-                       FROM effective_access_edges() pb
-                         WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
-                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
-                         AND (
-                             (
-                               pb.effect = 'deny'
-                               AND pb.grant_kind = 'capability'
-                               AND EXISTS (
-                                   SELECT 1 FROM matching_capabilities mc
-                                   WHERE mc.capability_id = pb.grant_id
-                                     AND mc.object_kind = 'resource'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
-                               )
-                               AND (
-                                   pb.scope_kind = 'platform'
-                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
-                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'resource')
-                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'resource:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
-                                   OR (pb.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                       SELECT 1 FROM candidate_ancestors ca
-                                       WHERE ca.object_id = c.id
-                                         AND pb.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
-                                   ))
-                               )
-                             )
-                             OR (
-                               pb.grant_kind = 'role'
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM role_grants rg
-                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
-                                   WHERE rg.root_role_id = pb.grant_id
-                                     AND mc.object_kind = 'resource'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
-                                     AND (
-                                         rg.scope_kind = 'platform'
-                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
-                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'resource')
-                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'resource:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
-                                         OR (rg.scope_kind = 'group_object_type' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':resource:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'group_tree_object_type' AND EXISTS (
-                                             SELECT 1 FROM candidate_ancestors ca
-                                             WHERE ca.object_id = c.id
-                                               AND rg.scope_ref = ca.ancestor_id::text || ':resource:' || c.sub_kind
-                                         ))
-                                     )
-                                     AND rg.effect = 'deny'
-                               )
-                             )
+                       SELECT 1 FROM grants g
+                       WHERE g.effect = 'deny'
+                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = g.capability_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
                          )
+                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'resource', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                )
                __SELECT__"#
@@ -4018,33 +3774,27 @@ async fn authorized_group_ids(
         crate::models::enums::EntityStatus::Suspended => "suspended".to_string(),
     });
 
-    // Group objects can only be scoped by platform/tenant/object_kind/object,
-    // the (degenerate) object_type 'group:group', and the group-tree kinds
-    // `group_child_kind`/`group_descendant_kind`. The `group_*_objects` scope
-    // modes are CHECK-constrained to entity/resource objects, so they can never
-    // authorize a group and are intentionally not matched here.
-    let sql = r#"WITH RECURSIVE subject_groups(group_id) AS (
-                   SELECT gm.group_id
-                   FROM group_members gm
-                   JOIN groups g ON g.id = gm.group_id
-                    AND g.status = 'active'
-                    AND g.group_type = 'principal'
-                   WHERE gm.entity_id = $1
-                   UNION ALL
-                   SELECT gh.parent_id
-                   FROM group_hierarchy gh
-                   JOIN subject_groups sg ON sg.group_id = gh.child_id
-                   JOIN groups parent ON parent.id = gh.parent_id
-                    AND parent.status = 'active'
-                    AND parent.group_type = 'principal'
-               ),
-               target_groups(id) AS (
+    // Scope matching is delegated to the shared `grant_scope_matches` predicate
+    // (the same logic the PDP's Rust path mirrors). For groups the relevant
+    // scopes are platform/tenant/object_kind/object plus `group_child_kind`/
+    // `group_descendant_kind`; the `group_*_objects` scope modes are
+    // CHECK-constrained to entity/resource objects, so they never target a group.
+    let sql = r#"WITH RECURSIVE target_groups(id) AS (
                    SELECT $6::uuid WHERE $6::uuid IS NOT NULL
                    UNION ALL
                    SELECT gh.child_id
                    FROM group_hierarchy gh
                    JOIN target_groups tg ON tg.id = gh.parent_id
                    WHERE $7::boolean
+               ),
+               grants AS (
+                   SELECT * FROM subject_effective_grants($1)
+               ),
+               caps AS (
+                   SELECT a.id AS capability_id, aa.object_type
+                   FROM actions a
+                   JOIN action_applicability aa ON aa.action_id = a.id
+                   WHERE a.name = $2 AND aa.object_kind = 'group'
                ),
                candidates AS (
                    SELECT g.id, 'group'::text AS sub_kind, g.tenant_id, g.created_at,
@@ -4066,165 +3816,40 @@ async fn authorized_group_ids(
                    FROM candidate_ancestors ca
                    JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
                ),
-               matching_capabilities AS (
-                   SELECT c.id AS capability_id, ca.object_kind, ca.object_type
-                   FROM actions c
-                   JOIN action_applicability ca ON ca.action_id = c.id
-                   WHERE c.name = $2
-               ),
-               role_grants AS (
-                   SELECT rpb.role_id AS root_role_id,
-                          CASE
-                              WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
-                              WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
-                              ELSE pb.scope_mode
-                          END AS scope_kind,
-                          CASE
-                              WHEN pb.scope_mode = 'platform' THEN NULL
-                              WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
-                              WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
-                              WHEN pb.scope_mode = 'object_type' THEN pb.object_type
-                              WHEN pb.scope_mode = 'object' THEN pb.object_id::text
-                              WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
-                              WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
-                          END AS scope_ref,
-                          pba.action_id AS capability_id,
-                          pb.effect AS effect,
-                          pb.conditions AS conditions
-                   FROM role_permission_blocks rpb
-                   JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-                   JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+               candidate_ancestor_ids AS (
+                   SELECT object_id, array_agg(ancestor_id) AS ancestors
+                   FROM candidate_ancestors
+                   GROUP BY object_id
                ),
                authorized AS (
                    SELECT c.id, c.created_at
                    FROM candidates c
+                   LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
                    WHERE EXISTS (
-                       SELECT 1
-                       FROM effective_access_edges() pb
-                       WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
-                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
-                         AND pb.effect = 'allow'
-                         AND pb.conditions = '{}'::jsonb
-                         AND (
-                             (
-                               pb.grant_kind = 'capability'
-                               AND EXISTS (
-                                   SELECT 1 FROM matching_capabilities mc
-                                   WHERE mc.capability_id = pb.grant_id
-                                     AND mc.object_kind = 'group'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
-                               )
-                               AND (
-                                   pb.scope_kind = 'platform'
-                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
-                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'group')
-                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'group:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
-                                   OR (pb.scope_kind = 'group_child_kind' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':group')
-                                   OR (pb.scope_kind = 'group_descendant_kind' AND (
-                                       (c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':group')
-                                       OR EXISTS (
-                                           SELECT 1 FROM candidate_ancestors ca
-                                           WHERE ca.object_id = c.id
-                                             AND pb.scope_ref = ca.ancestor_id::text || ':group'
-                                       )
-                                   ))
-                               )
-                             )
-                             OR (
-                               pb.grant_kind = 'role'
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM role_grants rg
-                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
-                                   WHERE rg.root_role_id = pb.grant_id
-                                     AND mc.object_kind = 'group'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
-                                     AND (
-                                         rg.scope_kind = 'platform'
-                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
-                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'group')
-                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'group:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
-                                         OR (rg.scope_kind = 'group_child_kind' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':group')
-                                         OR (rg.scope_kind = 'group_descendant_kind' AND (
-                                             (c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':group')
-                                             OR EXISTS (
-                                                 SELECT 1 FROM candidate_ancestors ca
-                                                 WHERE ca.object_id = c.id
-                                                   AND rg.scope_ref = ca.ancestor_id::text || ':group'
-                                             )
-                                         ))
-                                     )
-                                     AND rg.effect = 'allow'
-                                     AND rg.conditions = '{}'::jsonb
-                               )
-                             )
+                       SELECT 1 FROM grants g
+                       WHERE g.effect = 'allow' AND g.conditions = '{}'::jsonb
+                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = g.capability_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
                          )
+                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'group', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND NOT EXISTS (
-                       SELECT 1
-                       FROM effective_access_edges() pb
-                         WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
-                           OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
-                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
-                         AND (
-                             (
-                               pb.effect = 'deny'
-                               AND pb.grant_kind = 'capability'
-                               AND EXISTS (
-                                   SELECT 1 FROM matching_capabilities mc
-                                   WHERE mc.capability_id = pb.grant_id
-                                     AND mc.object_kind = 'group'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
-                               )
-                               AND (
-                                   pb.scope_kind = 'platform'
-                                   OR (pb.scope_kind = 'tenant' AND pb.scope_ref = c.tenant_id::text)
-                                   OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = 'group')
-                                   OR (pb.scope_kind = 'object_type' AND pb.scope_ref = 'group:' || c.sub_kind)
-                                   OR (pb.scope_kind = 'object' AND pb.scope_ref = c.id::text)
-                                   OR (pb.scope_kind = 'group_child_kind' AND c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':group')
-                                   OR (pb.scope_kind = 'group_descendant_kind' AND (
-                                       (c.parent_group_id IS NOT NULL AND pb.scope_ref = c.parent_group_id::text || ':group')
-                                       OR EXISTS (
-                                           SELECT 1 FROM candidate_ancestors ca
-                                           WHERE ca.object_id = c.id
-                                             AND pb.scope_ref = ca.ancestor_id::text || ':group'
-                                       )
-                                   ))
-                               )
-                             )
-                             OR (
-                               pb.grant_kind = 'role'
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM role_grants rg
-                                   JOIN matching_capabilities mc ON mc.capability_id = rg.capability_id
-                                   WHERE rg.root_role_id = pb.grant_id
-                                     AND mc.object_kind = 'group'
-                                     AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
-                                     AND (
-                                         rg.scope_kind = 'platform'
-                                         OR (rg.scope_kind = 'tenant' AND rg.scope_ref = c.tenant_id::text)
-                                         OR (rg.scope_kind = 'object_kind' AND rg.scope_ref = 'group')
-                                         OR (rg.scope_kind = 'object_type' AND rg.scope_ref = 'group:' || c.sub_kind)
-                                         OR (rg.scope_kind = 'object' AND rg.scope_ref = c.id::text)
-                                         OR (rg.scope_kind = 'group_child_kind' AND c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':group')
-                                         OR (rg.scope_kind = 'group_descendant_kind' AND (
-                                             (c.parent_group_id IS NOT NULL AND rg.scope_ref = c.parent_group_id::text || ':group')
-                                             OR EXISTS (
-                                                 SELECT 1 FROM candidate_ancestors ca
-                                                 WHERE ca.object_id = c.id
-                                                   AND rg.scope_ref = ca.ancestor_id::text || ':group'
-                                             )
-                                         ))
-                                     )
-                                     AND rg.effect = 'deny'
-                               )
-                             )
+                       SELECT 1 FROM grants g
+                       WHERE g.effect = 'deny'
+                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = g.capability_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
                          )
+                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'group', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                )
                SELECT id, COUNT(*) OVER() AS total
@@ -4773,89 +4398,13 @@ pub async fn effective_grants_for_subject(
     entity_id: Uuid,
 ) -> Result<Vec<EffectiveGrant>, AppError> {
     use sqlx::Row;
-    // The scope-column derivation and the group-path provenance are shared by
-    // both branches; permission_blocks store scope as columns, the readers
-    // compare a (scope_kind, scope_ref) pair, and `via` records how the subject
-    // reaches the grant (directly or through a principal group).
+    // Canonical grant expansion lives in the `subject_effective_grants` SQL
+    // function (migration 001), shared by this PDP path and every authorized
+    // listing reader so scope/effect/conditions semantics cannot drift.
     let rows = sqlx::query(
-        r#"WITH RECURSIVE subject_groups(group_id, path) AS (
-               SELECT gm.group_id, g.name
-               FROM group_members gm
-               JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
-               WHERE gm.entity_id = $1
-               UNION ALL
-               SELECT gh.parent_id, parent.name || ' -> ' || sg.path
-               FROM group_hierarchy gh
-               JOIN subject_groups sg ON sg.group_id = gh.child_id
-               JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
-           )
-           SELECT dp.id AS assignment_id,
-                  pb.id AS block_id,
-                  NULL::uuid AS role_id,
-                  NULL::text AS role_name,
-                  CASE WHEN dp.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
-                  dp.tenant_id AS tenant_boundary,
-                  CASE
-                    WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
-                    WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
-                    WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
-                    WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
-                    ELSE pb.scope_mode
-                  END AS scope_kind,
-                  CASE
-                    WHEN pb.scope_mode = 'platform' THEN NULL
-                    WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
-                    WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
-                    WHEN pb.scope_mode = 'object_type' THEN pb.object_type
-                    WHEN pb.scope_mode = 'object' THEN pb.object_id::text
-                    WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
-                    WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
-                    WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
-                  END AS scope_ref,
-                  pba.action_id AS capability_id,
-                  pb.effect,
-                  pb.conditions
-           FROM direct_policies dp
-           JOIN permission_blocks pb ON pb.id = dp.permission_block_id
-           JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
-           LEFT JOIN subject_groups sg ON dp.subject_kind = 'group' AND sg.group_id = dp.subject_id
-           WHERE (dp.subject_kind = 'entity' AND dp.subject_id = $1)
-              OR (dp.subject_kind = 'group' AND sg.group_id IS NOT NULL)
-           UNION ALL
-           SELECT ra.id AS assignment_id,
-                  pb.id AS block_id,
-                  ra.role_id AS role_id,
-                  r.name AS role_name,
-                  CASE WHEN ra.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
-                  ra.tenant_id AS tenant_boundary,
-                  CASE
-                    WHEN pb.scope_mode = 'group_direct_objects' THEN 'group_object_type'
-                    WHEN pb.scope_mode = 'group_descendant_objects' THEN 'group_tree_object_type'
-                    WHEN pb.scope_mode = 'group_child_groups' THEN 'group_child_kind'
-                    WHEN pb.scope_mode = 'group_descendant_groups' THEN 'group_descendant_kind'
-                    ELSE pb.scope_mode
-                  END AS scope_kind,
-                  CASE
-                    WHEN pb.scope_mode = 'platform' THEN NULL
-                    WHEN pb.scope_mode = 'tenant' THEN pb.tenant_id::text
-                    WHEN pb.scope_mode = 'object_kind' THEN pb.object_kind
-                    WHEN pb.scope_mode = 'object_type' THEN pb.object_type
-                    WHEN pb.scope_mode = 'object' THEN pb.object_id::text
-                    WHEN pb.scope_mode = 'group' THEN pb.group_id::text || ':group'
-                    WHEN pb.scope_mode IN ('group_direct_objects', 'group_descendant_objects') THEN pb.group_id::text || ':' || pb.object_type
-                    WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
-                  END AS scope_ref,
-                  pba.action_id AS capability_id,
-                  pb.effect,
-                  pb.conditions
-           FROM role_assignments ra
-           JOIN roles r ON r.id = ra.role_id
-           JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
-           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-           JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
-           LEFT JOIN subject_groups sg ON ra.subject_kind = 'group' AND sg.group_id = ra.subject_id
-           WHERE (ra.subject_kind = 'entity' AND ra.subject_id = $1)
-              OR (ra.subject_kind = 'group' AND sg.group_id IS NOT NULL)"#,
+        r#"SELECT assignment_id, block_id, role_id, role_name, via, tenant_boundary,
+                  scope_kind, scope_ref, capability_id, effect, conditions
+           FROM subject_effective_grants($1)"#,
     )
     .bind(entity_id)
     .fetch_all(pool)
