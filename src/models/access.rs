@@ -137,7 +137,12 @@ pub struct ExplainCapability {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EvaluatedBinding {
+    /// The assignment that confers this grant (`direct_policies.id` /
+    /// `role_assignments.id`) — identifies *which* assignment granted access.
     pub id: Uuid,
+    /// The permission block backing the grant. Distinct from `id` because one
+    /// shared block can back many assignments.
+    pub block_id: Uuid,
     pub effect: Effect,
     pub grant_kind: GrantKind,
     pub grant_id: Uuid,

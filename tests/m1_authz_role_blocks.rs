@@ -304,3 +304,67 @@ async fn role_linked_conditional_allow_block_honours_conditions() {
 
     cleanup(&p, tenant_id, entity_id, channel_id).await;
 }
+
+/// An explain binding identifies both the assignment that conferred access and
+/// the backing block. With shared blocks the assignment id is what tells callers
+/// *which* grant applied; the refactor must not collapse it into the block id.
+#[tokio::test]
+#[ignore]
+async fn explain_binding_carries_assignment_and_block_ids() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let entity_id = make_service_entity(&p, tenant_id).await;
+    let channel_id = make_channel(&p, tenant_id).await;
+    let read_cap = read_capability_id(&p).await;
+
+    let policy = atom::authz::repo::create_policy(
+        &p,
+        CreatePolicyBinding {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: entity_id,
+            grant_kind: GrantKind::Capability,
+            grant_id: read_cap,
+            scope_kind: ScopeKind::ObjectType,
+            scope_ref: Some("resource:channel".into()),
+            effect: Effect::Allow,
+            conditions: json!({}),
+        },
+    )
+    .await
+    .expect("create direct policy");
+
+    let block_id: Uuid =
+        sqlx::query_scalar("SELECT permission_block_id FROM direct_policies WHERE id = $1")
+            .bind(policy.id)
+            .fetch_one(&p)
+            .await
+            .expect("policy block id");
+
+    let resp = atom::authz::engine::explain(
+        &p,
+        &AuthzRequest {
+            subject_id: entity_id,
+            action: "read".into(),
+            resource_id: Some(channel_id),
+            object_kind: None,
+            object_id: None,
+            context: json!({}),
+        },
+    )
+    .await
+    .expect("explain");
+
+    assert!(resp.allowed, "{}", resp.reason);
+    let matched = resp.matched_binding.expect("matched binding present");
+    assert_eq!(
+        matched.id, policy.id,
+        "binding id must identify the direct-policy assignment"
+    );
+    assert_eq!(
+        matched.block_id, block_id,
+        "binding must also carry the backing block id"
+    );
+
+    cleanup(&p, tenant_id, entity_id, channel_id).await;
+}

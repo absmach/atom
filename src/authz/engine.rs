@@ -579,7 +579,8 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
             Some(reason) => ("skipped".to_string(), Some(reason.to_string())),
         };
         let evaluated_binding = EvaluatedBinding {
-            id: grant.block_id,
+            id: grant.assignment_id,
+            block_id: grant.block_id,
             effect: grant.effect.clone(),
             grant_kind: if grant.role_id.is_some() {
                 GrantKind::Role

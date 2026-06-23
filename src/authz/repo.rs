@@ -464,6 +464,10 @@ pub struct ExpandedRoleGrant {
 /// (incrementally) the other authorization readers.
 #[derive(Debug, Clone)]
 pub struct EffectiveGrant {
+    /// The assignment that confers this grant: the `direct_policies.id` or the
+    /// `role_assignments.id` row. With shared blocks this is what identifies
+    /// *which* assignment granted access, distinct from the block itself.
+    pub assignment_id: Uuid,
     /// The permission block backing this grant (for `explain` provenance).
     pub block_id: Uuid,
     /// `None` for a direct policy; `Some(role_id)` when the grant is reached
@@ -5280,7 +5284,8 @@ pub async fn effective_grants_for_subject(
                JOIN subject_groups sg ON sg.group_id = gh.child_id
                JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
            )
-           SELECT pb.id AS block_id,
+           SELECT dp.id AS assignment_id,
+                  pb.id AS block_id,
                   NULL::uuid AS role_id,
                   NULL::text AS role_name,
                   CASE WHEN dp.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
@@ -5312,7 +5317,8 @@ pub async fn effective_grants_for_subject(
            WHERE (dp.subject_kind = 'entity' AND dp.subject_id = $1)
               OR (dp.subject_kind = 'group' AND sg.group_id IS NOT NULL)
            UNION ALL
-           SELECT pb.id AS block_id,
+           SELECT ra.id AS assignment_id,
+                  pb.id AS block_id,
                   ra.role_id AS role_id,
                   r.name AS role_name,
                   CASE WHEN ra.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
@@ -5355,6 +5361,7 @@ pub async fn effective_grants_for_subject(
         .map(|row| {
             let scope_kind_text: String = row.try_get("scope_kind").map_err(db_err)?;
             Ok(EffectiveGrant {
+                assignment_id: row.try_get("assignment_id").map_err(db_err)?,
                 block_id: row.try_get("block_id").map_err(db_err)?,
                 role_id: row.try_get("role_id").map_err(db_err)?,
                 role_name: row.try_get("role_name").map_err(db_err)?,
