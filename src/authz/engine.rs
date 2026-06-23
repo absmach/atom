@@ -64,8 +64,6 @@ pub(crate) async fn resolve_object(
     pool: &PgPool,
     req: &AuthzRequest,
 ) -> Result<Option<ProtectedObject>, AppError> {
-    use sqlx::Row;
-
     if req.object_kind.as_deref() == Some("platform") {
         if req.object_id.is_some() {
             return Err(AppError::bad_request(
@@ -98,23 +96,9 @@ pub(crate) async fn resolve_object(
                 // M3: load the tenant regardless of status so the engine can
                 // deny with a state-aware reason ("tenant is frozen" etc.)
                 // rather than a generic "not found".
-                let row = sqlx::query("SELECT id, name, attributes FROM tenants WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(AppError::Database)?;
-                Ok(row.map(|r| ProtectedObject {
-                    id,
-                    coarse_kind: "tenant".to_string(),
-                    kind: "tenant".to_string(),
-                    name: r.try_get::<String, _>("name").ok(),
-                    tenant_id: Some(id),
-                    attributes: r
-                        .try_get::<Value, _>("attributes")
-                        .unwrap_or(Value::Object(Default::default())),
-                    parent_group_id: None,
-                    ancestor_group_ids: Vec::new(),
-                }))
+                Ok(repo::load_authz_tenant(pool, id)
+                    .await?
+                    .map(tenant_object_from_record))
             }
             "entity" => load_entity_as_object(pool, id).await,
             "group" => load_group_as_object(pool, id).await,
@@ -139,170 +123,89 @@ async fn load_entity_as_object(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.attributes, gep.group_id AS parent_group_id
-           FROM entities e
-           LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
-           WHERE e.id = $1 AND e.status <> 'inactive'"#,
+    load_protected_object(
+        pool,
+        "entity",
+        repo::load_authz_entity_object(pool, id).await?,
     )
-    .bind(id)
-    .fetch_optional(pool)
     .await
-    .map_err(AppError::Database)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let parent_group_id = row
-        .try_get::<Option<Uuid>, _>("parent_group_id")
-        .unwrap_or(None);
-    let ancestor_group_ids = match parent_group_id {
-        Some(parent_group_id) => group_ancestor_ids(pool, parent_group_id).await?,
-        None => Vec::new(),
-    };
-    Ok(Some(ProtectedObject {
-        id,
-        coarse_kind: "entity".to_string(),
-        kind: row
-            .try_get::<String, _>("kind")
-            .unwrap_or_else(|_| String::new()),
-        name: row.try_get::<String, _>("name").ok(),
-        tenant_id: row.try_get::<Option<Uuid>, _>("tenant_id").unwrap_or(None),
-        attributes: row
-            .try_get::<Value, _>("attributes")
-            .unwrap_or(Value::Object(Default::default())),
-        parent_group_id,
-        ancestor_group_ids,
-    }))
 }
 
 async fn load_resource(pool: &PgPool, id: Uuid) -> Result<Option<ProtectedObject>, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"SELECT r.id, r.kind, r.name, r.tenant_id, r.attributes, grp.group_id AS parent_group_id
-           FROM resources r
-           LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
-           WHERE r.id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Database)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let parent_group_id = row
-        .try_get::<Option<Uuid>, _>("parent_group_id")
-        .unwrap_or(None);
-    let ancestor_group_ids = match parent_group_id {
-        Some(parent_group_id) => group_ancestor_ids(pool, parent_group_id).await?,
-        None => Vec::new(),
-    };
-    Ok(Some(ProtectedObject {
-        id,
-        coarse_kind: "resource".to_string(),
-        kind: row
-            .try_get::<String, _>("kind")
-            .unwrap_or_else(|_| String::new()),
-        name: row.try_get::<Option<String>, _>("name").unwrap_or(None),
-        tenant_id: row.try_get::<Option<Uuid>, _>("tenant_id").unwrap_or(None),
-        attributes: row
-            .try_get::<Value, _>("attributes")
-            .unwrap_or(Value::Object(Default::default())),
-        parent_group_id,
-        ancestor_group_ids,
-    }))
+    load_protected_object(pool, "resource", repo::load_authz_resource(pool, id).await?).await
 }
 
 async fn load_group_as_object(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"SELECT g.id, g.name, g.tenant_id, g.attributes, gh.parent_id AS parent_group_id
-           FROM groups g
-           LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.id = $1 AND g.status <> 'inactive'"#,
+    load_protected_object(
+        pool,
+        "group",
+        repo::load_authz_group_object(pool, id).await?,
     )
-    .bind(id)
-    .fetch_optional(pool)
     .await
-    .map_err(AppError::Database)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let parent_group_id = row
-        .try_get::<Option<Uuid>, _>("parent_group_id")
-        .unwrap_or(None);
-    let ancestor_group_ids = match parent_group_id {
-        Some(parent_group_id) => group_ancestor_ids(pool, parent_group_id).await?,
-        None => Vec::new(),
-    };
-    Ok(Some(ProtectedObject {
-        id,
-        coarse_kind: "group".to_string(),
-        kind: "group".to_string(),
-        name: row.try_get::<String, _>("name").ok(),
-        tenant_id: row.try_get::<Option<Uuid>, _>("tenant_id").unwrap_or(None),
-        attributes: row
-            .try_get::<Value, _>("attributes")
-            .unwrap_or(Value::Object(Default::default())),
-        parent_group_id,
-        ancestor_group_ids,
-    }))
 }
 
 async fn load_credential_as_object(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"
-        SELECT c.id, c.kind, c.identifier, c.metadata, e.tenant_id
-        FROM credentials c
-        JOIN entities e ON e.id = c.entity_id
-        WHERE c.id = $1
-        "#,
+    load_protected_object(
+        pool,
+        "credential",
+        repo::load_authz_credential_object(pool, id).await?,
     )
-    .bind(id)
-    .fetch_optional(pool)
     .await
-    .map_err(AppError::Database)?;
-    Ok(row.map(|row| ProtectedObject {
-        id,
-        coarse_kind: "credential".to_string(),
-        kind: row
-            .try_get::<String, _>("kind")
-            .unwrap_or_else(|_| "credential".to_string()),
-        name: row
-            .try_get::<Option<String>, _>("identifier")
-            .unwrap_or(None),
-        tenant_id: row.try_get::<Option<Uuid>, _>("tenant_id").unwrap_or(None),
-        attributes: row
-            .try_get::<Value, _>("metadata")
-            .unwrap_or(Value::Object(Default::default())),
-        parent_group_id: None,
-        ancestor_group_ids: Vec::new(),
-    }))
 }
 
-async fn group_ancestor_ids(pool: &PgPool, group_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar(
-        r#"WITH RECURSIVE ancestors(id) AS (
-               SELECT parent_id FROM group_hierarchy WHERE child_id = $1
-               UNION ALL
-               SELECT gh.parent_id
-               FROM group_hierarchy gh
-               JOIN ancestors a ON gh.child_id = a.id
-           )
-           SELECT id FROM ancestors"#,
-    )
-    .bind(group_id)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)
+async fn load_protected_object(
+    pool: &PgPool,
+    coarse_kind: &str,
+    record: Option<repo::AuthzObjectRecord>,
+) -> Result<Option<ProtectedObject>, AppError> {
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let ancestor_group_ids = match record.parent_group_id {
+        Some(parent_group_id) => repo::group_ancestor_ids(pool, parent_group_id).await?,
+        None => Vec::new(),
+    };
+    Ok(Some(protected_object_from_record(
+        coarse_kind,
+        record,
+        ancestor_group_ids,
+    )))
+}
+
+fn protected_object_from_record(
+    coarse_kind: &str,
+    record: repo::AuthzObjectRecord,
+    ancestor_group_ids: Vec<Uuid>,
+) -> ProtectedObject {
+    ProtectedObject {
+        id: record.id,
+        coarse_kind: coarse_kind.to_string(),
+        kind: record.kind,
+        name: record.name,
+        tenant_id: record.tenant_id,
+        attributes: record.attributes,
+        parent_group_id: record.parent_group_id,
+        ancestor_group_ids,
+    }
+}
+
+fn tenant_object_from_record(tenant: repo::AuthzTenantRecord) -> ProtectedObject {
+    ProtectedObject {
+        id: tenant.id,
+        coarse_kind: "tenant".to_string(),
+        kind: "tenant".to_string(),
+        name: Some(tenant.name),
+        tenant_id: Some(tenant.id),
+        attributes: tenant.attributes,
+        parent_group_id: None,
+        ancestor_group_ids: Vec::new(),
+    }
 }
 
 /// Everything `evaluate` and `explain` need once the request has been resolved
@@ -357,36 +260,22 @@ async fn load_decision_context(
     pool: &PgPool,
     req: &AuthzRequest,
 ) -> Result<DecisionContext, AppError> {
-    use sqlx::Row;
-
-    let entity_row = sqlx::query(
-        "SELECT id, name, kind, tenant_id, status, attributes FROM entities WHERE id = $1",
-    )
-    .bind(req.subject_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let Some(entity_row) = entity_row else {
+    let Some(entity) = repo::load_authz_subject(pool, req.subject_id).await? else {
         return Ok(denied(AuthzResponse::deny("subject not found"), None, None));
     };
 
     let subject = ExplainSubject {
-        id: entity_row.try_get("id").map_err(AppError::Database)?,
-        name: entity_row.try_get("name").map_err(AppError::Database)?,
-        kind: entity_row.try_get("kind").map_err(AppError::Database)?,
-        status: entity_row.try_get("status").map_err(AppError::Database)?,
+        id: entity.id,
+        name: entity.name,
+        kind: entity.kind,
+        status: entity.status,
     };
     let entity_ctx = EntityEvalContext {
         id: subject.id,
         kind: subject.kind.clone(),
-        tenant_id: entity_row
-            .try_get("tenant_id")
-            .map_err(AppError::Database)?,
+        tenant_id: entity.tenant_id,
         status: subject.status.clone(),
-        attributes: entity_row
-            .try_get("attributes")
-            .map_err(AppError::Database)?,
+        attributes: entity.attributes,
     };
 
     if subject.status != EntityStatus::Active {
@@ -692,43 +581,40 @@ enum TenantLoad {
 /// short-circuit and the ABAC context (previously two separate queries of the
 /// same row).
 async fn load_tenant(pool: &PgPool, tenant_id: Option<Uuid>) -> Result<TenantLoad, AppError> {
-    use sqlx::Row;
-
     let Some(tenant_id) = tenant_id else {
         return Ok(TenantLoad::None);
     };
 
-    let row = sqlx::query("SELECT id, status, attributes FROM tenants WHERE id = $1")
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::Database)?;
+    Ok(tenant_load_from_record(
+        repo::load_authz_tenant(pool, tenant_id).await?,
+    ))
+}
 
-    let Some(row) = row else {
-        return Ok(TenantLoad::None);
+fn tenant_load_from_record(tenant: Option<repo::AuthzTenantRecord>) -> TenantLoad {
+    let Some(tenant) = tenant else {
+        return TenantLoad::None;
     };
 
-    let status: TenantStatus = row.try_get("status").map_err(AppError::Database)?;
-    let state = match status {
+    let state = match tenant.status {
         TenantStatus::Active => {
-            return Ok(TenantLoad::Active(TenantEvalContext {
-                id: row.try_get("id").map_err(AppError::Database)?,
-                status,
-                attributes: row.try_get("attributes").map_err(AppError::Database)?,
-            }));
+            return TenantLoad::Active(TenantEvalContext {
+                id: tenant.id,
+                status: tenant.status,
+                attributes: tenant.attributes,
+            });
         }
         TenantStatus::Inactive => "inactive",
         TenantStatus::Frozen => "frozen",
         TenantStatus::Deleted => "deleted",
     };
 
-    Ok(TenantLoad::Inactive(AuthzResponse::deny_with_details(
+    TenantLoad::Inactive(AuthzResponse::deny_with_details(
         format!("tenant is {state}"),
         json!({
-            "tenant_id": tenant_id,
+            "tenant_id": tenant.id,
             "tenant_status": state,
         }),
-    )))
+    ))
 }
 
 fn object_not_found_reason(req: &AuthzRequest) -> String {
@@ -1108,6 +994,81 @@ mod tests {
         assert_eq!(ctx["tenant"]["id"], json!(tenant_id));
         assert_eq!(ctx["tenant"]["status"], "active");
         assert_eq!(ctx["context"]["mfa_verified"], true);
+    }
+
+    #[test]
+    fn protected_object_mapping_preserves_repo_record_and_ancestors() {
+        let object_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let parent_group_id = Uuid::new_v4();
+        let ancestor_group_id = Uuid::new_v4();
+        let object = protected_object_from_record(
+            "resource",
+            repo::AuthzObjectRecord {
+                id: object_id,
+                kind: "channel".into(),
+                name: Some("telemetry".into()),
+                tenant_id: Some(tenant_id),
+                attributes: json!({"region": "eu"}),
+                parent_group_id: Some(parent_group_id),
+            },
+            vec![ancestor_group_id],
+        );
+
+        assert_eq!(object.id, object_id);
+        assert_eq!(object.coarse_kind, "resource");
+        assert_eq!(object.kind, "channel");
+        assert_eq!(object.name.as_deref(), Some("telemetry"));
+        assert_eq!(object.tenant_id, Some(tenant_id));
+        assert_eq!(object.attributes, json!({"region": "eu"}));
+        assert_eq!(object.parent_group_id, Some(parent_group_id));
+        assert_eq!(object.ancestor_group_ids, vec![ancestor_group_id]);
+    }
+
+    #[test]
+    fn tenant_record_mapping_preserves_lifecycle_decision() {
+        let tenant_id = Uuid::new_v4();
+        let active = tenant_load_from_record(Some(repo::AuthzTenantRecord {
+            id: tenant_id,
+            name: "active".into(),
+            status: TenantStatus::Active,
+            attributes: json!({"region": "eu"}),
+        }));
+        match active {
+            TenantLoad::Active(context) => {
+                assert_eq!(context.id, tenant_id);
+                assert_eq!(context.status, TenantStatus::Active);
+                assert_eq!(context.attributes, json!({"region": "eu"}));
+            }
+            TenantLoad::None | TenantLoad::Inactive(_) => {
+                panic!("active tenant must produce an active context")
+            }
+        }
+
+        let frozen = tenant_load_from_record(Some(repo::AuthzTenantRecord {
+            id: tenant_id,
+            name: "frozen".into(),
+            status: TenantStatus::Frozen,
+            attributes: json!({}),
+        }));
+        match frozen {
+            TenantLoad::Inactive(response) => {
+                assert!(!response.allowed);
+                assert_eq!(response.reason, "tenant is frozen");
+                assert_eq!(
+                    response.details,
+                    Some(json!({
+                        "tenant_id": tenant_id,
+                        "tenant_status": "frozen",
+                    }))
+                );
+            }
+            TenantLoad::None | TenantLoad::Active(_) => {
+                panic!("frozen tenant must produce a lifecycle deny")
+            }
+        }
+
+        assert!(matches!(tenant_load_from_record(None), TenantLoad::None));
     }
 
     // ─── scope_matches ────────────────────────────────────────────────────────
@@ -1637,6 +1598,107 @@ mod db_tests {
             .bind(entity_id)
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn repository_loaders_resolve_group_and_credential_objects() {
+        let pool = pool().await;
+        let entity_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO entities (id, kind, name, status, attributes)
+             VALUES ($1, 'human', $2, 'active', $3)",
+        )
+        .bind(entity_id)
+        .bind(format!("loader-subject-{entity_id}"))
+        .bind(json!({"department": "ops"}))
+        .execute(&pool)
+        .await
+        .expect("insert entity");
+
+        let grandparent_group_id = Uuid::new_v4();
+        let parent_group_id = Uuid::new_v4();
+        let child_group_id = Uuid::new_v4();
+        for (group_id, name) in [
+            (grandparent_group_id, "loader-grandparent"),
+            (parent_group_id, "loader-parent"),
+            (child_group_id, "loader-child"),
+        ] {
+            sqlx::query(
+                "INSERT INTO object_groups (id, name, status, attributes)
+                 VALUES ($1, $2, 'active', $3)",
+            )
+            .bind(group_id)
+            .bind(format!("{name}-{group_id}"))
+            .bind(json!({"source": "db-test"}))
+            .execute(&pool)
+            .await
+            .expect("insert object group");
+        }
+        for (parent_id, child_id) in [
+            (grandparent_group_id, parent_group_id),
+            (parent_group_id, child_group_id),
+        ] {
+            sqlx::query(
+                "INSERT INTO object_group_hierarchy (parent_id, child_id)
+                 VALUES ($1, $2)",
+            )
+            .bind(parent_id)
+            .bind(child_id)
+            .execute(&pool)
+            .await
+            .expect("insert group hierarchy");
+        }
+
+        let group = resolve_object(
+            &pool,
+            &AuthzRequest {
+                subject_id: entity_id,
+                action: "read".into(),
+                resource_id: None,
+                object_kind: Some("group".into()),
+                object_id: Some(child_group_id),
+                context: json!({}),
+            },
+        )
+        .await
+        .expect("resolve group")
+        .expect("group exists");
+        assert_eq!(group.kind, "group");
+        assert_eq!(group.parent_group_id, Some(parent_group_id));
+        assert_eq!(group.ancestor_group_ids, vec![grandparent_group_id]);
+
+        let credential_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO credentials (id, entity_id, kind, identifier, metadata)
+             VALUES ($1, $2, 'api_key', $3, $4)",
+        )
+        .bind(credential_id)
+        .bind(entity_id)
+        .bind(format!("loader-key-{credential_id}"))
+        .bind(json!({"environment": "test"}))
+        .execute(&pool)
+        .await
+        .expect("insert credential");
+
+        let credential = resolve_object(
+            &pool,
+            &AuthzRequest {
+                subject_id: entity_id,
+                action: "revoke".into(),
+                resource_id: None,
+                object_kind: Some("credential".into()),
+                object_id: Some(credential_id),
+                context: json!({}),
+            },
+        )
+        .await
+        .expect("resolve credential")
+        .expect("credential exists");
+        assert_eq!(credential.kind, "api_key");
+        assert_eq!(credential.attributes, json!({"environment": "test"}));
+        assert_eq!(credential.parent_group_id, None);
+        assert!(credential.ancestor_group_ids.is_empty());
     }
 
     #[tokio::test]

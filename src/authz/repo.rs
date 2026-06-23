@@ -25,8 +25,8 @@ use crate::{
             ListCapabilities,
         },
         enums::{
-            ActionAssignmentDecision, CredentialKind, Effect, GrantKind, ObjectKind, ScopeKind,
-            SubjectKind,
+            ActionAssignmentDecision, CredentialKind, Effect, EntityKind, EntityStatus, GrantKind,
+            ObjectKind, ScopeKind, SubjectKind, TenantStatus,
         },
         policy::{
             CreateDirectPolicy, CreatePermissionBlock, CreatePolicyBinding, CreateRoleAssignment,
@@ -4368,6 +4368,152 @@ pub async fn expiring_credentials(
 }
 
 // ─── Engine helpers ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct AuthzSubjectRecord {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) kind: EntityKind,
+    pub(crate) tenant_id: Option<Uuid>,
+    pub(crate) status: EntityStatus,
+    pub(crate) attributes: Value,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct AuthzTenantRecord {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) status: TenantStatus,
+    pub(crate) attributes: Value,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct AuthzObjectRecord {
+    pub(crate) id: Uuid,
+    pub(crate) kind: String,
+    pub(crate) name: Option<String>,
+    pub(crate) tenant_id: Option<Uuid>,
+    pub(crate) attributes: Value,
+    pub(crate) parent_group_id: Option<Uuid>,
+}
+
+pub(crate) async fn load_authz_subject(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Option<AuthzSubjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzSubjectRecord>(
+        r#"SELECT id, name, kind, tenant_id, status, attributes
+           FROM entities
+           WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> Result<Option<AuthzTenantRecord>, AppError> {
+    sqlx::query_as::<_, AuthzTenantRecord>(
+        r#"SELECT id, name, status, attributes
+           FROM tenants
+           WHERE id = $1"#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_resource(
+    pool: &PgPool,
+    resource_id: Uuid,
+) -> Result<Option<AuthzObjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzObjectRecord>(
+        r#"SELECT r.id, r.kind, r.name, r.tenant_id, r.attributes,
+                  grp.group_id AS parent_group_id
+           FROM resources r
+           LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
+           WHERE r.id = $1"#,
+    )
+    .bind(resource_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_entity_object(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Option<AuthzObjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzObjectRecord>(
+        r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.attributes,
+                  gep.group_id AS parent_group_id
+           FROM entities e
+           LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
+           WHERE e.id = $1 AND e.status <> 'inactive'"#,
+    )
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_group_object(
+    pool: &PgPool,
+    group_id: Uuid,
+) -> Result<Option<AuthzObjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzObjectRecord>(
+        r#"SELECT g.id, 'group'::text AS kind, g.name, g.tenant_id, g.attributes,
+                  gh.parent_id AS parent_group_id
+           FROM groups g
+           LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
+           WHERE g.id = $1 AND g.status <> 'inactive'"#,
+    )
+    .bind(group_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_credential_object(
+    pool: &PgPool,
+    credential_id: Uuid,
+) -> Result<Option<AuthzObjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzObjectRecord>(
+        r#"SELECT c.id, c.kind, c.identifier AS name, e.tenant_id,
+                  c.metadata AS attributes, NULL::uuid AS parent_group_id
+           FROM credentials c
+           JOIN entities e ON e.id = c.entity_id
+           WHERE c.id = $1"#,
+    )
+    .bind(credential_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn group_ancestor_ids(
+    pool: &PgPool,
+    group_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        r#"WITH RECURSIVE ancestors(id) AS (
+               SELECT parent_id FROM group_hierarchy WHERE child_id = $1
+               UNION ALL
+               SELECT gh.parent_id
+               FROM group_hierarchy gh
+               JOIN ancestors a ON gh.child_id = a.id
+           )
+           SELECT id FROM ancestors"#,
+    )
+    .bind(group_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
+}
 
 /// Canonical grant expansion for a subject: the single flat list of effective
 /// grants (direct policies and role-linked blocks), with the subject's group
