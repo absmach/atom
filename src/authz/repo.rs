@@ -771,11 +771,13 @@ pub async fn replace_role_permission_block_links(
             ));
         }
     }
-    crate::guardrails::validate_role_permission_block_links(pool, role_id, &unique_block_ids)
-        .await?;
-
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, role_id).await?;
+    // Validate under the role lock so a concurrent role assignment cannot commit
+    // a prohibited combination against stale state: any other role-link or
+    // assignment mutator blocks on this lock and re-validates against our result.
+    crate::guardrails::validate_role_permission_block_links(pool, role_id, &unique_block_ids)
+        .await?;
     sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
         .bind(role_id)
         .execute(&mut *tx)
@@ -3084,8 +3086,13 @@ pub async fn create_role_assignment(
     pool: &PgPool,
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    // Lock the role and validate under the lock so a concurrent block-link
+    // mutation cannot add a prohibited block against stale state: it blocks on
+    // this same lock and re-validates against the assignment we are inserting.
+    lock_role(&mut tx, req.role_id).await?;
     validate_role_assignment(pool, &req).await?;
-    sqlx::query_as::<_, RoleAssignment>(
+    let assignment = sqlx::query_as::<_, RoleAssignment>(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, $2, $3, $4)
@@ -3095,9 +3102,11 @@ pub async fn create_role_assignment(
     .bind(req.subject_kind)
     .bind(req.subject_id)
     .bind(req.role_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(assignment)
 }
 
 pub async fn list_role_assignments(
@@ -4229,6 +4238,7 @@ async fn authorized_entity_ids(
                        FROM effective_access_edges() pb
                        WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
                            OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
                          AND pb.effect = 'allow'
                          AND pb.conditions = '{}'::jsonb
                          AND (
@@ -4287,6 +4297,7 @@ async fn authorized_entity_ids(
                        FROM effective_access_edges() pb
                          WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
                            OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
                          AND (
                              (
                                pb.effect = 'deny'
@@ -4457,6 +4468,7 @@ async fn authorized_resource_ids(
                        FROM effective_access_edges() pb
                        WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
                            OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
                          AND pb.effect = 'allow'
                          AND pb.conditions = '{}'::jsonb
                          AND (
@@ -4515,6 +4527,7 @@ async fn authorized_resource_ids(
                        FROM effective_access_edges() pb
                          WHERE ((pb.subject_kind = 'entity' AND pb.subject_id = $1)
                            OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM subject_groups)))
+                         AND (pb.tenant_id IS NULL OR pb.tenant_id = c.tenant_id)
                          AND (
                              (
                                pb.effect = 'deny'
@@ -4706,59 +4719,77 @@ pub async fn tenant_ids_for_capability(
     .map_err(db_err)
 }
 
+/// Tenants in which `entity_id` effectively holds `action_name` for `object_kind`,
+/// via a tenant-scoped or `object_kind`-scoped grant. Used to scope tenant-bounded
+/// listings (e.g. audit logs); platform-wide access is handled by the caller.
+///
+/// Reads the single canonical grant expansion so role-linked blocks carry their
+/// real effect and conditions: a role whose only matching block is a *deny* does
+/// not grant access (deny overrides), and a conditional allow is not listable
+/// without request context. The grant's assignment tenant boundary is honoured.
 pub async fn tenant_ids_for_action_on_object_kind(
     pool: &PgPool,
     entity_id: Uuid,
     action_name: &str,
     object_kind: &str,
 ) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar(
-        r#"WITH RECURSIVE group_paths(group_id) AS (
-               SELECT gm.group_id
-               FROM group_members gm
-               JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
-               WHERE gm.entity_id = $1
-               UNION ALL
-               SELECT gh.parent_id
-               FROM group_hierarchy gh
-               JOIN group_paths gp ON gp.group_id = gh.child_id
-               JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
-           )
-           SELECT DISTINCT
-             CASE
-               WHEN pb.scope_kind = 'tenant' THEN pb.scope_ref::uuid
-               ELSE pb.tenant_id
-             END AS tenant_id
-           FROM effective_access_edges() pb
-           WHERE (
-               (pb.subject_kind = 'entity' AND pb.subject_id = $1)
-               OR (pb.subject_kind = 'group' AND pb.subject_id IN (SELECT group_id FROM group_paths))
-           )
-             AND pb.effect = 'allow'
-             AND (
-               (pb.scope_kind = 'tenant' AND pb.scope_ref IS NOT NULL)
-               OR (pb.scope_kind = 'object_kind' AND pb.scope_ref = $3 AND pb.tenant_id IS NOT NULL)
-             )
-             AND (
-               (pb.grant_kind = 'capability' AND pb.grant_id IN (
-                   SELECT id FROM actions WHERE name = $2
-               ))
-               OR (pb.grant_kind = 'role' AND pb.grant_id IN (
-                   SELECT role_id
-                   FROM effective_role_actions() rc
-                   JOIN actions c ON c.id = rc.capability_id
-                   WHERE c.name = $2
-                   UNION
-                   SELECT NULL::uuid WHERE FALSE
-               ))
-             )"#,
-    )
-    .bind(entity_id)
-    .bind(action_name)
-    .bind(object_kind)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    let Some(action_id): Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+            .bind(action_name)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+    else {
+        return Ok(Vec::new());
+    };
+
+    let grants = effective_grants_for_subject(pool, entity_id).await?;
+    let mut allowed: HashSet<Uuid> = HashSet::new();
+    let mut denied: HashSet<Uuid> = HashSet::new();
+    for grant in &grants {
+        if grant.capability_id != action_id {
+            continue;
+        }
+        // The tenant this grant pertains to for `object_kind`: a tenant-scoped
+        // grant names it directly; an object_kind-scoped grant applies within its
+        // assignment tenant.
+        let tenant = match grant.scope_kind {
+            ScopeKind::Tenant => grant
+                .scope_ref
+                .as_deref()
+                .and_then(|s| s.parse::<Uuid>().ok()),
+            ScopeKind::ObjectKind if grant.scope_ref.as_deref() == Some(object_kind) => {
+                grant.tenant_boundary
+            }
+            _ => continue,
+        };
+        let Some(tenant) = tenant else {
+            continue;
+        };
+        // Honour the assignment tenant boundary, as the PDP does.
+        if grant
+            .tenant_boundary
+            .is_some_and(|boundary| boundary != tenant)
+        {
+            continue;
+        }
+        match grant.effect {
+            // Any deny removes the tenant (deny overrides; conservative for a
+            // conditional deny, which we cannot evaluate without context).
+            Effect::Deny => {
+                denied.insert(tenant);
+            }
+            // Only an unconditional allow is listable without request context.
+            Effect::Allow if grant.conditions.as_object().is_some_and(|m| m.is_empty()) => {
+                allowed.insert(tenant);
+            }
+            Effect::Allow => {}
+        }
+    }
+    Ok(allowed
+        .into_iter()
+        .filter(|t| !denied.contains(t))
+        .collect())
 }
 
 pub async fn orphan_policies(

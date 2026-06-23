@@ -199,3 +199,91 @@ async fn successful_login_emits_auth_login_allow_with_entity_id() {
     .expect("login audit");
     assert_eq!(details["entity_id"], json!(entity_id));
 }
+
+/// Create a role carrying one tenant-scoped block (the given effect) for `read`,
+/// assigned to `subject`. Returns the role id.
+async fn read_role(pool: &sqlx::PgPool, tenant_id: Uuid, subject: Uuid, effect: &str) -> Uuid {
+    let read = capability_id(pool, "read").await;
+    let role = atom::authz::repo::create_role(
+        pool,
+        atom::models::role::CreateRole {
+            name: format!("m7-role-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("create role");
+    let block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, tenant_id, effect) VALUES ('tenant', $1, $2) RETURNING id",
+    )
+    .bind(tenant_id)
+    .bind(effect)
+    .fetch_one(pool)
+    .await
+    .expect("block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block)
+    .bind(read)
+    .execute(pool)
+    .await
+    .expect("block action");
+    atom::authz::repo::replace_role_permission_block_links(pool, role.id, &[block])
+        .await
+        .expect("link");
+    atom::authz::repo::create_role_assignment(
+        pool,
+        atom::models::policy::CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: subject,
+            role_id: role.id,
+        },
+    )
+    .await
+    .expect("assign role");
+    role.id
+}
+
+/// The audit-log tenant filter must honour role-block effect: a role whose only
+/// read block is a *deny* must not grant the tenant's audit logs (the legacy
+/// query treated any role with a read block as an unconditional allow).
+#[tokio::test]
+#[ignore]
+async fn audit_tenant_filter_honours_role_deny() {
+    let p = pool().await;
+    let t = tenant(&p).await;
+    let denied_subject = human(&p, Some(t)).await;
+    let allowed_subject = human(&p, Some(t)).await;
+
+    read_role(&p, t, denied_subject, "deny").await;
+    let tenants = atom::authz::repo::tenant_ids_for_action_on_object_kind(
+        &p,
+        denied_subject,
+        "read",
+        "audit_log",
+    )
+    .await
+    .expect("tenant ids");
+    assert!(
+        !tenants.contains(&t),
+        "a role whose only read block is a deny must not grant audit access, got: {tenants:?}"
+    );
+
+    // Control: a separate subject with an allow role does get the tenant.
+    read_role(&p, t, allowed_subject, "allow").await;
+    let tenants = atom::authz::repo::tenant_ids_for_action_on_object_kind(
+        &p,
+        allowed_subject,
+        "read",
+        "audit_log",
+    )
+    .await
+    .expect("tenant ids");
+    assert!(
+        tenants.contains(&t),
+        "a role with an allow read block must grant audit access"
+    );
+}

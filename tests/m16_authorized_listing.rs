@@ -476,3 +476,87 @@ async fn authorized_listing_honours_ancestor_group_deny() {
         .execute(&pool)
         .await;
 }
+
+/// An exact-object block whose assignment is bounded to a different tenant than
+/// the object's owner must not surface the object in a listing — the listing now
+/// compares the assignment edge's tenant with the candidate object's tenant, as
+/// the PDP and gates do.
+#[tokio::test]
+#[ignore]
+async fn authorized_listing_honours_assignment_tenant_boundary() {
+    let pool = common::pool().await;
+    let owner_tenant = make_tenant(&pool, "m16-owner").await; // owns the object
+    let other_tenant = make_tenant(&pool, "m16-other").await; // the assignment boundary
+    let subject_id = make_entity(&pool, other_tenant, "human", "subject").await;
+    let channel_id = make_resource(&pool, owner_tenant, "channel", "channel").await;
+    let read_id = action_id(&pool, "read").await;
+
+    // Exact-object read allow on the owner_tenant object.
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_id, effect)
+           VALUES ('object', $1, 'allow') RETURNING id"#,
+    )
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert object block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    // Assignment bounded to other_tenant — not the object's owner.
+    sqlx::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
+    )
+    .bind(other_tenant)
+    .bind(subject_id)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("cross-tenant direct policy");
+
+    let ids = authorized(
+        &pool,
+        subject_id,
+        "read",
+        "resource",
+        Some("resource:channel"),
+        owner_tenant,
+    )
+    .await;
+    assert!(
+        !ids.contains(&channel_id),
+        "a cross-tenant exact-object grant must not surface the object, got: {ids:?}"
+    );
+
+    // Control: rebind the assignment to the object's tenant → now listed.
+    sqlx::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
+        .bind(owner_tenant)
+        .bind(block_id)
+        .execute(&pool)
+        .await
+        .expect("rebind");
+    let ids = authorized(
+        &pool,
+        subject_id,
+        "read",
+        "resource",
+        Some("resource:channel"),
+        owner_tenant,
+    )
+    .await;
+    assert!(
+        ids.contains(&channel_id),
+        "a same-tenant exact-object grant must surface the object"
+    );
+
+    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+        .bind(channel_id)
+        .execute(&pool)
+        .await;
+}
