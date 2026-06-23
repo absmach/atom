@@ -334,3 +334,87 @@ async fn conditional_deny_blocks_gate() {
 
     cleanup(&p, tenant_id).await;
 }
+
+/// An object-scoped grant whose assignment is bounded to a *different* tenant
+/// than the object's owner must not satisfy an object gate. The gate resolves
+/// the object's tenant and applies the assignment tenant boundary, matching the
+/// PDP (which would deny). Without this the gate compared only the object UUID,
+/// permitting cross-tenant access through e.g. require_read_access.
+#[tokio::test]
+#[ignore]
+async fn object_gate_honours_assignment_tenant_boundary() {
+    let p = pool().await;
+    let owner_tenant = make_tenant(&p).await; // owns the object
+    let other_tenant = make_tenant(&p).await; // the assignment boundary
+    let actor = make_human(&p, other_tenant).await;
+
+    // Object: a channel in owner_tenant.
+    let object_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
+        .bind(object_id)
+        .bind(format!("gate-obj-{object_id}"))
+        .bind(owner_tenant)
+        .execute(&p)
+        .await
+        .expect("insert resource");
+
+    let read_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+        .fetch_one(&p)
+        .await
+        .expect("read cap");
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
+           VALUES ('object', $1, 'allow', '{}') RETURNING id"#,
+    )
+    .bind(object_id)
+    .fetch_one(&p)
+    .await
+    .expect("insert object block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(read_id)
+    .execute(&p)
+    .await
+    .expect("block action");
+    // Assignment bounded to other_tenant — not the object's owner.
+    sqlx::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
+    )
+    .bind(other_tenant)
+    .bind(actor)
+    .bind(block_id)
+    .execute(&p)
+    .await
+    .expect("insert direct policy");
+
+    assert!(
+        !has_capability_in_scope(&p, actor, "read", Scope::Object(object_id))
+            .await
+            .expect("cross-tenant object gate"),
+        "an object grant bounded to a different tenant must not satisfy the object gate"
+    );
+
+    // Control: rebind the assignment to the object's owning tenant → now valid.
+    sqlx::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
+        .bind(owner_tenant)
+        .bind(block_id)
+        .execute(&p)
+        .await
+        .expect("rebind policy");
+    assert!(
+        has_capability_in_scope(&p, actor, "read", Scope::Object(object_id))
+            .await
+            .expect("same-tenant object gate"),
+        "an object grant bounded to the object's tenant must satisfy the gate"
+    );
+
+    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+        .bind(object_id)
+        .execute(&p)
+        .await;
+    cleanup(&p, owner_tenant).await;
+    cleanup(&p, other_tenant).await;
+}

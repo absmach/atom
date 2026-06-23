@@ -440,7 +440,23 @@ pub async fn has_capability_in_scope(
         return Ok(false);
     };
     let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
-    Ok(gate_allows(&grants, action_id, scope))
+    let gate_tenant = gate_tenant_context(pool, scope).await?;
+    Ok(gate_allows(&grants, action_id, scope, gate_tenant))
+}
+
+/// The tenant whose objects the gate concerns, used to apply the same assignment
+/// tenant boundary the PDP enforces (`EffectiveGrant::tenant_boundary`). A
+/// platform gate has no tenant; a tenant gate is that tenant; an object gate is
+/// the object's owning tenant, resolved here exactly as the PDP resolves it.
+/// A missing object and a platform/global object both resolve to `None`.
+async fn gate_tenant_context(pool: &PgPool, scope: Scope) -> Result<Option<Uuid>, AppError> {
+    Ok(match scope {
+        Scope::Platform => None,
+        Scope::Tenant(tenant_id) => Some(tenant_id),
+        Scope::Object(object_id) => crate::authz::repo::object_tenant_id_by_id(pool, object_id)
+            .await?
+            .flatten(),
+    })
 }
 
 /// Coarse control-plane decision over the canonical grant expansion: does the
@@ -461,14 +477,30 @@ pub async fn has_capability_in_scope(
 /// conditions this gate deliberately ignores. The trade-off is that a subject
 /// whose only access is conditional will not pass a coarse gate; that is the
 /// safe direction for an administrative precondition.
+///
+/// `gate_tenant` is the tenant whose objects the gate concerns (see
+/// [`gate_tenant_context`]). A grant's assignment tenant boundary is applied
+/// against it just as the PDP does, so a platform- or object-scoped block
+/// reached through a tenant-bounded assignment cannot satisfy a gate for another
+/// tenant's object.
 fn gate_allows(
     grants: &[crate::authz::repo::EffectiveGrant],
     action_id: Uuid,
     scope: Scope,
+    gate_tenant: Option<Uuid>,
 ) -> bool {
     let mut allow = false;
     for grant in grants {
         if grant.capability_id != action_id || !gate_scope_satisfied(grant, scope) {
+            continue;
+        }
+        // Assignment tenant boundary: when the grant is confined to a tenant, it
+        // only applies to that tenant's objects. Skip both allow and deny that
+        // fall outside, matching the PDP.
+        if grant
+            .tenant_boundary
+            .is_some_and(|boundary| Some(boundary) != gate_tenant)
+        {
             continue;
         }
         match grant.effect {
@@ -560,6 +592,10 @@ pub async fn require_any_capability(
     let names: Vec<&str> = checks.iter().map(|(name, _)| *name).collect();
     let action_ids = action_ids_by_name(pool, &names).await?;
     let mut tenant_active: std::collections::HashMap<Uuid, bool> = std::collections::HashMap::new();
+    // Resolved owning tenant per object id, so a repeated object scope across the
+    // candidate list (e.g. read + manage on the same object) is looked up once.
+    let mut object_tenant: std::collections::HashMap<Uuid, Option<Uuid>> =
+        std::collections::HashMap::new();
 
     for (capability_name, scope) in checks {
         let Some(&action_id) = action_ids.get(*capability_name) else {
@@ -578,7 +614,19 @@ pub async fn require_any_capability(
                 continue;
             }
         }
-        if gate_allows(&grants, action_id, *scope) {
+        let gate_tenant = match scope {
+            Scope::Platform => None,
+            Scope::Tenant(tenant_id) => Some(*tenant_id),
+            Scope::Object(object_id) => match object_tenant.get(object_id) {
+                Some(&tenant) => tenant,
+                None => {
+                    let tenant = gate_tenant_context(pool, *scope).await?;
+                    object_tenant.insert(*object_id, tenant);
+                    tenant
+                }
+            },
+        };
+        if gate_allows(&grants, action_id, *scope, gate_tenant) {
             return Ok(());
         }
     }
