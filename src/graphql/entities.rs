@@ -3,8 +3,9 @@ use async_graphql::{Context, Object, Result, ID};
 use crate::{
     auth::Scope,
     authz::{engine, repo as authz_repo},
+    error::AppError,
     identity::repo,
-    models::{access::AuthorizedObjectIdsQuery, entity as entity_model, policy::AuthzRequest},
+    models::{access::AuthorizedObjectIdsQuery, entity as entity_model},
     state::AppState,
 };
 
@@ -43,23 +44,20 @@ impl EntityQuery {
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
         let entity = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
+        // Object read decision via the PDP. `manage` implies `read`, so the caller
+        // may read the entity if they can read or manage it.
         let allowed = auth.entity_id == id
-            || engine::evaluate(
+            || engine::allows_any(
                 &state.pool,
-                &AuthzRequest {
-                    subject_id: auth.entity_id,
-                    action: "read".to_string(),
-                    resource_id: None,
-                    object_kind: Some("entity".to_string()),
-                    object_id: Some(id),
-                    context: serde_json::Value::Null,
-                },
+                auth.entity_id,
+                "entity",
+                id,
+                &["read", "manage"],
             )
             .await
-            .map_err(gql_error)?
-            .allowed;
+            .map_err(gql_error)?;
         if !allowed {
-            require_read_access(&state.pool, auth.entity_id, entity.tenant_id, id).await?;
+            return Err(gql_error(AppError::Forbidden));
         }
         Ok(entity.into())
     }

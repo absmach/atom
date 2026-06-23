@@ -509,6 +509,38 @@ pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse
     }
 }
 
+/// Whether the subject is allowed any of `actions` on the object, evaluated
+/// through the PDP. Used where one capability implies another for object
+/// access — e.g. `manage` implies `read`, so an object read resolver allows a
+/// caller who can `read` *or* `manage` the object — without falling back to the
+/// coarse control-plane gate.
+pub async fn allows_any(
+    pool: &PgPool,
+    subject_id: Uuid,
+    object_kind: &str,
+    object_id: Uuid,
+    actions: &[&str],
+) -> Result<bool, AppError> {
+    for action in actions {
+        let resp = evaluate(
+            pool,
+            &AuthzRequest {
+                subject_id,
+                action: (*action).to_string(),
+                resource_id: None,
+                object_kind: Some(object_kind.to_string()),
+                object_id: Some(object_id),
+                context: Value::Null,
+            },
+        )
+        .await?;
+        if resp.allowed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Match a canonical grant against the request: assignment tenant boundary →
 /// block scope (group-aware) → action → conditions. Returns `None` when the
 /// grant matches, or `Some(skip_reason)` naming the first failed check. The PDP

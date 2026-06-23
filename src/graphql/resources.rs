@@ -2,18 +2,16 @@ use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
     authz::{engine, repo as authz_repo},
+    error::AppError,
     models::{
         access::AuthorizedObjectIdsQuery,
-        policy::AuthzRequest,
         resource::{CreateResource, UpdateResource},
     },
     state::AppState,
 };
 
 use super::{
-    auth::{
-        gql_error, require_any_capability, require_auth, require_read_access, scope_for_tenant,
-    },
+    auth::{gql_error, require_any_capability, require_auth, scope_for_tenant},
     types::{
         parse_id, parse_optional_id, CreateResourceInput, Resource, ResourceList,
         UpdateResourceInput,
@@ -84,22 +82,19 @@ impl ResourceQuery {
         let resource = authz_repo::get_resource(&state.pool, id)
             .await
             .map_err(gql_error)?;
-        if !engine::evaluate(
+        // Object read decision via the PDP. `manage` implies `read`, so the caller
+        // may read the resource if they can read or manage it.
+        if !engine::allows_any(
             &state.pool,
-            &AuthzRequest {
-                subject_id: auth.entity_id,
-                action: "read".to_string(),
-                resource_id: None,
-                object_kind: Some("resource".to_string()),
-                object_id: Some(id),
-                context: serde_json::Value::Null,
-            },
+            auth.entity_id,
+            "resource",
+            id,
+            &["read", "manage"],
         )
         .await
         .map_err(gql_error)?
-        .allowed
         {
-            require_read_access(&state.pool, auth.entity_id, resource.tenant_id, id).await?;
+            return Err(gql_error(AppError::Forbidden));
         }
         Ok(resource.into())
     }
