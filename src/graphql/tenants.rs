@@ -2,13 +2,15 @@ use async_graphql::{Context, Object, Result, SimpleObject, ID};
 
 use crate::{
     auth::{has_capability_in_scope, require_capability, Scope},
+    authz::engine,
+    error::AppError,
     models::{enums::TenantStatus, tenant as tenant_model, tenant::ListTenants},
     state::AppState,
     tenants::{handlers as tenant_handlers, repo as tenant_repo},
 };
 
 use super::{
-    auth::{gql_error, require_any_capability, require_auth, require_read_access},
+    auth::{gql_error, require_any_capability, require_auth},
     types::{
         parse_id, parse_optional_id, parse_optional_tenant_status, CreateTenantInput,
         CreateTenantInvitationInput, EntityList, GqlTenantStatus, InvitationTokenInput, Tenant,
@@ -70,7 +72,7 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        require_read_access(&state.pool, auth.entity_id, Some(id), id).await?;
+        require_tenant_read_access(state, auth.entity_id, id).await?;
         let tenant = tenant_repo::get_tenant(&state.pool, id)
             .await
             .map_err(gql_error)?;
@@ -88,7 +90,7 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_read_access(&state.pool, auth.entity_id, Some(tenant_id), tenant_id).await?;
+        require_tenant_read_access(state, auth.entity_id, tenant_id).await?;
         let list = tenant_repo::list_tenant_members(
             &state.pool,
             tenant_id,
@@ -158,7 +160,7 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_read_access(&state.pool, auth.entity_id, Some(tenant_id), tenant_id).await?;
+        require_tenant_read_access(state, auth.entity_id, tenant_id).await?;
         let list = tenant_repo::list_tenant_invitations(
             &state.pool,
             tenant_id,
@@ -184,7 +186,7 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_read_access(&state.pool, auth.entity_id, Some(tenant_id), tenant_id).await?;
+        require_tenant_read_access(state, auth.entity_id, tenant_id).await?;
         let roles = tenant_repo::list_tenant_role_actions(&state.pool, tenant_id, auth.entity_id)
             .await
             .map_err(gql_error)?;
@@ -481,6 +483,27 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
     .map_err(gql_error)?;
 
     Ok(tenant.into())
+}
+
+async fn require_tenant_read_access(
+    state: &AppState,
+    entity_id: uuid::Uuid,
+    tenant_id: uuid::Uuid,
+) -> Result<()> {
+    if engine::allows_any(
+        &state.pool,
+        entity_id,
+        "tenant",
+        tenant_id,
+        &["read", "manage"],
+    )
+    .await
+    .map_err(gql_error)?
+    {
+        Ok(())
+    } else {
+        Err(gql_error(AppError::Forbidden))
+    }
 }
 
 async fn can_list_all_tenants(pool: &sqlx::PgPool, entity_id: uuid::Uuid) -> Result<bool> {

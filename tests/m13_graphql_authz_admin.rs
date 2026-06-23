@@ -405,7 +405,7 @@ async fn create_role_and_attach_capability() {
         .execute(authed(format!(
             r#"
             {{
-              roles {{
+              roles(q: "{name}") {{
                 items {{ id name derivedKind }}
               }}
               role(id: "{role_id}") {{ id name }}
@@ -988,4 +988,79 @@ async fn graphql_entity_read_allowed_via_object_type_manage() {
     );
     let data = resp.data.into_json().expect("json");
     assert_eq!(data["entity"]["id"], serde_json::json!(target.to_string()));
+}
+
+/// A tenant visible through an object-kind scoped tenant grant must also be
+/// readable through `tenant(id)`. Listing already accepted this grant shape;
+/// the point lookup used the coarser control-plane gate and rejected it.
+#[tokio::test]
+#[ignore]
+async fn graphql_tenant_read_matches_listing_object_kind_grant() {
+    let pool = common::pool().await;
+    let tenant_id = tenant(&pool).await;
+    let subject = tenant_entity(&pool, tenant_id, "human").await;
+    let read = seeded_action(&pool, "read").await;
+
+    let block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks
+           (scope_mode, tenant_id, object_kind, effect, conditions)
+         VALUES ('object_kind', $1, 'tenant', 'allow', '{}')
+         RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("tenant object-kind read block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block)
+    .bind(read)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    sqlx::query(
+        "INSERT INTO direct_policies
+           (tenant_id, subject_kind, subject_id, permission_block_id)
+         VALUES ($1, 'entity', $2, $3)",
+    )
+    .bind(tenant_id)
+    .bind(subject)
+    .bind(block)
+    .execute(&pool)
+    .await
+    .expect("direct policy");
+
+    let schema = build_schema(state(pool.clone()));
+    let listed = schema
+        .execute(authed_as(subject, "{ tenants { items { id } total } }"))
+        .await;
+    assert!(
+        listed.errors.is_empty(),
+        "tenant list should accept object-kind tenant grants: {:?}",
+        listed.errors
+    );
+    let listed_data = listed.data.into_json().expect("json");
+    assert!(listed_data["tenants"]["items"]
+        .as_array()
+        .expect("tenant items")
+        .iter()
+        .any(|item| item["id"] == serde_json::json!(tenant_id.to_string())));
+
+    let fetched = schema
+        .execute(authed_as(
+            subject,
+            format!("{{ tenant(id: \"{tenant_id}\") {{ id }} }}"),
+        ))
+        .await;
+    assert!(
+        fetched.errors.is_empty(),
+        "tenant(id) should use the same object-level PDP semantics as listing: {:?}",
+        fetched.errors
+    );
+    let fetched_data = fetched.data.into_json().expect("json");
+    assert_eq!(
+        fetched_data["tenant"]["id"],
+        serde_json::json!(tenant_id.to_string())
+    );
 }
