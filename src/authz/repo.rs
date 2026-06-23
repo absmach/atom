@@ -1475,15 +1475,34 @@ pub async fn create_permission_block(
 }
 
 pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    // Blocks are shared and immutable: refuse to delete one still linked to a
-    // role or attached to a direct policy, so an explicit block delete can never
-    // silently cascade those links away. Callers must unlink first.
+    // Blocks are shared: refuse to delete one still linked to a role or attached
+    // to a direct policy, so an explicit delete cannot cascade live links away.
+    //
+    // The link FKs stay ON DELETE CASCADE (so tenant-wide cascade deletes still
+    // complete — roles survive tenant deletion via SET NULL, and their link rows
+    // are cleaned only by the block's cascade). To close the check-then-delete
+    // race without RESTRICT, lock the block row FOR UPDATE first: an FK insert
+    // into role_permission_blocks / direct_policies takes a FOR KEY SHARE lock on
+    // the referenced block row, which conflicts with FOR UPDATE, so no link can
+    // slip in between the reference check and the delete.
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM permission_blocks WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::not_found(format!(
+            "permission block {id} not found"
+        )));
+    }
     let referenced: bool = sqlx::query_scalar(
         r#"SELECT EXISTS (SELECT 1 FROM role_permission_blocks WHERE permission_block_id = $1)
               OR EXISTS (SELECT 1 FROM direct_policies WHERE permission_block_id = $1)"#,
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
     if referenced {
@@ -1491,16 +1510,12 @@ pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppE
             "permission block is still linked to a role or direct policy; unlink it first",
         ));
     }
-    let result = sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
+    sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::not_found(format!(
-            "permission block {id} not found"
-        )));
-    }
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -2167,14 +2182,22 @@ pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Rol
 }
 
 pub async fn delete_role(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    // Capture the role's linked blocks before the role cascade removes the link
+    // rows, then GC any that are left unreferenced. Without this the blocks would
+    // leak as orphans (deleting the role cascades role_permission_blocks via
+    // role_id, but never the blocks themselves).
+    let block_ids = role_block_ids(&mut tx, id).await?;
     let result = sqlx::query("DELETE FROM roles WHERE id = $1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("role {id} not found")));
     }
+    delete_orphaned_blocks(&mut tx, &block_ids).await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 

@@ -285,3 +285,88 @@ async fn orphaned_block_is_collected_on_direct_policy_delete() {
         "an unreferenced direct-policy block must be garbage-collected"
     );
 }
+
+/// Deleting a tenant must still cascade away its roles' linked blocks. The link
+/// FKs stay ON DELETE CASCADE precisely so this works: roles survive tenant
+/// deletion (roles.tenant_id is SET NULL), so their role_permission_blocks rows
+/// are cleaned only by the block's own cascade when the tenant's blocks go.
+/// A RESTRICT link FK would deadlock this cascade.
+#[tokio::test]
+#[ignore]
+async fn tenant_delete_cascades_linked_blocks() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let read_cap = read_capability_id(&p).await;
+    let block_id = make_block(&p, tenant_id, read_cap).await;
+    let role = make_role(&p, tenant_id).await;
+
+    atom::authz::repo::replace_role_permission_block_links(&p, role, &[block_id])
+        .await
+        .expect("link");
+
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .execute(&p)
+        .await
+        .expect("tenant delete must cascade through linked blocks");
+
+    assert!(
+        !block_exists(&p, block_id).await,
+        "the tenant's permission block must be cascade-deleted"
+    );
+}
+
+/// Deleting a role garbage-collects a block only that role linked, instead of
+/// leaking it as an orphan.
+#[tokio::test]
+#[ignore]
+async fn role_delete_collects_orphaned_block() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let read_cap = read_capability_id(&p).await;
+    let block_id = make_block(&p, tenant_id, read_cap).await;
+    let role = make_role(&p, tenant_id).await;
+
+    atom::authz::repo::replace_role_permission_block_links(&p, role, &[block_id])
+        .await
+        .expect("link");
+    atom::authz::repo::delete_role(&p, role)
+        .await
+        .expect("delete role");
+
+    assert!(
+        !block_exists(&p, block_id).await,
+        "a block only the deleted role linked must be garbage-collected"
+    );
+}
+
+/// Deleting a role must not GC a block another role still links.
+#[tokio::test]
+#[ignore]
+async fn role_delete_keeps_shared_block() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let read_cap = read_capability_id(&p).await;
+    let block_id = make_block(&p, tenant_id, read_cap).await;
+    let role_a = make_role(&p, tenant_id).await;
+    let role_b = make_role(&p, tenant_id).await;
+
+    atom::authz::repo::replace_role_permission_block_links(&p, role_a, &[block_id])
+        .await
+        .expect("link a");
+    atom::authz::repo::replace_role_permission_block_links(&p, role_b, &[block_id])
+        .await
+        .expect("link b");
+    atom::authz::repo::delete_role(&p, role_a)
+        .await
+        .expect("delete role a");
+
+    assert!(
+        block_exists(&p, block_id).await,
+        "a block still linked to role B must survive role A's deletion"
+    );
+    assert!(
+        role_links_block(&p, role_b, block_id).await,
+        "role B must still link the block"
+    );
+}
