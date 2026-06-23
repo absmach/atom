@@ -444,15 +444,23 @@ pub async fn has_capability_in_scope(
 }
 
 /// Coarse control-plane decision over the canonical grant expansion: does the
-/// subject hold an `allow` for `action_id` at `scope`, not overridden by an
-/// unconditional deny? Group membership is already resolved recursively by the
-/// expansion, and role-linked blocks carry their own scope/effect, so this is
-/// PDP-consistent for the coarse platform/tenant/object scopes a gate uses.
+/// subject hold an *unconditional* `allow` for `action_id` at `scope`, not
+/// overridden by a deny? Group membership is already resolved recursively by the
+/// expansion, and role-linked blocks carry their own scope/effect.
 ///
-/// Gates are administrative preconditions, not object-level decisions: a
-/// conditional grant cannot be evaluated without request context, so a
-/// conditional allow still satisfies the gate (the object-level PDP re-checks
-/// its conditions) and a conditional deny does not block here.
+/// Gates **fail closed on ABAC conditions** because they run without request
+/// context, and several callers use the gate as the final authorization (e.g.
+/// `createEntity` has no object to re-check against the PDP):
+/// - only an *unconditional* allow satisfies the gate — a conditional allow
+///   cannot be verified here, so it does not grant the precondition (otherwise a
+///   `manage if context.mfa` grant would pass without MFA);
+/// - *any* matching deny blocks, conditional or not — a deny we cannot fully
+///   evaluate is assumed to apply.
+///
+/// Object-specific decisions must still call the PDP, which evaluates the
+/// conditions this gate deliberately ignores. The trade-off is that a subject
+/// whose only access is conditional will not pass a coarse gate; that is the
+/// safe direction for an administrative precondition.
 fn gate_allows(
     grants: &[crate::authz::repo::EffectiveGrant],
     action_id: Uuid,
@@ -464,9 +472,9 @@ fn gate_allows(
             continue;
         }
         match grant.effect {
-            Effect::Deny if is_unconditional(&grant.conditions) => return false,
-            Effect::Deny => {}
-            Effect::Allow => allow = true,
+            Effect::Deny => return false,
+            Effect::Allow if is_unconditional(&grant.conditions) => allow = true,
+            Effect::Allow => {}
         }
     }
     allow

@@ -77,9 +77,19 @@ async fn make_principal_group(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
     .id
 }
 
-/// Create a tenant-scoped role carrying a single block (the given effect) for
-/// `manage`, and return the role id.
+/// Create a tenant-scoped role carrying a single unconditional block (the given
+/// effect) for `manage`, and return the role id.
 async fn role_with_manage_block(pool: &sqlx::PgPool, tenant_id: Uuid, effect: Effect) -> Uuid {
+    role_with_manage_block_cond(pool, tenant_id, effect, json!({})).await
+}
+
+/// As [`role_with_manage_block`], but with explicit ABAC `conditions` on the block.
+async fn role_with_manage_block_cond(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    effect: Effect,
+    conditions: serde_json::Value,
+) -> Uuid {
     let manage = manage_capability_id(pool).await;
     let role = atom::authz::repo::create_role(
         pool,
@@ -102,7 +112,7 @@ async fn role_with_manage_block(pool: &sqlx::PgPool, tenant_id: Uuid, effect: Ef
             object_id: None,
             group_id: None,
             effect,
-            conditions: json!({}),
+            conditions,
             action_ids: vec![manage],
         },
     )
@@ -253,6 +263,73 @@ async fn role_with_only_deny_block_does_not_satisfy_gate() {
             .await
             .expect("allow gate"),
         "an allow block at the gate scope must satisfy the gate"
+    );
+
+    cleanup(&p, tenant_id).await;
+}
+
+async fn assign_role_to_entity(pool: &sqlx::PgPool, tenant_id: Uuid, actor: Uuid, role: Uuid) {
+    atom::authz::repo::create_role_assignment(
+        pool,
+        CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: actor,
+            role_id: role,
+        },
+    )
+    .await
+    .expect("assign role");
+}
+
+/// A conditional allow must not satisfy a coarse gate: the gate runs without
+/// request context and several callers use it as the final decision, so a
+/// `manage if context.mfa` grant passing would let the operation run without MFA.
+#[tokio::test]
+#[ignore]
+async fn conditional_allow_does_not_satisfy_gate() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let actor = make_human(&p, tenant_id).await;
+
+    let role =
+        role_with_manage_block_cond(&p, tenant_id, Effect::Allow, json!({ "context.mfa": true }))
+            .await;
+    assign_role_to_entity(&p, tenant_id, actor, role).await;
+
+    assert!(
+        !has_capability_in_scope(&p, actor, "manage", Scope::Tenant(tenant_id))
+            .await
+            .expect("conditional allow gate"),
+        "a conditional allow must not satisfy the coarse gate"
+    );
+
+    cleanup(&p, tenant_id).await;
+}
+
+/// A conditional deny blocks the gate (fail closed): it cannot be evaluated
+/// without request context, so it is assumed to apply and overrides an allow.
+#[tokio::test]
+#[ignore]
+async fn conditional_deny_blocks_gate() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let actor = make_human(&p, tenant_id).await;
+
+    // Unconditional allow would pass the gate on its own.
+    let allow_role = role_with_manage_block(&p, tenant_id, Effect::Allow).await;
+    assign_role_to_entity(&p, tenant_id, actor, allow_role).await;
+    // A conditional deny for the same action/scope must override it at the gate.
+    let deny_role =
+        role_with_manage_block_cond(&p, tenant_id, Effect::Deny, json!({ "context.mfa": true }))
+            .await;
+    assign_role_to_entity(&p, tenant_id, actor, deny_role).await;
+
+    assert!(
+        !has_capability_in_scope(&p, actor, "manage", Scope::Tenant(tenant_id))
+            .await
+            .expect("conditional deny gate"),
+        "a conditional deny must block the coarse gate even with an allow present"
     );
 
     cleanup(&p, tenant_id).await;
