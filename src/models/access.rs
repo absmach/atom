@@ -12,14 +12,6 @@ use super::enums::{
 use super::{policy::PolicyBinding, role::Role};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EntitySummary {
-    pub id: Uuid,
-    pub name: String,
-    pub kind: EntityKind,
-    pub tenant_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplainSubject {
     pub id: Uuid,
     pub name: String,
@@ -33,100 +25,6 @@ pub struct ResourceSummary {
     pub kind: String,
     pub name: Option<String>,
     pub tenant_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapabilitySummary {
-    pub id: Uuid,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoleSummary {
-    pub id: Uuid,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GrantSummary {
-    pub kind: GrantKind,
-    pub role: Option<RoleSummary>,
-    pub capabilities: Vec<CapabilitySummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccessItem {
-    pub resource: ResourceSummary,
-    pub effect: Effect,
-    pub scope_kind: ScopeKind,
-    pub scope_ref: Option<String>,
-    pub policy_id: Uuid,
-    pub grant: GrantSummary,
-    pub conditions: Value,
-    pub via: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct EntityAccessResponse {
-    pub entity_id: Uuid,
-    pub entity_name: String,
-    pub entity_kind: EntityKind,
-    pub items: Vec<AccessItem>,
-    pub total: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ResourceAccessEntity {
-    pub id: Uuid,
-    pub name: String,
-    pub kind: EntityKind,
-    pub tenant_id: Option<Uuid>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ResourceAccessItem {
-    pub entity: ResourceAccessEntity,
-    pub effect: Effect,
-    pub scope_kind: ScopeKind,
-    pub scope_ref: Option<String>,
-    pub policy_id: Uuid,
-    pub grant: GrantSummary,
-    pub conditions: Value,
-    pub via: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ResourceAccessResponse {
-    pub resource_id: Uuid,
-    pub resource: ResourceSummary,
-    pub items: Vec<ResourceAccessItem>,
-    pub total: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GroupInfo {
-    pub name: String,
-    pub tenant_id: Option<Uuid>,
-    pub member_count: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GroupAccessItem {
-    pub resource: ResourceSummary,
-    pub effect: Effect,
-    pub scope_kind: ScopeKind,
-    pub scope_ref: Option<String>,
-    pub policy_id: Uuid,
-    pub grant: GrantSummary,
-    pub conditions: Value,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GroupAccessResponse {
-    pub group_id: Uuid,
-    pub group: GroupInfo,
-    pub items: Vec<GroupAccessItem>,
-    pub total: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,86 +112,6 @@ pub struct AuthorizedObjectIdsResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AccessQuery {
-    pub tenant_id: Option<Uuid>,
-    pub resource_kind: Option<String>,
-    pub action: Option<String>,
-    pub effect: Option<Effect>,
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ResourceAccessQuery {
-    pub action: Option<String>,
-    pub entity_kind: Option<EntityKind>,
-    pub effect: Option<Effect>,
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RoleHoldersQuery {
-    pub tenant_id: Option<Uuid>,
-    pub subject_kind: Option<SubjectKind>,
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GroupAccessQuery {
-    pub resource_kind: Option<String>,
-    pub action: Option<String>,
-    pub effect: Option<Effect>,
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RoleWithCapabilities {
-    pub id: Uuid,
-    pub name: String,
-    pub tenant_id: Option<Uuid>,
-    pub description: Option<String>,
-    pub capabilities: Vec<CapabilitySummary>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RoleHolderGroup {
-    pub id: Uuid,
-    pub name: String,
-    pub tenant_id: Option<Uuid>,
-    pub member_count: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RoleHolderItem {
-    pub subject_kind: SubjectKind,
-    pub entity: Option<EntitySummary>,
-    pub group: Option<RoleHolderGroup>,
-    pub policy_id: Uuid,
-    pub effect: Effect,
-    pub scope_kind: ScopeKind,
-    pub scope_ref: Option<String>,
-    pub conditions: Value,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RoleHoldersResponse {
-    pub role: RoleWithCapabilities,
-    pub items: Vec<RoleHolderItem>,
-    pub total: i64,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct SubjectRoleAssignmentsQuery {
     pub tenant_id: Option<Uuid>,
     pub subject_kind: SubjectKind,
@@ -358,16 +176,6 @@ pub struct AdminPageQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UnprotectedResourcesQuery {
-    pub tenant_id: Option<Uuid>,
-    pub kind: Option<String>,
-    #[serde(default = "default_admin_limit")]
-    pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct ExpiringCredentialsQuery {
     #[serde(default = "default_days")]
     pub days: i64,
@@ -395,22 +203,6 @@ pub struct OrphanPolicyItem {
 #[derive(Debug, Serialize)]
 pub struct OrphanPoliciesResponse {
     pub items: Vec<OrphanPolicyItem>,
-    pub total: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UnprotectedResourceItem {
-    pub id: Uuid,
-    pub kind: String,
-    pub name: Option<String>,
-    pub tenant_id: Option<Uuid>,
-    pub owner_id: Option<Uuid>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UnprotectedResourcesResponse {
-    pub items: Vec<UnprotectedResourceItem>,
     pub total: i64,
 }
 

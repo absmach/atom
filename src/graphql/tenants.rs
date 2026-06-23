@@ -22,11 +22,13 @@ use super::{
 pub struct TenantQuery;
 
 #[derive(Clone, SimpleObject)]
-pub struct TenantRoleAction {
+pub struct TenantRoleAssignment {
     role_id: ID,
     role_name: String,
+    /// Actions defined by the role's permission blocks. This is role metadata,
+    /// not a claim that every action is currently authorized.
     actions: Vec<String>,
-    access_type: String,
+    assignment_paths: Vec<String>,
 }
 
 #[Object]
@@ -182,21 +184,22 @@ impl TenantQuery {
         &self,
         ctx: &Context<'_>,
         tenant_id: ID,
-    ) -> Result<Vec<TenantRoleAction>> {
+    ) -> Result<Vec<TenantRoleAssignment>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_tenant_read_access(state, auth.entity_id, tenant_id).await?;
-        let roles = tenant_repo::list_tenant_role_actions(&state.pool, tenant_id, auth.entity_id)
-            .await
-            .map_err(gql_error)?;
+        let roles =
+            tenant_repo::list_tenant_role_assignments(&state.pool, tenant_id, auth.entity_id)
+                .await
+                .map_err(gql_error)?;
         Ok(roles
             .into_iter()
-            .map(|role| TenantRoleAction {
+            .map(|role| TenantRoleAssignment {
                 role_id: ID::from(role.role_id.to_string()),
                 role_name: role.role_name,
                 actions: role.actions,
-                access_type: role.access_type,
+                assignment_paths: role.assignment_paths,
             })
             .collect())
     }
