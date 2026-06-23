@@ -695,6 +695,27 @@ pub async fn create_role_with_permission_blocks(
     Ok(role)
 }
 
+/// Serialize role-link mutations by taking a row lock on the role. Every path
+/// that adds or removes `role_permission_blocks` rows for a role must hold this
+/// first, so two such mutations on the same role cannot interleave (e.g. one
+/// inserting a link after another has deleted the existing set). An FK insert
+/// into role_permission_blocks takes a FOR KEY SHARE lock on the role row, which
+/// conflicts with this FOR UPDATE. Returns not-found if the role is absent.
+async fn lock_role(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    role_id: Uuid,
+) -> Result<(), AppError> {
+    let locked: Option<Uuid> = sqlx::query_scalar("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(role_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::not_found(format!("role {role_id} not found")));
+    }
+    Ok(())
+}
+
 pub async fn replace_role_permission_blocks(
     pool: &PgPool,
     role_id: Uuid,
@@ -706,6 +727,7 @@ pub async fn replace_role_permission_blocks(
     validate_role_permission_blocks(pool, permission_blocks).await?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_role(&mut tx, role_id).await?;
     let old_block_ids = role_block_ids(&mut tx, role_id).await?;
     unlink_role_blocks_and_gc(&mut tx, role_id, &old_block_ids).await?;
     for block in permission_blocks {
@@ -754,6 +776,7 @@ pub async fn replace_role_permission_block_links(
         .await?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_role(&mut tx, role_id).await?;
     sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
         .bind(role_id)
         .execute(&mut *tx)
@@ -2183,10 +2206,12 @@ pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Rol
 
 pub async fn delete_role(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_role(&mut tx, id).await?;
     // Capture the role's linked blocks before the role cascade removes the link
     // rows, then GC any that are left unreferenced. Without this the blocks would
     // leak as orphans (deleting the role cascades role_permission_blocks via
-    // role_id, but never the blocks themselves).
+    // role_id, but never the blocks themselves). The lock prevents a concurrent
+    // link insert from escaping this orphan collection.
     let block_ids = role_block_ids(&mut tx, id).await?;
     let result = sqlx::query("DELETE FROM roles WHERE id = $1")
         .bind(id)
@@ -2217,6 +2242,7 @@ pub async fn add_role_capability(
         .await?;
     crate::guardrails::validate_role_capability(pool, role_id, cap_id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_role(&mut tx, role_id).await?;
     insert_role_capability_as_permission_block(
         &mut tx,
         role_id,
@@ -2236,6 +2262,7 @@ pub async fn add_composite_role_child(
     child_role_id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_role(&mut tx, parent_role_id).await?;
     copy_role_permission_blocks(&mut tx, parent_role_id, child_role_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -2256,6 +2283,7 @@ pub async fn replace_composite_role_children(
     child_role_ids: &[Uuid],
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_role(&mut tx, parent_role_id).await?;
     let old_block_ids = role_block_ids(&mut tx, parent_role_id).await?;
     unlink_role_blocks_and_gc(&mut tx, parent_role_id, &old_block_ids).await?;
     for child_role_id in child_role_ids {
@@ -2271,6 +2299,7 @@ pub async fn remove_role_capability(
     cap_id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_role(&mut tx, role_id).await?;
     // Blocks this role links that grant `cap_id`. Unlink them from this role and
     // GC any now-orphaned; blocks the same `cap_id` reaches through other roles
     // are untouched.
