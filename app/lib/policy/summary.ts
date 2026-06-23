@@ -2,7 +2,7 @@ export type PolicyDraft = {
   effect: "allow" | "deny";
   subjectKind: "entity" | "group";
   subjectName?: string;
-  grantKind: "capability" | "role";
+  grantKind: "action" | "role";
   grantName?: string;
   scopeKind:
     | "platform"
@@ -10,10 +10,11 @@ export type PolicyDraft = {
     | "object_kind"
     | "object_type"
     | "object"
-    | "group_object_type"
-    | "group_tree_object_type"
-    | "group_child_kind"
-    | "group_descendant_kind";
+    | "group"
+    | "group_direct_objects"
+    | "group_descendant_objects"
+    | "group_child_groups"
+    | "group_descendant_groups";
   scopeRef?: string;
   conditions: Array<{ path: string; operator: "equals"; value: string }>;
 };
@@ -45,15 +46,17 @@ export function scopeSummary(kind: PolicyDraft["scopeKind"], ref?: string) {
       return ref ? `all ${ref} resources` : "all objects of a type";
     case "object":
       return ref ? `object ${ref}` : "a specific object";
-    case "group_object_type":
+    case "group":
+      return ref ? `object group ${ref}` : "an object group";
+    case "group_direct_objects":
       return ref
-        ? `direct group-contained ${ref}`
-        : "direct group-contained objects";
-    case "group_tree_object_type":
+        ? `direct objects in group ${ref}`
+        : "direct objects in an object group";
+    case "group_descendant_objects":
       return ref ? `subgroup-contained ${ref}` : "objects in subgroups";
-    case "group_child_kind":
+    case "group_child_groups":
       return ref ? `direct child groups of ${ref}` : "direct child groups";
-    case "group_descendant_kind":
+    case "group_descendant_groups":
       return ref ? `descendant groups of ${ref}` : "descendant groups";
   }
 }

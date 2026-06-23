@@ -471,7 +471,7 @@ function PostureCard() {
       <CardHeader>
         <CardTitle>Authorization Posture</CardTitle>
         <CardDescription>
-          Policy and authz signal available from current queries.
+          Policy and authorization signal available from current queries.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -484,11 +484,11 @@ function PostureCard() {
               />
               <MiniMetric label="Deny policies" value={policyBreakdown.deny} />
               <MiniMetric
-                label="Authz allowed"
+                label="Authorization allowed"
                 value={query.data?.authzAllowed.total ?? 0}
               />
               <MiniMetric
-                label="Authz denied"
+                label="Authorization denied"
                 value={query.data?.authzDenied.total ?? 0}
               />
             </div>
@@ -658,7 +658,7 @@ function buildSummaryCards(
       description: "Protected objects visible to this session.",
     },
     {
-      label: "Policy Bindings",
+      label: "Direct Policies",
       value: data?.policies.total ?? 0,
       href: "/policies",
       icon: GitBranch,
@@ -671,7 +671,7 @@ function buildSummaryCards(
       href: "/roles",
       icon: ShieldCheck,
       status: null,
-      description: "Tenant-scoped capability bundles.",
+      description: "Named collections of permission blocks.",
     },
     {
       label: "Audit Events",
@@ -715,7 +715,7 @@ function buildRiskData(data: RiskResponse | undefined): ChartDatum[] {
       label: "Expiring credentials",
       value: data?.expiringCredentials.length ?? 0,
     },
-    { label: "Authz denied", value: data?.authzDenied.total ?? 0 },
+    { label: "Authorization denied", value: data?.authzDenied.total ?? 0 },
   ];
 }
 
@@ -781,7 +781,7 @@ function buildProductionPostureCards(
       icon: ShieldAlert,
     },
     {
-      label: "Recent authz denies",
+      label: "Recent authorization denies",
       value: formatNumber(denied),
       status: denied > 0 ? "watch" : "ok",
       risk: false,

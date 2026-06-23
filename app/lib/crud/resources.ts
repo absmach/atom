@@ -190,11 +190,25 @@ export const crudResources: CrudResource[] = [
     icon: Server,
     queryName: "resources",
     tenantFilter: true,
-    listQuery: `query Resources($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { resources(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId parentGroupId attributes createdAt updatedAt } } }`,
+    listQuery: `query Resources($tenantId: ID, $kind: String, $limit: Int = 50, $offset: Int = 0) { resources(tenantId: $tenantId, kind: $kind, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId parentGroupId attributes createdAt updatedAt } } }`,
     createMutation: `mutation CreateResource($input: CreateResourceInput!) { createResource(input: $input) { id kind name alias tenantId ownerId createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteResource($id: ID!) { deleteResource(id: $id) }`,
     deleteIdField: "id",
     formAttributes: true,
+    filters: [
+      {
+        key: "kind",
+        variable: "kind",
+        label: "Kind",
+        type: "select",
+        options: [
+          { label: "Channel", value: "channel" },
+          { label: "Rule", value: "rule" },
+          { label: "Report", value: "report" },
+          { label: "Alarm", value: "alarm" },
+        ],
+      },
+    ],
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "alias", label: "Alias", priority: "medium" },
@@ -219,7 +233,7 @@ export const crudResources: CrudResource[] = [
     title: "Roles",
     route: "/roles",
     description:
-      "Rows from roles: named action sets assigned through policies/assignments.",
+      "Named collections of permission blocks assigned to entities or principal groups.",
     icon: ShieldCheck,
     queryName: "roles",
     tenantFilter: true,
@@ -287,7 +301,7 @@ export const crudResources: CrudResource[] = [
     },
   },
   {
-    key: "capability-actions",
+    key: "actions",
     title: "Actions",
     route: "/actions",
     description:
@@ -316,7 +330,7 @@ export const crudResources: CrudResource[] = [
     },
   },
   {
-    key: "capabilities",
+    key: "action-applicability",
     title: "Action Applicability",
     route: "/actions",
     description:
@@ -572,7 +586,7 @@ export const secondaryResources: CrudResource[] = [
     title: "Relationships",
     route: "/entities",
     description:
-      "Ownerships, group memberships, role actions, and policy inheritance traces.",
+      "Ownerships, group memberships, role assignments, and policy inheritance traces.",
     icon: Network,
     queryName: "ownedEntities",
     columns: [

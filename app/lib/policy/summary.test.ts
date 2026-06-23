@@ -8,7 +8,7 @@ describe("summarizePolicy", () => {
         effect: "allow",
         subjectKind: "group",
         subjectName: "devices in floor-sensors",
-        grantKind: "capability",
+        grantKind: "action",
         grantName: "publish",
         scopeKind: "object_type",
         scopeRef: "resource:channel",

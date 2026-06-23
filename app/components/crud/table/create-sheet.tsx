@@ -1,8 +1,8 @@
 import type { FormEvent } from "react";
 import {
-  CapabilityActionCreateForm,
-  CapabilityApplicabilityCreateForm,
-} from "@/components/capabilities/capability-create-form";
+  ActionApplicabilityCreateForm,
+  ActionCreateForm,
+} from "@/components/actions/action-create-form";
 import { FallbackCreateForm } from "@/components/crud/table/quick-create-form";
 import { singularize } from "@/components/crud/table/utils";
 import { EntityCreateForm } from "@/components/entities/entity-create-form";
@@ -84,14 +84,14 @@ export function CrudCreateSheet({
               onSaved={onRefresh}
             />
           ) : null}
-          {resource.key === "capability-actions" ? (
-            <CapabilityActionCreateForm
+          {resource.key === "actions" ? (
+            <ActionCreateForm
               onCancel={() => onOpenChange(false)}
               onSaved={onRefresh}
             />
           ) : null}
-          {resource.key === "capabilities" ? (
-            <CapabilityApplicabilityCreateForm
+          {resource.key === "action-applicability" ? (
+            <ActionApplicabilityCreateForm
               onCancel={() => onOpenChange(false)}
               onSaved={onRefresh}
             />
@@ -130,8 +130,8 @@ function usesFallbackCreateForm(resourceKey: string) {
     "resources",
     "roles",
     "permission-blocks",
-    "capability-actions",
-    "capabilities",
+    "actions",
+    "action-applicability",
     "action-assignment-rules",
     "policies",
   ].includes(resourceKey);

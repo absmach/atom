@@ -1,19 +1,19 @@
-export type CapabilityApplicability = {
+export type ActionApplicability = {
   objectKind: string;
   objectType?: string | null;
 };
 
-export type CapabilityLike = {
+export type ActionLike = {
   name: string;
-  applicability?: CapabilityApplicability[] | null;
+  applicability?: ActionApplicability[] | null;
 };
 
-export type CapabilityTarget = {
+export type ActionTarget = {
   objectKind: string;
   objectType?: string | null;
 };
 
-export const CAPABILITY_APPLICABILITY_OPTIONS = [
+export const ACTION_APPLICABILITY_OPTIONS = [
   { label: "Tenant", objectKind: "tenant", objectType: null },
   { label: "Human users", objectKind: "entity", objectType: "entity:human" },
   {
@@ -40,41 +40,41 @@ export const CAPABILITY_APPLICABILITY_OPTIONS = [
   { label: "Signing keys", objectKind: "signing_key", objectType: null },
 ] as const;
 
-export function encodeApplicability(item: CapabilityApplicability) {
+export function encodeApplicability(item: ActionApplicability) {
   return `${item.objectKind}|${item.objectType ?? ""}`;
 }
 
-export function decodeApplicability(value: string): CapabilityApplicability {
+export function decodeApplicability(value: string): ActionApplicability {
   const [objectKind, objectType = ""] = value.split("|", 2);
   return { objectKind, objectType: objectType || null };
 }
 
-export function applicabilityValue(item: CapabilityApplicability) {
+export function applicabilityValue(item: ActionApplicability) {
   return item.objectType ?? item.objectKind;
 }
 
-export function applicabilityValues(capability: CapabilityLike) {
-  return (capability.applicability ?? []).map(applicabilityValue);
+export function applicabilityValues(action: ActionLike) {
+  return (action.applicability ?? []).map(applicabilityValue);
 }
 
-export function applicabilityLabel(capability: CapabilityLike) {
-  const values = applicabilityValues(capability);
+export function applicabilityLabel(action: ActionLike) {
+  const values = applicabilityValues(action);
   return values.length > 0 ? values.join(", ") : "Not assigned to objects";
 }
 
-export function capabilityLabel(capability: CapabilityLike) {
-  const suffix = applicabilityValues(capability);
+export function actionLabel(action: ActionLike) {
+  const suffix = applicabilityValues(action);
   return suffix.length > 0
-    ? `${capability.name} (${suffix.join(", ")})`
-    : capability.name;
+    ? `${action.name} (${suffix.join(", ")})`
+    : action.name;
 }
 
-export function capabilityAppliesToTarget(
-  capability: CapabilityLike,
-  target: CapabilityTarget | null,
+export function actionAppliesToTarget(
+  action: ActionLike,
+  target: ActionTarget | null,
 ) {
   if (!target) return true;
-  return (capability.applicability ?? []).some(
+  return (action.applicability ?? []).some(
     (item) =>
       item.objectKind === target.objectKind &&
       (!target.objectType ||
@@ -83,10 +83,10 @@ export function capabilityAppliesToTarget(
   );
 }
 
-export function capabilityTargetFromRoleScope(
+export function actionTargetFromRoleScope(
   scopeKind: string | null | undefined,
   scopeRef: string | null | undefined,
-): CapabilityTarget | null {
+): ActionTarget | null {
   if (!scopeKind || scopeKind === "platform" || scopeKind === "tenant") {
     return null;
   }
@@ -97,8 +97,8 @@ export function capabilityTargetFromRoleScope(
     return targetFromObjectType(scopeRef);
   }
   if (
-    scopeKind === "group_object_type" ||
-    scopeKind === "group_tree_object_type"
+    scopeKind === "group_direct_objects" ||
+    scopeKind === "group_descendant_objects"
   ) {
     const [, objectKind, ...objectTypeParts] = (scopeRef ?? "").split(":");
     if (!objectKind || objectTypeParts.length === 0) return null;
@@ -108,8 +108,8 @@ export function capabilityTargetFromRoleScope(
     };
   }
   if (
-    scopeKind === "group_child_kind" ||
-    scopeKind === "group_descendant_kind"
+    scopeKind === "group_child_groups" ||
+    scopeKind === "group_descendant_groups"
   ) {
     return { objectKind: "group" };
   }

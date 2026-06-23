@@ -40,7 +40,7 @@ type PermissionBlock = {
   actions: Action[];
 };
 
-export function RoleCapabilitiesPanel({ roleId }: { roleId: string }) {
+export function RolePermissionBlocksPanel({ roleId }: { roleId: string }) {
   const { data, isFetching, error } = useQuery({
     queryKey: ["role-permission-blocks-panel", roleId],
     queryFn: ({ signal }) =>

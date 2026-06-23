@@ -26,13 +26,13 @@ import {
 } from "@/components/ui/select";
 import { graphqlClient } from "@/lib/graphql/client";
 
-const CAPABILITIES_QUERY = `
+const ACTIONS_QUERY = `
   query ActionApplicabilityFormActions {
     actions(limit: 500, offset: 0) { items { id name description } }
   }
 `;
 
-const CREATE_CAPABILITY_MUTATION = `
+const CREATE_ACTION_MUTATION = `
   mutation CreateAction($input: CreateActionInput!) {
     createAction(input: $input) {
       id
@@ -44,7 +44,7 @@ const CREATE_CAPABILITY_MUTATION = `
   }
 `;
 
-const ADD_CAPABILITY_APPLICABILITY_MUTATION = `
+const ADD_ACTION_APPLICABILITY_MUTATION = `
   mutation AddActionApplicability($input: AddActionApplicabilityInput!) {
     addActionApplicability(input: $input) {
       id
@@ -68,10 +68,10 @@ const OBJECT_KINDS = [
   "audit_log",
 ] as const;
 
-export type CapabilityApplicabilityFormInitialValues = {
+export type ActionApplicabilityFormInitialValues = {
   id: string;
-  capabilityId: string;
-  capabilityName: string;
+  actionId: string;
+  actionName: string;
   objectKind: string;
   objectType: string;
 };
@@ -82,28 +82,28 @@ const actionSchema = z.object({
 });
 
 const applicabilitySchema = z.object({
-  capabilityId: z.string().min(1, "action_id is required."),
+  actionId: z.string().min(1, "action_id is required."),
   objectKind: z.string().min(1, "object_kind is required."),
   objectType: z.string().trim(),
 });
 
-type CapabilityActionValues = z.infer<typeof actionSchema>;
-type CapabilityApplicabilityValues = z.infer<typeof applicabilitySchema>;
+type ActionValues = z.infer<typeof actionSchema>;
+type ActionApplicabilityValues = z.infer<typeof applicabilitySchema>;
 
-type CapabilityOption = {
+type ActionOption = {
   id: string;
   name: string;
   description?: string | null;
 };
 
-export function CapabilityActionCreateForm({
+export function ActionCreateForm({
   onCancel,
   onSaved,
 }: {
   onCancel: () => void;
   onSaved: () => void;
 }) {
-  const form = useForm<CapabilityActionValues>({
+  const form = useForm<ActionValues>({
     resolver: zodResolver(actionSchema),
     defaultValues: {
       name: "",
@@ -112,9 +112,9 @@ export function CapabilityActionCreateForm({
   });
 
   const save = useMutation({
-    mutationFn: (values: CapabilityActionValues) =>
+    mutationFn: (values: ActionValues) =>
       graphqlClient({
-        query: CREATE_CAPABILITY_MUTATION,
+        query: CREATE_ACTION_MUTATION,
         variables: {
           input: {
             name: values.name,
@@ -182,41 +182,41 @@ export function CapabilityActionCreateForm({
   );
 }
 
-export function CapabilityApplicabilityCreateForm({
-  capability,
+export function ActionApplicabilityCreateForm({
+  applicability,
   onCancel,
   onSaved,
 }: {
-  capability?: CapabilityApplicabilityFormInitialValues;
+  applicability?: ActionApplicabilityFormInitialValues;
   onCancel: () => void;
   onSaved: () => void;
 }) {
-  const capabilitiesQuery = useQuery({
-    queryKey: ["capability-applicability-form-capabilities"],
+  const actionsQuery = useQuery({
+    queryKey: ["action-applicability-form-actions"],
     queryFn: ({ signal }) =>
-      graphqlClient<{ actions: { items: CapabilityOption[] } }>({
-        query: CAPABILITIES_QUERY,
+      graphqlClient<{ actions: { items: ActionOption[] } }>({
+        query: ACTIONS_QUERY,
         signal,
       }),
     staleTime: 60_000,
   });
 
-  const form = useForm<CapabilityApplicabilityValues>({
+  const form = useForm<ActionApplicabilityValues>({
     resolver: zodResolver(applicabilitySchema),
     defaultValues: {
-      capabilityId: capability?.capabilityId ?? "",
-      objectKind: capability?.objectKind ?? "",
-      objectType: capability?.objectType ?? "",
+      actionId: applicability?.actionId ?? "",
+      objectKind: applicability?.objectKind ?? "",
+      objectType: applicability?.objectType ?? "",
     },
   });
 
   const save = useMutation({
-    mutationFn: (values: CapabilityApplicabilityValues) =>
+    mutationFn: (values: ActionApplicabilityValues) =>
       graphqlClient({
-        query: ADD_CAPABILITY_APPLICABILITY_MUTATION,
+        query: ADD_ACTION_APPLICABILITY_MUTATION,
         variables: {
           input: {
-            actionId: values.capabilityId,
+            actionId: values.actionId,
             objectKind: values.objectKind,
             objectType: values.objectType || null,
           },
@@ -229,7 +229,7 @@ export function CapabilityApplicabilityCreateForm({
     onError: (err) => toast.error(err.message),
   });
 
-  const capabilities = capabilitiesQuery.data?.actions.items ?? [];
+  const actions = actionsQuery.data?.actions.items ?? [];
 
   return (
     <Form {...form}>
@@ -239,12 +239,12 @@ export function CapabilityApplicabilityCreateForm({
       >
         <FormField
           control={form.control}
-          name="capabilityId"
+          name="actionId"
           render={({ field }) => (
             <FormItem>
               <RequiredFormLabel required>action_id</RequiredFormLabel>
               <Select
-                disabled={capabilitiesQuery.isFetching}
+                disabled={actionsQuery.isFetching}
                 onValueChange={field.onChange}
                 value={field.value || undefined}
               >
@@ -254,7 +254,7 @@ export function CapabilityApplicabilityCreateForm({
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent>
-                  {capabilities.map((item) => (
+                  {actions.map((item) => (
                     <SelectItem key={item.id} value={item.id}>
                       {item.name} ({item.id})
                     </SelectItem>

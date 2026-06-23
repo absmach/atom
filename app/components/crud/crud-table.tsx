@@ -62,9 +62,8 @@ export function CrudTable({
   );
   const [editingRole, setEditingRole] = React.useState<Row | null>(null);
   const [editingPolicy, setEditingPolicy] = React.useState<Row | null>(null);
-  const [editingCapability, setEditingCapability] = React.useState<Row | null>(
-    null,
-  );
+  const [editingActionApplicability, setEditingActionApplicability] =
+    React.useState<Row | null>(null);
 
   const nameMap = useNameMap(extractIds(resourceKey, rows));
 
@@ -103,12 +102,12 @@ export function CrudTable({
         );
       }
       const idField = resource.deleteIdField ?? "id";
-      if (resource.key === "capabilities") {
+      if (resource.key === "action-applicability") {
         return graphqlClient({
           query: resource.deleteMutation,
           variables: {
             input: {
-              actionId: row.actionId ?? row.capabilityId,
+              actionId: row.actionId,
               objectKind: row.objectKind,
               objectType: row.objectType ?? null,
             },
@@ -263,7 +262,7 @@ export function CrudTable({
     group: editingGroup,
     resource: editingResource,
     role: editingRole,
-    capability: editingCapability,
+    actionApplicability: editingActionApplicability,
     policy: editingPolicy,
   };
 
@@ -274,7 +273,7 @@ export function CrudTable({
     setGroup: setEditingGroup,
     setResource: setEditingResource,
     setRole: setEditingRole,
-    setCapability: setEditingCapability,
+    setActionApplicability: setEditingActionApplicability,
     setPolicy: setEditingPolicy,
   };
 
@@ -422,11 +421,11 @@ function TableRowActions({
             )
           }
         />
-      ) : resourceKey === "capabilities" ? (
+      ) : resourceKey === "action-applicability" ? (
         <>
           {!missingUpdate && (
             <Button
-              onClick={() => defer(() => onEdit.setCapability(row))}
+              onClick={() => defer(() => onEdit.setActionApplicability(row))}
               size="sm"
               variant="outline"
             >
@@ -437,7 +436,7 @@ function TableRowActions({
             disabled={missingDelete || destroyPending}
             onClick={() =>
               onDelete(
-                `Delete applicability row "${String(row.actionName ?? row.capabilityName ?? row.id)}" on "${String(row.objectKind)}:${String(row.objectType ?? "NULL")}"? This cannot be undone.`,
+                `Delete applicability row "${String(row.actionName ?? row.id)}" on "${String(row.objectKind)}:${String(row.objectType ?? "NULL")}"? This cannot be undone.`,
               )
             }
             size="sm"

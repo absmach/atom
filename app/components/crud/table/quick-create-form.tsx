@@ -31,7 +31,7 @@ export function FallbackCreateForm({
       {resourceKey === "groups" || resourceKey === "roles" ? (
         <QuickField name="description" label="Description" />
       ) : null}
-      {resourceKey !== "tenants" && resourceKey !== "capabilities" ? (
+      {resourceKey !== "tenants" && resourceKey !== "action-applicability" ? (
         <TenantPickerField />
       ) : null}
       {formAttributes ? (

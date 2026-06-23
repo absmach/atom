@@ -111,13 +111,13 @@ const SCOPE_MODES = [
   {
     value: "group_direct_objects",
     label: "Direct objects in object group",
-    description: "Applies to clients/channels directly inside the group.",
+    description: "Applies to entities or resources directly inside the group.",
   },
   {
     value: "group_descendant_objects",
     label: "Objects in subgroups",
     description:
-      "Applies to clients/channels inside child or deeper groups only.",
+      "Applies to entities or resources inside child or deeper groups only.",
   },
   {
     value: "group_child_groups",

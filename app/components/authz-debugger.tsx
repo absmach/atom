@@ -45,7 +45,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { CapabilityApplicability } from "@/lib/access/capabilities";
+import type { ActionApplicability } from "@/lib/access/actions";
 import {
   AUTHZ_TARGET_KINDS,
   type AuthzDebuggerInitialValues,
@@ -635,7 +635,7 @@ export function AuthzDebugger({
 type ActionItem = {
   id: string;
   name: string;
-  applicability: CapabilityApplicability[];
+  applicability: ActionApplicability[];
 };
 
 type EntityOption = { id: string; name: string; kind: string };
@@ -699,16 +699,12 @@ function authzScopeSummary(kind: string, ref?: string) {
     case "group":
       return ref ? `object group ${ref}` : "object group";
     case "group_direct_objects":
-    case "group_object_type":
       return ref ? `direct objects in group ${ref}` : "direct group objects";
     case "group_descendant_objects":
-    case "group_tree_object_type":
       return ref ? `objects in subgroups of ${ref}` : "objects in subgroups";
     case "group_child_groups":
-    case "group_child_kind":
       return ref ? `direct child groups of ${ref}` : "direct child groups";
     case "group_descendant_groups":
-    case "group_descendant_kind":
       return ref ? `descendant groups of ${ref}` : "descendant groups";
     default:
       return ref ? `${kind} ${ref}` : kind;
@@ -760,7 +756,8 @@ function TraceCard({
   const effect = String(item.effect ?? "allow");
   const result = String(item.result ?? "skipped");
   const via = String(item.via ?? "direct");
-  const grantKind = String(item.grant_kind ?? "capability");
+  const rawGrantKind = String(item.grant_kind ?? "action");
+  const grantKind = rawGrantKind === "capability" ? "action" : rawGrantKind;
   const grantId = item.grant_id ? String(item.grant_id) : null;
   const roleName = item.role_name ? String(item.role_name) : null;
   const scopeKind = String(item.scope_kind ?? "platform");

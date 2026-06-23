@@ -8,7 +8,11 @@ import { Action } from "@/lib/utils";
 
 type Row = Record<string, unknown>;
 
-export function CapabilityInspectDetails({ row }: { row: Row | null }) {
+export function ActionApplicabilityInspectDetails({
+  row,
+}: {
+  row: Row | null;
+}) {
   const [copied, setCopied] = React.useState(false);
 
   const id = row?.id ? String(row.id) : "";
@@ -42,11 +46,9 @@ export function CapabilityInspectDetails({ row }: { row: Row | null }) {
         </div>
       </Field>
 
-      {row.actionName || row.capabilityName ? (
+      {row.actionName ? (
         <Field label="action_name">
-          <span className="text-sm">
-            {String(row.actionName ?? row.capabilityName)}
-          </span>
+          <span className="text-sm">{String(row.actionName)}</span>
         </Field>
       ) : row.name ? (
         <Field label="name">
@@ -54,10 +56,10 @@ export function CapabilityInspectDetails({ row }: { row: Row | null }) {
         </Field>
       ) : null}
 
-      {row.actionId || row.capabilityId ? (
+      {row.actionId ? (
         <Field label="action_id">
           <span className="break-all font-mono text-xs">
-            {String(row.actionId ?? row.capabilityId)}
+            {String(row.actionId)}
           </span>
         </Field>
       ) : null}

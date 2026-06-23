@@ -1,6 +1,6 @@
-import { CapabilityApplicabilityCreateForm } from "@/components/capabilities/capability-create-form";
+import { ActionApplicabilityCreateForm } from "@/components/actions/action-create-form";
 import {
-  capabilityFormInitialValues,
+  actionApplicabilityFormInitialValues,
   entityFormInitialValues,
   groupFormInitialValues,
   profileFormInitialValues,
@@ -31,7 +31,7 @@ export type EditingRows = {
   group: Row | null;
   resource: Row | null;
   role: Row | null;
-  capability: Row | null;
+  actionApplicability: Row | null;
   policy: Row | null;
 };
 
@@ -42,7 +42,7 @@ export type EditingSetters = {
   setGroup: (row: Row | null) => void;
   setResource: (row: Row | null) => void;
   setRole: (row: Row | null) => void;
-  setCapability: (row: Row | null) => void;
+  setActionApplicability: (row: Row | null) => void;
   setPolicy: (row: Row | null) => void;
 };
 
@@ -224,7 +224,7 @@ export function CrudEditSheets({
               {`Edit ${String(editing.role?.name ?? editing.role?.id ?? "role")}`}
             </SheetTitle>
             <SheetDescription>
-              Update this role&apos;s name, description, and actions.
+              Update this role&apos;s name, description, and permission blocks.
             </SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-4">
@@ -244,28 +244,30 @@ export function CrudEditSheets({
       </Sheet>
 
       <Sheet
-        open={Boolean(editing.capability)}
+        open={Boolean(editing.actionApplicability)}
         onOpenChange={(nextOpen) => {
-          if (!nextOpen) setters.setCapability(null);
+          if (!nextOpen) setters.setActionApplicability(null);
         }}
       >
         <SheetContent className="w-full overflow-y-auto sm:max-w-md!">
           <SheetHeader>
             <SheetTitle>
-              {`Edit ${String(editing.capability?.actionName ?? editing.capability?.name ?? editing.capability?.id ?? "action applicability")}`}
+              {`Edit ${String(editing.actionApplicability?.actionName ?? editing.actionApplicability?.name ?? editing.actionApplicability?.id ?? "action applicability")}`}
             </SheetTitle>
             <SheetDescription>
               Update this action applicability row.
             </SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-4">
-            {editing.capability ? (
-              <CapabilityApplicabilityCreateForm
-                key={String(editing.capability.id)}
-                capability={capabilityFormInitialValues(editing.capability)}
-                onCancel={() => setters.setCapability(null)}
+            {editing.actionApplicability ? (
+              <ActionApplicabilityCreateForm
+                key={String(editing.actionApplicability.id)}
+                applicability={actionApplicabilityFormInitialValues(
+                  editing.actionApplicability,
+                )}
+                onCancel={() => setters.setActionApplicability(null)}
                 onSaved={() => {
-                  setters.setCapability(null);
+                  setters.setActionApplicability(null);
                   onRefresh();
                 }}
               />
@@ -282,7 +284,7 @@ export function CrudEditSheets({
       >
         <SheetContent className="w-full overflow-y-auto sm:w-[min(90vw,64rem)]! sm:max-w-2xl!">
           <SheetHeader>
-            <SheetTitle>Edit policy binding</SheetTitle>
+            <SheetTitle>Edit direct policy</SheetTitle>
             <SheetDescription>
               Replace this direct policy with a new subject-to-permission-block
               grant.

@@ -9,5 +9,5 @@ export default async function ActionsPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const sp = await searchParams;
-  return <CrudWorkspace resourceKey="capability-actions" searchParams={sp} />;
+  return <CrudWorkspace resourceKey="actions" searchParams={sp} />;
 }

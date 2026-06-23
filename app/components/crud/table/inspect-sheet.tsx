@@ -1,6 +1,6 @@
 import { Activity } from "lucide-react";
 import Link from "next/link";
-import { CapabilityInspectDetails } from "@/components/capabilities/capability-inspect-details";
+import { ActionApplicabilityInspectDetails } from "@/components/actions/action-applicability-inspect-details";
 import { DetailFields } from "@/components/crud/table/detail-fields";
 import type { Row } from "@/components/crud/table/types";
 import { EntityAuditLog } from "@/components/entities/entity-audit-log";
@@ -11,8 +11,8 @@ import { GroupMembersPanel } from "@/components/groups/group-members-panel";
 import { PolicyInspectDetails } from "@/components/policy/policy-inspect-details";
 import { ProfileInspectDetails } from "@/components/profiles/profile-inspect-details";
 import { ResourceInspectDetails } from "@/components/resources/resource-inspect-details";
-import { RoleCapabilitiesPanel } from "@/components/roles/role-capabilities-panel";
 import { RoleInspectDetails } from "@/components/roles/role-inspect-details";
+import { RolePermissionBlocksPanel } from "@/components/roles/role-permission-blocks-panel";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -50,7 +50,7 @@ export function CrudInspectSheet({
       >
         <SheetHeader>
           <SheetTitle>
-            {resource.key === "capabilities"
+            {resource.key === "action-applicability"
               ? "Inspect Action Applicability"
               : `Inspect ${String(inspected?.name ?? inspected?.displayName ?? inspected?.id ?? "")}`}
           </SheetTitle>
@@ -127,13 +127,13 @@ function InspectBody({
       <>
         <RoleInspectDetails row={inspected} />
         {inspected?.id ? (
-          <RoleCapabilitiesPanel roleId={String(inspected.id)} />
+          <RolePermissionBlocksPanel roleId={String(inspected.id)} />
         ) : null}
       </>
     );
   }
-  if (resourceKey === "capabilities") {
-    return <CapabilityInspectDetails row={inspected} />;
+  if (resourceKey === "action-applicability") {
+    return <ActionApplicabilityInspectDetails row={inspected} />;
   }
   return <DetailFields row={inspected} />;
 }

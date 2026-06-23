@@ -84,7 +84,7 @@ const STARTER_OPERATIONS = [
     variables: '{\n  "limit": 20,\n  "offset": 0\n}',
   },
   {
-    name: "Authz Explain",
+    name: "Authorization Explain",
     description: "Inspect the authorization decision for a subject/action.",
     query: `mutation Explain($input: AuthzCheckInput!) {
   authzExplain(input: $input) {

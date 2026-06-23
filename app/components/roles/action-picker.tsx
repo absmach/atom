@@ -11,56 +11,58 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  type ActionApplicability,
+  actionLabel,
   applicabilityValues,
-  type CapabilityApplicability,
-  capabilityLabel,
-} from "@/lib/access/capabilities";
+} from "@/lib/access/actions";
 
-export type PickerCapability = {
+export type PickerAction = {
   id: string;
   name: string;
-  applicability?: CapabilityApplicability[] | null;
+  applicability?: ActionApplicability[] | null;
 };
 
 type Props = {
-  all: PickerCapability[];
+  all: PickerAction[];
   selected: string[];
   onAdd: (id: string) => void;
   onRemove: (id: string) => void;
   disabled?: boolean;
 };
 
-export function CapabilityPicker({
+export function ActionPicker({
   all,
   selected,
   onAdd,
   onRemove,
   disabled,
 }: Props) {
-  const selectedCaps = all.filter((c) => selected.includes(c.id));
-  const availableCaps = all.filter((c) => !selected.includes(c.id));
+  const selectedActions = all.filter((action) => selected.includes(action.id));
+  const availableActions = all.filter(
+    (action) => !selected.includes(action.id),
+  );
 
   return (
     <div className="grid gap-2">
       <Label>Actions</Label>
-      {selectedCaps.length > 0 ? (
+      {selectedActions.length > 0 ? (
         <div className="flex flex-wrap gap-1">
-          {selectedCaps.map((cap) => (
-            <Badge key={cap.id} variant="secondary" className="gap-1 pr-1">
-              {cap.name}
-              {applicabilityValues(cap).length > 0 ? (
+          {selectedActions.map((action) => (
+            <Badge key={action.id} variant="secondary" className="gap-1 pr-1">
+              {action.name}
+              {applicabilityValues(action).length > 0 ? (
                 <span className="text-muted-foreground">
-                  @{applicabilityValues(cap).join(",")}
+                  @{applicabilityValues(action).join(",")}
                 </span>
               ) : null}
               <button
                 type="button"
                 disabled={disabled}
                 className="ml-0.5 rounded-sm opacity-70 hover:opacity-100 disabled:cursor-not-allowed"
-                onClick={() => onRemove(cap.id)}
+                onClick={() => onRemove(action.id)}
               >
                 <X className="h-3 w-3" />
-                <span className="sr-only">Remove {cap.name}</span>
+                <span className="sr-only">Remove {action.name}</span>
               </button>
             </Badge>
           ))}
@@ -68,7 +70,7 @@ export function CapabilityPicker({
       ) : (
         <p className="text-xs text-muted-foreground">No actions selected.</p>
       )}
-      {availableCaps.length > 0 && (
+      {availableActions.length > 0 && (
         <Select
           disabled={disabled}
           value=""
@@ -80,9 +82,9 @@ export function CapabilityPicker({
             <SelectValue placeholder="— add action —" />
           </SelectTrigger>
           <SelectContent>
-            {availableCaps.map((c) => (
-              <SelectItem key={c.id} value={c.id}>
-                {capabilityLabel(c)}
+            {availableActions.map((action) => (
+              <SelectItem key={action.id} value={action.id}>
+                {actionLabel(action)}
               </SelectItem>
             ))}
           </SelectContent>

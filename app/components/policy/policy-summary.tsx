@@ -8,10 +8,11 @@ export type ScopeKind =
   | "object_kind"
   | "object_type"
   | "object"
-  | "group_object_type"
-  | "group_tree_object_type"
-  | "group_child_kind"
-  | "group_descendant_kind";
+  | "group"
+  | "group_direct_objects"
+  | "group_descendant_objects"
+  | "group_child_groups"
+  | "group_descendant_groups";
 
 export type PolicySummaryProps = {
   effect: "allow" | "deny";
