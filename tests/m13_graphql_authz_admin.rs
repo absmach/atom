@@ -863,7 +863,6 @@ async fn audit_and_admin_queries_smoke() {
                 total
               }}
               orphanPolicies(limit: 1) {{ id }}
-              unprotectedResources(limit: 1) {{ id kind }}
               expiringCredentials(limit: 1) {{ id entityId kind status }}
             }}
             "#
@@ -874,7 +873,6 @@ async fn audit_and_admin_queries_smoke() {
     assert!(data["auditLogs"]["items"].is_array());
     assert!(data["entityAuditLogs"]["items"].is_array());
     assert!(data["orphanPolicies"].is_array());
-    assert!(data["unprotectedResources"].is_array());
     assert!(data["expiringCredentials"].is_array());
 }
 

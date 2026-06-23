@@ -6,7 +6,7 @@ Lightweight replacement for Keycloak — single Rust binary, single Postgres dat
 
 - **Language:** Rust (edition 2021)
 - **HTTP framework:** Axum 0.7
-- **APIs:** GraphQL (async-graphql `=7.2.1`, depth/complexity/introspection limits) + gRPC (Tonic 0.12 + tonic-health). The REST handlers under `authz/` and `tenants/` are compiled but **unmounted** (see `routes.rs`).
+- **APIs:** GraphQL (async-graphql `=7.2.1`, depth/complexity/introspection limits) + gRPC (Tonic 0.12 + tonic-health). The legacy tenant Axum handlers are **unmounted** (see `routes.rs`); the dead authz REST handler module has been removed.
 - **Database:** PostgreSQL via sqlx 0.8.6 (dynamic `query`/`query_as`; macros off)
 - **Auth:** argon2 (password/API-key hashing); **ES256** JWTs via `p256` with `kid` rotation + JWKS (tokens carry identity/session, never permissions)
 - **PKI:** `rcgen`/`ring`/`ocsp`/`x509-parser` (certificate issuance, CSR, renewal, CRL, OCSP)
@@ -45,10 +45,10 @@ src/
   │  repo.rs           — sqlx queries
   authz/
      mod.rs
-     handlers.rs       — Axum handlers; capabilities + policy endpoints use RequireManage
      engine.rs         — PDP: batch-loads role capabilities, evaluates RBAC/ABAC,
      │                    deny-overrides-allow; unit-tested in #[cfg(test)]
-     repo.rs           — sqlx queries; capability_ids_for_roles() batch-loads by role array
+     repo.rs           — sqlx queries; effective_grants_for_subject() is the canonical
+                          runtime grant expansion
 migrations/
   001_initial.sql      — full schema + action seeds and bootstrap access data
 ```

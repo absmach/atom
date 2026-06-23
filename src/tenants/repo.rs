@@ -39,11 +39,14 @@ pub struct TenantAdminBootstrap {
 }
 
 #[derive(Debug, Clone)]
-pub struct TenantRoleAction {
+pub struct TenantRoleAssignmentSummary {
     pub role_id: Uuid,
     pub role_name: String,
+    /// Actions present in the role definition. This is metadata, not an
+    /// authorization decision: block effects, conditions, and object scopes are
+    /// intentionally not flattened into an inaccurate effective-access claim.
     pub actions: Vec<String>,
-    pub access_type: String,
+    pub assignment_paths: Vec<String>,
 }
 
 pub fn tenant_admin_bootstrap(tenant_id: Uuid, creator_id: Uuid) -> TenantAdminBootstrap {
@@ -803,37 +806,54 @@ pub async fn remove_tenant_member(
     Ok(())
 }
 
-pub async fn list_tenant_role_actions(
+pub async fn list_tenant_role_assignments(
     pool: &PgPool,
     tenant_id: Uuid,
     entity_id: Uuid,
-) -> Result<Vec<TenantRoleAction>, AppError> {
+) -> Result<Vec<TenantRoleAssignmentSummary>, AppError> {
     let rows = sqlx::query(
-        r#"WITH bindings AS (
-             SELECT pb.*, 'direct'::text AS access_type
-             FROM effective_access_edges() pb
-             WHERE pb.subject_kind = 'entity' AND pb.subject_id = $2
+        r#"WITH RECURSIVE subject_groups(group_id, path) AS (
+             SELECT gm.group_id, g.name
+             FROM group_members gm
+             JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+             WHERE gm.entity_id = $2
              UNION ALL
-             SELECT pb.*, 'group'::text AS access_type
-             FROM effective_access_edges() pb
-             JOIN group_members gm ON gm.group_id = pb.subject_id
-             WHERE pb.subject_kind = 'group' AND gm.entity_id = $2
+             SELECT gh.parent_id, parent.name || ' -> ' || sg.path
+             FROM group_hierarchy gh
+             JOIN subject_groups sg ON sg.group_id = gh.child_id
+             JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
+           ), assignments AS (
+             SELECT ra.role_id, 'direct'::text AS assignment_path
+             FROM role_assignments ra
+             WHERE ra.subject_kind = 'entity'
+               AND ra.subject_id = $2
+               AND (ra.tenant_id = $1 OR ra.tenant_id IS NULL)
+             UNION ALL
+             SELECT ra.role_id, 'group:' || sg.path
+             FROM role_assignments ra
+             JOIN subject_groups sg ON sg.group_id = ra.subject_id
+             WHERE ra.subject_kind = 'group'
+               AND (ra.tenant_id = $1 OR ra.tenant_id IS NULL)
            )
            SELECT r.id AS role_id,
                   r.name AS role_name,
-                  ARRAY_AGG(DISTINCT c.name ORDER BY c.name) AS actions,
-                  MIN(bindings.access_type) AS access_type
-           FROM bindings
-           JOIN roles r ON bindings.grant_kind = 'role' AND r.id = bindings.grant_id
-           JOIN effective_role_actions() rc ON rc.role_id = r.id
-           JOIN actions c ON c.id = rc.capability_id
-           WHERE bindings.effect = 'allow'
-             AND (r.tenant_id = $1 OR r.tenant_id IS NULL)
-             AND (
-                 bindings.scope_kind = 'platform'
-                 OR (bindings.scope_kind = 'tenant' AND bindings.scope_ref = $1::text)
-             )
-           GROUP BY r.id, r.name"#,
+                  COALESCE(
+                    ARRAY_AGG(DISTINCT a.name ORDER BY a.name)
+                      FILTER (WHERE a.name IS NOT NULL),
+                    ARRAY[]::text[]
+                  ) AS actions,
+                  ARRAY_AGG(
+                    DISTINCT assignments.assignment_path
+                    ORDER BY assignments.assignment_path
+                  ) AS assignment_paths
+           FROM assignments
+           JOIN roles r ON r.id = assignments.role_id
+           LEFT JOIN role_permission_blocks rpb ON rpb.role_id = r.id
+           LEFT JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+           LEFT JOIN actions a ON a.id = pba.action_id
+           WHERE r.tenant_id = $1 OR r.tenant_id IS NULL
+           GROUP BY r.id, r.name
+           ORDER BY r.name, r.id"#,
     )
     .bind(tenant_id)
     .bind(entity_id)
@@ -843,11 +863,11 @@ pub async fn list_tenant_role_actions(
 
     rows.into_iter()
         .map(|row| {
-            Ok(TenantRoleAction {
+            Ok(TenantRoleAssignmentSummary {
                 role_id: row.try_get("role_id").map_err(db_err)?,
                 role_name: row.try_get("role_name").map_err(db_err)?,
                 actions: row.try_get("actions").map_err(db_err)?,
-                access_type: row.try_get("access_type").map_err(db_err)?,
+                assignment_paths: row.try_get("assignment_paths").map_err(db_err)?,
             })
         })
         .collect()

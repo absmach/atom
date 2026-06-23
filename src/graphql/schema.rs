@@ -194,7 +194,6 @@ mod tests {
             "auditLogs",
             "entityAuditLogs",
             "orphanPolicies",
-            "unprotectedResources",
             "expiringCredentials",
             "systemStatus",
             "signingKeys",
@@ -286,6 +285,7 @@ mod tests {
             "roleCapabilities",
             "rolePolicies",
             "subjectRoleAssignments",
+            "unprotectedResources",
         ] {
             assert!(
                 !query_fields.contains(name),

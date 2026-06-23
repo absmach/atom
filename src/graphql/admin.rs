@@ -6,9 +6,7 @@ use crate::{
     auth::{has_capability_in_scope, require_capability, AuthContext, Scope},
     authz::repo as authz_repo,
     error::AppError,
-    models::access::{
-        AdminPageQuery, AuditQuery, ExpiringCredentialsQuery, UnprotectedResourcesQuery,
-    },
+    models::access::{AdminPageQuery, AuditQuery, ExpiringCredentialsQuery},
     state::AppState,
 };
 
@@ -17,7 +15,7 @@ use super::{
     types::{
         parse_id, parse_optional_audit_outcome, parse_optional_credential_kind, parse_optional_id,
         parse_optional_timestamp, AuditLog, AuditLogList, Credential, GqlAuditOutcome,
-        GqlCredentialKind, OrphanPolicy, Resource,
+        GqlCredentialKind, OrphanPolicy,
     },
 };
 
@@ -113,43 +111,6 @@ impl AdminQuery {
         .await
         .map_err(gql_error)?;
         Ok(policies.items.into_iter().map(OrphanPolicy::from).collect())
-    }
-
-    async fn unprotected_resources(
-        &self,
-        ctx: &Context<'_>,
-        tenant_id: Option<ID>,
-        kind: Option<String>,
-        limit: Option<i32>,
-        offset: Option<i32>,
-    ) -> Result<Vec<Resource>> {
-        let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
-            .await
-            .map_err(gql_error)?;
-        let resources = authz_repo::unprotected_resources(
-            &state.pool,
-            UnprotectedResourcesQuery {
-                tenant_id: parse_optional_id(tenant_id, "tenantId")?,
-                kind,
-                limit: limit.map(i64::from).unwrap_or(50),
-                offset: offset.map(i64::from).unwrap_or(0),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-
-        let mut items = Vec::new();
-        for resource in resources.items {
-            items.push(
-                authz_repo::get_resource(&state.pool, resource.id)
-                    .await
-                    .map(Resource::from)
-                    .map_err(gql_error)?,
-            );
-        }
-        Ok(items)
     }
 
     async fn expiring_credentials(

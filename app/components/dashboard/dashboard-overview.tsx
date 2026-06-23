@@ -80,7 +80,6 @@ type ResourceKindsResponse = {
 
 type RiskResponse = {
   orphanPolicies: unknown[];
-  unprotectedResources: unknown[];
   expiringCredentials: unknown[];
   authzDenied: Count;
 };
@@ -160,7 +159,6 @@ const RESOURCE_KINDS_QUERY = `
 const RISK_QUERY = `
   query DashboardRisk {
     orphanPolicies(limit: 50, offset: 0) { id }
-    unprotectedResources(limit: 50, offset: 0) { id }
     expiringCredentials(days: 30, limit: 50, offset: 0) { id }
     authzDenied: auditLogs(event: "authz.check", outcome: deny, limit: 1, offset: 0) { total }
   }
@@ -707,10 +705,6 @@ function buildEntityKindData(
 function buildRiskData(data: RiskResponse | undefined): ChartDatum[] {
   return [
     { label: "Orphan policies", value: data?.orphanPolicies.length ?? 0 },
-    {
-      label: "Unprotected resources",
-      value: data?.unprotectedResources.length ?? 0,
-    },
     {
       label: "Expiring credentials",
       value: data?.expiringCredentials.length ?? 0,

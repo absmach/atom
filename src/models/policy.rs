@@ -428,28 +428,6 @@ mod tests {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ListPolicies {
-    #[serde(default, alias = "tenantId")]
-    pub tenant_id: Option<Uuid>,
-    pub subject_id: Option<Uuid>,
-    pub subject_kind: Option<SubjectKind>,
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
-}
-
-fn default_limit() -> i64 {
-    20
-}
-
-#[derive(Debug, Serialize)]
-pub struct PolicyList {
-    pub items: Vec<PolicyBinding>,
-    pub total: i64,
-}
-
 /// Authorization check request.
 ///
 /// Two equivalent ways to identify the protected object:
