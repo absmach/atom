@@ -103,16 +103,25 @@ pub async fn validate_role_capability(
 ) -> Result<(), AppError> {
     let capability_names = capability_names(pool, &[capability_id]).await?;
     let rows = sqlx::query(
-        r#"SELECT e.kind AS entity_kind, pb.tenant_id, pb.scope_kind, pb.scope_ref
+        r#"WITH RECURSIVE assigned_groups(edge_id, group_id) AS (
+               SELECT pb.id, pb.subject_id
+               FROM effective_access_edges() pb
+               WHERE pb.grant_kind = 'role' AND pb.grant_id = $1 AND pb.subject_kind = 'group'
+               UNION
+               SELECT ag.edge_id, gh.child_id
+               FROM group_hierarchy gh
+               JOIN assigned_groups ag ON gh.parent_id = ag.group_id
+           )
+           SELECT e.kind AS entity_kind, pb.tenant_id, pb.scope_kind, pb.scope_ref
            FROM effective_access_edges() pb
            JOIN entities e ON pb.subject_kind = 'entity' AND e.id = pb.subject_id
            WHERE pb.grant_kind = 'role' AND pb.grant_id = $1
            UNION ALL
            SELECT e.kind AS entity_kind, pb.tenant_id, pb.scope_kind, pb.scope_ref
-           FROM effective_access_edges() pb
-           JOIN group_members gm ON pb.subject_kind = 'group' AND gm.group_id = pb.subject_id
-           JOIN entities e ON e.id = gm.entity_id
-           WHERE pb.grant_kind = 'role' AND pb.grant_id = $1"#,
+           FROM assigned_groups ag
+           JOIN effective_access_edges() pb ON pb.id = ag.edge_id
+           JOIN group_members gm ON gm.group_id = ag.group_id
+           JOIN entities e ON e.id = gm.entity_id"#,
     )
     .bind(role_id)
     .fetch_all(pool)

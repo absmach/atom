@@ -304,3 +304,91 @@ async fn exact_object_permission_block_uses_real_object_type() {
         .to_string()
         .contains("capability publish is not applicable to resource:rule"));
 }
+
+/// Adding a capability to a role must be guardrail-checked against every entity
+/// that holds the role, including those reaching it through a *parent* group.
+///
+/// Regression for `validate_role_capability` expanding group membership
+/// recursively: before the fix it joined only direct members of the assigned
+/// group, so a device sitting in a child group of the assigned parent group was
+/// invisible and the prohibited capability was added anyway.
+#[tokio::test]
+#[ignore]
+async fn role_capability_addition_rejects_device_via_parent_group() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let device = tenant_entity(&p, tenant_id, "device").await;
+    let manage_id = capability_id(&p, "manage").await;
+
+    // An absolute deny for device `manage` at tenant scope — the scope a role
+    // assignment edge carries, which is what `validate_role_capability` reads.
+    sqlx::query(
+        "INSERT INTO action_assignment_rules
+            (entity_kind, action_name, object_kind, object_type, decision, is_absolute)
+         VALUES ('device', 'manage', 'tenant', NULL, 'deny', TRUE)",
+    )
+    .execute(&p)
+    .await
+    .expect("insert custom rule");
+
+    let make_group = |name: String| {
+        atom::identity::repo::create_group(
+            &p,
+            CreateGroup {
+                id: None,
+                name,
+                tenant_id: Some(tenant_id),
+                group_type: Some("principal".to_string()),
+                description: None,
+                attributes: json!({}),
+            },
+        )
+    };
+    let parent = make_group(format!("m8-parent-{}", Uuid::new_v4()))
+        .await
+        .expect("parent group");
+    let child = make_group(format!("m8-child-{}", Uuid::new_v4()))
+        .await
+        .expect("child group");
+    atom::identity::repo::set_group_parent(&p, child.id, parent.id)
+        .await
+        .expect("set parent");
+    // Device joins the child group before the role carries the prohibited
+    // capability, so the join itself is clean.
+    atom::identity::repo::add_group_member(&p, child.id, device)
+        .await
+        .expect("device joins child group");
+
+    // An empty tenant role assigned to the parent group.
+    let role = atom::authz::repo::create_role(
+        &p,
+        CreateRole {
+            name: format!("m8-parent-role-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("role");
+    atom::authz::repo::create_role_assignment(
+        &p,
+        CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Group,
+            subject_id: parent.id,
+            role_id: role.id,
+        },
+    )
+    .await
+    .expect("assign role to parent group");
+
+    // Adding `manage` must be rejected: the device holds the role through the
+    // child→parent chain and is absolutely denied device `manage` at tenant scope.
+    let err = atom::authz::repo::add_role_capability(&p, role.id, manage_id)
+        .await
+        .expect_err("guardrail should reject capability addition for transitive device holder");
+    assert!(
+        err.to_string().contains("guardrail rejected"),
+        "expected guardrail rejection, got: {err}"
+    );
+}
