@@ -877,3 +877,64 @@ async fn audit_and_admin_queries_smoke() {
     assert!(data["unprotectedResources"].is_array());
     assert!(data["expiringCredentials"].is_array());
 }
+
+/// Through an actual GraphQL resolver, an exact-object read deny must override a
+/// tenant-wide read allow. The `entity(id)` resolver falls back to the
+/// control-plane gate when the PDP denies, so the gate must apply cross-scope
+/// deny-override (the GraphQL gate previously used a sequential-OR copy that let
+/// the tenant allow win).
+#[tokio::test]
+#[ignore]
+async fn graphql_entity_read_object_deny_overrides_tenant_allow() {
+    let pool = common::pool().await;
+    let tenant_id = tenant(&pool).await;
+    let subject = tenant_entity(&pool, tenant_id, "human").await;
+    let target = tenant_entity(&pool, tenant_id, "human").await;
+    let read = seeded_action(&pool, "read").await;
+
+    // Tenant-wide read allow + exact-object read deny on the target, both to the subject.
+    let allow_block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions) VALUES ('tenant', $1, 'allow', '{}') RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("allow block");
+    let deny_block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions) VALUES ('object', $1, 'deny', '{}') RETURNING id",
+    )
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .expect("deny block");
+    for block in [allow_block, deny_block] {
+        sqlx::query(
+            "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        )
+        .bind(block)
+        .bind(read)
+        .execute(&pool)
+        .await
+        .expect("block action");
+        sqlx::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+            .bind(tenant_id)
+            .bind(subject)
+            .bind(block)
+            .execute(&pool)
+            .await
+            .expect("direct policy");
+    }
+
+    let schema = build_schema(state(pool.clone()));
+    let resp = schema
+        .execute(authed_as(
+            subject,
+            format!("{{ entity(id: \"{target}\") {{ id }} }}"),
+        ))
+        .await;
+    assert!(
+        !resp.errors.is_empty(),
+        "object read deny must override tenant read allow through the GraphQL gate, got: {:?}",
+        resp.data
+    );
+}
