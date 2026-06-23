@@ -96,7 +96,7 @@ ABAC conditions: flat JSON object, keys are dot-paths (`entity.*`, `resource.*`,
 
 The live GraphQL/gRPC surface wraps the PDP with imperative **control-plane gates** — administrative preconditions, not object-level decisions:
 
-**Scope gates** (`auth.rs`) — `has_capability_in_scope` / `require_any_capability` / `require_read_access` evaluate the canonical grant expansion in memory: they honour the block's own scope and effect (unconditional deny overrides), resolve groups recursively, and treat a conditional grant as satisfying the gate (the object-level PDP re-checks its conditions). Object-specific authorization must still call the PDP.
+**Scope gates** (`auth.rs`) — `has_capability_in_scope` / `require_any_capability` / `require_read_access` evaluate the canonical grant expansion in memory: they honour the block's own scope and effect and resolve groups recursively. They **fail closed on ABAC conditions** (several callers use a gate as the final decision, e.g. `createEntity`, which has no object to re-check): only an *unconditional* allow satisfies a gate, and *any* matching deny — conditional or not — blocks it. Object-specific authorization must still call the PDP, which evaluates the conditions the gate ignores.
 
 **`RequireManage` extractor + `has_global_manage`** (`auth.rs`) — still used by some GraphQL resolvers; checks whether the caller holds a platform-scoped `manage` allow (directly or via a role).
 
