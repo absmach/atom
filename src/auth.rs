@@ -728,15 +728,18 @@ pub async fn require_role_read(
     require_any_capability(pool, entity_id, &[("role.manage", scope), ("read", scope)]).await
 }
 
-pub async fn require_policy_read(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
+/// Gate for reading policy records in a tenant (or platform when `tenant_id` is
+/// `None`): `policy.manage`, `read`, or `manage` at that scope.
+pub async fn require_policy_read(
+    pool: &PgPool,
+    entity_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let scope = scope_for_tenant(tenant_id);
     require_any_capability(
         pool,
         entity_id,
-        &[
-            ("policy.manage", Scope::Platform),
-            ("read", Scope::Platform),
-            ("manage", Scope::Platform),
-        ],
+        &[("policy.manage", scope), ("read", scope), ("manage", scope)],
     )
     .await
 }

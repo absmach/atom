@@ -377,7 +377,7 @@ pub async fn get_capability(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let cap = repo::get_capability(&state.pool, id).await?;
     Ok(Json(cap))
 }
@@ -387,7 +387,7 @@ pub async fn list_capabilities(
     auth: AuthContext,
     Query(params): Query<ListCapabilities>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let caps = repo::list_capabilities(&state.pool, params).await?;
     Ok(Json(serde_json::json!({"items": caps})))
 }
@@ -433,7 +433,7 @@ pub async fn get_policy(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let policy = repo::get_policy(&state.pool, id).await?;
     Ok(Json(policy))
 }
@@ -443,7 +443,7 @@ pub async fn list_policies(
     auth: AuthContext,
     Query(params): Query<ListPolicies>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_policy_read(&state.pool, auth.entity_id).await?;
+    require_policy_read(&state.pool, auth.entity_id, None).await?;
     let list = repo::list_policies(&state.pool, params).await?;
     Ok(Json(list))
 }
