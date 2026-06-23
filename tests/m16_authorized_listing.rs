@@ -203,6 +203,38 @@ async fn authorized(
 
 #[tokio::test]
 #[ignore]
+async fn authorized_resource_kinds_include_custom_readable_kinds_only() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m16-resource-kinds").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    make_resource(&pool, tenant_id, "channel", "channel").await;
+    make_resource(&pool, tenant_id, "custom_stream", "custom-stream").await;
+    make_resource(&pool, tenant_id, "rule", "unreadable-rule").await;
+    let read_id = action_id(&pool, "read").await;
+
+    for kind in ["channel", "custom_stream"] {
+        let role_id = make_role_with_block(
+            &pool,
+            tenant_id,
+            "object_type",
+            Some("resource"),
+            Some(&format!("resource:{kind}")),
+            None,
+            read_id,
+        )
+        .await;
+        assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
+    }
+
+    let kinds = atom::authz::repo::authorized_resource_kinds(&pool, subject_id, Some(tenant_id))
+        .await
+        .expect("authorized resource kinds");
+
+    assert_eq!(kinds, vec!["channel", "custom_stream"]);
+}
+
+#[tokio::test]
+#[ignore]
 async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, "m17-deny").await;

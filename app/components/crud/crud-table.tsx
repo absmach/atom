@@ -41,6 +41,7 @@ import { extractIds, useNameMap } from "@/lib/reconcile/use-name-map";
 export type { CrudTableProps };
 
 export function CrudTable({
+  filters,
   resourceKey,
   rows,
   total,
@@ -282,7 +283,7 @@ export function CrudTable({
       <DataTable
         columns={columns}
         data={rows}
-        filters={resource.filters}
+        filters={filters ?? resource.filters}
         limit={limit}
         noResultsMessage={`No ${resource.title.toLowerCase()} found.`}
         page={page}

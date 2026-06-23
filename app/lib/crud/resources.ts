@@ -16,6 +16,18 @@ import {
 
 export type CrudAction = "create" | "read" | "update" | "delete";
 
+export type CrudFilter = {
+  key: string;
+  variable?: string;
+  label: string;
+  allLabel?: string;
+  type: "text" | "select";
+  placeholder?: string;
+  options?: Array<{ label: string; value: string }>;
+  optionsQuery?: string;
+  optionsQueryName?: string;
+};
+
 export type CrudResource = {
   key: string;
   title: string;
@@ -29,14 +41,7 @@ export type CrudResource = {
   deleteIdField?: string;
   formAttributes?: boolean;
   tenantFilter?: boolean;
-  filters?: Array<{
-    key: string;
-    variable?: string;
-    label: string;
-    type: "text" | "select";
-    placeholder?: string;
-    options?: Array<{ label: string; value: string }>;
-  }>;
+  filters?: CrudFilter[];
   columns: Array<{
     key: string;
     label: string;
@@ -200,13 +205,10 @@ export const crudResources: CrudResource[] = [
         key: "kind",
         variable: "kind",
         label: "Kind",
+        allLabel: "All Kinds",
         type: "select",
-        options: [
-          { label: "Channel", value: "channel" },
-          { label: "Rule", value: "rule" },
-          { label: "Report", value: "report" },
-          { label: "Alarm", value: "alarm" },
-        ],
+        optionsQuery: `query ResourceKinds($tenantId: ID) { resourceKinds(tenantId: $tenantId) }`,
+        optionsQueryName: "resourceKinds",
       },
     ],
     columns: [
@@ -332,7 +334,7 @@ export const crudResources: CrudResource[] = [
   {
     key: "action-applicability",
     title: "Action Applicability",
-    route: "/actions",
+    route: "/actions/applicability",
     description:
       "Rows from action_applicability: each action/object-kind/object-type pair stored in Atom.",
     icon: KeyRound,
@@ -408,7 +410,7 @@ export const crudResources: CrudResource[] = [
   {
     key: "action-assignment-rules",
     title: "Assignment Guardrails",
-    route: "/actions",
+    route: "/actions/guardrails",
     description:
       "Rows from action_assignment_rules: assignment-time allow and deny guardrails by entity kind, action, and protected object.",
     icon: SlidersHorizontal,

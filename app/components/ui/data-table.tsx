@@ -70,6 +70,7 @@ export type DataTableProps<TData, TValue> = {
   filters?: Array<{
     key: string;
     label: string;
+    allLabel?: string;
     type: "text" | "select";
     placeholder?: string;
     options?: Array<{ label: string; value: string }>;
@@ -124,7 +125,6 @@ export function DataTable<TData, TValue>({
   useEffect(() => {
     setStatusValue(urlStatus);
   }, [urlStatus]);
-  const filterKeysStr = filters.map((f) => f.key).join(",");
   useEffect(() => {
     setFilterValues(
       Object.fromEntries(
@@ -134,8 +134,7 @@ export function DataTable<TData, TValue>({
         ]),
       ),
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterKeysStr, paramKey, searchParams]);
+  }, [filters, paramKey, searchParams]);
 
   const pageCount = total > 0 ? Math.ceil(total / limit) : 1;
 
@@ -499,6 +498,7 @@ function SelectFilter({
   filter: {
     key: string;
     label: string;
+    allLabel?: string;
     options?: Array<{ label: string; value: string }>;
   };
   onChange: (value: string) => void;
@@ -514,7 +514,9 @@ function SelectFilter({
       </SelectTrigger>
       <SelectContent>
         <SelectGroup>
-          <SelectItem value="all">All {filter.label}</SelectItem>
+          <SelectItem value="all">
+            {filter.allLabel ?? `All ${filter.label}`}
+          </SelectItem>
           {(filter.options ?? []).map((option) => (
             <SelectItem key={option.value} value={option.value}>
               {option.label}

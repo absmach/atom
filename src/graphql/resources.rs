@@ -23,6 +23,20 @@ pub struct ResourceQuery;
 
 #[Object]
 impl ResourceQuery {
+    async fn resource_kinds(
+        &self,
+        ctx: &Context<'_>,
+        tenant_id: Option<ID>,
+    ) -> Result<Vec<String>> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
+
+        authz_repo::authorized_resource_kinds(&state.pool, auth.entity_id, tenant_id)
+            .await
+            .map_err(gql_error)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn resources(
         &self,

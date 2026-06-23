@@ -4385,14 +4385,78 @@ async fn authorized_entity_ids(
     rows_to_authorized_object_ids(rows)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AuthorizedResourceProjection {
+    Ids,
+    Kinds,
+}
+
 async fn authorized_resource_ids(
     pool: &PgPool,
     params: AuthorizedObjectIdsQuery,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
-    let limit = params.limit.clamp(1, 500);
+    let rows = authorized_resource_rows(pool, params, AuthorizedResourceProjection::Ids).await?;
+    rows_to_authorized_object_ids(rows)
+}
+
+pub async fn authorized_resource_kinds(
+    pool: &PgPool,
+    subject_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<Vec<String>, AppError> {
+    use sqlx::Row;
+
+    let rows = authorized_resource_rows(
+        pool,
+        AuthorizedObjectIdsQuery {
+            subject_id,
+            action: "read".to_string(),
+            object_kind: "resource".to_string(),
+            object_type: None,
+            tenant_id,
+            q: None,
+            profile_id: None,
+            entity_status: None,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 500,
+            offset: 0,
+        },
+        AuthorizedResourceProjection::Kinds,
+    )
+    .await?;
+
+    rows.into_iter()
+        .map(|row| row.try_get("kind").map_err(db_err))
+        .collect()
+}
+
+async fn authorized_resource_rows(
+    pool: &PgPool,
+    params: AuthorizedObjectIdsQuery,
+    projection: AuthorizedResourceProjection,
+) -> Result<Vec<sqlx::postgres::PgRow>, AppError> {
+    let limit = match projection {
+        AuthorizedResourceProjection::Ids => params.limit.clamp(1, 500),
+        AuthorizedResourceProjection::Kinds => 500,
+    };
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
 
+    let select_clause = match projection {
+        AuthorizedResourceProjection::Ids => {
+            "SELECT id, COUNT(*) OVER() AS total
+             FROM authorized
+             ORDER BY created_at DESC
+             LIMIT $8 OFFSET $9"
+        }
+        AuthorizedResourceProjection::Kinds => {
+            "SELECT DISTINCT sub_kind AS kind
+             FROM authorized
+             ORDER BY kind
+             LIMIT $8 OFFSET $9"
+        }
+    };
     let sql = r#"WITH RECURSIVE subject_groups(group_id) AS (
                    SELECT gm.group_id
                    FROM group_members gm
@@ -4468,7 +4532,7 @@ async fn authorized_resource_ids(
                    JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
                ),
                authorized AS (
-                   SELECT c.id, c.created_at
+                   SELECT c.id, c.sub_kind, c.created_at
                    FROM candidates c
                    WHERE EXISTS (
                        SELECT 1
@@ -4587,12 +4651,10 @@ async fn authorized_resource_ids(
                          )
                    )
                )
-               SELECT id, COUNT(*) OVER() AS total
-               FROM authorized
-               ORDER BY created_at DESC
-               LIMIT $8 OFFSET $9"#;
+               __SELECT__"#
+        .replace("__SELECT__", select_clause);
 
-    let rows = sqlx::query(sql)
+    sqlx::query(&sql)
         .bind(params.subject_id)
         .bind(params.action)
         .bind(params.tenant_id)
@@ -4604,9 +4666,7 @@ async fn authorized_resource_ids(
         .bind(offset)
         .fetch_all(pool)
         .await
-        .map_err(db_err)?;
-
-    rows_to_authorized_object_ids(rows)
+        .map_err(db_err)
 }
 
 fn rows_to_authorized_object_ids(
