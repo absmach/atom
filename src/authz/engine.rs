@@ -415,12 +415,15 @@ async fn load_decision_context(
         tenant_id: object.tenant_id,
     };
 
-    // M3: deny when the object's owning tenant is not active. Skips for
-    // platform/global objects (tenant_id = None). The deny carries audit
-    // `details`, so it is surfaced through the full response.
-    if let Some(deny) = check_tenant_lifecycle(pool, &object).await? {
-        return Ok(denied(deny, Some(subject), Some(resource)));
-    }
+    // M3: load the object's owning tenant once. The same row drives the
+    // lifecycle short-circuit (kept ahead of action resolution so "tenant is
+    // frozen" wins over "unknown action") and the ABAC context built below. The
+    // lifecycle deny carries audit `details`, surfaced through the full response.
+    let tenant_ctx = match load_tenant(pool, object.tenant_id).await? {
+        TenantLoad::Inactive(deny) => return Ok(denied(deny, Some(subject), Some(resource))),
+        TenantLoad::None => None,
+        TenantLoad::Active(ctx) => Some(ctx),
+    };
 
     let cap_ids =
         repo::find_capability_ids_by_name(pool, &req.action, &object.coarse_kind, &object.kind)
@@ -443,7 +446,6 @@ async fn load_decision_context(
         .copied()
         .collect::<std::collections::HashSet<_>>();
 
-    let tenant_ctx = load_tenant_context(pool, object.tenant_id).await?;
     let eval_ctx = build_context(&entity_ctx, &object, tenant_ctx.as_ref(), &req.context);
 
     // Single canonical grant expansion: direct policies and role-linked blocks,
@@ -641,55 +643,26 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
     }
 }
 
-/// M3 / TEN-14 / AZ-16 / AUD-8: deny the request when the object's owning
-/// tenant is not `active`. Returns `Ok(None)` for platform/global objects and
-/// for active tenants. The deny carries `tenant_id` + `tenant_status` in
-/// `details` so audit can record the lifecycle reason.
-async fn check_tenant_lifecycle(
-    pool: &PgPool,
-    object: &ProtectedObject,
-) -> Result<Option<AuthzResponse>, AppError> {
-    use sqlx::Row;
-
-    let Some(tenant_id) = object.tenant_id else {
-        return Ok(None);
-    };
-
-    let row = sqlx::query("SELECT status FROM tenants WHERE id = $1")
-        .bind(tenant_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::Database)?;
-
-    let Some(row) = row else {
-        return Ok(None);
-    };
-
-    let status: TenantStatus = row.try_get("status").map_err(AppError::Database)?;
-    let state = match status {
-        TenantStatus::Active => return Ok(None),
-        TenantStatus::Inactive => "inactive",
-        TenantStatus::Frozen => "frozen",
-        TenantStatus::Deleted => "deleted",
-    };
-
-    Ok(Some(AuthzResponse::deny_with_details(
-        format!("tenant is {state}"),
-        json!({
-            "tenant_id": tenant_id,
-            "tenant_status": state,
-        }),
-    )))
+/// Outcome of loading the object's owning tenant once per check.
+enum TenantLoad {
+    /// No owning tenant (platform/global object) or the tenant row is missing —
+    /// no lifecycle gate and no tenant ABAC context.
+    None,
+    /// M3 / TEN-14 / AZ-16 / AUD-8: the tenant is not `active`. Carries the deny,
+    /// whose `details` hold `tenant_id` + `tenant_status` for audit.
+    Inactive(AuthzResponse),
+    /// Active tenant context for the ABAC build.
+    Active(TenantEvalContext),
 }
 
-async fn load_tenant_context(
-    pool: &PgPool,
-    tenant_id: Option<Uuid>,
-) -> Result<Option<TenantEvalContext>, AppError> {
+/// Load the object's owning tenant a single time, serving both the lifecycle
+/// short-circuit and the ABAC context (previously two separate queries of the
+/// same row).
+async fn load_tenant(pool: &PgPool, tenant_id: Option<Uuid>) -> Result<TenantLoad, AppError> {
     use sqlx::Row;
 
     let Some(tenant_id) = tenant_id else {
-        return Ok(None);
+        return Ok(TenantLoad::None);
     };
 
     let row = sqlx::query("SELECT id, status, attributes FROM tenants WHERE id = $1")
@@ -698,14 +671,31 @@ async fn load_tenant_context(
         .await
         .map_err(AppError::Database)?;
 
-    row.map(|row| {
-        Ok(TenantEvalContext {
-            id: row.try_get("id").map_err(AppError::Database)?,
-            status: row.try_get("status").map_err(AppError::Database)?,
-            attributes: row.try_get("attributes").map_err(AppError::Database)?,
-        })
-    })
-    .transpose()
+    let Some(row) = row else {
+        return Ok(TenantLoad::None);
+    };
+
+    let status: TenantStatus = row.try_get("status").map_err(AppError::Database)?;
+    let state = match status {
+        TenantStatus::Active => {
+            return Ok(TenantLoad::Active(TenantEvalContext {
+                id: row.try_get("id").map_err(AppError::Database)?,
+                status,
+                attributes: row.try_get("attributes").map_err(AppError::Database)?,
+            }));
+        }
+        TenantStatus::Inactive => "inactive",
+        TenantStatus::Frozen => "frozen",
+        TenantStatus::Deleted => "deleted",
+    };
+
+    Ok(TenantLoad::Inactive(AuthzResponse::deny_with_details(
+        format!("tenant is {state}"),
+        json!({
+            "tenant_id": tenant_id,
+            "tenant_status": state,
+        }),
+    )))
 }
 
 fn object_not_found_reason(req: &AuthzRequest) -> String {
