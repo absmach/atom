@@ -225,3 +225,167 @@ async fn tenant_visible_via_parent_group_role() {
         "a tenant readable via a parent-group role must be listed, got: {visible_ids:?}"
     );
 }
+
+async fn manage_id(pool: &sqlx::PgPool) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .expect("manage cap")
+}
+
+/// Insert a permission block (raw, bypassing applicability validation) and link
+/// it to `caller` via a direct policy bounded to `tenant`.
+async fn direct_block(
+    pool: &sqlx::PgPool,
+    tenant: Uuid,
+    caller: Uuid,
+    scope_mode: &str,
+    object_kind: Option<&str>,
+    effect: &str,
+    action: Uuid,
+) {
+    let block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(scope_mode)
+    .bind(tenant)
+    .bind(object_kind)
+    .bind(effect)
+    .fetch_one(pool)
+    .await
+    .expect("block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block)
+    .bind(action)
+    .execute(pool)
+    .await
+    .expect("block action");
+    sqlx::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+        .bind(tenant)
+        .bind(caller)
+        .bind(block)
+        .execute(pool)
+        .await
+        .expect("direct policy");
+}
+
+/// A manage deny must not hide a tenant the caller can read: deny-override is
+/// per-action. Before the fix the listing checked allow(read|manage) then
+/// deny(read|manage) uncorrelated, so the manage deny removed the tenant.
+#[tokio::test]
+#[ignore]
+async fn read_allow_not_hidden_by_manage_deny() {
+    let p = pool().await;
+    let target = make_tenant(&p).await;
+    let caller = make_human(&p, Some(target)).await;
+
+    direct_block(
+        &p,
+        target,
+        caller,
+        "tenant",
+        None,
+        "allow",
+        read_id(&p).await,
+    )
+    .await;
+    direct_block(
+        &p,
+        target,
+        caller,
+        "tenant",
+        None,
+        "deny",
+        manage_id(&p).await,
+    )
+    .await;
+
+    assert!(
+        visible_tenant_ids(&p, caller).await.contains(&target),
+        "a read allow must keep the tenant visible despite a separate manage deny"
+    );
+}
+
+/// A direct object_kind='tenant' read grant must make the tenant visible — the
+/// PDP matches object_kind scope against the tenant object's kind.
+#[tokio::test]
+#[ignore]
+async fn tenant_visible_via_object_kind_grant() {
+    let p = pool().await;
+    let target = make_tenant(&p).await;
+    let caller = make_human(&p, Some(target)).await;
+
+    direct_block(
+        &p,
+        target,
+        caller,
+        "object_kind",
+        Some("tenant"),
+        "allow",
+        read_id(&p).await,
+    )
+    .await;
+
+    assert!(
+        visible_tenant_ids(&p, caller).await.contains(&target),
+        "an object_kind='tenant' read grant must list the tenant"
+    );
+}
+
+/// A role-linked object_kind='tenant' read grant must make the tenant visible —
+/// role_grants must carry object_kind scopes, not collapse them to NULL.
+#[tokio::test]
+#[ignore]
+async fn tenant_visible_via_role_object_kind_grant() {
+    let p = pool().await;
+    let target = make_tenant(&p).await;
+    let caller = make_human(&p, Some(target)).await;
+    let read = read_id(&p).await;
+
+    let role = atom::authz::repo::create_role(
+        &p,
+        CreateRole {
+            name: format!("m19-ok-role-{}", Uuid::new_v4()),
+            tenant_id: Some(target),
+            description: None,
+        },
+    )
+    .await
+    .expect("create role");
+    let block: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ('object_kind', $1, 'tenant', 'allow') RETURNING id",
+    )
+    .bind(target)
+    .fetch_one(&p)
+    .await
+    .expect("block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block)
+    .bind(read)
+    .execute(&p)
+    .await
+    .expect("block action");
+    atom::authz::repo::replace_role_permission_block_links(&p, role.id, &[block])
+        .await
+        .expect("link");
+    atom::authz::repo::create_role_assignment(
+        &p,
+        CreateRoleAssignment {
+            tenant_id: Some(target),
+            subject_kind: SubjectKind::Entity,
+            subject_id: caller,
+            role_id: role.id,
+        },
+    )
+    .await
+    .expect("assign role");
+
+    assert!(
+        visible_tenant_ids(&p, caller).await.contains(&target),
+        "a role-linked object_kind='tenant' read grant must list the tenant"
+    );
+}
