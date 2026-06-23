@@ -4124,6 +4124,13 @@ async fn authorized_entity_ids(
                     AND g.status = 'active'
                     AND g.group_type = 'principal'
                    WHERE gm.entity_id = $1
+                   UNION ALL
+                   SELECT gh.parent_id
+                   FROM group_hierarchy gh
+                   JOIN subject_groups sg ON sg.group_id = gh.child_id
+                   JOIN groups parent ON parent.id = gh.parent_id
+                    AND parent.status = 'active'
+                    AND parent.group_type = 'principal'
                ),
                target_groups(id) AS (
                    SELECT $8::uuid WHERE $8::uuid IS NOT NULL
@@ -4347,6 +4354,13 @@ async fn authorized_resource_ids(
                     AND g.status = 'active'
                     AND g.group_type = 'principal'
                    WHERE gm.entity_id = $1
+                   UNION ALL
+                   SELECT gh.parent_id
+                   FROM group_hierarchy gh
+                   JOIN subject_groups sg ON sg.group_id = gh.child_id
+                   JOIN groups parent ON parent.id = gh.parent_id
+                    AND parent.status = 'active'
+                    AND parent.group_type = 'principal'
                ),
                target_groups(id) AS (
                    SELECT $6::uuid WHERE $6::uuid IS NOT NULL

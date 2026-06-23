@@ -381,3 +381,98 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     .await;
     assert_eq!(tree_ids, vec![child_device_id]);
 }
+
+/// A deny assigned to an *ancestor* principal group must remove the object from
+/// the listing, matching the PDP. The subject reaches the deny only through a
+/// parent of its direct group, so the listing's subject_groups CTE must resolve
+/// principal-group membership recursively (it previously used direct members
+/// only, so the deny was invisible and the object was wrongly listed).
+#[tokio::test]
+#[ignore]
+async fn authorized_listing_honours_ancestor_group_deny() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m16-ancestor-deny").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    let channel_id = make_resource(&pool, tenant_id, "channel", "channel").await;
+    let read_id = action_id(&pool, "read").await;
+
+    // Direct allow: subject can read channels (object alone would be listable).
+    let allow_role = make_role_with_block(
+        &pool,
+        tenant_id,
+        "object_type",
+        Some("resource"),
+        Some("resource:channel"),
+        None,
+        read_id,
+    )
+    .await;
+    assign_role_to_entity(&pool, tenant_id, subject_id, allow_role).await;
+
+    // Subject is a direct member of the child group; the parent is its ancestor.
+    let parent_group = make_group(&pool, tenant_id, "principal", "parent").await;
+    let child_group = make_group(&pool, tenant_id, "principal", "child").await;
+    sqlx::query(
+        "INSERT INTO principal_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
+    )
+    .bind(parent_group)
+    .bind(child_group)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("principal hierarchy");
+    sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
+        .bind(child_group)
+        .bind(subject_id)
+        .execute(&pool)
+        .await
+        .expect("child membership");
+
+    // Deny read on the channel, assigned to the ancestor (parent) group.
+    let deny_block: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert deny block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(deny_block)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("deny action");
+    sqlx::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'group', $2, $3)"#,
+    )
+    .bind(tenant_id)
+    .bind(parent_group)
+    .bind(deny_block)
+    .execute(&pool)
+    .await
+    .expect("assign deny to parent group");
+
+    let ids = authorized(
+        &pool,
+        subject_id,
+        "read",
+        "resource",
+        Some("resource:channel"),
+        tenant_id,
+    )
+    .await;
+    assert!(
+        ids.is_empty(),
+        "a deny on an ancestor principal group must remove the object from the listing, got: {ids:?}"
+    );
+
+    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+        .bind(channel_id)
+        .execute(&pool)
+        .await;
+}
