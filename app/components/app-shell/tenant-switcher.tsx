@@ -53,18 +53,21 @@ export function TenantSwitcher() {
     staleTime: 60_000,
   });
 
-  const tenantOptions: TenantSelection[] = (data?.tenants.items ?? []).map(
-    (t) => ({ id: t.id, name: t.name }),
+  const tenantOptions = React.useMemo<TenantSelection[]>(
+    () => (data?.tenants.items ?? []).map((t) => ({ id: t.id, name: t.name })),
+    [data?.tenants.items],
   );
-  const options = [GLOBAL_OPTION, ...tenantOptions];
+  const options = React.useMemo(
+    () => [GLOBAL_OPTION, ...tenantOptions],
+    [tenantOptions],
+  );
 
   // Resolve the display name for the ID seeded from the cookie once tenants load.
   React.useEffect(() => {
     if (!data || selection.id === GLOBAL_TENANT) return;
     const match = options.find((o) => o.id === selection.id);
     if (match && match.name !== selection.name) setTenant(match);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, selection.id, options.find, selection.name, setTenant]);
+  }, [data, selection.id, selection.name, options, setTenant]);
 
   const Icon = selection.id === GLOBAL_TENANT ? Globe2 : Building2;
   const label = tenantLabel(selection);

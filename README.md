@@ -43,7 +43,7 @@ Atom’s normal product model uses these ideas:
 | Tenant               | Top boundary                                     | Magistrala domain `d1`                              |
 | Action               | One action                                       | `read`, `write`, `publish`, `role.manage`           |
 | Action Applicability | Which object types support an action             | `publish` is valid for channels, not clients        |
-| Permission Block     | Scope + actions + effect + conditions            | channels in Plant-A -> read, publish                |
+| Permission Block     | Scope + actions + effect + conditions            | topic in Plant-A -> read, publish                   |
 | Role                 | Named collection of Permission Blocks            | `Plant Operator` bundles client and channel access  |
 | Role Assignment      | Gives a role to an entity or Principal Group     | assign `Plant Operator` to `user1`                  |
 | Direct Policy        | Gives one Permission Block directly to a subject | `client1` can publish to `channel1`                 |
@@ -452,70 +452,70 @@ Generic application mapping:
 
 `.env.example` is the local template. These are the main runtime and Compose variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | *(required)* | Postgres connection string |
-| `LISTEN_ADDR` | `0.0.0.0:8080` | HTTP bind address |
-| `GRPC_ADDR` | `0.0.0.0:8081` | gRPC bind address |
-| `ATOM_DB_MAX_CONNECTIONS` / `ATOM_DB_MIN_CONNECTIONS` | `20` / `0` | Postgres pool size controls |
-| `ATOM_DB_ACQUIRE_TIMEOUT_SECS` / `ATOM_DB_CONNECT_TIMEOUT_SECS` | `30` / `10` | Pool acquire and startup connect timeouts |
-| `ATOM_DB_IDLE_TIMEOUT_SECS` / `ATOM_DB_MAX_LIFETIME_SECS` | `600` / `1800` | Pool idle and lifetime limits |
-| `ATOM_KEY_ENCRYPTION_KEY` | *(required for production)* | Base64 32-byte AES-256-GCM key used to encrypt signing private keys |
-| `ATOM_KEY_ENCRYPTION_KEY_ID` | `local:v1` | Operator-visible signing-key encryption key id |
-| `ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS` | `false` | Development-only fallback for plaintext signing key rows |
-| `ATOM_AUDIT_RETENTION_DAYS` / `ATOM_AUDIT_RETENTION_ENABLED` | `365` / `true` | Background audit cleanup policy |
-| `ATOM_AUDIT_CLEANUP_INTERVAL_SECS` / `ATOM_AUDIT_CLEANUP_BATCH_SIZE` | `86400` / `5000` | Audit cleanup cadence and batch size |
-| `ATOM_LOGIN_FAILURE_LIMIT` / `ATOM_LOGIN_FAILURE_WINDOW_SECS` | `5` / `900` | Password login throttle |
-| `ATOM_RATE_LIMIT_ENABLED` | `true` | Enables in-process HTTP rate limits |
-| `ATOM_TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated proxy CIDRs whose forwarded client IP headers Atom may trust |
-| `ATOM_HTTP_RATE_LIMIT_AUTH_ROUTES` / `ATOM_HTTP_RATE_LIMIT_AUTH_WINDOW_SECS` | `30` / `60` | Auth route rate-limit policy |
-| `ATOM_HTTP_RATE_LIMIT_PUBLIC_ROUTES` / `ATOM_HTTP_RATE_LIMIT_PUBLIC_WINDOW_SECS` | `120` / `60` | JWKS and public PKI rate-limit policy |
-| `ATOM_HTTP_RATE_LIMIT_GRAPHQL` / `ATOM_HTTP_RATE_LIMIT_GRAPHQL_WINDOW_SECS` | `120` / `60` | GraphQL rate-limit policy |
-| `ATOM_HTTP_RATE_LIMIT_CUSTOM_ENDPOINTS` / `ATOM_HTTP_RATE_LIMIT_CUSTOM_ENDPOINTS_WINDOW_SECS` | `120` / `60` | Custom endpoint rate-limit policy |
-| `ATOM_HTTP_RATE_LIMIT_ADMIN_ROUTES` / `ATOM_HTTP_RATE_LIMIT_ADMIN_WINDOW_SECS` | `300` / `60` | Authenticated REST admin route rate-limit policy |
-| `ATOM_AUTH_BODY_LIMIT_BYTES` / `ATOM_GRAPHQL_BODY_LIMIT_BYTES` / `ATOM_CUSTOM_ENDPOINT_BODY_LIMIT_BYTES` | `32768` / `1048576` / `1048576` | Request body limits |
-| `ATOM_GRAPHQL_MAX_DEPTH` / `ATOM_GRAPHQL_MAX_COMPLEXITY` | `20` / `1000` | GraphQL validation limits |
-| `ATOM_GRAPHQL_INTROSPECTION_ENABLED` | `false` | Enables GraphQL introspection (off by default; opt in for dev) |
-| `JWT_EXPIRY_SECS` | `3600` | JWT lifetime in seconds |
-| `ATOM_JWT_ISSUER` | `ATOM_PUBLIC_BASE_URL` | JWT issuer claim |
-| `ATOM_JWT_AUDIENCE` | `magistrala` | JWT audience claim |
-| `ADMIN_SECRET` | *(optional)* | Seeds the admin password on first boot |
-| `ADMIN_ENTITY_ID` | `00000000-0000-0000-0000-000000000001` | Override seeded admin UUID |
-| `ATOM_SERVICE_SECRET` / `ATOM_SERVICE_ENTITY_ID` | *(optional)* / seeded service UUID | Seeds a service entity password on first boot |
-| `ATOM_MIN_PASSWORD_CHARS` | `12` | Minimum password length |
-| `ATOM_CORS_ALLOWED_ORIGINS` | `ATOM_PUBLIC_BASE_URL` | Comma-separated allowed CORS origins |
-| `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN` | auto-detect HTTPS / *(unset)* | Auth cookie options for UI flows |
-| `ATOM_SELF_REGISTRATION_ENABLED` | `true` | Enables unauthenticated global human self-registration |
-| `ATOM_UI_REGISTRATION_ENABLED` | `true` | UI service only; exposes `/register` and the login-page signup link |
-| `ATOM_UI_FORWARD_CLIENT_IP_HEADERS` | `false` | UI service only; forwards client IP headers to Atom proxy calls when explicitly enabled |
-| `ATOM_SIGNUP_ENABLED` | *(legacy alias)* | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED` |
-| `ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN` | `false` | Development-only password login before email verification |
-| `ATOM_PUBLIC_BASE_URL` | `http://localhost:8080` | Public URL used for issuer and redirect defaults |
-| `ATOM_EMAIL_VERIFICATION_REDIRECT` | `http://localhost:8080/auth/email/verify` | URL that verifies email tokens |
-| `ATOM_PASSWORD_RESET_REDIRECT` | `http://localhost:8080/reset-password` | Frontend URL for password reset tokens |
-| `ATOM_INVITATION_REDIRECT` | `http://localhost:8080/invitations/accept` | Frontend URL for invitation tokens |
-| `ATOM_OAUTH_SUCCESS_REDIRECT` | `http://localhost:8080/auth/callback` | Frontend URL that receives the OAuth exchange code |
-| `ATOM_OAUTH_ERROR_REDIRECT` | `http://localhost:8080/auth/callback` | Frontend URL that receives OAuth errors |
-| `ATOM_OIDC_PROVIDERS` | `[]` | JSON array of OIDC providers, for example Google |
-| `ATOM_EMAIL_VERIFICATION_EXPIRY_SECS` | `86400` | Email verification token lifetime |
-| `ATOM_INVITATION_EXPIRY_SECS` | `604800` | Invitation token lifetime |
-| `ATOM_OAUTH_STATE_EXPIRY_SECS` | `600` | OAuth state token lifetime |
-| `ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS` | `300` | OAuth exchange code lifetime |
-| `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM` | *(optional)* | Required pair for signup and password reset email delivery |
-| `ATOM_SMTP_PORT` / `ATOM_SMTP_TLS` | `587` / `starttls` | SMTP port and TLS mode |
-| `ATOM_SMTP_USERNAME` / `ATOM_SMTP_PASSWORD` | *(optional)* | SMTP credentials |
-| `ATOM_CERTS_ENABLED` | `true` | Enables certificate lifecycle support |
-| `ATOM_CERTS_CA_MODE` | `file_intermediate_issuer` | CA mode: `file_intermediate_issuer` or `file_root_issuer` |
-| `ATOM_CERTS_ROOT_CA_CERT_PATH` | *(optional)* | Mounted root CA certificate path |
-| `ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH` | *(optional)* | Mounted intermediate CA certificate path |
-| `ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH` | *(optional)* | Mounted intermediate CA private key path |
-| `ATOM_CERTS_ROOT_CA_KEY_PATH` | *(optional)* | Mounted root CA private key path for `file_root_issuer` |
-| `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS` | `2592000` | Default issued certificate lifetime |
-| `ATOM_CERTS_LEAF_MAX_TTL_SECS` | `2592000` | Maximum issued certificate lifetime |
-| `ATOM_CERTS_CA_DIR` | `./certs` | Docker Compose host directory mounted at `/certs:ro` |
-| `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8081` / `18081` / `3005` | Docker Compose host ports |
-| `ATOM_GRAPHQL_URL` | `http://atom:8080/graphql` | GraphQL endpoint used by the Dockerized Next UI |
-| `RUST_LOG` | `info` | Log level filter |
+| Variable                                                                                                                       | Default                                              | Description                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                                                                                                                 | *(required)*                                         | Postgres connection string                                                              |
+| `LISTEN_ADDR`                                                                                                                  | `0.0.0.0:8080`                                       | HTTP bind address                                                                       |
+| `GRPC_ADDR`                                                                                                                    | `0.0.0.0:8081`                                       | gRPC bind address                                                                       |
+| `ATOM_DB_MAX_CONNECTIONS` / `ATOM_DB_MIN_CONNECTIONS`                                                                          | `20` / `0`                                           | Postgres pool size controls                                                             |
+| `ATOM_DB_ACQUIRE_TIMEOUT_SECS` / `ATOM_DB_CONNECT_TIMEOUT_SECS`                                                                | `30` / `10`                                          | Pool acquire and startup connect timeouts                                               |
+| `ATOM_DB_IDLE_TIMEOUT_SECS` / `ATOM_DB_MAX_LIFETIME_SECS`                                                                      | `600` / `1800`                                       | Pool idle and lifetime limits                                                           |
+| `ATOM_KEY_ENCRYPTION_KEY`                                                                                                      | *(required for production)*                          | Base64 32-byte AES-256-GCM key used to encrypt signing private keys                     |
+| `ATOM_KEY_ENCRYPTION_KEY_ID`                                                                                                   | `local:v1`                                           | Operator-visible signing-key encryption key id                                          |
+| `ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS`                                                                                            | `false`                                              | Development-only fallback for plaintext signing key rows                                |
+| `ATOM_AUDIT_RETENTION_DAYS` / `ATOM_AUDIT_RETENTION_ENABLED`                                                                   | `365` / `true`                                       | Background audit cleanup policy                                                         |
+| `ATOM_AUDIT_CLEANUP_INTERVAL_SECS` / `ATOM_AUDIT_CLEANUP_BATCH_SIZE`                                                           | `86400` / `5000`                                     | Audit cleanup cadence and batch size                                                    |
+| `ATOM_LOGIN_FAILURE_LIMIT` / `ATOM_LOGIN_FAILURE_WINDOW_SECS`                                                                  | `5` / `900`                                          | Password login throttle                                                                 |
+| `ATOM_RATE_LIMIT_ENABLED`                                                                                                      | `true`                                               | Enables in-process HTTP rate limits                                                     |
+| `ATOM_TRUSTED_PROXY_CIDRS`                                                                                                     | *(empty)*                                            | Comma-separated proxy CIDRs whose forwarded client IP headers Atom may trust            |
+| `ATOM_HTTP_RATE_LIMIT_AUTH_ROUTES` / `ATOM_HTTP_RATE_LIMIT_AUTH_WINDOW_SECS`                                                   | `30` / `60`                                          | Auth route rate-limit policy                                                            |
+| `ATOM_HTTP_RATE_LIMIT_PUBLIC_ROUTES` / `ATOM_HTTP_RATE_LIMIT_PUBLIC_WINDOW_SECS`                                               | `120` / `60`                                         | JWKS and public PKI rate-limit policy                                                   |
+| `ATOM_HTTP_RATE_LIMIT_GRAPHQL` / `ATOM_HTTP_RATE_LIMIT_GRAPHQL_WINDOW_SECS`                                                    | `120` / `60`                                         | GraphQL rate-limit policy                                                               |
+| `ATOM_HTTP_RATE_LIMIT_CUSTOM_ENDPOINTS` / `ATOM_HTTP_RATE_LIMIT_CUSTOM_ENDPOINTS_WINDOW_SECS`                                  | `120` / `60`                                         | Custom endpoint rate-limit policy                                                       |
+| `ATOM_HTTP_RATE_LIMIT_ADMIN_ROUTES` / `ATOM_HTTP_RATE_LIMIT_ADMIN_WINDOW_SECS`                                                 | `300` / `60`                                         | Authenticated REST admin route rate-limit policy                                        |
+| `ATOM_AUTH_BODY_LIMIT_BYTES` / `ATOM_GRAPHQL_BODY_LIMIT_BYTES` / `ATOM_CUSTOM_ENDPOINT_BODY_LIMIT_BYTES`                       | `32768` / `1048576` / `1048576`                      | Request body limits                                                                     |
+| `ATOM_GRAPHQL_MAX_DEPTH` / `ATOM_GRAPHQL_MAX_COMPLEXITY`                                                                       | `20` / `1000`                                        | GraphQL validation limits                                                               |
+| `ATOM_GRAPHQL_INTROSPECTION_ENABLED`                                                                                           | `false`                                              | Enables GraphQL introspection (off by default; opt in for dev)                          |
+| `JWT_EXPIRY_SECS`                                                                                                              | `3600`                                               | JWT lifetime in seconds                                                                 |
+| `ATOM_JWT_ISSUER`                                                                                                              | `ATOM_PUBLIC_BASE_URL`                               | JWT issuer claim                                                                        |
+| `ATOM_JWT_AUDIENCE`                                                                                                            | `magistrala`                                         | JWT audience claim                                                                      |
+| `ADMIN_SECRET`                                                                                                                 | *(optional)*                                         | Seeds the admin password on first boot                                                  |
+| `ADMIN_ENTITY_ID`                                                                                                              | `00000000-0000-0000-0000-000000000001`               | Override seeded admin UUID                                                              |
+| `ATOM_SERVICE_SECRET` / `ATOM_SERVICE_ENTITY_ID`                                                                               | *(optional)* / seeded service UUID                   | Seeds a service entity password on first boot                                           |
+| `ATOM_MIN_PASSWORD_CHARS`                                                                                                      | `12`                                                 | Minimum password length                                                                 |
+| `ATOM_CORS_ALLOWED_ORIGINS`                                                                                                    | `ATOM_PUBLIC_BASE_URL`                               | Comma-separated allowed CORS origins                                                    |
+| `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN`                                                                          | auto-detect HTTPS / *(unset)*                        | Auth cookie options for UI flows                                                        |
+| `ATOM_SELF_REGISTRATION_ENABLED`                                                                                               | `true`                                               | Enables unauthenticated global human self-registration                                  |
+| `ATOM_UI_REGISTRATION_ENABLED`                                                                                                 | `true`                                               | UI service only; exposes `/register` and the login-page signup link                     |
+| `ATOM_UI_FORWARD_CLIENT_IP_HEADERS`                                                                                            | `false`                                              | UI service only; forwards client IP headers to Atom proxy calls when explicitly enabled |
+| `ATOM_SIGNUP_ENABLED`                                                                                                          | *(legacy alias)*                                     | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED`                          |
+| `ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN`                                                                                            | `false`                                              | Development-only password login before email verification                               |
+| `ATOM_PUBLIC_BASE_URL`                                                                                                         | `http://localhost:8080`                              | Public URL used for issuer and redirect defaults                                        |
+| `ATOM_EMAIL_VERIFICATION_REDIRECT`                                                                                             | `http://localhost:8080/auth/email/verify`            | URL that verifies email tokens                                                          |
+| `ATOM_PASSWORD_RESET_REDIRECT`                                                                                                 | `http://localhost:8080/reset-password`               | Frontend URL for password reset tokens                                                  |
+| `ATOM_INVITATION_REDIRECT`                                                                                                     | `http://localhost:8080/invitations/accept`           | Frontend URL for invitation tokens                                                      |
+| `ATOM_OAUTH_SUCCESS_REDIRECT`                                                                                                  | `http://localhost:8080/auth/callback`                | Frontend URL that receives the OAuth exchange code                                      |
+| `ATOM_OAUTH_ERROR_REDIRECT`                                                                                                    | `http://localhost:8080/auth/callback`                | Frontend URL that receives OAuth errors                                                 |
+| `ATOM_OIDC_PROVIDERS`                                                                                                          | `[]`                                                 | JSON array of OIDC providers, for example Google                                        |
+| `ATOM_EMAIL_VERIFICATION_EXPIRY_SECS`                                                                                          | `86400`                                              | Email verification token lifetime                                                       |
+| `ATOM_INVITATION_EXPIRY_SECS`                                                                                                  | `604800`                                             | Invitation token lifetime                                                               |
+| `ATOM_OAUTH_STATE_EXPIRY_SECS`                                                                                                 | `600`                                                | OAuth state token lifetime                                                              |
+| `ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS`                                                                                          | `300`                                                | OAuth exchange code lifetime                                                            |
+| `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM`                                                                                            | *(optional)*                                         | Required pair for signup and password reset email delivery                              |
+| `ATOM_SMTP_PORT` / `ATOM_SMTP_TLS`                                                                                             | `587` / `starttls`                                   | SMTP port and TLS mode                                                                  |
+| `ATOM_SMTP_USERNAME` / `ATOM_SMTP_PASSWORD`                                                                                    | *(optional)*                                         | SMTP credentials                                                                        |
+| `ATOM_CERTS_ENABLED`                                                                                                           | `true`                                               | Enables certificate lifecycle support                                                   |
+| `ATOM_CERTS_CA_MODE`                                                                                                           | `file_intermediate_issuer`                           | CA mode: `file_intermediate_issuer` or `file_root_issuer`                               |
+| `ATOM_CERTS_ROOT_CA_CERT_PATH`                                                                                                 | *(optional)*                                         | Mounted root CA certificate path                                                        |
+| `ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH`                                                                                         | *(optional)*                                         | Mounted intermediate CA certificate path                                                |
+| `ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH`                                                                                          | *(optional)*                                         | Mounted intermediate CA private key path                                                |
+| `ATOM_CERTS_ROOT_CA_KEY_PATH`                                                                                                  | *(optional)*                                         | Mounted root CA private key path for `file_root_issuer`                                 |
+| `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS`                                                                                             | `2592000`                                            | Default issued certificate lifetime                                                     |
+| `ATOM_CERTS_LEAF_MAX_TTL_SECS`                                                                                                 | `2592000`                                            | Maximum issued certificate lifetime                                                     |
+| `ATOM_CERTS_CA_DIR`                                                                                                            | `./certs`                                            | Docker Compose host directory mounted at `/certs:ro`                                    |
+| `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8081` / `18081` / `3005` | Docker Compose host ports                                                               |
+| `ATOM_GRAPHQL_URL`                                                                                                             | `http://atom:8080/graphql`                           | GraphQL endpoint used by the Dockerized Next UI                                         |
+| `RUST_LOG`                                                                                                                     | `info`                                               | Log level filter                                                                        |
 
 Rate limiting uses the socket peer IP by default. `X-Forwarded-For` and
 `X-Real-IP` are ignored unless the immediate peer IP is inside
