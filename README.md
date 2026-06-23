@@ -855,6 +855,13 @@ cargo watch -x run
 # Run Postgres only for cargo run
 docker compose --env-file .env up -d postgres
 
+# Run unit tests without external services
+cargo test
+
+# Run DB-gated integration tests, including #[ignore] tests
+set -a; source .env; set +a
+cargo test -- --include-ignored --test-threads=1
+
 # Lint
 cargo clippy -- -D warnings
 cargo fmt --check
