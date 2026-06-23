@@ -3451,30 +3451,31 @@ pub async fn subject_role_assignments(
 }
 
 pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let direct_block_id: Option<Uuid> = sqlx::query_scalar(
         "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
     if let Some(block_id) = direct_block_id {
-        sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
-            .bind(block_id)
-            .execute(pool)
-            .await
-            .map_err(db_err)?;
+        // The block is shared: GC it only if removing this policy left it
+        // unreferenced. A block still linked to a role or another policy stays.
+        delete_orphaned_blocks(&mut tx, &[block_id]).await?;
+        tx.commit().await.map_err(db_err)?;
         return Ok(());
     }
 
     let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("policy {id} not found")));
     }
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 

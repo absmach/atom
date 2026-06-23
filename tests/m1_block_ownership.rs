@@ -14,8 +14,8 @@
 
 mod common;
 
-use atom::models::enums::Effect;
-use atom::models::policy::CreatePermissionBlock;
+use atom::models::enums::{Effect, GrantKind, ScopeKind, SubjectKind};
+use atom::models::policy::{CreatePermissionBlock, CreatePolicyBinding};
 use atom::models::role::CreateRole;
 use common::pool;
 use serde_json::json;
@@ -191,4 +191,97 @@ async fn delete_permission_block_refuses_referenced_block() {
         .await
         .expect("delete after unlink");
     assert!(!block_exists(&p, block_id).await, "block must be gone");
+}
+
+async fn make_human(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')",
+    )
+    .bind(id)
+    .bind(format!("own-ent-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert entity");
+    id
+}
+
+/// Create a direct policy granting `read` on resource:channel to `subject`, and
+/// return (policy_id, block_id).
+async fn make_direct_policy(pool: &sqlx::PgPool, tenant_id: Uuid, subject: Uuid) -> (Uuid, Uuid) {
+    let read_cap = read_capability_id(pool).await;
+    let policy = atom::authz::repo::create_policy(
+        pool,
+        CreatePolicyBinding {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: subject,
+            grant_kind: GrantKind::Capability,
+            grant_id: read_cap,
+            scope_kind: ScopeKind::ObjectType,
+            scope_ref: Some("resource:channel".into()),
+            effect: Effect::Allow,
+            conditions: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("create policy");
+    let block_id: Uuid =
+        sqlx::query_scalar("SELECT permission_block_id FROM direct_policies WHERE id = $1")
+            .bind(policy.id)
+            .fetch_one(pool)
+            .await
+            .expect("policy block id");
+    (policy.id, block_id)
+}
+
+/// Deleting a direct policy must not destroy its block while a role still links
+/// it. Before the fix delete_policy deleted the block outright, cascading the
+/// role link away.
+#[tokio::test]
+#[ignore]
+async fn shared_block_survives_direct_policy_delete() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let subject = make_human(&p, tenant_id).await;
+    let (policy_id, block_id) = make_direct_policy(&p, tenant_id, subject).await;
+    let role = make_role(&p, tenant_id).await;
+
+    atom::authz::repo::replace_role_permission_block_links(&p, role, &[block_id])
+        .await
+        .expect("link policy block to role");
+
+    atom::authz::repo::delete_policy(&p, policy_id)
+        .await
+        .expect("delete policy");
+
+    assert!(
+        block_exists(&p, block_id).await,
+        "a block still linked to a role must survive direct-policy deletion"
+    );
+    assert!(
+        role_links_block(&p, role, block_id).await,
+        "the role must still link the block"
+    );
+}
+
+/// A direct policy's block with no other reference is garbage-collected when the
+/// policy is deleted, so delete_policy still cleans up owned blocks.
+#[tokio::test]
+#[ignore]
+async fn orphaned_block_is_collected_on_direct_policy_delete() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let subject = make_human(&p, tenant_id).await;
+    let (policy_id, block_id) = make_direct_policy(&p, tenant_id, subject).await;
+
+    atom::authz::repo::delete_policy(&p, policy_id)
+        .await
+        .expect("delete policy");
+
+    assert!(
+        !block_exists(&p, block_id).await,
+        "an unreferenced direct-policy block must be garbage-collected"
+    );
 }
