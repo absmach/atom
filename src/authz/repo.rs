@@ -702,16 +702,8 @@ pub async fn replace_role_permission_blocks(
     validate_role_permission_blocks(pool, permission_blocks).await?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
-    sqlx::query(
-        r#"DELETE FROM permission_blocks
-           WHERE id IN (
-             SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1
-           )"#,
-    )
-    .bind(role_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_err)?;
+    let old_block_ids = role_block_ids(&mut tx, role_id).await?;
+    unlink_role_blocks_and_gc(&mut tx, role_id, &old_block_ids).await?;
     for block in permission_blocks {
         insert_role_permission_block(&mut tx, role_id, block).await?;
     }
@@ -828,6 +820,70 @@ async fn insert_role_permission_block(
     .map_err(db_err)?;
 
     Ok(block_id)
+}
+
+/// Permission blocks are shared: one block can be linked to several roles and to
+/// direct policies. Delete only those among `block_ids` that, after the caller
+/// has removed its own links, are no longer referenced by any role or direct
+/// policy — so a block still in use elsewhere is never destroyed. This is the
+/// garbage-collection half of the shared-immutable ownership model.
+async fn delete_orphaned_blocks(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    block_ids: &[Uuid],
+) -> Result<(), AppError> {
+    if block_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"DELETE FROM permission_blocks pb
+           WHERE pb.id = ANY($1)
+             AND NOT EXISTS (
+                 SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM direct_policies WHERE permission_block_id = pb.id
+             )"#,
+    )
+    .bind(block_ids)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+/// Detach `block_ids` from `role_id`, then garbage-collect any that are now
+/// orphaned. Replaces the previous `DELETE FROM permission_blocks` by role, which
+/// cascaded through `role_permission_blocks`/`direct_policies` and so silently
+/// removed blocks still linked to *other* roles.
+async fn unlink_role_blocks_and_gc(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    role_id: Uuid,
+    block_ids: &[Uuid],
+) -> Result<(), AppError> {
+    if block_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "DELETE FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = ANY($2)",
+    )
+    .bind(role_id)
+    .bind(block_ids)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    delete_orphaned_blocks(tx, block_ids).await
+}
+
+/// Block ids currently linked to `role_id`.
+async fn role_block_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    role_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar("SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1")
+        .bind(role_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db_err)
 }
 
 type PermissionBlockScopeColumns<'a> = (
@@ -1415,6 +1471,22 @@ pub async fn create_permission_block(
 }
 
 pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    // Blocks are shared and immutable: refuse to delete one still linked to a
+    // role or attached to a direct policy, so an explicit block delete can never
+    // silently cascade those links away. Callers must unlink first.
+    let referenced: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (SELECT 1 FROM role_permission_blocks WHERE permission_block_id = $1)
+              OR EXISTS (SELECT 1 FROM direct_policies WHERE permission_block_id = $1)"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+    if referenced {
+        return Err(AppError::bad_request(
+            "permission block is still linked to a role or direct policy; unlink it first",
+        ));
+    }
     let result = sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
         .bind(id)
         .execute(pool)
@@ -2157,16 +2229,8 @@ pub async fn replace_composite_role_children(
     child_role_ids: &[Uuid],
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    sqlx::query(
-        r#"DELETE FROM permission_blocks
-           WHERE id IN (
-             SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1
-           )"#,
-    )
-    .bind(parent_role_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_err)?;
+    let old_block_ids = role_block_ids(&mut tx, parent_role_id).await?;
+    unlink_role_blocks_and_gc(&mut tx, parent_role_id, &old_block_ids).await?;
     for child_role_id in child_role_ids {
         copy_role_permission_blocks(&mut tx, parent_role_id, *child_role_id).await?;
     }
@@ -2179,20 +2243,23 @@ pub async fn remove_role_capability(
     role_id: Uuid,
     cap_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query(
-        r#"DELETE FROM permission_blocks
-           WHERE id IN (
-             SELECT rpb.permission_block_id
-             FROM role_permission_blocks rpb
-             JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
-             WHERE rpb.role_id = $1 AND pba.action_id = $2
-           )"#,
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    // Blocks this role links that grant `cap_id`. Unlink them from this role and
+    // GC any now-orphaned; blocks the same `cap_id` reaches through other roles
+    // are untouched.
+    let block_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT rpb.permission_block_id
+           FROM role_permission_blocks rpb
+           JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
+           WHERE rpb.role_id = $1 AND pba.action_id = $2"#,
     )
     .bind(role_id)
     .bind(cap_id)
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;
+    unlink_role_blocks_and_gc(&mut tx, role_id, &block_ids).await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
