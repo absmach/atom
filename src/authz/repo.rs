@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use serde_json::Value;
@@ -10,16 +10,15 @@ use crate::{
     models::{
         access::{
             AccessItem, AccessQuery, AdminPageQuery, AuditLogItem, AuditLogResponse,
-            AuthorizedObjectIdsQuery, AuthorizedObjectIdsResponse, CapabilitySource,
-            CapabilitySummary, EffectiveCapabilitiesQuery, EffectiveCapabilitiesResponse,
-            EffectiveCapability, EntityAccessResponse, EntitySummary, ExpiringCredentialItem,
-            ExpiringCredentialsQuery, ExpiringCredentialsResponse, GrantSummary, GroupAccessItem,
-            GroupAccessQuery, GroupAccessResponse, GroupInfo, OrphanPoliciesResponse,
-            OrphanPolicyItem, ResourceAccessEntity, ResourceAccessItem, ResourceAccessQuery,
-            ResourceAccessResponse, ResourceSummary, RoleHolderGroup, RoleHolderItem,
-            RoleHoldersQuery, RoleHoldersResponse, RoleSummary, RoleWithCapabilities,
-            SubjectRoleAssignment, SubjectRoleAssignmentList, SubjectRoleAssignmentsQuery,
-            UnprotectedResourceItem, UnprotectedResourcesQuery, UnprotectedResourcesResponse,
+            AuthorizedObjectIdsQuery, AuthorizedObjectIdsResponse, CapabilitySummary,
+            EntityAccessResponse, EntitySummary, ExpiringCredentialItem, ExpiringCredentialsQuery,
+            ExpiringCredentialsResponse, GrantSummary, GroupAccessItem, GroupAccessQuery,
+            GroupAccessResponse, GroupInfo, OrphanPoliciesResponse, OrphanPolicyItem,
+            ResourceAccessEntity, ResourceAccessItem, ResourceAccessQuery, ResourceAccessResponse,
+            ResourceSummary, RoleHolderGroup, RoleHolderItem, RoleHoldersQuery,
+            RoleHoldersResponse, RoleSummary, RoleWithCapabilities, SubjectRoleAssignment,
+            SubjectRoleAssignmentList, SubjectRoleAssignmentsQuery, UnprotectedResourceItem,
+            UnprotectedResourcesQuery, UnprotectedResourcesResponse,
         },
         action_assignment_rule::{
             ActionAssignmentRule, ActionAssignmentRuleList, CreateActionAssignmentRule,
@@ -4602,105 +4601,6 @@ fn rows_to_authorized_object_ids(
         total = row.try_get("total").map_err(db_err)?;
     }
     Ok(AuthorizedObjectIdsResponse { ids, total })
-}
-
-pub async fn effective_capabilities(
-    pool: &PgPool,
-    entity_id: Uuid,
-    params: EffectiveCapabilitiesQuery,
-) -> Result<EffectiveCapabilitiesResponse, AppError> {
-    use sqlx::Row;
-    let entity = sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                  status, attributes, created_at, updated_at
-           FROM entities
-           WHERE id = $1"#,
-    )
-    .bind(entity_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("entity {entity_id} not found")),
-        other => AppError::Database(other),
-    })?;
-
-    let rows = sqlx::query(
-        r#"WITH bindings AS (
-             SELECT pb.*, 'direct'::text AS via
-             FROM effective_access_edges() pb
-             LEFT JOIN roles r ON pb.grant_kind = 'role' AND r.id = pb.grant_id
-             WHERE pb.subject_kind = 'entity' AND pb.subject_id = $1
-               AND ($2::uuid IS NULL OR r.tenant_id = $2)
-             UNION ALL
-             SELECT pb.*, ('group:' || g.name)::text AS via
-             FROM effective_access_edges() pb
-             JOIN group_members gm ON gm.group_id = pb.subject_id
-             JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
-             LEFT JOIN roles r ON pb.grant_kind = 'role' AND r.id = pb.grant_id
-             WHERE pb.subject_kind = 'group' AND gm.entity_id = $1
-               AND ($2::uuid IS NULL OR g.tenant_id = $2 OR r.tenant_id = $2)
-           )
-           SELECT c.id AS capability_id, c.name AS capability_name,
-                  b.grant_kind, b.grant_id, role.name AS role_name, b.id AS policy_id,
-                  b.scope_kind, b.scope_ref, b.effect, b.via
-           FROM bindings b
-           LEFT JOIN roles role ON b.grant_kind = 'role' AND role.id = b.grant_id
-           LEFT JOIN effective_role_actions() rc ON b.grant_kind = 'role' AND rc.role_id = b.grant_id
-           JOIN actions c ON
-             (b.grant_kind = 'capability' AND c.id = b.grant_id)
-             OR (b.grant_kind = 'role' AND c.id = rc.capability_id)
-           WHERE (
-             $3::text IS NULL
-             OR EXISTS (
-               SELECT 1 FROM action_applicability ca
-               WHERE ca.action_id = c.id
-                 AND ca.object_kind = $3
-                 AND ($4::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $4)
-             )
-           )
-           ORDER BY c.name, b.created_at DESC"#,
-    )
-    .bind(entity_id)
-    .bind(params.tenant_id)
-    .bind(params.object_kind)
-    .bind(params.object_type)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let mut caps: BTreeMap<(String, Uuid), EffectiveCapability> = BTreeMap::new();
-    for row in rows {
-        let cap_id: Uuid = row.try_get("capability_id").map_err(db_err)?;
-        let cap_name: String = row.try_get("capability_name").map_err(db_err)?;
-        let entry = caps
-            .entry((cap_name.clone(), cap_id))
-            .or_insert_with(|| EffectiveCapability {
-                id: cap_id,
-                name: cap_name,
-                sources: Vec::new(),
-            });
-        let grant_kind: GrantKind = row.try_get("grant_kind").map_err(db_err)?;
-        entry.sources.push(CapabilitySource {
-            kind: grant_kind.clone(),
-            role_id: match grant_kind {
-                GrantKind::Capability => None,
-                GrantKind::Role => Some(row.try_get("grant_id").map_err(db_err)?),
-            },
-            role_name: row.try_get("role_name").map_err(db_err)?,
-            policy_id: row.try_get("policy_id").map_err(db_err)?,
-            scope_kind: row.try_get("scope_kind").map_err(db_err)?,
-            scope_ref: row.try_get("scope_ref").map_err(db_err)?,
-            effect: row.try_get("effect").map_err(db_err)?,
-            via: row.try_get("via").map_err(db_err)?,
-        });
-    }
-
-    Ok(EffectiveCapabilitiesResponse {
-        entity_id: entity.id,
-        entity_name: entity.name,
-        entity_kind: entity.kind,
-        capabilities: caps.into_values().collect(),
-    })
 }
 
 pub async fn audit_logs(

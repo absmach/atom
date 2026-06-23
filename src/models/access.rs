@@ -257,40 +257,6 @@ pub struct GroupAccessQuery {
     pub offset: i64,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct EffectiveCapabilitiesQuery {
-    pub tenant_id: Option<Uuid>,
-    pub object_kind: Option<String>,
-    pub object_type: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CapabilitySource {
-    pub kind: GrantKind,
-    pub role_id: Option<Uuid>,
-    pub role_name: Option<String>,
-    pub policy_id: Uuid,
-    pub scope_kind: ScopeKind,
-    pub scope_ref: Option<String>,
-    pub effect: Effect,
-    pub via: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct EffectiveCapability {
-    pub id: Uuid,
-    pub name: String,
-    pub sources: Vec<CapabilitySource>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct EffectiveCapabilitiesResponse {
-    pub entity_id: Uuid,
-    pub entity_name: String,
-    pub entity_kind: EntityKind,
-    pub capabilities: Vec<EffectiveCapability>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct RoleWithCapabilities {
     pub id: Uuid,
