@@ -441,7 +441,11 @@ pub async fn has_capability_in_scope(
     };
     let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
     let gate_tenant = gate_tenant_context(pool, scope).await?;
-    Ok(gate_allows(&grants, action_id, scope, gate_tenant))
+    Ok(gate_action_allows(
+        &grants,
+        action_id,
+        &[(scope, gate_tenant)],
+    ))
 }
 
 /// The tenant whose objects the gate concerns, used to apply the same assignment
@@ -460,9 +464,16 @@ async fn gate_tenant_context(pool: &PgPool, scope: Scope) -> Result<Option<Uuid>
 }
 
 /// Coarse control-plane decision over the canonical grant expansion: does the
-/// subject hold an *unconditional* `allow` for `action_id` at `scope`, not
-/// overridden by a deny? Group membership is already resolved recursively by the
-/// expansion, and role-linked blocks carry their own scope/effect.
+/// subject hold an *unconditional* `allow` for `action_id` at one of `scopes`,
+/// not overridden by a deny? Group membership is already resolved recursively by
+/// the expansion, and role-linked blocks carry their own scope/effect.
+///
+/// **All `scopes` for the action are evaluated together.** A caller that accepts
+/// either an exact-object grant or a tenant-wide grant (e.g. `require_read_access`)
+/// passes both scopes here, so a deny at the narrower scope (an exact-object
+/// deny) overrides an allow at the broader one (a tenant-wide allow) — exactly as
+/// the PDP applies deny-override. Evaluating each scope independently and
+/// returning on the first allow would let a tenant allow bypass an object deny.
 ///
 /// Gates **fail closed on ABAC conditions** because they run without request
 /// context, and several callers use the gate as the final authorization (e.g.
@@ -478,29 +489,34 @@ async fn gate_tenant_context(pool: &PgPool, scope: Scope) -> Result<Option<Uuid>
 /// whose only access is conditional will not pass a coarse gate; that is the
 /// safe direction for an administrative precondition.
 ///
-/// `gate_tenant` is the tenant whose objects the gate concerns (see
-/// [`gate_tenant_context`]). A grant's assignment tenant boundary is applied
-/// against it just as the PDP does, so a platform- or object-scoped block
-/// reached through a tenant-bounded assignment cannot satisfy a gate for another
-/// tenant's object.
-fn gate_allows(
+/// Each scope carries its `gate_tenant` (see [`gate_tenant_context`]); a grant's
+/// assignment tenant boundary is applied against the scope it matches, just as
+/// the PDP does, so a platform- or object-scoped block reached through a
+/// tenant-bounded assignment cannot satisfy a gate for another tenant's object.
+/// A requested scope paired with the tenant whose objects it concerns (its
+/// [`gate_tenant_context`]), the unit `gate_action_allows` evaluates.
+type ScopeCheck = (Scope, Option<Uuid>);
+
+fn gate_action_allows(
     grants: &[crate::authz::repo::EffectiveGrant],
     action_id: Uuid,
-    scope: Scope,
-    gate_tenant: Option<Uuid>,
+    scopes: &[ScopeCheck],
 ) -> bool {
     let mut allow = false;
     for grant in grants {
-        if grant.capability_id != action_id || !gate_scope_satisfied(grant, scope) {
+        if grant.capability_id != action_id {
             continue;
         }
-        // Assignment tenant boundary: when the grant is confined to a tenant, it
-        // only applies to that tenant's objects. Skip both allow and deny that
-        // fall outside, matching the PDP.
-        if grant
-            .tenant_boundary
-            .is_some_and(|boundary| Some(boundary) != gate_tenant)
-        {
+        // The grant applies if it matches any requested scope under that scope's
+        // assignment tenant boundary. A tenant-bounded grant only applies to that
+        // tenant's objects, matching the PDP.
+        let applies = scopes.iter().any(|(scope, gate_tenant)| {
+            gate_scope_satisfied(grant, *scope)
+                && grant
+                    .tenant_boundary
+                    .is_none_or(|boundary| Some(boundary) == *gate_tenant)
+        });
+        if !applies {
             continue;
         }
         match grant.effect {
@@ -586,8 +602,8 @@ pub async fn require_any_capability(
         return Err(AppError::Forbidden);
     }
     // Load the subject's grants and resolve the candidate action names once,
-    // then evaluate every (capability, scope) candidate in memory instead of
-    // firing one expansion query per candidate.
+    // then evaluate the candidates in memory instead of firing one expansion
+    // query per candidate.
     let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
     let names: Vec<&str> = checks.iter().map(|(name, _)| *name).collect();
     let action_ids = action_ids_by_name(pool, &names).await?;
@@ -597,6 +613,9 @@ pub async fn require_any_capability(
     let mut object_tenant: std::collections::HashMap<Uuid, Option<Uuid>> =
         std::collections::HashMap::new();
 
+    // Group the requested scopes by action, preserving order, so each action is
+    // evaluated across all of its scopes together (cross-scope deny-override).
+    let mut by_action: Vec<(Uuid, Vec<ScopeCheck>)> = Vec::new();
     for (capability_name, scope) in checks {
         let Some(&action_id) = action_ids.get(*capability_name) else {
             continue;
@@ -610,6 +629,7 @@ pub async fn require_any_capability(
                     active
                 }
             };
+            // An inactive tenant's scope cannot grant anything; drop it.
             if !active {
                 continue;
             }
@@ -626,7 +646,16 @@ pub async fn require_any_capability(
                 }
             },
         };
-        if gate_allows(&grants, action_id, *scope, gate_tenant) {
+        match by_action.iter_mut().find(|(id, _)| *id == action_id) {
+            Some((_, action_scopes)) => action_scopes.push((*scope, gate_tenant)),
+            None => by_action.push((action_id, vec![(*scope, gate_tenant)])),
+        }
+    }
+
+    // Any one action whose combined scopes yield an allow (not overridden by a
+    // deny at any of them) authorizes the request.
+    for (action_id, action_scopes) in &by_action {
+        if gate_action_allows(&grants, *action_id, action_scopes) {
             return Ok(());
         }
     }

@@ -19,7 +19,7 @@
 
 mod common;
 
-use atom::auth::{has_capability_in_scope, Scope};
+use atom::auth::{has_capability_in_scope, require_read_access, Scope};
 use atom::models::enums::{Effect, SubjectKind};
 use atom::models::group::CreateGroup;
 use atom::models::policy::{CreatePermissionBlock, CreateRoleAssignment};
@@ -417,4 +417,94 @@ async fn object_gate_honours_assignment_tenant_boundary() {
         .await;
     cleanup(&p, owner_tenant).await;
     cleanup(&p, other_tenant).await;
+}
+
+/// require_read_access accepts an exact-object grant OR a tenant-wide grant for
+/// the same action. An exact-object read *deny* must override a tenant-wide read
+/// *allow* — the gate evaluates both scopes of the action together. Evaluating
+/// them independently and returning on the first allow let the tenant allow
+/// bypass the object deny.
+#[tokio::test]
+#[ignore]
+async fn object_deny_overrides_tenant_allow_in_read_gate() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let actor = make_human(&p, tenant_id).await;
+    let object_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
+        .bind(object_id)
+        .bind(format!("gate-obj-{object_id}"))
+        .bind(tenant_id)
+        .execute(&p)
+        .await
+        .expect("insert resource");
+    let read_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+        .fetch_one(&p)
+        .await
+        .expect("read cap");
+
+    // Tenant-wide read allow.
+    let allow_block: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions)
+           VALUES ('tenant', $1, 'allow', '{}') RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&p)
+    .await
+    .expect("allow block");
+    // Exact-object read deny.
+    let deny_block: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
+           VALUES ('object', $1, 'deny', '{}') RETURNING id"#,
+    )
+    .bind(object_id)
+    .fetch_one(&p)
+    .await
+    .expect("deny block");
+    for block in [allow_block, deny_block] {
+        sqlx::query(
+            "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        )
+        .bind(block)
+        .bind(read_id)
+        .execute(&p)
+        .await
+        .expect("block action");
+        sqlx::query(
+            r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+               VALUES ($1, 'entity', $2, $3)"#,
+        )
+        .bind(tenant_id)
+        .bind(actor)
+        .bind(block)
+        .execute(&p)
+        .await
+        .expect("direct policy");
+    }
+
+    assert!(
+        require_read_access(&p, actor, Some(tenant_id), object_id)
+            .await
+            .is_err(),
+        "an exact-object read deny must override the tenant-wide read allow"
+    );
+
+    // Control: drop the object deny; the tenant-wide allow alone grants read.
+    sqlx::query("DELETE FROM direct_policies WHERE permission_block_id = $1")
+        .bind(deny_block)
+        .execute(&p)
+        .await
+        .expect("drop deny policy");
+    assert!(
+        require_read_access(&p, actor, Some(tenant_id), object_id)
+            .await
+            .is_ok(),
+        "the tenant-wide read allow alone must satisfy the read gate"
+    );
+
+    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+        .bind(object_id)
+        .execute(&p)
+        .await;
+    cleanup(&p, tenant_id).await;
 }
