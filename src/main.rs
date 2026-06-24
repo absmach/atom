@@ -1,6 +1,6 @@
 use anyhow::Context;
 use atom::{
-    audit, certs, config, db, grpc, identity, keys, routes,
+    audit, certs, config, db, grpc, identity, keys, purge, routes,
     state::{self, GrpcRuntimeStatus},
 };
 use tracing_subscriber::EnvFilter;
@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .set_grpc_status(GrpcRuntimeStatus::starting(grpc_bound_addr.to_string()))
         .await;
     audit::spawn_retention_cleanup(state.clone());
+    purge::spawn_purge_cleanup(state.clone());
 
     // Spawn gRPC server on a separate port; runs concurrently with HTTP. It
     // installs its own shutdown listener and drains on SIGINT/SIGTERM.

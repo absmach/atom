@@ -316,11 +316,12 @@ async fn tenant_delete_cascades_linked_blocks() {
     );
 }
 
-/// Deleting a role garbage-collects a block only that role linked, instead of
-/// leaking it as an orphan.
+/// Soft-deleting a role keeps its linked block (the role is recoverable);
+/// physical purge then garbage-collects a block only that role linked, instead
+/// of leaking it as an orphan.
 #[tokio::test]
 #[ignore]
-async fn role_delete_collects_orphaned_block() {
+async fn role_purge_collects_orphaned_block() {
     let p = pool().await;
     let tenant_id = make_tenant(&p).await;
     let read_cap = read_capability_id(&p).await;
@@ -334,9 +335,34 @@ async fn role_delete_collects_orphaned_block() {
         .await
         .expect("delete role");
 
+    // Soft delete defers block GC: the block survives until the role is purged.
+    assert!(
+        block_exists(&p, block_id).await,
+        "soft-deleting a role must keep its block (role is recoverable)"
+    );
+
+    // Age the tombstone past retention and purge; the role is physically removed
+    // and its now-orphaned block is collected.
+    sqlx::query("UPDATE roles SET deleted_at = now() - interval '100 days' WHERE id = $1")
+        .bind(role)
+        .execute(&p)
+        .await
+        .expect("age role tombstone");
+    atom::purge::purge_expired(
+        &p,
+        atom::config::PurgeConfig {
+            enabled: true,
+            retention_days: 90,
+            interval_secs: 1,
+            batch_size: 1000,
+        },
+    )
+    .await
+    .expect("purge");
+
     assert!(
         !block_exists(&p, block_id).await,
-        "a block only the deleted role linked must be garbage-collected"
+        "a block only the purged role linked must be garbage-collected"
     );
 }
 

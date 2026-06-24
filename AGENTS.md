@@ -114,6 +114,7 @@ Set `ADMIN_SECRET` on first boot to create the password credential for `atom-adm
 - `entities` and `groups` have a composite unique index on `(name, tenant_id)` — name uniqueness is per-tenant.
 - `actions` unique on `name`; `action_applicability` defines valid object kind/type pairs.
 - Migrations are embedded in the binary at compile time via `sqlx::migrate!("./migrations")` and run automatically on startup (no runtime CWD dependency). New migrations go in `migrations/NNN_<name>.sql`; adding one requires a rebuild.
+- **Soft delete:** entities, groups, roles, resources, and tenants carry a `deleted_at`/`deleted_by` tombstone. Delete mutations set the tombstone (they do not hard-`DELETE`) and fire immediate side effects (entity delete revokes its credentials + sessions; tenant delete revokes child sessions). A soft delete leaves `status` unchanged, so every read/authz/listing/login query filters `deleted_at IS NULL` — a new query over these tables must include it. Name/alias unique indexes are partial (`WHERE deleted_at IS NULL`) so names free on delete. Physical removal is the `purge` background job (`src/purge.rs`, `ATOM_PURGE_*`, disabled by default) or the explicit admin `purgeTenant` mutation; both reuse FK cascades.
 - GIN indexes on `attributes` JSONB columns in `entities` and `resources`.
 
 ## API Key Format

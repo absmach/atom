@@ -501,6 +501,23 @@ pub async fn soft_delete_tenant(
     Ok(tenant)
 }
 
+/// Physically remove a tenant that has already been soft-deleted, bypassing the
+/// purge retention window. This cascades to all tenant-owned data, so it is an
+/// explicit, deliberate admin action (a soft delete is required first).
+pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let result = sqlx::query("DELETE FROM tenants WHERE id = $1 AND deleted_at IS NOT NULL")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted tenant {id} to purge"
+        )));
+    }
+    Ok(())
+}
+
 /// Sets `status` to a new value (non-delete lifecycle: active/inactive/frozen).
 /// The row is retained so historical references (audit logs, attributes,
 /// etc.) remain resolvable.

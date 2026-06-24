@@ -1,0 +1,224 @@
+//! Soft-delete + purge integration tests.
+//!
+//! Require a reachable Postgres at `DATABASE_URL`; `#[ignore]` by default:
+//!
+//! ```bash
+//! DATABASE_URL=postgres://... cargo test --test m21_soft_delete -- --ignored
+//! ```
+
+mod common;
+
+use atom::config::PurgeConfig;
+use uuid::Uuid;
+
+async fn make_entity(pool: &sqlx::PgPool, name: &str, tenant_id: Option<Uuid>) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')")
+        .bind(id)
+        .bind(name)
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("insert entity");
+    id
+}
+
+async fn make_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+    id
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_delete_entity_hides_it_and_revokes_access() {
+    let pool = common::pool().await;
+    let id = make_entity(&pool, &format!("sd-entity-{}", Uuid::new_v4()), None).await;
+    let cred_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'api_key', $3, 'active')")
+        .bind(cred_id)
+        .bind(id)
+        .bind(format!("key-{cred_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert credential");
+    let session_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')")
+        .bind(session_id)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("insert session");
+
+    atom::identity::repo::delete_entity(&pool, id, None)
+        .await
+        .expect("soft delete entity");
+
+    // Hidden from reads.
+    assert!(atom::identity::repo::get_entity(&pool, id).await.is_err());
+
+    // Tombstone set; credential revoked; session revoked — all immediately.
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted_at FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("entity row still present");
+    assert!(deleted_at.is_some(), "entity should carry a tombstone");
+
+    let cred_status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+        .bind(cred_id)
+        .fetch_one(&pool)
+        .await
+        .expect("credential");
+    assert_eq!(cred_status, "revoked");
+
+    let revoked: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("session");
+    assert!(revoked.is_some(), "session should be revoked");
+}
+
+#[tokio::test]
+#[ignore]
+async fn name_is_reusable_after_soft_delete() {
+    let pool = common::pool().await;
+    let name = format!("sd-reuse-{}", Uuid::new_v4());
+    let first = make_entity(&pool, &name, None).await;
+    atom::identity::repo::delete_entity(&pool, first, None)
+        .await
+        .expect("delete first");
+    // Re-creating with the same (name, tenant) must succeed now that the unique
+    // index is partial on deleted_at IS NULL.
+    let second = make_entity(&pool, &name, None).await;
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_deleted_role_and_resource_are_hidden() {
+    let pool = common::pool().await;
+
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(format!("sd-role-{role_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert role");
+    atom::authz::repo::delete_role(&pool, role_id, None)
+        .await
+        .expect("delete role");
+    assert!(atom::authz::repo::get_role(&pool, role_id).await.is_err());
+
+    let resource_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
+        .bind(resource_id)
+        .bind(format!("sd-res-{resource_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert resource");
+    atom::authz::repo::delete_resource(&pool, resource_id, None)
+        .await
+        .expect("delete resource");
+    assert!(atom::authz::repo::get_resource(&pool, resource_id)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+#[ignore]
+async fn purge_physically_removes_expired_tombstones_only() {
+    let pool = common::pool().await;
+    let old = make_entity(&pool, &format!("sd-old-{}", Uuid::new_v4()), None).await;
+    let recent = make_entity(&pool, &format!("sd-recent-{}", Uuid::new_v4()), None).await;
+
+    // Tombstone both, but age only `old` past the retention window.
+    sqlx::query("UPDATE entities SET deleted_at = now() - interval '100 days' WHERE id = $1")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .expect("age old");
+    sqlx::query("UPDATE entities SET deleted_at = now() WHERE id = $1")
+        .bind(recent)
+        .execute(&pool)
+        .await
+        .expect("tombstone recent");
+
+    let cfg = PurgeConfig {
+        enabled: true,
+        retention_days: 90,
+        interval_secs: 1,
+        batch_size: 1000,
+    };
+    atom::purge::purge_expired(&pool, cfg).await.expect("purge");
+
+    let old_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .expect("check old");
+    let recent_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)")
+            .bind(recent)
+            .fetch_one(&pool)
+            .await
+            .expect("check recent");
+    assert!(!old_exists, "expired tombstone must be purged");
+    assert!(recent_exists, "tombstone within retention must survive");
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_delete_tenant_marks_and_revokes_child_sessions() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-tenant-{}", Uuid::new_v4())).await;
+    let entity_id = make_entity(
+        &pool,
+        &format!("sd-child-{}", Uuid::new_v4()),
+        Some(tenant_id),
+    )
+    .await;
+    let session_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')")
+        .bind(session_id)
+        .bind(entity_id)
+        .execute(&pool)
+        .await
+        .expect("insert session");
+
+    atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
+        .await
+        .expect("soft delete tenant");
+
+    let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, deleted_at FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("tenant row");
+    assert_eq!(status, "deleted");
+    assert!(deleted_at.is_some());
+
+    let revoked: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("session");
+    assert!(revoked.is_some(), "child session should be revoked");
+
+    // Tenant is hidden from reads.
+    assert!(atom::tenants::repo::get_tenant(&pool, tenant_id)
+        .await
+        .is_err());
+}

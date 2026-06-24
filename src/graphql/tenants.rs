@@ -312,6 +312,22 @@ impl TenantMutation {
         Ok(true)
     }
 
+    /// Physically purge an already-soft-deleted tenant and all its data,
+    /// bypassing the purge retention window. Deliberate, irreversible, admin-only.
+    async fn purge_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+
+        tenant_repo::purge_tenant(&state.pool, parse_id(id, "id")?)
+            .await
+            .map_err(gql_error)?;
+
+        Ok(true)
+    }
+
     async fn enable_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<Tenant> {
         change_tenant_status(ctx, id, TenantStatus::Active).await
     }

@@ -19,6 +19,7 @@ pub struct Config {
     pub grpc_addr: String,
     pub signing_keys: SigningKeyConfig,
     pub audit_retention: AuditRetentionConfig,
+    pub purge: PurgeConfig,
     pub rate_limits: RateLimitConfig,
     pub body_limits: BodyLimitConfig,
     pub graphql_limits: GraphqlLimitConfig,
@@ -144,6 +145,28 @@ impl Default for AuditRetentionConfig {
     }
 }
 
+/// Physical purge of soft-deleted rows. Disabled by default: for an identity/
+/// authorization system, keeping tombstones indefinitely (and purging only on a
+/// deliberate, explicit decision) is the safe default — "never" until opted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeConfig {
+    pub enabled: bool,
+    pub retention_days: i64,
+    pub interval_secs: u64,
+    pub batch_size: i64,
+}
+
+impl Default for PurgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retention_days: 90,
+            interval_secs: 86_400,
+            batch_size: 1_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimitPolicyConfig {
     pub max_requests: u32,
@@ -265,6 +288,7 @@ impl Config {
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             signing_keys: signing_keys_from_env()?,
             audit_retention: audit_retention_from_env()?,
+            purge: purge_from_env()?,
             rate_limits: rate_limits_from_env()?,
             body_limits: body_limits_from_env()?,
             graphql_limits: graphql_limits_from_env()?,
@@ -343,6 +367,7 @@ impl Config {
                 ..SigningKeyConfig::default()
             },
             audit_retention: AuditRetentionConfig::default(),
+            purge: PurgeConfig::default(),
             rate_limits: RateLimitConfig {
                 enabled: false,
                 ..RateLimitConfig::default()
@@ -537,6 +562,28 @@ fn audit_retention_from_env() -> Result<AuditRetentionConfig> {
     }
     if cfg.cleanup_batch_size <= 0 {
         anyhow::bail!("ATOM_AUDIT_CLEANUP_BATCH_SIZE must be greater than zero");
+    }
+    Ok(cfg)
+}
+
+fn purge_from_env() -> Result<PurgeConfig> {
+    let default = PurgeConfig::default();
+    let cfg = PurgeConfig {
+        enabled: env_bool_default("ATOM_PURGE_ENABLED", default.enabled),
+        retention_days: env_parse("ATOM_PURGE_RETENTION_DAYS", default.retention_days)?,
+        interval_secs: env_parse("ATOM_PURGE_INTERVAL_SECS", default.interval_secs)?,
+        batch_size: env_parse("ATOM_PURGE_BATCH_SIZE", default.batch_size)?,
+    };
+    if cfg.enabled {
+        if cfg.retention_days <= 0 {
+            anyhow::bail!("ATOM_PURGE_RETENTION_DAYS must be greater than zero");
+        }
+        if cfg.interval_secs == 0 {
+            anyhow::bail!("ATOM_PURGE_INTERVAL_SECS must be greater than zero");
+        }
+        if cfg.batch_size <= 0 {
+            anyhow::bail!("ATOM_PURGE_BATCH_SIZE must be greater than zero");
+        }
     }
     Ok(cfg)
 }

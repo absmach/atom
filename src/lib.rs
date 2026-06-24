@@ -19,6 +19,7 @@ pub mod health;
 pub mod identity;
 pub mod keys;
 pub mod models;
+pub mod purge;
 pub mod rate_limit;
 pub mod routes;
 pub mod schema;
