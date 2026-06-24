@@ -383,7 +383,7 @@ impl GroupMutation {
         let id = parse_id(id, "id")?;
         let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
         require_group_manage(&state.pool, auth.entity_id, id, group.tenant_id).await?;
-        repo::delete_group(&state.pool, id)
+        repo::delete_group(&state.pool, id, Some(auth.entity_id))
             .await
             .map_err(gql_error)?;
         Ok(true)

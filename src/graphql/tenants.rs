@@ -305,14 +305,9 @@ impl TenantMutation {
             .await
             .map_err(gql_error)?;
 
-        tenant_repo::change_tenant_status(
-            &state.pool,
-            parse_id(id, "id")?,
-            TenantStatus::Deleted,
-            Some(auth.entity_id),
-        )
-        .await
-        .map_err(gql_error)?;
+        tenant_repo::soft_delete_tenant(&state.pool, parse_id(id, "id")?, Some(auth.entity_id))
+            .await
+            .map_err(gql_error)?;
 
         Ok(true)
     }

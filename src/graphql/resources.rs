@@ -210,7 +210,7 @@ impl ResourceMutation {
         )
         .await?;
 
-        authz_repo::delete_resource(&state.pool, id)
+        authz_repo::delete_resource(&state.pool, id, Some(auth.entity_id))
             .await
             .map_err(gql_error)?;
 

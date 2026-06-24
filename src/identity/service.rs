@@ -156,6 +156,11 @@ async fn do_login_password(
         if identity.status != EntityStatus::Active {
             return Err(AppError::unauthorized("entity is not active"));
         }
+        // A soft-deleted entity, or one whose tenant is soft-deleted, must not be
+        // able to log in. The entity's own credentials are revoked on delete, but
+        // a deleted tenant deliberately keeps child credentials for recovery, so
+        // the tenant tombstone is enforced here.
+        ensure_login_target_not_deleted(pool, identity.entity_id).await?;
 
         let hash = password_hash_for_login(
             pool,
@@ -188,6 +193,28 @@ async fn do_login_password(
 
 fn login_attempt_identifier(identifier: &str) -> String {
     normalize_email_lossy(identifier)
+}
+
+/// Reject login when the entity is soft-deleted or its owning tenant is
+/// soft-deleted. Returns the same "entity is not active" error so the soft-delete
+/// state is not distinguishable from deactivation.
+async fn ensure_login_target_not_deleted(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
+    let ok: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT e.id
+           FROM entities e
+           LEFT JOIN tenants t ON t.id = e.tenant_id
+           WHERE e.id = $1
+             AND e.deleted_at IS NULL
+             AND (t.id IS NULL OR (t.deleted_at IS NULL AND t.status <> 'deleted'))"#,
+    )
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    if ok.is_none() {
+        return Err(AppError::unauthorized("entity is not active"));
+    }
+    Ok(())
 }
 
 async fn ensure_login_not_throttled(

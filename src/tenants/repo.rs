@@ -223,14 +223,16 @@ async fn bootstrap_tenant_admin(
 }
 
 pub async fn get_tenant(pool: &PgPool, id: Uuid) -> Result<Tenant, AppError> {
-    sqlx::query_as::<_, Tenant>(&format!("SELECT {TENANT_COLS} FROM tenants WHERE id = $1"))
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
-            other => AppError::Database(other),
-        })
+    sqlx::query_as::<_, Tenant>(&format!(
+        "SELECT {TENANT_COLS} FROM tenants WHERE id = $1 AND deleted_at IS NULL"
+    ))
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
+        other => AppError::Database(other),
+    })
 }
 
 pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantList, AppError> {
@@ -243,7 +245,8 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants
-           WHERE ($1::text IS NULL OR name = $1)
+           WHERE deleted_at IS NULL
+             AND ($1::text IS NULL OR name = $1)
              AND ($2::text IS NULL OR lower(alias) = lower($2))
              AND ($3::text IS NULL OR status = $3)
              AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)
@@ -262,7 +265,8 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM tenants
-           WHERE ($1::text IS NULL OR name = $1)
+           WHERE deleted_at IS NULL
+             AND ($1::text IS NULL OR name = $1)
              AND ($2::text IS NULL OR lower(alias) = lower($2))
              AND ($3::text IS NULL OR status = $3)
              AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)"#,
@@ -303,13 +307,13 @@ pub async fn list_tenants_for_entity(
     const CTES: &str = r#"WITH RECURSIVE subject_groups(group_id) AS (
             SELECT gm.group_id
             FROM group_members gm
-            JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.group_type = 'principal'
+            JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.group_type = 'principal' AND g.deleted_at IS NULL
             WHERE gm.entity_id = $1
             UNION ALL
             SELECT gh.parent_id
             FROM group_hierarchy gh
             JOIN subject_groups sg ON sg.group_id = gh.child_id
-            JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.group_type = 'principal'
+            JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.group_type = 'principal' AND parent.deleted_at IS NULL
         ),
         role_grants AS (
             SELECT rpb.role_id AS root_role_id,
@@ -381,7 +385,8 @@ pub async fn list_tenants_for_entity(
               AND NOT {deny_for_action}
         )"#
     );
-    let base_filter = r#"($2::text IS NULL OR t.name = $2)
+    let base_filter = r#"t.deleted_at IS NULL
+             AND ($2::text IS NULL OR t.name = $2)
              AND ($3::text IS NULL OR lower(t.alias) = lower($3))
              AND ($4::text IS NULL OR t.status = $4)
              AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)"#;
@@ -453,7 +458,50 @@ pub async fn update_tenant(
     })
 }
 
-/// Sets `status` to a new value. `Deleted` is the soft-delete state.
+/// Soft-delete a tenant: mark `status = deleted`, stamp the tombstone, and
+/// immediately revoke every active session of entities in the tenant so they are
+/// logged out now. New logins are blocked by the tenant-tombstone check on the
+/// login path; the PDP already denies any object owned by a deleted tenant.
+/// Credentials are intentionally left intact so the tenant is recoverable.
+/// Physical removal (and the entity cascade) is deferred to the purge cron.
+pub async fn soft_delete_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let tenant = sqlx::query_as::<_, Tenant>(&format!(
+        r#"UPDATE tenants
+           SET status = 'deleted', deleted_at = now(), deleted_by = $2,
+               updated_by = $2, updated_at = now()
+           WHERE id = $1 AND deleted_at IS NULL
+           RETURNING {TENANT_COLS}"#,
+    ))
+    .bind(id)
+    .bind(deleted_by)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
+        other => AppError::Database(other),
+    })?;
+
+    sqlx::query(
+        "UPDATE sessions SET revoked_at = now()
+         WHERE revoked_at IS NULL
+           AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(tenant)
+}
+
+/// Sets `status` to a new value (non-delete lifecycle: active/inactive/frozen).
 /// The row is retained so historical references (audit logs, attributes,
 /// etc.) remain resolvable.
 pub async fn change_tenant_status(

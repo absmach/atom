@@ -188,7 +188,9 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
            FROM sessions s
            JOIN entities e ON e.id = s.entity_id
            LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE s.id = $1 AND s.entity_id = $2"#,
+           WHERE s.id = $1 AND s.entity_id = $2
+             AND e.deleted_at IS NULL
+             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
     )
     .bind(session_id)
     .bind(entity_id)
@@ -255,7 +257,9 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
            FROM credentials c
            JOIN entities e ON e.id = c.entity_id
            LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE c.id = $1 AND c.kind = $2"#,
+           WHERE c.id = $1 AND c.kind = $2
+             AND e.deleted_at IS NULL
+             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
     )
     .bind(cred_id)
     .bind(CredentialKind::ApiKey)

@@ -417,7 +417,7 @@ pub async fn delete_entity(
         )
         .await?;
     }
-    repo::delete_entity(&state.pool, id).await?;
+    repo::delete_entity(&state.pool, id, Some(auth.entity_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -711,7 +711,7 @@ pub async fn delete_group(
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    repo::delete_group(&state.pool, id).await?;
+    repo::delete_group(&state.pool, id, Some(auth.entity_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

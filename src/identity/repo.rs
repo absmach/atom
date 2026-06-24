@@ -86,7 +86,7 @@ pub async fn get_entity(pool: &PgPool, id: Uuid) -> Result<Entity, AppError> {
         r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                   status, attributes, created_at, updated_at
            FROM entities
-           WHERE id = $1"#,
+           WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(id)
     .fetch_one(pool)
@@ -106,7 +106,7 @@ pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Ent
         r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
                   status, attributes, created_at, updated_at
            FROM entities
-           WHERE id = ANY($1::uuid[])
+           WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY array_position($1::uuid[], id)"#,
     )
     .bind(ids)
@@ -139,7 +139,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
-           WHERE ($1::text IS NULL OR e.kind = $1)
+           WHERE e.deleted_at IS NULL
+             AND ($1::text IS NULL OR e.kind = $1)
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
@@ -173,7 +174,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
            SELECT COUNT(*)
            FROM entities e
            LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
-           WHERE ($1::text IS NULL OR e.kind = $1)
+           WHERE e.deleted_at IS NULL
+             AND ($1::text IS NULL OR e.kind = $1)
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
@@ -477,15 +479,46 @@ fn entity_kind_as_str(kind: &EntityKind) -> &'static str {
     }
 }
 
-pub async fn delete_entity(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("DELETE FROM entities WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+/// Soft-delete an entity: set the tombstone and immediately cut off access by
+/// revoking its credentials and active sessions. Physical removal is deferred to
+/// the purge cron. Hard delete (the old behavior) relied on FK cascade for the
+/// credential/session cleanup, so the revocations are now explicit.
+pub async fn delete_entity(
+    pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let result = sqlx::query(
+        "UPDATE entities SET deleted_at = now(), deleted_by = $2
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(deleted_by)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("entity {id} not found")));
     }
+
+    sqlx::query(
+        "UPDATE credentials SET status = 'revoked' WHERE entity_id = $1 AND status = 'active'",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -622,7 +655,7 @@ pub async fn get_group(pool: &PgPool, id: Uuid) -> Result<Group, AppError> {
                   g.status, g.attributes, g.created_at, g.updated_at
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.id = $1"#,
+           WHERE g.id = $1 AND g.deleted_at IS NULL"#,
     )
     .bind(id)
     .fetch_one(pool)
@@ -643,7 +676,7 @@ pub async fn list_groups_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Group
                   g.status, g.attributes, g.created_at, g.updated_at
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.id = ANY($1::uuid[])
+           WHERE g.id = ANY($1::uuid[]) AND g.deleted_at IS NULL
            ORDER BY array_position($1::uuid[], g.id)"#,
     )
     .bind(ids)
@@ -664,7 +697,8 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
                   g.status, g.attributes, g.created_at, g.updated_at
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE ($1::uuid IS NULL OR g.tenant_id = $1)
+           WHERE g.deleted_at IS NULL
+             AND ($1::uuid IS NULL OR g.tenant_id = $1)
              AND ($2::text IS NULL OR g.status = $2)
              AND ($3::text IS NULL OR g.name ILIKE $3 OR g.description ILIKE $3 OR g.attributes::text ILIKE $3)
              AND ($8::text IS NULL OR g.group_type = $8)
@@ -689,7 +723,8 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
         r#"SELECT COUNT(*)
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE ($1::uuid IS NULL OR g.tenant_id = $1)
+           WHERE g.deleted_at IS NULL
+             AND ($1::uuid IS NULL OR g.tenant_id = $1)
              AND ($2::text IS NULL OR g.status = $2)
              AND ($3::text IS NULL OR g.name ILIKE $3 OR g.description ILIKE $3 OR g.attributes::text ILIKE $3)
              AND ($6::text IS NULL OR g.group_type = $6)
@@ -898,19 +933,28 @@ pub async fn list_child_groups(
     .await
 }
 
-pub async fn delete_group(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+/// Soft-delete a group (principal or object) by setting its tombstone. Physical
+/// removal and membership/hierarchy cleanup are deferred to the purge cron.
+pub async fn delete_group(
+    pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
     let result = sqlx::query(
         r#"WITH p AS (
-             DELETE FROM principal_groups WHERE id = $1 RETURNING id
+             UPDATE principal_groups SET deleted_at = now(), deleted_by = $2
+             WHERE id = $1 AND deleted_at IS NULL RETURNING id
            ),
            o AS (
-             DELETE FROM object_groups WHERE id = $1 RETURNING id
+             UPDATE object_groups SET deleted_at = now(), deleted_by = $2
+             WHERE id = $1 AND deleted_at IS NULL RETURNING id
            )
            SELECT id FROM p
            UNION ALL
            SELECT id FROM o"#,
     )
     .bind(id)
+    .bind(deleted_by)
     .fetch_optional(pool)
     .await
     .map_err(db_err)?;

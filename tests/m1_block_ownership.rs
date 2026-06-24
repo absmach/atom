@@ -330,7 +330,7 @@ async fn role_delete_collects_orphaned_block() {
     atom::authz::repo::replace_role_permission_block_links(&p, role, &[block_id])
         .await
         .expect("link");
-    atom::authz::repo::delete_role(&p, role)
+    atom::authz::repo::delete_role(&p, role, None)
         .await
         .expect("delete role");
 
@@ -357,7 +357,7 @@ async fn role_delete_keeps_shared_block() {
     atom::authz::repo::replace_role_permission_block_links(&p, role_b, &[block_id])
         .await
         .expect("link b");
-    atom::authz::repo::delete_role(&p, role_a)
+    atom::authz::repo::delete_role(&p, role_a, None)
         .await
         .expect("delete role a");
 

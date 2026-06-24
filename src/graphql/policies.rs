@@ -411,7 +411,7 @@ impl PolicyMutation {
         )
         .await
         .map_err(gql_error)?;
-        authz_repo::delete_role(&state.pool, id)
+        authz_repo::delete_role(&state.pool, id, Some(auth.entity_id))
             .await
             .map_err(gql_error)?;
         Ok(true)

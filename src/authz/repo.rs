@@ -78,7 +78,7 @@ pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resou
 
 pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError> {
     sqlx::query_as::<_, Resource>(
-        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at FROM resources WHERE id = $1",
+        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_one(pool)
@@ -97,7 +97,7 @@ pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Re
     sqlx::query_as::<_, Resource>(
         r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at
            FROM resources
-           WHERE id = ANY($1::uuid[])
+           WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY array_position($1::uuid[], id)"#,
     )
     .bind(ids)
@@ -131,7 +131,8 @@ pub async fn list_resources(
            SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes, r.created_at, r.updated_at
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
-           WHERE ($1::text IS NULL OR r.kind = $1)
+           WHERE r.deleted_at IS NULL
+             AND ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
              AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
@@ -161,7 +162,8 @@ pub async fn list_resources(
            SELECT COUNT(*)
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
-           WHERE ($1::text IS NULL OR r.kind = $1)
+           WHERE r.deleted_at IS NULL
+             AND ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
              AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))"#,
@@ -225,12 +227,22 @@ pub async fn update_resource(
     Ok(resource)
 }
 
-pub async fn delete_resource(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("DELETE FROM resources WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+/// Soft-delete a resource by setting its tombstone. Physical removal is deferred
+/// to the purge cron.
+pub async fn delete_resource(
+    pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        "UPDATE resources SET deleted_at = now(), deleted_by = $2
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(deleted_by)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("resource {id} not found")));
     }
@@ -1643,7 +1655,7 @@ async fn validate_object_group_boundary(
 pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
     sqlx::query_as::<_, Role>(
         r#"SELECT id, name, tenant_id, description, created_at, updated_at
-           FROM roles WHERE id = $1"#,
+           FROM roles WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(id)
     .fetch_one(pool)
@@ -1679,7 +1691,8 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     let items = sqlx::query_as::<_, Role>(
         r#"SELECT id, name, tenant_id, description, created_at, updated_at
            FROM roles
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+           WHERE deleted_at IS NULL
+             AND ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
              AND (
                $3::text IS NULL
@@ -1704,7 +1717,8 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM roles
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+           WHERE deleted_at IS NULL
+             AND ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
              AND (
                $3::text IS NULL
@@ -2184,25 +2198,26 @@ pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Rol
     })
 }
 
-pub async fn delete_role(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    lock_role(&mut tx, id).await?;
-    // Capture the role's linked blocks before the role cascade removes the link
-    // rows, then GC any that are left unreferenced. Without this the blocks would
-    // leak as orphans (deleting the role cascades role_permission_blocks via
-    // role_id, but never the blocks themselves). The lock prevents a concurrent
-    // link insert from escaping this orphan collection.
-    let block_ids = role_block_ids(&mut tx, id).await?;
-    let result = sqlx::query("DELETE FROM roles WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+/// Soft-delete a role by setting its tombstone. The role's assignments and
+/// permission-block links are left intact (the role is recoverable until purge);
+/// orphaned-block garbage collection happens at physical purge time, not here.
+pub async fn delete_role(
+    pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        "UPDATE roles SET deleted_at = now(), deleted_by = $2
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(deleted_by)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("role {id} not found")));
     }
-    delete_orphaned_blocks(&mut tx, &block_ids).await?;
-    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -3518,7 +3533,8 @@ async fn authorized_entity_ids(
                           gep.group_id AS parent_group_id
                    FROM entities e
                    LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
-                   WHERE ($3::uuid IS NULL OR e.tenant_id = $3)
+                   WHERE e.deleted_at IS NULL
+                     AND ($3::uuid IS NULL OR e.tenant_id = $3)
                      AND ($4::text IS NULL OR e.kind::text = $4 OR 'entity:' || e.kind::text = $4)
                      AND ($5::text IS NULL OR e.name ILIKE $5 OR e.attributes::text ILIKE $5)
                      AND ($6::uuid IS NULL OR e.profile_id = $6)
@@ -3693,7 +3709,8 @@ async fn authorized_resource_rows(
                           grp.group_id AS parent_group_id
                    FROM resources r
                    LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
-                   WHERE ($3::uuid IS NULL OR r.tenant_id = $3)
+                   WHERE r.deleted_at IS NULL
+                     AND ($3::uuid IS NULL OR r.tenant_id = $3)
                      AND ($4::text IS NULL OR r.kind = $4 OR 'resource:' || r.kind = $4)
                      AND ($5::text IS NULL OR r.name ILIKE $5 OR r.attributes::text ILIKE $5)
                      AND ($6::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
@@ -3801,7 +3818,8 @@ async fn authorized_group_ids(
                           gph.parent_id AS parent_group_id
                    FROM groups g
                    LEFT JOIN group_hierarchy gph ON gph.child_id = g.id
-                   WHERE ($3::uuid IS NULL OR g.tenant_id = $3)
+                   WHERE g.deleted_at IS NULL
+                     AND ($3::uuid IS NULL OR g.tenant_id = $3)
                      AND ($4::text IS NULL OR g.group_type = $4)
                      AND ($5::text IS NULL OR g.name ILIKE $5 OR g.description ILIKE $5 OR g.attributes::text ILIKE $5)
                      AND ($8::text IS NULL OR g.status = $8)
@@ -3954,13 +3972,13 @@ pub async fn tenant_ids_for_capability(
         r#"WITH RECURSIVE group_paths(group_id) AS (
                SELECT gm.group_id
                FROM group_members gm
-               JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+               JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.deleted_at IS NULL
                WHERE gm.entity_id = $1
                UNION ALL
                SELECT gh.parent_id
                FROM group_hierarchy gh
                JOIN group_paths gp ON gp.group_id = gh.child_id
-               JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
+               JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.deleted_at IS NULL
            )
            SELECT DISTINCT pb.scope_ref::uuid
            FROM effective_access_edges() pb
@@ -4276,7 +4294,7 @@ pub(crate) async fn load_authz_subject(
     sqlx::query_as::<_, AuthzSubjectRecord>(
         r#"SELECT id, name, kind, tenant_id, status, attributes
            FROM entities
-           WHERE id = $1"#,
+           WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(entity_id)
     .fetch_optional(pool)
@@ -4308,7 +4326,7 @@ pub(crate) async fn load_authz_resource(
                   grp.group_id AS parent_group_id
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
-           WHERE r.id = $1"#,
+           WHERE r.id = $1 AND r.deleted_at IS NULL"#,
     )
     .bind(resource_id)
     .fetch_optional(pool)
@@ -4325,7 +4343,7 @@ pub(crate) async fn load_authz_entity_object(
                   gep.group_id AS parent_group_id
            FROM entities e
            LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
-           WHERE e.id = $1 AND e.status <> 'inactive'"#,
+           WHERE e.id = $1 AND e.status <> 'inactive' AND e.deleted_at IS NULL"#,
     )
     .bind(entity_id)
     .fetch_optional(pool)
@@ -4342,7 +4360,7 @@ pub(crate) async fn load_authz_group_object(
                   gh.parent_id AS parent_group_id
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.id = $1 AND g.status <> 'inactive'"#,
+           WHERE g.id = $1 AND g.status <> 'inactive' AND g.deleted_at IS NULL"#,
     )
     .bind(group_id)
     .fetch_optional(pool)

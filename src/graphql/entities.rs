@@ -227,7 +227,7 @@ impl EntityMutation {
             )
             .await?;
         }
-        repo::delete_entity(&state.pool, id)
+        repo::delete_entity(&state.pool, id, Some(auth.entity_id))
             .await
             .map_err(gql_error)?;
         Ok(true)

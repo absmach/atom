@@ -20,6 +20,8 @@ CREATE TABLE tenants (
     attributes  JSONB       NOT NULL DEFAULT '{}',
     created_by  UUID,
     updated_by  UUID,
+    deleted_by  UUID,
+    deleted_at  TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ,
     CONSTRAINT chk_tenants_alias_slug
@@ -33,11 +35,12 @@ CREATE TABLE tenants (
         )
 );
 
-CREATE UNIQUE INDEX idx_tenants_name ON tenants(name);
+CREATE UNIQUE INDEX idx_tenants_name ON tenants(name) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX idx_tenants_alias
     ON tenants (lower(alias))
-    WHERE alias IS NOT NULL;
+    WHERE alias IS NOT NULL AND deleted_at IS NULL;
 CREATE INDEX idx_tenants_status ON tenants(status);
+CREATE INDEX idx_tenants_deleted_at ON tenants(deleted_at) WHERE deleted_at IS NOT NULL;
 CREATE INDEX idx_tenants_attrs ON tenants USING GIN(attributes);
 CREATE INDEX idx_tenants_tags ON tenants USING GIN(tags);
 
@@ -95,6 +98,8 @@ CREATE TABLE entities (
     profile_version_id UUID        REFERENCES profile_versions(id),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ,
+    deleted_at         TIMESTAMPTZ,
+    deleted_by         UUID        REFERENCES entities(id) ON DELETE SET NULL,
     alias              TEXT,
     CONSTRAINT chk_entities_alias_slug
         CHECK (alias IS NULL OR alias ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'),
@@ -117,10 +122,12 @@ CREATE UNIQUE INDEX idx_entities_name_tenant
     ON entities (
         name,
         COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-    );
+    )
+    WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX idx_entities_alias
     ON entities (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(alias))
-    WHERE alias IS NOT NULL;
+    WHERE alias IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX idx_entities_deleted_at ON entities(deleted_at) WHERE deleted_at IS NOT NULL;
 
 ALTER TABLE tenants
     ADD CONSTRAINT tenants_created_by_fkey
@@ -129,6 +136,10 @@ ALTER TABLE tenants
 ALTER TABLE tenants
     ADD CONSTRAINT tenants_updated_by_fkey
     FOREIGN KEY (updated_by) REFERENCES entities(id) ON DELETE SET NULL;
+
+ALTER TABLE tenants
+    ADD CONSTRAINT tenants_deleted_by_fkey
+    FOREIGN KEY (deleted_by) REFERENCES entities(id) ON DELETE SET NULL;
 
 CREATE TABLE credentials (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -297,6 +308,8 @@ CREATE TABLE principal_groups (
     description TEXT,
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
     attributes  JSONB       NOT NULL DEFAULT '{}',
+    deleted_at  TIMESTAMPTZ,
+    deleted_by  UUID        REFERENCES entities(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ
 );
@@ -304,7 +317,8 @@ CREATE TABLE principal_groups (
 CREATE INDEX idx_principal_groups_tenant ON principal_groups(tenant_id);
 CREATE INDEX idx_principal_groups_status ON principal_groups(status);
 CREATE INDEX idx_principal_groups_attrs ON principal_groups USING GIN(attributes);
-CREATE UNIQUE INDEX idx_principal_groups_name_tenant ON principal_groups(name, tenant_id);
+CREATE UNIQUE INDEX idx_principal_groups_name_tenant ON principal_groups(name, tenant_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_principal_groups_deleted_at ON principal_groups(deleted_at) WHERE deleted_at IS NOT NULL;
 
 CREATE TABLE principal_group_members (
     group_id    UUID        NOT NULL REFERENCES principal_groups(id) ON DELETE CASCADE,
@@ -335,6 +349,8 @@ CREATE TABLE object_groups (
     description TEXT,
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
     attributes  JSONB       NOT NULL DEFAULT '{}',
+    deleted_at  TIMESTAMPTZ,
+    deleted_by  UUID        REFERENCES entities(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -342,7 +358,8 @@ CREATE TABLE object_groups (
 CREATE INDEX idx_object_groups_tenant ON object_groups(tenant_id);
 CREATE INDEX idx_object_groups_status ON object_groups(status);
 CREATE INDEX idx_object_groups_attrs ON object_groups USING GIN(attributes);
-CREATE UNIQUE INDEX idx_object_groups_name_tenant ON object_groups(name, tenant_id);
+CREATE UNIQUE INDEX idx_object_groups_name_tenant ON object_groups(name, tenant_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_object_groups_deleted_at ON object_groups(deleted_at) WHERE deleted_at IS NOT NULL;
 
 CREATE TABLE object_group_hierarchy (
     parent_id  UUID        NOT NULL REFERENCES object_groups(id) ON DELETE CASCADE,
@@ -360,10 +377,10 @@ CREATE INDEX idx_object_group_hierarchy_tenant ON object_group_hierarchy(tenant_
 -- Compatibility read views for code paths that still use the generic "group"
 -- shape. Physical storage is split into Principal Groups and Object Groups.
 CREATE VIEW groups AS
-SELECT id, name, tenant_id, 'object'::text AS group_type, description, status, attributes, created_at, updated_at
+SELECT id, name, tenant_id, 'object'::text AS group_type, description, status, attributes, deleted_at, deleted_by, created_at, updated_at
 FROM object_groups
 UNION ALL
-SELECT id, name, tenant_id, 'principal'::text AS group_type, description, status, attributes, created_at, updated_at
+SELECT id, name, tenant_id, 'principal'::text AS group_type, description, status, attributes, deleted_at, deleted_by, created_at, updated_at
 FROM principal_groups;
 
 CREATE VIEW group_members AS
@@ -398,6 +415,8 @@ CREATE TABLE resources (
     tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
     owner_id    UUID        REFERENCES entities(id) ON DELETE SET NULL,
     attributes  JSONB       NOT NULL DEFAULT '{}',
+    deleted_at  TIMESTAMPTZ,
+    deleted_by  UUID        REFERENCES entities(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ,
     alias       TEXT,
@@ -418,7 +437,8 @@ CREATE INDEX idx_resources_owner ON resources(owner_id);
 CREATE INDEX idx_resources_attrs ON resources USING GIN(attributes);
 CREATE UNIQUE INDEX idx_resources_alias
     ON resources (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(alias))
-    WHERE alias IS NOT NULL;
+    WHERE alias IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX idx_resources_deleted_at ON resources(deleted_at) WHERE deleted_at IS NOT NULL;
 
 CREATE TABLE object_group_entities (
     group_id    UUID        NOT NULL REFERENCES object_groups(id) ON DELETE CASCADE,
@@ -468,12 +488,16 @@ CREATE TABLE roles (
     name        TEXT        NOT NULL,
     tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
     description TEXT,
+    deleted_at  TIMESTAMPTZ,
+    deleted_by  UUID        REFERENCES entities(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX idx_roles_name_tenant
-    ON roles(name, COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid));
+    ON roles(name, COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid))
+    WHERE deleted_at IS NULL;
+CREATE INDEX idx_roles_deleted_at ON roles(deleted_at) WHERE deleted_at IS NOT NULL;
 
 CREATE TABLE actions (
     id              UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -699,13 +723,13 @@ AS $$
     WITH RECURSIVE subject_groups(group_id, path) AS (
         SELECT gm.group_id, g.name
         FROM group_members gm
-        JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+        JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.deleted_at IS NULL
         WHERE gm.entity_id = p_entity_id
         UNION ALL
         SELECT gh.parent_id, parent.name || ' -> ' || sg.path
         FROM group_hierarchy gh
         JOIN subject_groups sg ON sg.group_id = gh.child_id
-        JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
+        JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.deleted_at IS NULL
     )
     SELECT dp.id AS assignment_id,
            pb.id AS block_id,
