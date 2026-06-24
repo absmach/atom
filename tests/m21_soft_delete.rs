@@ -459,3 +459,140 @@ async fn soft_delete_tenant_marks_and_revokes_child_sessions() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+#[ignore]
+async fn listing_excludes_objects_under_soft_deleted_tenant() {
+    use atom::models::access::AuthorizedObjectIdsQuery;
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-ten-list-{}", Uuid::new_v4())).await;
+    let subject = make_entity(&pool, &format!("sd-ten-subj-{}", Uuid::new_v4()), None).await;
+    let target = make_entity(
+        &pool,
+        &format!("sd-ten-tgt-{}", Uuid::new_v4()),
+        Some(tenant_id),
+    )
+    .await;
+
+    // Platform read grant: subject can read entities across all tenants.
+    let block_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("block");
+    let read_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("read action");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    sqlx::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)")
+        .bind(subject)
+        .bind(block_id)
+        .execute(&pool)
+        .await
+        .expect("policy");
+
+    let lists_target = || async {
+        atom::authz::repo::authorized_object_ids(
+            &pool,
+            AuthorizedObjectIdsQuery {
+                subject_id: subject,
+                action: "read".to_string(),
+                object_kind: "entity".to_string(),
+                object_type: None,
+                tenant_id: None,
+                q: None,
+                profile_id: None,
+                entity_status: None,
+                group_type: None,
+                parent_group_id: None,
+                include_descendants: false,
+                limit: 500,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("listing")
+        .ids
+        .contains(&target)
+    };
+
+    assert!(
+        lists_target().await,
+        "target should list while tenant is active"
+    );
+
+    atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
+        .await
+        .expect("soft delete tenant");
+
+    assert!(
+        !lists_target().await,
+        "objects under a soft-deleted tenant must not be listed (PDP denies them)"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-purge-ten-{}", Uuid::new_v4())).await;
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(role_id)
+        .bind(format!("sd-purge-role-{role_id}"))
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("role");
+    let resource_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
+        .bind(resource_id)
+        .bind(format!("sd-purge-res-{resource_id}"))
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("resource");
+    let group_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(group_id)
+        .bind(format!("sd-purge-grp-{group_id}"))
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("group");
+
+    atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
+        .await
+        .expect("soft delete");
+    atom::tenants::repo::purge_tenant(&pool, tenant_id)
+        .await
+        .expect("purge tenant");
+
+    // Tenant-owned rows must be gone, not relinked to NULL (global).
+    for (table, id) in [
+        ("roles", role_id),
+        ("resources", resource_id),
+        ("object_groups", group_id),
+    ] {
+        let exists: bool = sqlx::query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {table} WHERE id = $1)"
+        ))
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("check");
+        assert!(
+            !exists,
+            "{table} row must be purged with the tenant, not orphaned"
+        );
+    }
+}

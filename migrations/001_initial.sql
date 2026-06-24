@@ -304,7 +304,7 @@ CREATE INDEX idx_signing_keys_status ON signing_keys(status);
 CREATE TABLE principal_groups (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT        NOT NULL,
-    tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id   UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     description TEXT,
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
     attributes  JSONB       NOT NULL DEFAULT '{}',
@@ -345,7 +345,7 @@ CREATE INDEX idx_principal_group_hierarchy_tenant ON principal_group_hierarchy(t
 CREATE TABLE object_groups (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT        NOT NULL,
-    tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id   UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     description TEXT,
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
     attributes  JSONB       NOT NULL DEFAULT '{}',
@@ -412,7 +412,7 @@ CREATE TABLE resources (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     kind        TEXT        NOT NULL,
     name        TEXT,
-    tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id   UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     owner_id    UUID        REFERENCES entities(id) ON DELETE SET NULL,
     attributes  JSONB       NOT NULL DEFAULT '{}',
     deleted_at  TIMESTAMPTZ,
@@ -486,7 +486,7 @@ CREATE INDEX idx_ownerships_owned ON ownerships(owned_id);
 CREATE TABLE roles (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name        TEXT        NOT NULL,
-    tenant_id   UUID        REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id   UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     description TEXT,
     deleted_at  TIMESTAMPTZ,
     deleted_by  UUID        REFERENCES entities(id) ON DELETE SET NULL,
