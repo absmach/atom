@@ -776,6 +776,7 @@ pub async fn list_user_invitations(
               OR EXISTS (
                   SELECT 1 FROM entity_emails ee
                   WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
+                    AND ee.deleted_at IS NULL
               )
            ORDER BY ti.created_at DESC
            LIMIT $2 OFFSET $3"#,
@@ -792,6 +793,7 @@ pub async fn list_user_invitations(
                   OR EXISTS (
                       SELECT 1 FROM entity_emails ee
                       WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
+                        AND ee.deleted_at IS NULL
                   )"#,
     )
     .bind(invitee_user_id)
@@ -1153,6 +1155,7 @@ async fn accept_invitation_row(
                   OR EXISTS (
                       SELECT 1 FROM entity_emails ee
                       WHERE ee.entity_id = $2 AND lower(ee.email) = lower(ti.invitee_email)
+                        AND ee.deleted_at IS NULL
                   ))
            RETURNING role_id"#,
     )
@@ -1219,6 +1222,7 @@ pub async fn reject_invitation(
                   OR EXISTS (
                       SELECT 1 FROM entity_emails ee
                       WHERE ee.entity_id = $2 AND lower(ee.email) = lower(tenant_invitations.invitee_email)
+                        AND ee.deleted_at IS NULL
                   ))"#,
     )
     .bind(tenant_id)
@@ -1269,7 +1273,7 @@ async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, 
     sqlx::query_scalar(
         r#"SELECT entity_id
            FROM entity_emails
-           WHERE lower(email) = lower($1)"#,
+           WHERE lower(email) = lower($1) AND deleted_at IS NULL"#,
     )
     .bind(email)
     .fetch_optional(pool)
@@ -1278,18 +1282,20 @@ async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, 
 }
 
 async fn email_by_entity_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<String>, AppError> {
-    sqlx::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-        .bind(entity_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_err)
+    sqlx::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
 }
 
 async fn entity_has_email(pool: &PgPool, entity_id: Uuid, email: &str) -> Result<bool, AppError> {
     sqlx::query_scalar(
         r#"SELECT EXISTS (
                SELECT 1 FROM entity_emails
-               WHERE entity_id = $1 AND lower(email) = lower($2)
+               WHERE entity_id = $1 AND lower(email) = lower($2) AND deleted_at IS NULL
            )"#,
     )
     .bind(entity_id)

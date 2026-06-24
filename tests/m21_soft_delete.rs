@@ -18,7 +18,7 @@ use atom::{
         resource::{ListResources, UpdateResource},
         role::{ListRoles, UpdateRole},
         session::PasswordResetConfirmRequest,
-        tenant::ListTenants,
+        tenant::{CreateTenantInvitation, ListTenants},
         token::CreateApiKey,
     },
 };
@@ -309,6 +309,49 @@ async fn email_is_reusable_after_soft_delete() {
         .await
         .expect("re-register email on a fresh entity");
     assert_ne!(first, second);
+}
+
+#[tokio::test]
+#[ignore]
+async fn invitation_by_email_does_not_resolve_to_soft_deleted_user() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-inv-email-ten-{}", Uuid::new_v4())).await;
+    let inviter = make_entity(&pool, &format!("sd-inv-email-by-{}", Uuid::new_v4()), None).await;
+
+    let email = format!("sd-inv-{}@example.com", Uuid::new_v4());
+    let stale = make_entity(&pool, &format!("sd-inv-stale-{}", Uuid::new_v4()), None).await;
+    sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+        .bind(Uuid::new_v4())
+        .bind(stale)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("insert stale email");
+    atom::identity::repo::delete_entity(&pool, stale, None)
+        .await
+        .expect("soft delete stale user");
+
+    // Inviting that address must create a pending email invitation, not bind the
+    // invite to the tombstoned entity.
+    let created = atom::tenants::repo::create_invitation(
+        &pool,
+        tenant_id,
+        inviter,
+        CreateTenantInvitation {
+            invitee_user_id: None,
+            invitee_email: Some(email),
+            role_id: None,
+            resend: false,
+            redirect_url: None,
+        },
+        3600,
+    )
+    .await
+    .expect("create invitation");
+    assert_eq!(
+        created.invitation.invitee_user_id, None,
+        "invitation must not resolve to a soft-deleted user"
+    );
 }
 
 #[tokio::test]

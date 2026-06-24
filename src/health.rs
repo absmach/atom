@@ -280,6 +280,29 @@ fn db_pool_status(state: &AppState) -> DbPoolStatus {
     }
 }
 
+async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
+    let cfg = state.config.audit_retention;
+    let last_cleanup = sqlx::query_scalar::<_, serde_json::Value>(
+        r#"SELECT details
+           FROM audit_logs
+           WHERE event = 'audit.retention_cleanup'
+           ORDER BY created_at DESC
+           LIMIT 1"#,
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    AuditRetentionStatus {
+        enabled: cfg.enabled,
+        days: cfg.days,
+        cleanup_interval_secs: cfg.cleanup_interval_secs,
+        cleanup_batch_size: cfg.cleanup_batch_size,
+        last_cleanup,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{readiness_ok, ComponentCheck, ComponentStatus};
@@ -319,28 +342,5 @@ mod tests {
             &certificate_issuer,
             &check(ComponentStatus::Ok),
         ));
-    }
-}
-
-async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
-    let cfg = state.config.audit_retention;
-    let last_cleanup = sqlx::query_scalar::<_, serde_json::Value>(
-        r#"SELECT details
-           FROM audit_logs
-           WHERE event = 'audit.retention_cleanup'
-           ORDER BY created_at DESC
-           LIMIT 1"#,
-    )
-    .fetch_optional(&state.pool)
-    .await
-    .ok()
-    .flatten();
-
-    AuditRetentionStatus {
-        enabled: cfg.enabled,
-        days: cfg.days,
-        cleanup_interval_secs: cfg.cleanup_interval_secs,
-        cleanup_batch_size: cfg.cleanup_batch_size,
-        last_cleanup,
     }
 }
