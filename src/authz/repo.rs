@@ -3022,6 +3022,7 @@ pub async fn list_role_assignments(
              AND ($2::text IS NULL OR subject_kind = $2)
              AND ($3::uuid IS NULL OR subject_id = $3)
              AND ($4::uuid IS NULL OR role_id = $4)
+             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)
            ORDER BY created_at DESC
            LIMIT $5 OFFSET $6"#,
     )
@@ -3041,7 +3042,8 @@ pub async fn list_role_assignments(
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
              AND ($3::uuid IS NULL OR subject_id = $3)
-             AND ($4::uuid IS NULL OR role_id = $4)"#,
+             AND ($4::uuid IS NULL OR role_id = $4)
+             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)"#,
     )
     .bind(params.tenant_id)
     .bind(params.subject_kind)
@@ -3188,7 +3190,7 @@ async fn validate_role_assignment(
     req: &CreateRoleAssignment,
 ) -> Result<(), AppError> {
     let role_tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(req.role_id)
             .fetch_optional(pool)
             .await
@@ -3236,13 +3238,14 @@ async fn validate_subject_boundary(
 ) -> Result<(), AppError> {
     match subject_kind {
         SubjectKind::Entity => {
-            let entity_tenant_id: Option<Uuid> =
-                sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-                    .bind(subject_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(db_err)?
-                    .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
+            let entity_tenant_id: Option<Uuid> = sqlx::query_scalar(
+                "SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(subject_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
             if let Some(tenant_id) = tenant_id {
                 let member: bool = sqlx::query_scalar(
                     r#"SELECT EXISTS (
@@ -3267,15 +3270,16 @@ async fn validate_subject_boundary(
             }
         }
         SubjectKind::Group => {
-            let group_tenant_id: Option<Uuid> =
-                sqlx::query_scalar("SELECT tenant_id FROM principal_groups WHERE id = $1")
-                    .bind(subject_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(db_err)?
-                    .ok_or_else(|| {
-                        AppError::bad_request("assignment references unknown principal group")
-                    })?;
+            let group_tenant_id: Option<Uuid> = sqlx::query_scalar(
+                "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(subject_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| {
+                AppError::bad_request("assignment references unknown principal group")
+            })?;
             if group_tenant_id != tenant_id {
                 return Err(AppError::bad_request(
                     "assignment subject principal group must be in the same tenant",
