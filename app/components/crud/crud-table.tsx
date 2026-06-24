@@ -373,14 +373,26 @@ function TableRowActions({
       </Button>
       {resourceKey === "tenants" ? (
         <TenantActionButtons
+          isDestroyPending={destroyPending}
           isPending={tenantStatusPending}
+          onDelete={() =>
+            onDelete(
+              `Delete tenant "${String(row.name ?? row.id)}"? It will be hidden immediately, revoke child sessions, and be physically purged after the configured retention window when purge is enabled.`,
+            )
+          }
           onEdit={() => onEdit.setTenant(row)}
           onStatusChange={onTenantStatusChange}
           row={row}
         />
       ) : resourceKey === "entities" ? (
         <EntityActionButtons
+          isDestroyPending={destroyPending}
           isPending={entityStatusPending}
+          onDelete={() =>
+            onDelete(
+              `Delete entity "${String(row.name ?? row.id)}"? It will be hidden immediately, revoke credentials and sessions, and be physically purged after the configured retention window when purge is enabled.`,
+            )
+          }
           onEdit={() => defer(() => onEdit.setEntity(row))}
           onStatusChange={onEntityStatusChange}
           row={row}
@@ -398,7 +410,7 @@ function TableRowActions({
           onEdit={() => defer(() => onEdit.setGroup(row))}
           onDelete={() =>
             onDelete(
-              `Delete group "${String(row.name ?? row.id)}"? This cannot be undone.`,
+              `Delete group "${String(row.name ?? row.id)}"? It will be hidden immediately and be physically purged after the configured retention window when purge is enabled.`,
             )
           }
         />
@@ -408,7 +420,7 @@ function TableRowActions({
           onEdit={() => defer(() => onEdit.setResource(row))}
           onDelete={() =>
             onDelete(
-              `Delete resource "${String(row.name ?? row.id)}"? This cannot be undone.`,
+              `Delete resource "${String(row.name ?? row.id)}"? It will be hidden immediately and be physically purged after the configured retention window when purge is enabled.`,
             )
           }
         />
@@ -418,7 +430,7 @@ function TableRowActions({
           onEdit={() => defer(() => onEdit.setRole(row))}
           onDelete={() =>
             onDelete(
-              `Delete role "${String(row.name ?? row.id)}"? This cannot be undone.`,
+              `Delete role "${String(row.name ?? row.id)}"? It will be hidden immediately and be physically purged after the configured retention window when purge is enabled.`,
             )
           }
         />

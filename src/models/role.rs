@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::enums::DeletedFilter;
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Role {
     pub id: Uuid,
@@ -38,6 +40,8 @@ pub struct ListRoles {
     pub tenant_id: Option<Uuid>,
     pub derived_kind: Option<String>,
     pub q: Option<String>,
+    #[serde(default)]
+    pub deleted: DeletedFilter,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]

@@ -117,6 +117,7 @@ pub async fn list_resources(
     let tenant_id = params.tenant_id;
     let parent_group_id = params.parent_group_id;
     let include_descendants = params.include_descendants;
+    let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
 
     let items = sqlx::query_as::<_, Resource>(
@@ -131,11 +132,13 @@ pub async fn list_resources(
            SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes, r.created_at, r.updated_at
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
-           WHERE r.deleted_at IS NULL
-             AND ($1::text IS NULL OR r.kind = $1)
+           WHERE ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
              AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+             AND ($8::text = 'all'
+                  OR ($8::text = 'live' AND r.deleted_at IS NULL)
+                  OR ($8::text = 'deleted' AND r.deleted_at IS NOT NULL))
            ORDER BY r.created_at DESC
            LIMIT $6 OFFSET $7"#,
     )
@@ -146,6 +149,7 @@ pub async fn list_resources(
     .bind(include_descendants)
     .bind(limit)
     .bind(offset)
+    .bind(deleted)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -162,17 +166,20 @@ pub async fn list_resources(
            SELECT COUNT(*)
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
-           WHERE r.deleted_at IS NULL
-             AND ($1::text IS NULL OR r.kind = $1)
+           WHERE ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
-             AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))"#,
+             AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+             AND ($6::text = 'all'
+                  OR ($6::text = 'live' AND r.deleted_at IS NULL)
+                  OR ($6::text = 'deleted' AND r.deleted_at IS NOT NULL))"#,
     )
     .bind(kind)
     .bind(tenant_id)
     .bind(q)
     .bind(parent_group_id)
     .bind(include_descendants)
+    .bind(deleted)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -1676,6 +1683,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
         .map(str::trim)
         .filter(|kind| !kind.is_empty())
         .map(str::to_ascii_lowercase);
+    let deleted = params.deleted.as_str();
 
     if let Some(kind) = derived_kind.as_deref() {
         match kind {
@@ -1691,8 +1699,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     let items = sqlx::query_as::<_, Role>(
         r#"SELECT id, name, tenant_id, description, created_at, updated_at
            FROM roles
-           WHERE deleted_at IS NULL
-             AND ($1::uuid IS NULL OR tenant_id = $1)
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
              AND (
                $3::text IS NULL
@@ -1704,6 +1711,9 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
                     SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
                   ))
              )
+             AND ($6::text = 'all'
+                  OR ($6::text = 'live' AND deleted_at IS NULL)
+                  OR ($6::text = 'deleted' AND deleted_at IS NOT NULL))
            ORDER BY name LIMIT $4 OFFSET $5"#,
     )
     .bind(params.tenant_id)
@@ -1711,14 +1721,14 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     .bind(derived_kind.clone())
     .bind(limit)
     .bind(offset)
+    .bind(deleted)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM roles
-           WHERE deleted_at IS NULL
-             AND ($1::uuid IS NULL OR tenant_id = $1)
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
              AND (
                $3::text IS NULL
@@ -1729,11 +1739,15 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
                OR ($3 = 'empty' AND NOT EXISTS (
                     SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
                   ))
-             )"#,
+             )
+             AND ($4::text = 'all'
+                  OR ($4::text = 'live' AND deleted_at IS NULL)
+                  OR ($4::text = 'deleted' AND deleted_at IS NOT NULL))"#,
     )
     .bind(params.tenant_id)
     .bind(q)
     .bind(derived_kind)
+    .bind(deleted)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;

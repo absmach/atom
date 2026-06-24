@@ -155,3 +155,22 @@ pub enum TenantStatus {
     Frozen,
     Deleted,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletedFilter {
+    #[default]
+    Live,
+    Deleted,
+    All,
+}
+
+impl DeletedFilter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeletedFilter::Live => "live",
+            DeletedFilter::Deleted => "deleted",
+            DeletedFilter::All => "all",
+        }
+    }
+}

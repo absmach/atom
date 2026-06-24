@@ -8,7 +8,13 @@
 
 mod common;
 
-use atom::config::PurgeConfig;
+use atom::{
+    config::PurgeConfig,
+    models::{
+        entity::ListEntities, enums::DeletedFilter, group::ListGroups, resource::ListResources,
+        role::ListRoles, tenant::ListTenants,
+    },
+};
 use uuid::Uuid;
 
 async fn make_entity(pool: &sqlx::PgPool, name: &str, tenant_id: Option<Uuid>) -> Uuid {
@@ -132,6 +138,239 @@ async fn soft_deleted_role_and_resource_are_hidden() {
     assert!(atom::authz::repo::get_resource(&pool, resource_id)
         .await
         .is_err());
+}
+
+#[tokio::test]
+#[ignore]
+async fn deleted_filter_lists_soft_deleted_objects() {
+    let pool = common::pool().await;
+
+    let tenant_name = format!("sd-filter-tenant-{}", Uuid::new_v4());
+    let tenant_id = make_tenant(&pool, &tenant_name).await;
+    atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
+        .await
+        .expect("delete tenant");
+    let live_tenants = atom::tenants::repo::list_tenants(
+        &pool,
+        ListTenants {
+            q: Some(tenant_name.clone()),
+            name: None,
+            alias: None,
+            status: None,
+            deleted: DeletedFilter::Live,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list live tenants");
+    assert!(live_tenants
+        .items
+        .iter()
+        .all(|tenant| tenant.id != tenant_id));
+    let deleted_tenants = atom::tenants::repo::list_tenants(
+        &pool,
+        ListTenants {
+            q: Some(tenant_name),
+            name: None,
+            alias: None,
+            status: None,
+            deleted: DeletedFilter::Deleted,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list deleted tenants");
+    assert!(deleted_tenants
+        .items
+        .iter()
+        .any(|tenant| tenant.id == tenant_id));
+
+    let entity_name = format!("sd-filter-entity-{}", Uuid::new_v4());
+    let entity_id = make_entity(&pool, &entity_name, None).await;
+    atom::identity::repo::delete_entity(&pool, entity_id, None)
+        .await
+        .expect("delete entity");
+    let live_entities = atom::identity::repo::list_entities(
+        &pool,
+        ListEntities {
+            q: Some(entity_name.clone()),
+            kind: None,
+            profile_id: None,
+            tenant_id: None,
+            status: None,
+            deleted: DeletedFilter::Live,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list live entities");
+    assert!(live_entities
+        .items
+        .iter()
+        .all(|entity| entity.id != entity_id));
+    let deleted_entities = atom::identity::repo::list_entities(
+        &pool,
+        ListEntities {
+            q: Some(entity_name),
+            kind: None,
+            profile_id: None,
+            tenant_id: None,
+            status: None,
+            deleted: DeletedFilter::Deleted,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list deleted entities");
+    assert!(deleted_entities
+        .items
+        .iter()
+        .any(|entity| entity.id == entity_id));
+
+    let group_name = format!("sd-filter-group-{}", Uuid::new_v4());
+    let group_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO object_groups (id, name) VALUES ($1, $2)")
+        .bind(group_id)
+        .bind(&group_name)
+        .execute(&pool)
+        .await
+        .expect("insert group");
+    atom::identity::repo::delete_group(&pool, group_id, None)
+        .await
+        .expect("delete group");
+    let live_groups = atom::identity::repo::list_groups(
+        &pool,
+        ListGroups {
+            q: Some(group_name.clone()),
+            tenant_id: None,
+            group_type: Some("object".to_string()),
+            parent_id: None,
+            status: None,
+            deleted: DeletedFilter::Live,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list live groups");
+    assert!(live_groups.items.iter().all(|group| group.id != group_id));
+    let deleted_groups = atom::identity::repo::list_groups(
+        &pool,
+        ListGroups {
+            q: Some(group_name),
+            tenant_id: None,
+            group_type: Some("object".to_string()),
+            parent_id: None,
+            status: None,
+            deleted: DeletedFilter::Deleted,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list deleted groups");
+    assert!(deleted_groups
+        .items
+        .iter()
+        .any(|group| group.id == group_id));
+
+    let resource_name = format!("sd-filter-resource-{}", Uuid::new_v4());
+    let resource_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
+        .bind(resource_id)
+        .bind(&resource_name)
+        .execute(&pool)
+        .await
+        .expect("insert resource");
+    atom::authz::repo::delete_resource(&pool, resource_id, None)
+        .await
+        .expect("delete resource");
+    let live_resources = atom::authz::repo::list_resources(
+        &pool,
+        ListResources {
+            q: Some(resource_name.clone()),
+            kind: None,
+            tenant_id: None,
+            parent_group_id: None,
+            include_descendants: false,
+            deleted: DeletedFilter::Live,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list live resources");
+    assert!(live_resources
+        .items
+        .iter()
+        .all(|resource| resource.id != resource_id));
+    let deleted_resources = atom::authz::repo::list_resources(
+        &pool,
+        ListResources {
+            q: Some(resource_name),
+            kind: None,
+            tenant_id: None,
+            parent_group_id: None,
+            include_descendants: false,
+            deleted: DeletedFilter::Deleted,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list deleted resources");
+    assert!(deleted_resources
+        .items
+        .iter()
+        .any(|resource| resource.id == resource_id));
+
+    let role_name = format!("sd-filter-role-{}", Uuid::new_v4());
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(&role_name)
+        .execute(&pool)
+        .await
+        .expect("insert role");
+    atom::authz::repo::delete_role(&pool, role_id, None)
+        .await
+        .expect("delete role");
+    let live_roles = atom::authz::repo::list_roles(
+        &pool,
+        ListRoles {
+            tenant_id: None,
+            derived_kind: None,
+            q: Some(role_name.clone()),
+            deleted: DeletedFilter::Live,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list live roles");
+    assert!(live_roles.items.iter().all(|role| role.id != role_id));
+    let deleted_roles = atom::authz::repo::list_roles(
+        &pool,
+        ListRoles {
+            tenant_id: None,
+            derived_kind: None,
+            q: Some(role_name),
+            deleted: DeletedFilter::Deleted,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list deleted roles");
+    assert!(deleted_roles.items.iter().any(|role| role.id == role_id));
 }
 
 #[tokio::test]

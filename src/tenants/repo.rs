@@ -241,15 +241,18 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     let name = params.name;
     let alias = params.alias;
     let status = params.status;
+    let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants
-           WHERE deleted_at IS NULL
-             AND ($1::text IS NULL OR name = $1)
+           WHERE ($1::text IS NULL OR name = $1)
              AND ($2::text IS NULL OR lower(alias) = lower($2))
              AND ($3::text IS NULL OR status = $3)
              AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)
+             AND ($7::text = 'all'
+                  OR ($7::text = 'live' AND deleted_at IS NULL)
+                  OR ($7::text = 'deleted' AND deleted_at IS NOT NULL))
            ORDER BY created_at DESC
            LIMIT $5 OFFSET $6"#,
     ))
@@ -259,22 +262,26 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     .bind(q.clone())
     .bind(limit)
     .bind(offset)
+    .bind(deleted)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM tenants
-           WHERE deleted_at IS NULL
-             AND ($1::text IS NULL OR name = $1)
+           WHERE ($1::text IS NULL OR name = $1)
              AND ($2::text IS NULL OR lower(alias) = lower($2))
              AND ($3::text IS NULL OR status = $3)
-             AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)"#,
+             AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)
+             AND ($5::text = 'all'
+                  OR ($5::text = 'live' AND deleted_at IS NULL)
+                  OR ($5::text = 'deleted' AND deleted_at IS NOT NULL))"#,
     )
     .bind(name)
     .bind(alias)
     .bind(status)
     .bind(q)
+    .bind(deleted)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -292,6 +299,7 @@ pub async fn list_tenants_for_entity(
     let name = params.name;
     let alias = params.alias;
     let status = params.status;
+    let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
     let access_actions = ["read", "manage"];
 
@@ -385,11 +393,13 @@ pub async fn list_tenants_for_entity(
               AND NOT {deny_for_action}
         )"#
     );
-    let base_filter = r#"t.deleted_at IS NULL
-             AND ($2::text IS NULL OR t.name = $2)
+    let base_filter = r#"($2::text IS NULL OR t.name = $2)
              AND ($3::text IS NULL OR lower(t.alias) = lower($3))
              AND ($4::text IS NULL OR t.status = $4)
-             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)"#;
+             AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
+             AND ($9::text = 'all'
+                  OR ($9::text = 'live' AND t.deleted_at IS NULL)
+                  OR ($9::text = 'deleted' AND t.deleted_at IS NOT NULL))"#;
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         "{CTES} SELECT {TENANT_COLS} FROM tenants t \
@@ -403,6 +413,7 @@ pub async fn list_tenants_for_entity(
     .bind(access_actions.as_slice())
     .bind(limit)
     .bind(offset)
+    .bind(deleted)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -416,6 +427,9 @@ pub async fn list_tenants_for_entity(
     .bind(status)
     .bind(q)
     .bind(access_actions.as_slice())
+    .bind(0_i64)
+    .bind(0_i64)
+    .bind(deleted)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -1358,6 +1372,7 @@ mod tests {
                 name: None,
                 alias: None,
                 status: Some(TenantStatus::Active),
+                deleted: crate::models::enums::DeletedFilter::Live,
                 limit: 100,
                 offset: 0,
             },

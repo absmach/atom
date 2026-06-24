@@ -5,7 +5,7 @@ use crate::{
     authz::{engine, repo as authz_repo},
     error::AppError,
     identity::repo,
-    models::{access::AuthorizedObjectIdsQuery, entity as entity_model},
+    models::{access::AuthorizedObjectIdsQuery, entity as entity_model, enums::DeletedFilter},
     state::AppState,
 };
 
@@ -14,9 +14,9 @@ use super::{
         gql_error, require_any_capability, require_auth, require_read_access, scope_for_tenant,
     },
     types::{
-        parse_id, parse_optional_entity_kind, parse_optional_entity_status, parse_optional_id,
-        CreateEntityInput, Entity, EntityList, GqlEntityKind, GqlEntityStatus, Ownership,
-        UpdateEntityInput,
+        parse_deleted_filter, parse_id, parse_optional_entity_kind, parse_optional_entity_status,
+        parse_optional_id, CreateEntityInput, Entity, EntityList, GqlDeletedFilter, GqlEntityKind,
+        GqlEntityStatus, Ownership, UpdateEntityInput,
     },
 };
 
@@ -73,15 +73,47 @@ impl EntityQuery {
         parent_group_id: Option<ID>,
         include_descendants: Option<bool>,
         status: Option<GqlEntityStatus>,
+        deleted: Option<GqlDeletedFilter>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<EntityList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
+        let profile_id = parse_optional_id(profile_id, "profileId")?;
         let parent_group_id = parse_optional_id(parent_group_id, "parentGroupId")?;
         let parsed_kind = parse_optional_entity_kind(kind);
         let parsed_status = parse_optional_entity_status(status);
+        let deleted = parse_deleted_filter(deleted);
+        let limit = limit.map(i64::from).unwrap_or(20);
+        let offset = offset.map(i64::from).unwrap_or(0);
+
+        if deleted != DeletedFilter::Live {
+            require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)])
+                .await?;
+            let list = repo::list_entities(
+                &state.pool,
+                entity_model::ListEntities {
+                    q,
+                    kind: parsed_kind,
+                    profile_id,
+                    tenant_id,
+                    status: parsed_status,
+                    deleted,
+                    parent_group_id,
+                    include_descendants: include_descendants.unwrap_or(false),
+                    limit,
+                    offset,
+                },
+            )
+            .await
+            .map_err(gql_error)?;
+            return Ok(EntityList {
+                items: list.items.into_iter().map(Entity::from).collect(),
+                total: list.total,
+            });
+        }
+
         let authorized = authz_repo::authorized_object_ids(
             &state.pool,
             AuthorizedObjectIdsQuery {
@@ -91,13 +123,13 @@ impl EntityQuery {
                 object_type: parsed_kind.as_ref().map(entity_object_type),
                 tenant_id,
                 q,
-                profile_id: parse_optional_id(profile_id, "profileId")?,
+                profile_id,
                 entity_status: parsed_status,
                 group_type: None,
                 parent_group_id,
                 include_descendants: include_descendants.unwrap_or(false),
-                limit: limit.map(i64::from).unwrap_or(20),
-                offset: offset.map(i64::from).unwrap_or(0),
+                limit,
+                offset,
             },
         )
         .await

@@ -1,11 +1,13 @@
 use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
+    auth::Scope,
     authz::{engine, repo as authz_repo},
     error::AppError,
     models::{
         access::AuthorizedObjectIdsQuery,
-        resource::{CreateResource, UpdateResource},
+        enums::DeletedFilter,
+        resource::{CreateResource, ListResources, UpdateResource},
     },
     state::AppState,
 };
@@ -13,8 +15,8 @@ use crate::{
 use super::{
     auth::{gql_error, require_any_capability, require_auth, scope_for_tenant},
     types::{
-        parse_id, parse_optional_id, CreateResourceInput, Resource, ResourceList,
-        UpdateResourceInput,
+        parse_deleted_filter, parse_id, parse_optional_id, CreateResourceInput, GqlDeletedFilter,
+        Resource, ResourceList, UpdateResourceInput,
     },
 };
 
@@ -46,6 +48,7 @@ impl ResourceQuery {
         tenant_id: Option<ID>,
         parent_group_id: Option<ID>,
         include_descendants: Option<bool>,
+        deleted: Option<GqlDeletedFilter>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<ResourceList> {
@@ -53,6 +56,35 @@ impl ResourceQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         let parent_group_id = parse_optional_id(parent_group_id, "parentGroupId")?;
+        let deleted = parse_deleted_filter(deleted);
+        let limit = limit.map(i64::from).unwrap_or(20);
+        let offset = offset.map(i64::from).unwrap_or(0);
+        let include_descendants = include_descendants.unwrap_or(false);
+
+        if deleted != DeletedFilter::Live {
+            require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)])
+                .await?;
+            let list = authz_repo::list_resources(
+                &state.pool,
+                ListResources {
+                    q,
+                    kind: kind.clone(),
+                    tenant_id,
+                    parent_group_id,
+                    include_descendants,
+                    deleted,
+                    limit,
+                    offset,
+                },
+            )
+            .await
+            .map_err(gql_error)?;
+            return Ok(ResourceList {
+                items: list.items.into_iter().map(Resource::from).collect(),
+                total: list.total,
+            });
+        }
+
         let object_type = kind.as_deref().map(|kind| {
             if kind.contains(':') {
                 kind.to_string()
@@ -73,9 +105,9 @@ impl ResourceQuery {
                 entity_status: None,
                 group_type: None,
                 parent_group_id,
-                include_descendants: include_descendants.unwrap_or(false),
-                limit: limit.map(i64::from).unwrap_or(20),
-                offset: offset.map(i64::from).unwrap_or(0),
+                include_descendants,
+                limit,
+                offset,
             },
         )
         .await

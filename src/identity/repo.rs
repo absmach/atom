@@ -124,6 +124,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     let status = params.status;
     let parent_group_id = params.parent_group_id;
     let include_descendants = params.include_descendants;
+    let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
 
     let items = sqlx::query_as::<_, Entity>(
@@ -139,13 +140,15 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
-           WHERE e.deleted_at IS NULL
-             AND ($1::text IS NULL OR e.kind = $1)
+           WHERE ($1::text IS NULL OR e.kind = $1)
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
              AND ($5::text IS NULL OR e.name ILIKE $5 OR e.alias ILIKE $5 OR e.attributes::text ILIKE $5)
              AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
+             AND ($10::text = 'all'
+                  OR ($10::text = 'live' AND e.deleted_at IS NULL)
+                  OR ($10::text = 'deleted' AND e.deleted_at IS NOT NULL))
            ORDER BY e.created_at DESC
            LIMIT $8 OFFSET $9"#,
     )
@@ -158,6 +161,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(include_descendants)
     .bind(limit)
     .bind(offset)
+    .bind(deleted)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -174,13 +178,15 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
            SELECT COUNT(*)
            FROM entities e
            LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
-           WHERE e.deleted_at IS NULL
-             AND ($1::text IS NULL OR e.kind = $1)
+           WHERE ($1::text IS NULL OR e.kind = $1)
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
              AND ($5::text IS NULL OR e.name ILIKE $5 OR e.alias ILIKE $5 OR e.attributes::text ILIKE $5)
-             AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))"#,
+             AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
+             AND ($8::text = 'all'
+                  OR ($8::text = 'live' AND e.deleted_at IS NULL)
+                  OR ($8::text = 'deleted' AND e.deleted_at IS NOT NULL))"#,
     )
     .bind(kind)
     .bind(profile_id)
@@ -189,6 +195,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(q)
     .bind(parent_group_id)
     .bind(include_descendants)
+    .bind(deleted)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -691,19 +698,22 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     let status = params.status;
     let q = search_pattern(params.q);
     let parent_id = params.parent_id;
+    let deleted = params.deleted.as_str();
 
     let items = sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
                   g.status, g.attributes, g.created_at, g.updated_at
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.deleted_at IS NULL
-             AND ($1::uuid IS NULL OR g.tenant_id = $1)
+           WHERE ($1::uuid IS NULL OR g.tenant_id = $1)
              AND ($2::text IS NULL OR g.status = $2)
              AND ($3::text IS NULL OR g.name ILIKE $3 OR g.description ILIKE $3 OR g.attributes::text ILIKE $3)
              AND ($8::text IS NULL OR g.group_type = $8)
              AND (($4::uuid IS NULL AND $5::boolean = FALSE)
                   OR ($5::boolean = TRUE AND gh.parent_id = $4))
+             AND ($9::text = 'all'
+                  OR ($9::text = 'live' AND g.deleted_at IS NULL)
+                  OR ($9::text = 'deleted' AND g.deleted_at IS NOT NULL))
            ORDER BY g.created_at DESC
            LIMIT $6 OFFSET $7"#,
     )
@@ -715,6 +725,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     .bind(limit)
     .bind(offset)
     .bind(params.group_type.clone())
+    .bind(deleted)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -723,13 +734,15 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
         r#"SELECT COUNT(*)
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.deleted_at IS NULL
-             AND ($1::uuid IS NULL OR g.tenant_id = $1)
+           WHERE ($1::uuid IS NULL OR g.tenant_id = $1)
              AND ($2::text IS NULL OR g.status = $2)
              AND ($3::text IS NULL OR g.name ILIKE $3 OR g.description ILIKE $3 OR g.attributes::text ILIKE $3)
              AND ($6::text IS NULL OR g.group_type = $6)
              AND (($4::uuid IS NULL AND $5::boolean = FALSE)
-                  OR ($5::boolean = TRUE AND gh.parent_id = $4))"#,
+                  OR ($5::boolean = TRUE AND gh.parent_id = $4))
+             AND ($7::text = 'all'
+                  OR ($7::text = 'live' AND g.deleted_at IS NULL)
+                  OR ($7::text = 'deleted' AND g.deleted_at IS NOT NULL))"#,
     )
     .bind(params.tenant_id)
     .bind(status)
@@ -737,6 +750,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     .bind(parent_id)
     .bind(parent_id.is_some())
     .bind(params.group_type)
+    .bind(deleted)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -926,6 +940,7 @@ pub async fn list_child_groups(
             group_type: Some("object".to_string()),
             parent_id: Some(parent_id),
             status: None,
+            deleted: crate::models::enums::DeletedFilter::Live,
             limit,
             offset,
         },

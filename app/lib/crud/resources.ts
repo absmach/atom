@@ -51,6 +51,15 @@ export type CrudResource = {
   missing: Partial<Record<CrudAction, string>>;
 };
 
+const lifecycleFilter: CrudFilter = {
+  key: "deleted",
+  variable: "deleted",
+  label: "Lifecycle",
+  allLabel: "Live",
+  type: "select",
+  options: [{ label: "Deleted", value: "deleted" }],
+};
+
 export const crudResources: CrudResource[] = [
   {
     key: "tenants",
@@ -60,9 +69,12 @@ export const crudResources: CrudResource[] = [
       "Top-level boundaries for entities, resources, groups, roles, and assignments.",
     icon: Building2,
     queryName: "tenants",
-    listQuery: `query Tenants($limit: Int = 50, $offset: Int = 0) { tenants(limit: $limit, offset: $offset) { total items { id name alias tags attributes status createdAt updatedAt } } }`,
+    listQuery: `query Tenants($deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { tenants(deleted: $deleted, limit: $limit, offset: $offset) { total items { id name alias tags attributes status createdAt updatedAt } } }`,
     createMutation: `mutation CreateTenant($input: CreateTenantInput!) { createTenant(input: $input) { id name alias tags status createdAt updatedAt } }`,
+    deleteMutation: `mutation DeleteTenant($id: ID!) { deleteTenant(id: $id) }`,
+    deleteIdField: "id",
     formAttributes: true,
+    filters: [lifecycleFilter],
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "alias", label: "Alias", priority: "medium" },
@@ -85,10 +97,13 @@ export const crudResources: CrudResource[] = [
     icon: Fingerprint,
     queryName: "entities",
     tenantFilter: true,
-    listQuery: `query Entities($tenantId: ID, $kind: EntityKind, $limit: Int = 50, $offset: Int = 0) { entities(tenantId: $tenantId, kind: $kind, limit: $limit, offset: $offset) { total items { id kind profileId profileVersionId name alias tenantId parentGroupId attributes status createdAt updatedAt } } }`,
+    listQuery: `query Entities($tenantId: ID, $kind: EntityKind, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { entities(tenantId: $tenantId, kind: $kind, deleted: $deleted, limit: $limit, offset: $offset) { total items { id kind profileId profileVersionId name alias tenantId parentGroupId attributes status createdAt updatedAt } } }`,
     createMutation: `mutation CreateEntity($input: CreateEntityInput!) { createEntity(input: $input) { id kind profileId profileVersionId name alias tenantId status createdAt updatedAt } }`,
+    deleteMutation: `mutation DeleteEntity($id: ID!) { deleteEntity(id: $id) }`,
+    deleteIdField: "id",
     formAttributes: true,
     filters: [
+      lifecycleFilter,
       {
         key: "kind",
         variable: "kind",
@@ -164,10 +179,11 @@ export const crudResources: CrudResource[] = [
     icon: Users,
     queryName: "groups",
     tenantFilter: true,
-    listQuery: `query Groups($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { groups(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id name tenantId groupType parentId description createdAt updatedAt } } }`,
+    listQuery: `query Groups($tenantId: ID, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { groups(tenantId: $tenantId, deleted: $deleted, limit: $limit, offset: $offset) { total items { id name tenantId groupType parentId description createdAt updatedAt } } }`,
     createMutation: `mutation CreateGroup($input: CreateGroupInput!) { createGroup(input: $input) { id name tenantId groupType description createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteGroup($id: ID!) { deleteGroup(id: $id) }`,
     deleteIdField: "id",
+    filters: [lifecycleFilter],
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "groupType", label: "Type", priority: "high" },
@@ -195,12 +211,13 @@ export const crudResources: CrudResource[] = [
     icon: Server,
     queryName: "resources",
     tenantFilter: true,
-    listQuery: `query Resources($tenantId: ID, $kind: String, $limit: Int = 50, $offset: Int = 0) { resources(tenantId: $tenantId, kind: $kind, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId parentGroupId attributes createdAt updatedAt } } }`,
+    listQuery: `query Resources($tenantId: ID, $kind: String, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { resources(tenantId: $tenantId, kind: $kind, deleted: $deleted, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId parentGroupId attributes createdAt updatedAt } } }`,
     createMutation: `mutation CreateResource($input: CreateResourceInput!) { createResource(input: $input) { id kind name alias tenantId ownerId createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteResource($id: ID!) { deleteResource(id: $id) }`,
     deleteIdField: "id",
     formAttributes: true,
     filters: [
+      lifecycleFilter,
       {
         key: "kind",
         variable: "kind",
@@ -239,10 +256,11 @@ export const crudResources: CrudResource[] = [
     icon: ShieldCheck,
     queryName: "roles",
     tenantFilter: true,
-    listQuery: `query Roles($tenantId: ID, $limit: Int = 50, $offset: Int = 0) { roles(tenantId: $tenantId, limit: $limit, offset: $offset) { total items { id name tenantId description derivedKind createdAt updatedAt } } }`,
+    listQuery: `query Roles($tenantId: ID, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { roles(tenantId: $tenantId, deleted: $deleted, limit: $limit, offset: $offset) { total items { id name tenantId description derivedKind createdAt updatedAt } } }`,
     createMutation: `mutation CreateRole($input: CreateRoleInput!) { createRole(input: $input) { id name tenantId description derivedKind createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteRole($id: ID!) { deleteRole(id: $id) }`,
     deleteIdField: "id",
+    filters: [lifecycleFilter],
     columns: [
       { key: "tenantId", label: "Tenant", priority: "medium" },
       { key: "name", label: "Name", priority: "high" },

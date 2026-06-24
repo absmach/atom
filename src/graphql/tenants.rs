@@ -4,7 +4,11 @@ use crate::{
     auth::{has_capability_in_scope, require_capability, Scope},
     authz::engine,
     error::AppError,
-    models::{enums::TenantStatus, tenant as tenant_model, tenant::ListTenants},
+    models::{
+        enums::{DeletedFilter, TenantStatus},
+        tenant as tenant_model,
+        tenant::ListTenants,
+    },
     state::AppState,
     tenants::{handlers as tenant_handlers, repo as tenant_repo},
 };
@@ -12,9 +16,10 @@ use crate::{
 use super::{
     auth::{gql_error, require_any_capability, require_auth},
     types::{
-        parse_id, parse_optional_id, parse_optional_tenant_status, CreateTenantInput,
-        CreateTenantInvitationInput, EntityList, GqlTenantStatus, InvitationTokenInput, Tenant,
-        TenantInvitation, TenantInvitationList, TenantList, UpdateTenantInput,
+        parse_deleted_filter, parse_id, parse_optional_id, parse_optional_tenant_status,
+        CreateTenantInput, CreateTenantInvitationInput, EntityList, GqlDeletedFilter,
+        GqlTenantStatus, InvitationTokenInput, Tenant, TenantInvitation, TenantInvitationList,
+        TenantList, UpdateTenantInput,
     },
 };
 
@@ -41,20 +46,29 @@ impl TenantQuery {
         name: Option<String>,
         alias: Option<String>,
         status: Option<GqlTenantStatus>,
+        deleted: Option<GqlDeletedFilter>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<TenantList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
+        let deleted = parse_deleted_filter(deleted);
         let params = ListTenants {
             q,
             name,
             alias,
             status: parse_optional_tenant_status(status),
+            deleted,
             limit: limit.map(i64::from).unwrap_or(20),
             offset: offset.map(i64::from).unwrap_or(0),
         };
-        let list = if can_list_all_tenants(&state.pool, auth.entity_id).await? {
+        let list = if deleted != DeletedFilter::Live {
+            require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)])
+                .await?;
+            tenant_repo::list_tenants(&state.pool, params)
+                .await
+                .map_err(gql_error)?
+        } else if can_list_all_tenants(&state.pool, auth.entity_id).await? {
             tenant_repo::list_tenants(&state.pool, params)
                 .await
                 .map_err(gql_error)?

@@ -359,6 +359,32 @@ Atom GraphQL is generic. No Magistrala-specific GraphQL aliases exist; use the g
 
 GraphQL uses typed enums for Atom's fixed vocabularies, including `EntityKind`, `EntityStatus`, `TenantStatus`, `Effect`, `CredentialKind`, and `AuditOutcome`. Inline GraphQL uses enum values without quotes, such as `kind: device`. When using variables, send the same value as a JSON string, such as `"device"`.
 
+### Soft delete and purge retention
+
+Delete mutations for tenants, entities, groups, resources, and roles are soft
+deletes. Atom stamps `deleted_at` and `deleted_by`, hides the row from normal
+reads, listings, login, and authorization checks, and leaves physical removal to
+an explicit purge path.
+
+- Entity delete also revokes that entity's credentials and sessions.
+- Tenant delete sets tenant `status = deleted` and revokes sessions for child
+  entities in that tenant.
+- Entity, group, resource, and role delete leave their existing `status` value
+  unchanged; the tombstone is the lifecycle marker.
+- Live name and alias uniqueness uses partial indexes, so names and aliases are
+  reusable after soft delete.
+- Admin list queries expose a `deleted` filter for tombstone inspection; live
+  rows remain the default.
+
+Physical purge is disabled by default. Enable the background purge job with
+`ATOM_PURGE_ENABLED=true`. Its defaults are `ATOM_PURGE_RETENTION_DAYS=90`,
+`ATOM_PURGE_INTERVAL_SECS=86400`, and `ATOM_PURGE_BATCH_SIZE=1000`. Expired
+tombstones are hard-deleted in batches, using the database's foreign-key
+cascades; purging a tenant removes its tenant-owned entities, groups,
+resources, roles, and related rows instead of orphaning them. The admin-only
+`purgeTenant` mutation can physically remove an already-soft-deleted tenant
+immediately, bypassing the retention window.
+
 Profiles keep Atom's internal runtime/authz kind separate from user/domain subtypes:
 
 - `kind` is the internal Atom entity kind used by authorization (`human`, `device`, `service`, `workload`, `application`).

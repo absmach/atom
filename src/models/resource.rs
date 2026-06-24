@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::enums::DeletedFilter;
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Resource {
     pub id: Uuid,
@@ -46,6 +48,8 @@ pub struct ListResources {
     pub tenant_id: Option<Uuid>,
     pub parent_group_id: Option<Uuid>,
     pub include_descendants: bool,
+    #[serde(default)]
+    pub deleted: DeletedFilter,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]

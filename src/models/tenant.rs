@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::enums::TenantStatus;
+use super::enums::{DeletedFilter, TenantStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Tenant {
@@ -48,6 +48,8 @@ pub struct ListTenants {
     pub name: Option<String>,
     pub alias: Option<String>,
     pub status: Option<TenantStatus>,
+    #[serde(default)]
+    pub deleted: DeletedFilter,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]

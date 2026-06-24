@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::enums::{EntityKind, EntityStatus};
+use super::enums::{DeletedFilter, EntityKind, EntityStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Entity {
@@ -56,6 +56,8 @@ pub struct ListEntities {
     pub profile_id: Option<Uuid>,
     pub tenant_id: Option<Uuid>,
     pub status: Option<EntityStatus>,
+    #[serde(default)]
+    pub deleted: DeletedFilter,
     pub parent_group_id: Option<Uuid>,
     pub include_descendants: bool,
     #[serde(default = "default_limit")]

@@ -7,7 +7,7 @@ use crate::{
     models::{
         action_assignment_rule::{CreateActionAssignmentRule, ListActionAssignmentRules},
         capability::{CreateCapability, ListCapabilities, UpdateCapability},
-        enums::AuditOutcome,
+        enums::{AuditOutcome, DeletedFilter},
         policy::{
             CreateDirectPolicy, CreatePermissionBlock, CreateRoleAssignment, ListDirectPolicies,
             ListPermissionBlocks, ListRoleAssignments,
@@ -18,16 +18,19 @@ use crate::{
 };
 
 use super::{
-    auth::{gql_error, require_auth, require_policy_read, require_role_read, scope_for_tenant},
+    auth::{
+        gql_error, require_any_capability, require_auth, require_policy_read, require_role_read,
+        scope_for_tenant,
+    },
     types::{
-        parse_effect_or_default, parse_id, parse_object_kind,
+        parse_deleted_filter, parse_effect_or_default, parse_id, parse_object_kind,
         parse_optional_action_assignment_decision, parse_optional_entity_kind, parse_optional_id,
         parse_optional_subject_kind, parse_subject_kind, Action, ActionApplicabilityEntry,
         ActionApplicabilityList, ActionAssignmentRule, ActionAssignmentRuleList, ActionList,
         AddActionApplicabilityInput, CreateActionAssignmentRuleInput, CreateActionInput,
         CreateDirectPolicyInput, CreatePermissionBlockInput, CreateRoleAssignmentInput,
         CreateRoleInput, DirectPolicy, DirectPolicyList, GqlActionAssignmentRuleDecision,
-        GqlEntityKind, GqlSubjectKind, PermissionBlock, PermissionBlockList,
+        GqlDeletedFilter, GqlEntityKind, GqlSubjectKind, PermissionBlock, PermissionBlockList,
         RemoveActionApplicabilityInput, Role, RoleAssignment, RoleAssignmentList, RoleList,
         UpdateActionInput, UpdateRoleInput,
     },
@@ -45,19 +48,27 @@ impl PolicyQuery {
         tenant_id: Option<ID>,
         derived_kind: Option<String>,
         q: Option<String>,
+        deleted: Option<GqlDeletedFilter>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<RoleList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_role_read(&state.pool, auth.entity_id, tenant_id).await?;
+        let deleted = parse_deleted_filter(deleted);
+        if deleted != DeletedFilter::Live {
+            require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)])
+                .await?;
+        } else {
+            require_role_read(&state.pool, auth.entity_id, tenant_id).await?;
+        }
         let list = authz_repo::list_roles(
             &state.pool,
             ListRoles {
                 tenant_id,
                 derived_kind,
                 q,
+                deleted,
                 limit: limit.map(i64::from).unwrap_or(20),
                 offset: offset.map(i64::from).unwrap_or(0),
             },

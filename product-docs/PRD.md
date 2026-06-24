@@ -991,7 +991,7 @@ Priority levels: "Must" items are required for general availability and ship acr
 |---|---|---|
 | TEN-1 | The system must expose first-class tenant CRUD and lifecycle APIs. | Must |
 | TEN-2 | Tenant lifecycle must support active, inactive, frozen, and deleted states. | Must |
-| TEN-3 | Tenant deletion must be soft delete by setting status to `deleted`. | Must |
+| TEN-3 | Tenant deletion must be soft delete by stamping `deleted_at`/`deleted_by`, setting status to `deleted`, hiding tenant-owned access immediately, and deferring physical removal to the configured purge path. | Must |
 | TEN-4 | Tenant create must require platform `create` on `tenant`; update, freeze, and delete operations must require platform `manage` on `tenant`. | Must |
 | TEN-5 | Entities, resources, Object Groups, Principal Groups, and roles must be able to reference tenants by `tenant_id`. | Must |
 | TEN-6 | Magistrala domains must map directly to Atom tenants. | Must |

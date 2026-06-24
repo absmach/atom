@@ -15,7 +15,7 @@
 
 mod common;
 
-use atom::models::enums::{Effect, GrantKind, ScopeKind, SubjectKind};
+use atom::models::enums::{DeletedFilter, Effect, GrantKind, ScopeKind, SubjectKind};
 use atom::models::policy::{CreatePolicyBinding, CreateRoleAssignment};
 use atom::models::role::CreateRole;
 use atom::models::tenant::ListTenants;
@@ -115,6 +115,7 @@ async fn visible_tenant_ids(pool: &sqlx::PgPool, entity_id: Uuid) -> Vec<Uuid> {
             name: None,
             alias: None,
             status: None,
+            deleted: DeletedFilter::Live,
             limit: 100,
             offset: 0,
         },
