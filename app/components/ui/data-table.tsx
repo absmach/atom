@@ -5,9 +5,20 @@ import {
   flexRender,
   getCoreRowModel,
   type Table as ReactTable,
+  type RowData,
   useReactTable,
   type VisibilityState,
 } from "@tanstack/react-table";
+
+declare module "@tanstack/react-table" {
+  // Lets a column opt into extra cell/header classes (e.g. a sticky actions
+  // column). Consumed by the header and body cell renderers below.
+  // biome-ignore lint/correctness/noUnusedVariables: augmentation must match the upstream generic signature
+  interface ColumnMeta<TData extends RowData, TValue> {
+    className?: string;
+  }
+}
+
 import {
   ChevronLeft,
   ChevronRight,
@@ -329,12 +340,24 @@ export function DataTable<TData, TValue>({
 
       {/* Table */}
       <div className="overflow-x-auto rounded-md border bg-card">
-        <Table>
+        {/* min-w-max lets the table grow to its natural width so wide rows
+            scroll horizontally instead of compressing columns under the pinned
+            actions column. */}
+        <Table className="min-w-max">
           <TableHeader>
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id}>
                 {hg.headers.map((h) => (
-                  <TableHead key={h.id}>
+                  <TableHead
+                    key={h.id}
+                    className={
+                      (
+                        h.column.columnDef.meta as
+                          | { className?: string }
+                          | undefined
+                      )?.className
+                    }
+                  >
                     {h.isPlaceholder
                       ? null
                       : flexRender(h.column.columnDef.header, h.getContext())}

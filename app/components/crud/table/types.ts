@@ -10,4 +10,6 @@ export type CrudTableProps = {
   page: number;
   limit: number;
   source: "graphql" | "scaffold";
+  /** When false, the deletedAt/deletedBy columns are hidden (live/active view). */
+  showDeletedColumns?: boolean;
 };

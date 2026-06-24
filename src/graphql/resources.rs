@@ -1,12 +1,13 @@
 use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
+    audit,
     auth::Scope,
     authz::{engine, repo as authz_repo},
     error::AppError,
     models::{
         access::AuthorizedObjectIdsQuery,
-        enums::DeletedFilter,
+        enums::{AuditOutcome, DeletedFilter},
         resource::{CreateResource, ListResources, UpdateResource},
     },
     state::AppState,
@@ -246,6 +247,50 @@ impl ResourceMutation {
             .await
             .map_err(gql_error)?;
 
+        Ok(true)
+    }
+
+    /// Restore a soft-deleted resource within the retention window. Platform-admin
+    /// only and audit-logged.
+    async fn restore_resource(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        let id = parse_id(id, "id")?;
+        authz_repo::restore_resource(&state.pool, id, Some(auth.entity_id))
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "resource.restore",
+            AuditOutcome::Allow,
+            serde_json::json!({ "resource_id": id }),
+        )
+        .await;
+        Ok(true)
+    }
+
+    /// Physically purge an already-soft-deleted resource, bypassing the retention
+    /// window. Deliberate, irreversible, platform-admin only, and audit-logged.
+    async fn purge_resource(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        let id = parse_id(id, "id")?;
+        authz_repo::purge_resource(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "resource.purge",
+            AuditOutcome::Allow,
+            serde_json::json!({ "resource_id": id }),
+        )
+        .await;
         Ok(true)
     }
 

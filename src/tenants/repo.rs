@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    error::{db_err, AppError},
+    error::{db_err, restore_conflict, AppError},
     identity::service::{hash_secret, verify_secret},
     models::{
         entity::{Entity, EntityList},
@@ -538,18 +538,18 @@ pub async fn soft_delete_tenant(
         other => AppError::Database(other),
     })?;
 
+    // Stamp the tenant-delete marker on every revoked credential (not just
+    // certificates) so restore_tenant can reverse exactly the revocations this
+    // delete caused, without disturbing credentials revoked earlier for other
+    // reasons.
     let revoked_certificates: i64 = sqlx::query_scalar(
         r#"WITH revoked AS (
                UPDATE credentials c
                SET status = 'revoked',
-                   metadata = CASE
-                       WHEN c.kind = 'certificate'
-                       THEN c.metadata || jsonb_build_object(
-                           'revoked_at', now(),
-                           'revocation_reason', 'tenant_deleted'
-                       )
-                       ELSE c.metadata
-                   END
+                   metadata = c.metadata || jsonb_build_object(
+                       'revoked_at', now(),
+                       'revocation_reason', 'tenant_deleted'
+                   )
                FROM entities e
                WHERE c.entity_id = e.id
                  AND e.tenant_id = $1
@@ -580,17 +580,121 @@ pub async fn soft_delete_tenant(
     Ok(tenant)
 }
 
+/// Reverse a tenant soft delete within the retention window. Reactivates the
+/// tenant and clears its tombstone; its children (entities, groups, roles,
+/// resources) were never individually tombstoned by `soft_delete_tenant` — they
+/// were hidden only via the tenant's `deleted_at` — so they become visible again
+/// automatically.
+///
+/// To make the restored tenant operational, the non-certificate child
+/// credentials (passwords, API keys) that *this* delete revoked — identified by
+/// the `tenant_deleted` revocation marker — are reactivated, so members can log
+/// in with their existing secrets. Certificates stay revoked (their revocation
+/// is published via the CRL and cannot be safely undone — re-issue is required),
+/// and sessions stay revoked, so a fresh login is required. Credentials revoked
+/// earlier for other reasons (e.g. an individually soft-deleted child) are left
+/// untouched.
+///
+/// Fails with a conflict if the tenant name/alias was re-taken by a live tenant
+/// during the retention window.
+pub async fn restore_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let tenant = sqlx::query_as::<_, Tenant>(&format!(
+        r#"UPDATE tenants
+           SET status = 'active', deleted_at = NULL, deleted_by = NULL,
+               updated_by = $2, updated_at = now()
+           WHERE id = $1 AND deleted_at IS NOT NULL
+           RETURNING {TENANT_COLS}"#,
+    ))
+    .bind(id)
+    .bind(restored_by)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => {
+            AppError::not_found(format!("no soft-deleted tenant {id} to restore"))
+        }
+        other => restore_conflict(other),
+    })?;
+
+    sqlx::query(
+        r#"UPDATE credentials c
+           SET status = 'active',
+               metadata = c.metadata - 'revoked_at' - 'revocation_reason'
+           FROM entities e
+           WHERE c.entity_id = e.id
+             AND e.tenant_id = $1
+             AND e.deleted_at IS NULL
+             AND c.status = 'revoked'
+             AND c.kind <> 'certificate'
+             AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(tenant)
+}
+
+/// Every protected-object UUID that physically purging the given tenants will
+/// remove: the tenants themselves plus all of their cascaded children
+/// (entities and their credentials, object/principal groups, roles, resources).
+/// These are exactly the ids whose bare-UUID authorization references
+/// (`permission_blocks.object_id`, `direct_policies`/`role_assignments`
+/// `subject_id`) must be cleaned up, since no foreign key does it for them.
+///
+/// Must be called *before* the tenant rows are deleted, while the children still
+/// exist. Shared by the explicit `purge_tenant` and the background retention job.
+pub(crate) async fn tenant_purge_object_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_ids: &[Uuid],
+) -> Result<Vec<Uuid>, AppError> {
+    if tenant_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(
+        r#"SELECT id FROM unnest($1::uuid[]) AS t(id)
+           UNION ALL SELECT id FROM entities WHERE tenant_id = ANY($1)
+           UNION ALL SELECT c.id FROM credentials c
+                     JOIN entities e ON e.id = c.entity_id
+                     WHERE e.tenant_id = ANY($1)
+           UNION ALL SELECT id FROM object_groups WHERE tenant_id = ANY($1)
+           UNION ALL SELECT id FROM principal_groups WHERE tenant_id = ANY($1)
+           UNION ALL SELECT id FROM roles WHERE tenant_id = ANY($1)
+           UNION ALL SELECT id FROM resources WHERE tenant_id = ANY($1)"#,
+    )
+    .bind(tenant_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
 /// Physically remove a tenant that has already been soft-deleted, bypassing the
 /// purge retention window. This cascades to all tenant-owned data, so it is an
-/// explicit, deliberate admin action (a soft delete is required first).
+/// explicit, deliberate admin action (a soft delete is required first). The
+/// bare-UUID authorization references to the tenant and every cascaded child are
+/// cleaned up in the same transaction (no FK does this) via the canonical
+/// [`crate::authz::repo::purge_authz_references_for_ids`].
 pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    // Gather doomed object ids before the cascade removes the children.
+    let doomed = tenant_purge_object_ids(&mut tx, &[id]).await?;
+
     let purged = sqlx::query_as::<_, (Uuid, String)>(
         "DELETE FROM tenants
          WHERE id = $1 AND deleted_at IS NOT NULL
          RETURNING id, name",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
     let Some((id, name)) = purged else {
@@ -598,6 +702,10 @@ pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppEr
             "no soft-deleted tenant {id} to purge"
         )));
     };
+
+    crate::authz::repo::purge_authz_references_for_ids(&mut tx, &doomed).await?;
+
+    tx.commit().await.map_err(db_err)?;
     Ok(PurgedTenant { id, name })
 }
 

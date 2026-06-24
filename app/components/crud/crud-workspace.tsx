@@ -61,6 +61,19 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
         variables[filter.variable ?? filter.key] = value;
       }
     }
+    // Status lives in its own URL param (merged into the lifecycle dropdown),
+    // not in `resource.filters`. Forward it server-side so the filter spans the
+    // whole result set rather than just the current page. Enum values are
+    // snake_case, matching the GraphQL EntityStatus values.
+    const statusRaw = searchParams[`${resourceKey}.status`];
+    const statusValue = Array.isArray(statusRaw) ? statusRaw[0] : statusRaw;
+    if (
+      statusValue &&
+      statusValue !== "all" &&
+      resource.listQuery.includes("$status")
+    ) {
+      variables.status = statusValue;
+    }
 
     try {
       const data = await graphqlServer<
@@ -81,6 +94,13 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
     }
   }
   const { error: filterFetchError, filters } = await filterResultPromise;
+
+  // The tombstone columns (deletedAt/deletedBy) only carry data in the deleted
+  // view, so hide them in the default live/active view.
+  const deletedParam = searchParams[`${resourceKey}.deleted`];
+  const showDeletedColumns =
+    (Array.isArray(deletedParam) ? deletedParam[0] : deletedParam) ===
+    "deleted";
 
   return (
     <section className="grid gap-4">
@@ -120,6 +140,7 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
         page={page}
         resourceKey={resourceKey}
         rows={rows}
+        showDeletedColumns={showDeletedColumns}
         source={source}
         total={total}
       />

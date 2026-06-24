@@ -1199,3 +1199,33 @@ VALUES
     ('service', 'manage', 'credential', NULL, 'allow', FALSE),
     ('service', 'policy.manage', 'policy', NULL, 'allow', FALSE),
     ('service', 'role.manage', 'role', NULL, 'allow', FALSE);
+
+-- ─── Policy-object permission-block cleanup ──────────────────────────────────
+-- Exact-object permission blocks can target a direct policy or role assignment
+-- by id (object_kind = 'policy'), via the polymorphic permission_blocks.object_id
+-- column, which has no foreign key. A policy/assignment row is removed by many
+-- paths — direct delete, bulk delete, and FK cascade from tenants, roles, and
+-- permission_blocks — and any block still pointing at a removed row would be left
+-- dangling, granting access on a vanished object.
+--
+-- Enforce the cleanup as a DB-level invariant instead of at every call site: an
+-- AFTER DELETE trigger removes the blocks targeting a policy row whenever that
+-- row is deleted by ANY means (including referential-action cascades, for which
+-- row-level triggers still fire). Deleting those blocks cascades to the policies
+-- that reference them, re-firing the trigger; the recursion is monotonic (each
+-- step removes rows) and terminates.
+
+CREATE OR REPLACE FUNCTION purge_blocks_targeting_policy() RETURNS trigger AS $$
+BEGIN
+    DELETE FROM permission_blocks WHERE object_id = OLD.id;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_direct_policies_purge_object_blocks
+    AFTER DELETE ON direct_policies
+    FOR EACH ROW EXECUTE FUNCTION purge_blocks_targeting_policy();
+
+CREATE TRIGGER trg_role_assignments_purge_object_blocks
+    AFTER DELETE ON role_assignments
+    FOR EACH ROW EXECUTE FUNCTION purge_blocks_targeting_policy();

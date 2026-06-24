@@ -6,7 +6,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    error::{db_err, AppError},
+    error::{db_err, restore_conflict, AppError},
     models::{
         access::{
             AdminPageQuery, AuditLogItem, AuditLogResponse, AuthorizedObjectIdsQuery,
@@ -282,6 +282,130 @@ pub async fn delete_resource(
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("resource {id} not found")));
     }
+    Ok(())
+}
+
+/// Reverse a soft delete of a resource within the retention window. Fails with a
+/// conflict if the resource's tenant is still soft-deleted, or if its alias was
+/// re-taken by a live resource in the same tenant.
+pub async fn restore_resource(
+    pool: &PgPool,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let _ = restored_by;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let tenant_deleted: Option<bool> = sqlx::query_scalar(
+        "SELECT t.deleted_at IS NOT NULL
+         FROM resources r
+         LEFT JOIN tenants t ON t.id = r.tenant_id
+         WHERE r.id = $1 AND r.deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    match tenant_deleted {
+        None => {
+            return Err(AppError::not_found(format!(
+                "no soft-deleted resource {id} to restore"
+            )))
+        }
+        Some(true) => {
+            return Err(AppError::conflict(
+                "the resource's tenant is soft-deleted; restore the tenant first",
+            ))
+        }
+        Some(false) => {}
+    }
+
+    sqlx::query(
+        "UPDATE resources SET deleted_at = NULL, deleted_by = NULL
+         WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(restore_conflict)?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Canonical cleanup of the authorization rows that reference a set of
+/// physically removed object UUIDs by bare value (no foreign key enforces these,
+/// so a hard delete or FK cascade leaves them dangling):
+///
+/// - `permission_blocks.object_id` — object-scoped grants *on* any of the ids,
+///   for every object kind (entity, resource, group, role, tenant, credential,
+///   …). Deleting a block cascades to its actions, role links, and direct
+///   policies.
+/// - `direct_policies.subject_id` / `role_assignments.subject_id` — grants *to*
+///   any of the ids as a subject (only entity/group ids ever match; harmless for
+///   the rest). A direct policy / role assignment is itself a protected object
+///   (`object_kind = 'policy'`, keyed by its row id), but the blocks targeting a
+///   removed policy row are cleaned by a DB trigger (`purge_blocks_targeting_policy`
+///   in the schema) that fires on any policy deletion — direct, bulk, or FK
+///   cascade — so this helper does not sweep them, nor does any other call site.
+///
+/// Kind-agnostic by design: UUIDs are globally unique, so matching on the id set
+/// alone is correct and lets every purge path — explicit per-object, explicit
+/// tenant, and the background retention job — share one cleanup. Callers pass the
+/// full set of doomed ids, including cascaded children (e.g. a purged entity's
+/// credentials, a purged tenant's entities/groups/roles/resources).
+pub(crate) async fn purge_authz_references_for_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[Uuid],
+) -> Result<(), AppError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM permission_blocks WHERE object_id = ANY($1)")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    sqlx::query("DELETE FROM direct_policies WHERE subject_id = ANY($1)")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    sqlx::query("DELETE FROM role_assignments WHERE subject_id = ANY($1)")
+        .bind(ids)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
+/// Physically remove an already-soft-deleted resource, bypassing the purge
+/// retention window. Irreversible: FK cascades drop its group links. A soft
+/// delete is required first.
+///
+/// Object-scoped permission blocks granting access *on* the resource reference
+/// it by `object_id`, which has no foreign key, so they are removed explicitly
+/// (deleting a block cascades to its actions, role links, and direct policies).
+/// Resources are never a subject, so there is no subject-side cleanup.
+pub async fn purge_resource(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let deleted: Option<Uuid> = sqlx::query_scalar(
+        "DELETE FROM resources WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if deleted.is_none() {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted resource {id} to purge"
+        )));
+    }
+
+    purge_authz_references_for_ids(&mut tx, &[id]).await?;
+
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -2389,6 +2513,110 @@ pub async fn delete_role(
     Ok(())
 }
 
+/// Reverse a soft delete of a role within the retention window. The role's
+/// permission blocks survive a soft delete (block GC is deferred to purge), so
+/// clearing the tombstone restores the role's grants intact and they begin
+/// flowing through the PDP again immediately. Fails with a conflict if the
+/// role's tenant is still soft-deleted, or if its (name, tenant) was re-taken.
+pub async fn restore_role(
+    pool: &PgPool,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let _ = restored_by;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let tenant_deleted: Option<bool> = sqlx::query_scalar(
+        "SELECT t.deleted_at IS NOT NULL
+         FROM roles r
+         LEFT JOIN tenants t ON t.id = r.tenant_id
+         WHERE r.id = $1 AND r.deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    match tenant_deleted {
+        None => {
+            return Err(AppError::not_found(format!(
+                "no soft-deleted role {id} to restore"
+            )))
+        }
+        Some(true) => {
+            return Err(AppError::conflict(
+                "the role's tenant is soft-deleted; restore the tenant first",
+            ))
+        }
+        Some(false) => {}
+    }
+
+    sqlx::query(
+        "UPDATE roles SET deleted_at = NULL, deleted_by = NULL
+         WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(restore_conflict)?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Physically remove an already-soft-deleted role, bypassing the purge retention
+/// window. Mirrors the background purge's role handling: after deleting the role
+/// (FK cascades drop its assignments and role-block links), permission blocks
+/// left orphaned — referenced by no role and no direct policy — are GC'd, and
+/// object-scoped blocks granting access *on* the role (`object_id = role`, which
+/// has no FK) are removed via [`purge_authz_references_for_ids`].
+/// Irreversible; a soft delete is required first.
+pub async fn purge_role(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let candidate_block_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT permission_block_id FROM role_permission_blocks WHERE role_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    let deleted: Option<Uuid> = sqlx::query_scalar(
+        "DELETE FROM roles WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if deleted.is_none() {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted role {id} to purge"
+        )));
+    }
+
+    if !candidate_block_ids.is_empty() {
+        sqlx::query(
+            r#"DELETE FROM permission_blocks pb
+               WHERE pb.id = ANY($1)
+                 AND NOT EXISTS (
+                     SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM direct_policies WHERE permission_block_id = pb.id
+                 )"#,
+        )
+        .bind(&candidate_block_ids)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    purge_authz_references_for_ids(&mut tx, &[id]).await?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
 pub async fn add_role_capability(
     pool: &PgPool,
     role_id: Uuid,
@@ -3357,6 +3585,8 @@ pub async fn get_role_assignment(pool: &PgPool, id: Uuid) -> Result<RoleAssignme
 }
 
 pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    // A role assignment is a 'policy' protected object; the policy-object cleanup trigger
+    // sweeps the permission blocks targeting it when this row is deleted.
     let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
         .bind(id)
         .execute(pool)
@@ -3487,7 +3717,8 @@ pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppErro
         return Err(AppError::not_found(format!("direct policy {id} not found")));
     };
     // The block is shared: GC it only if removing this policy left it
-    // unreferenced (mirrors delete_policy).
+    // unreferenced (mirrors delete_policy). Blocks targeting this policy *as an
+    // object* are swept by the policy-object cleanup trigger on the delete above.
     delete_orphaned_blocks(&mut tx, &[block_id]).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -3835,6 +4066,8 @@ pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     if let Some(block_id) = direct_block_id {
         // The block is shared: GC it only if removing this policy left it
         // unreferenced. A block still linked to a role or another policy stays.
+        // Blocks targeting this policy as an object are swept by the policy-object cleanup
+        // trigger on the delete above.
         delete_orphaned_blocks(&mut tx, &[block_id]).await?;
         tx.commit().await.map_err(db_err)?;
         return Ok(());
