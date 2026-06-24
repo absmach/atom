@@ -1032,6 +1032,128 @@ async fn composite_role_helpers_reject_deleted_child_roles() {
 
 #[tokio::test]
 #[ignore]
+async fn set_group_parent_rejects_deleted_parent_or_child() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-grp-parent-ten-{}", Uuid::new_v4())).await;
+    let live_parent = Uuid::new_v4();
+    let deleted_parent = Uuid::new_v4();
+    let live_child = Uuid::new_v4();
+    let deleted_child = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO object_groups (id, name, tenant_id)
+         VALUES ($1, $2, $5), ($3, $4, $5), ($6, $7, $5), ($8, $9, $5)",
+    )
+    .bind(live_parent)
+    .bind(format!("sd-live-parent-{live_parent}"))
+    .bind(deleted_parent)
+    .bind(format!("sd-deleted-parent-{deleted_parent}"))
+    .bind(tenant_id)
+    .bind(live_child)
+    .bind(format!("sd-live-child-{live_child}"))
+    .bind(deleted_child)
+    .bind(format!("sd-deleted-child-{deleted_child}"))
+    .execute(&pool)
+    .await
+    .expect("groups");
+    atom::identity::repo::delete_group(&pool, deleted_parent, None)
+        .await
+        .expect("delete parent");
+    atom::identity::repo::delete_group(&pool, deleted_child, None)
+        .await
+        .expect("delete child");
+
+    assert!(
+        atom::identity::repo::set_group_parent(&pool, live_child, deleted_parent)
+            .await
+            .is_err(),
+        "live group must not be moved under a deleted parent"
+    );
+    assert!(
+        atom::identity::repo::set_group_parent(&pool, deleted_child, live_parent)
+            .await
+            .is_err(),
+        "deleted group must not be moved under a live parent"
+    );
+    let hierarchy_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM object_group_hierarchy
+         WHERE child_id = $1 OR child_id = $2 OR parent_id = $3",
+    )
+    .bind(live_child)
+    .bind(deleted_child)
+    .bind(deleted_parent)
+    .fetch_one(&pool)
+    .await
+    .expect("hierarchy count");
+    assert_eq!(hierarchy_rows, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn set_resource_parent_group_rejects_deleted_resource_or_group() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-res-parent-ten-{}", Uuid::new_v4())).await;
+    let live_resource = Uuid::new_v4();
+    let deleted_resource = Uuid::new_v4();
+    let live_group = Uuid::new_v4();
+    let deleted_group = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO resources (id, kind, name, tenant_id)
+         VALUES ($1, 'channel', $2, $5), ($3, 'channel', $4, $5)",
+    )
+    .bind(live_resource)
+    .bind(format!("sd-live-resource-{live_resource}"))
+    .bind(deleted_resource)
+    .bind(format!("sd-deleted-resource-{deleted_resource}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("resources");
+    sqlx::query(
+        "INSERT INTO object_groups (id, name, tenant_id)
+         VALUES ($1, $2, $5), ($3, $4, $5)",
+    )
+    .bind(live_group)
+    .bind(format!("sd-live-res-group-{live_group}"))
+    .bind(deleted_group)
+    .bind(format!("sd-deleted-res-group-{deleted_group}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("groups");
+    atom::authz::repo::delete_resource(&pool, deleted_resource, None)
+        .await
+        .expect("delete resource");
+    atom::identity::repo::delete_group(&pool, deleted_group, None)
+        .await
+        .expect("delete group");
+
+    assert!(
+        atom::authz::repo::set_resource_parent_group(&pool, live_resource, deleted_group)
+            .await
+            .is_err(),
+        "live resource must not be attached to a deleted object group"
+    );
+    assert!(
+        atom::authz::repo::set_resource_parent_group(&pool, deleted_resource, live_group)
+            .await
+            .is_err(),
+        "deleted resource must not be attached to a live object group"
+    );
+    let edges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM object_group_resources
+         WHERE resource_id = $1 OR resource_id = $2 OR group_id = $3",
+    )
+    .bind(live_resource)
+    .bind(deleted_resource)
+    .bind(deleted_group)
+    .fetch_one(&pool)
+    .await
+    .expect("resource group edge count");
+    assert_eq!(edges, 0);
+}
+
+#[tokio::test]
+#[ignore]
 async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-tenant-{}", Uuid::new_v4())).await;
