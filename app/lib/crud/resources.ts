@@ -42,6 +42,11 @@ export type CrudResource = {
   formAttributes?: boolean;
   tenantFilter?: boolean;
   filters?: CrudFilter[];
+  /**
+   * Status values always offered in the status dropdown, independent of the
+   * rows on the current page. Keeps the filter stable across applied filters.
+   */
+  statusOptions?: string[];
   columns: Array<{
     key: string;
     label: string;
@@ -104,6 +109,7 @@ export const crudResources: CrudResource[] = [
     deleteMutation: `mutation DeleteEntity($id: ID!) { deleteEntity(id: $id) }`,
     deleteIdField: "id",
     formAttributes: true,
+    statusOptions: ["active", "inactive", "suspended"],
     filters: [
       lifecycleFilter,
       {

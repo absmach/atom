@@ -292,6 +292,7 @@ export function CrudTable({
         searchPlaceholder={`Filter ${resource.title.toLowerCase()}...`}
         statusFilter={{
           enabled: resource.columns.some((column) => column.key === "status"),
+          options: resource.statusOptions,
         }}
         toolbar={
           <div className="flex items-center gap-2">

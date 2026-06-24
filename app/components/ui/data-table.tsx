@@ -174,6 +174,24 @@ export function DataTable<TData, TValue>({
     );
   }
 
+  // Combined status + lifecycle control: a single dropdown that selects a
+  // status (Live + active/disabled) or "deleted", driving both URL params.
+  function handleLifecycleStatusChange(value: string) {
+    const deleted = value === "deleted";
+    setStatusValue(deleted ? "all" : value);
+    setFilterValues((current) => ({
+      ...current,
+      deleted: deleted ? "deleted" : "",
+    }));
+    router.replace(
+      buildUrl({
+        [`${paramKey}.status`]: deleted || value === "all" ? null : value,
+        [`${paramKey}.deleted`]: deleted ? "deleted" : null,
+        [`${paramKey}.page`]: null,
+      }),
+    );
+  }
+
   function commitFilterChange(key: string, value: string) {
     router.replace(
       buildUrl({
@@ -201,20 +219,30 @@ export function DataTable<TData, TValue>({
 
   const statusOptions = React.useMemo(() => {
     if (!statusFilter?.enabled) return [];
-    const values = new Set(
-      (statusFilter.options ?? [])
-        .map((option) => option.trim())
-        .filter(Boolean),
-    );
-    for (const row of data) {
-      const status = (row as Record<string, unknown>).status;
-      if (typeof status === "string" && status.trim().length > 0) {
-        values.add(status);
+    const configured = (statusFilter.options ?? [])
+      .map((option) => option.trim())
+      .filter(Boolean);
+    const values = new Set(configured);
+    // Only fall back to row-derived statuses when none are configured; deriving
+    // from the current page would make the options shift as filters change.
+    if (configured.length === 0) {
+      for (const row of data) {
+        const status = (row as Record<string, unknown>).status;
+        if (typeof status === "string" && status.trim().length > 0) {
+          values.add(status);
+        }
       }
     }
     if (statusValue !== "all") values.add(statusValue);
     return Array.from(values).sort((a, b) => a.localeCompare(b));
   }, [data, statusFilter, statusValue]);
+
+  // The lifecycle (live/deleted) filter is merged into the status dropdown, so
+  // pull it out of the generic filter row and render the rest separately.
+  const lifecycleFilter = filters.find((filter) => filter.key === "deleted");
+  const restFilters = filters.filter((filter) => filter.key !== "deleted");
+  const lifecycleStatusValue =
+    filterValues.deleted === "deleted" ? "deleted" : statusValue;
 
   // Client-side filter of the current page — useful when backend has no text search.
   const filteredData = data.filter((row) => {
@@ -257,15 +285,20 @@ export function DataTable<TData, TValue>({
               value={searchValue}
             />
           </div>
-          {statusFilter?.enabled ? (
-            <StatusFilterSelect
-              label={statusFilter.label ?? "Status"}
-              onChange={handleStatusChange}
+          {statusFilter?.enabled || lifecycleFilter ? (
+            <LifecycleStatusFilter
+              hasLifecycle={Boolean(lifecycleFilter)}
+              label={statusFilter?.label ?? "Status"}
+              onChange={
+                lifecycleFilter
+                  ? handleLifecycleStatusChange
+                  : handleStatusChange
+              }
               options={statusOptions}
-              value={statusValue}
+              value={lifecycleStatusValue}
             />
           ) : null}
-          {filters.map((filter) =>
+          {restFilters.map((filter) =>
             filter.type === "select" ? (
               <SelectFilter
                 filter={filter}
@@ -472,12 +505,14 @@ function DataTableViewOptions<TData>({ table }: { table: ReactTable<TData> }) {
   );
 }
 
-function StatusFilterSelect({
+function LifecycleStatusFilter({
+  hasLifecycle,
   label,
   onChange,
   options,
   value,
 }: {
+  hasLifecycle: boolean;
   label: string;
   onChange: (value: string) => void;
   options: string[];
@@ -487,18 +522,21 @@ function StatusFilterSelect({
     <Select onValueChange={onChange} value={value}>
       <SelectTrigger
         aria-label={`Filter by ${label.toLowerCase()}`}
-        className="h-9 w-full sm:w-40"
+        className="h-9 w-full sm:w-44"
       >
         <SelectValue placeholder={label} />
       </SelectTrigger>
       <SelectContent>
         <SelectGroup>
-          <SelectItem value="all">All</SelectItem>
+          <SelectItem value="all">{hasLifecycle ? "Live" : "All"}</SelectItem>
           {options.map((option) => (
             <SelectItem key={option} value={option}>
               {capitalize(option)}
             </SelectItem>
           ))}
+          {hasLifecycle ? (
+            <SelectItem value="deleted">Deleted</SelectItem>
+          ) : null}
         </SelectGroup>
       </SelectContent>
     </Select>
