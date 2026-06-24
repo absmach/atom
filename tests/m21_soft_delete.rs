@@ -347,6 +347,75 @@ async fn soft_deleted_role_is_not_assignable_or_listed() {
 
 #[tokio::test]
 #[ignore]
+async fn assignment_to_soft_deleted_subject_is_rejected_and_unlisted() {
+    use atom::models::enums::SubjectKind;
+    use atom::models::policy::{CreateRoleAssignment, ListRoleAssignments};
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-subj-asg-{}", Uuid::new_v4())).await;
+    let subject = make_entity(
+        &pool,
+        &format!("sd-asgvic-{}", Uuid::new_v4()),
+        Some(tenant_id),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')",
+    )
+    .bind(tenant_id)
+    .bind(subject)
+    .execute(&pool)
+    .await
+    .expect("membership");
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(role_id)
+        .bind(format!("sd-subj-role-{role_id}"))
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("role");
+
+    let req = || CreateRoleAssignment {
+        tenant_id: Some(tenant_id),
+        subject_kind: SubjectKind::Entity,
+        subject_id: subject,
+        role_id,
+    };
+    atom::authz::repo::create_role_assignment(&pool, req())
+        .await
+        .expect("assign live subject");
+
+    atom::identity::repo::delete_entity(&pool, subject, None)
+        .await
+        .expect("delete subject");
+
+    assert!(
+        atom::authz::repo::create_role_assignment(&pool, req())
+            .await
+            .is_err(),
+        "a soft-deleted subject must not be assignable"
+    );
+    let listed = atom::authz::repo::list_role_assignments(
+        &pool,
+        ListRoleAssignments {
+            tenant_id: Some(tenant_id),
+            subject_kind: None,
+            subject_id: Some(subject),
+            role_id: None,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list");
+    assert_eq!(
+        listed.total, 0,
+        "assignments to a deleted subject must not list"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn soft_delete_tenant_marks_and_revokes_child_sessions() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-tenant-{}", Uuid::new_v4())).await;

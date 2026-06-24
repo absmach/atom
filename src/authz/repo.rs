@@ -3023,6 +3023,10 @@ pub async fn list_role_assignments(
              AND ($3::uuid IS NULL OR subject_id = $3)
              AND ($4::uuid IS NULL OR role_id = $4)
              AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)
+             AND (
+               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = role_assignments.subject_id AND se.deleted_at IS NULL))
+               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = role_assignments.subject_id AND sg.deleted_at IS NULL))
+             )
            ORDER BY created_at DESC
            LIMIT $5 OFFSET $6"#,
     )
@@ -3043,7 +3047,11 @@ pub async fn list_role_assignments(
              AND ($2::text IS NULL OR subject_kind = $2)
              AND ($3::uuid IS NULL OR subject_id = $3)
              AND ($4::uuid IS NULL OR role_id = $4)
-             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)"#,
+             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)
+             AND (
+               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = role_assignments.subject_id AND se.deleted_at IS NULL))
+               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = role_assignments.subject_id AND sg.deleted_at IS NULL))
+             )"#,
     )
     .bind(params.tenant_id)
     .bind(params.subject_kind)
@@ -3119,6 +3127,10 @@ pub async fn list_direct_policies(
              AND ($2::text IS NULL OR subject_kind = $2)
              AND ($3::uuid IS NULL OR subject_id = $3)
              AND ($4::uuid IS NULL OR permission_block_id = $4)
+             AND (
+               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
+               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
+             )
            ORDER BY created_at DESC
            LIMIT $5 OFFSET $6"#,
     )
@@ -3138,7 +3150,11 @@ pub async fn list_direct_policies(
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
              AND ($3::uuid IS NULL OR subject_id = $3)
-             AND ($4::uuid IS NULL OR permission_block_id = $4)"#,
+             AND ($4::uuid IS NULL OR permission_block_id = $4)
+             AND (
+               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
+               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
+             )"#,
     )
     .bind(params.tenant_id)
     .bind(params.subject_kind)
