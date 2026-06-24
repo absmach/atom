@@ -542,6 +542,140 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
 
 #[tokio::test]
 #[ignore]
+async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
+    use atom::models::{
+        access::AuthorizedObjectIdsQuery, enums::TenantStatus, policy::AuthzRequest,
+        tenant::UpdateTenant,
+    };
+
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-ten-react-{}", Uuid::new_v4())).await;
+    let subject = make_entity(
+        &pool,
+        &format!("sd-ten-react-subj-{}", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    let target = make_entity(
+        &pool,
+        &format!("sd-ten-react-tgt-{}", Uuid::new_v4()),
+        Some(tenant_id),
+    )
+    .await;
+
+    let block_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("block");
+    let read_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("read action");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    sqlx::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)")
+        .bind(subject)
+        .bind(block_id)
+        .execute(&pool)
+        .await
+        .expect("policy");
+
+    let lists_target = || async {
+        atom::authz::repo::authorized_object_ids(
+            &pool,
+            AuthorizedObjectIdsQuery {
+                subject_id: subject,
+                action: "read".to_string(),
+                object_kind: "entity".to_string(),
+                object_type: None,
+                tenant_id: None,
+                q: None,
+                profile_id: None,
+                entity_status: None,
+                group_type: None,
+                parent_group_id: None,
+                include_descendants: false,
+                limit: 500,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("listing")
+        .ids
+        .contains(&target)
+    };
+
+    assert!(
+        lists_target().await,
+        "target should list while tenant is active"
+    );
+
+    atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
+        .await
+        .expect("soft delete tenant");
+
+    assert!(
+        atom::tenants::repo::change_tenant_status(&pool, tenant_id, TenantStatus::Active, None)
+            .await
+            .is_err(),
+        "a tombstoned tenant must not be re-enabled"
+    );
+    assert!(
+        atom::tenants::repo::update_tenant(
+            &pool,
+            tenant_id,
+            UpdateTenant {
+                name: Some(format!("reactivated-{}", Uuid::new_v4())),
+                alias: None,
+                tags: None,
+                attributes: None,
+            },
+            None,
+        )
+        .await
+        .is_err(),
+        "a tombstoned tenant must not be editable"
+    );
+
+    // Simulate the historical bug shape: status active, tombstone still present.
+    sqlx::query("UPDATE tenants SET status = 'active' WHERE id = $1")
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("force inconsistent status");
+
+    assert!(
+        !lists_target().await,
+        "deleted_at must keep listings closed even if status is active"
+    );
+
+    let decision = atom::authz::engine::evaluate(
+        &pool,
+        &AuthzRequest {
+            subject_id: subject,
+            action: "read".to_string(),
+            resource_id: None,
+            object_kind: Some("entity".to_string()),
+            object_id: Some(target),
+            context: serde_json::Value::Null,
+        },
+    )
+    .await
+    .expect("evaluate");
+    assert!(!decision.allowed);
+    assert_eq!(decision.reason, "tenant is deleted");
+}
+
+#[tokio::test]
+#[ignore]
 async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-purge-ten-{}", Uuid::new_v4())).await;

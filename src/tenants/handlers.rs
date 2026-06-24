@@ -129,8 +129,7 @@ pub async fn delete_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform).await?;
-    repo::change_tenant_status(&state.pool, id, TenantStatus::Deleted, Some(auth.entity_id))
-        .await?;
+    repo::soft_delete_tenant(&state.pool, id, Some(auth.entity_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

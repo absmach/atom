@@ -37,9 +37,18 @@ async fn fresh_tenant(pool: &sqlx::PgPool) -> uuid::Uuid {
 }
 
 async fn freeze_to(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, status: TenantStatus) {
-    atom::tenants::repo::change_tenant_status(pool, tenant_id, status, None)
-        .await
-        .expect("change status");
+    match status {
+        TenantStatus::Active | TenantStatus::Inactive | TenantStatus::Frozen => {
+            atom::tenants::repo::change_tenant_status(pool, tenant_id, status, None)
+                .await
+                .expect("change status");
+        }
+        TenantStatus::Deleted => {
+            atom::tenants::repo::soft_delete_tenant(pool, tenant_id, None)
+                .await
+                .expect("delete tenant");
+        }
+    }
 }
 
 async fn channel_in(pool: &sqlx::PgPool, tenant_id: uuid::Uuid) -> uuid::Uuid {

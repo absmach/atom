@@ -440,7 +440,7 @@ pub async fn update_tenant(
                attributes = COALESCE($6, attributes),
                updated_by = $7,
                updated_at = now()
-           WHERE id = $1
+           WHERE id = $1 AND deleted_at IS NULL
            RETURNING {TENANT_COLS}"#,
     ))
     .bind(id)
@@ -527,10 +527,16 @@ pub async fn change_tenant_status(
     status: TenantStatus,
     updated_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
+    if status == TenantStatus::Deleted {
+        return Err(AppError::bad_request(
+            "use delete tenant to apply the soft-delete lifecycle",
+        ));
+    }
+
     sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = $2, updated_by = $3, updated_at = now()
-           WHERE id = $1
+           WHERE id = $1 AND deleted_at IS NULL
            RETURNING {TENANT_COLS}"#,
     ))
     .bind(id)
@@ -1401,7 +1407,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn status_transitions_cover_all_variants() {
+    async fn status_transitions_cover_non_delete_variants() {
         let pool = pool().await;
         let t = create_tenant(
             &pool,
@@ -1420,13 +1426,17 @@ mod tests {
             TenantStatus::Inactive,
             TenantStatus::Frozen,
             TenantStatus::Active,
-            TenantStatus::Deleted,
         ] {
             let updated = change_tenant_status(&pool, t.id, next.clone(), None)
                 .await
                 .expect("change status");
             assert_eq!(updated.status, next);
         }
+        assert!(
+            change_tenant_status(&pool, t.id, TenantStatus::Deleted, None)
+                .await
+                .is_err()
+        );
         cleanup(&pool, &[t.id]).await;
     }
 

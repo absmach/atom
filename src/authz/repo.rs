@@ -3554,7 +3554,7 @@ async fn authorized_entity_ids(
                    FROM entities e
                    LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
                    WHERE e.deleted_at IS NULL
-                     AND (e.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = e.tenant_id AND t.status = 'active'))
+                     AND (e.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = e.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
                      AND ($3::uuid IS NULL OR e.tenant_id = $3)
                      AND ($4::text IS NULL OR e.kind::text = $4 OR 'entity:' || e.kind::text = $4)
                      AND ($5::text IS NULL OR e.name ILIKE $5 OR e.attributes::text ILIKE $5)
@@ -3731,7 +3731,7 @@ async fn authorized_resource_rows(
                    FROM resources r
                    LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
                    WHERE r.deleted_at IS NULL
-                     AND (r.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = r.tenant_id AND t.status = 'active'))
+                     AND (r.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = r.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
                      AND ($3::uuid IS NULL OR r.tenant_id = $3)
                      AND ($4::text IS NULL OR r.kind = $4 OR 'resource:' || r.kind = $4)
                      AND ($5::text IS NULL OR r.name ILIKE $5 OR r.attributes::text ILIKE $5)
@@ -3841,7 +3841,7 @@ async fn authorized_group_ids(
                    FROM groups g
                    LEFT JOIN group_hierarchy gph ON gph.child_id = g.id
                    WHERE g.deleted_at IS NULL
-                     AND (g.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = g.tenant_id AND t.status = 'active'))
+                     AND (g.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = g.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
                      AND ($3::uuid IS NULL OR g.tenant_id = $3)
                      AND ($4::text IS NULL OR g.group_type = $4)
                      AND ($5::text IS NULL OR g.name ILIKE $5 OR g.description ILIKE $5 OR g.attributes::text ILIKE $5)
@@ -4297,6 +4297,7 @@ pub(crate) struct AuthzTenantRecord {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) status: TenantStatus,
+    pub(crate) deleted_at: Option<chrono::DateTime<Utc>>,
     pub(crate) attributes: Value,
 }
 
@@ -4330,7 +4331,7 @@ pub(crate) async fn load_authz_tenant(
     tenant_id: Uuid,
 ) -> Result<Option<AuthzTenantRecord>, AppError> {
     sqlx::query_as::<_, AuthzTenantRecord>(
-        r#"SELECT id, name, status, attributes
+        r#"SELECT id, name, status, deleted_at, attributes
            FROM tenants
            WHERE id = $1"#,
     )

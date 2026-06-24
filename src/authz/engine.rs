@@ -595,17 +595,21 @@ fn tenant_load_from_record(tenant: Option<repo::AuthzTenantRecord>) -> TenantLoa
         return TenantLoad::None;
     };
 
-    let state = match tenant.status {
-        TenantStatus::Active => {
-            return TenantLoad::Active(TenantEvalContext {
-                id: tenant.id,
-                status: tenant.status,
-                attributes: tenant.attributes,
-            });
+    let state = if tenant.deleted_at.is_some() {
+        "deleted"
+    } else {
+        match tenant.status {
+            TenantStatus::Active => {
+                return TenantLoad::Active(TenantEvalContext {
+                    id: tenant.id,
+                    status: tenant.status,
+                    attributes: tenant.attributes,
+                });
+            }
+            TenantStatus::Inactive => "inactive",
+            TenantStatus::Frozen => "frozen",
+            TenantStatus::Deleted => "deleted",
         }
-        TenantStatus::Inactive => "inactive",
-        TenantStatus::Frozen => "frozen",
-        TenantStatus::Deleted => "deleted",
     };
 
     TenantLoad::Inactive(AuthzResponse::deny_with_details(
@@ -1032,6 +1036,7 @@ mod tests {
             id: tenant_id,
             name: "active".into(),
             status: TenantStatus::Active,
+            deleted_at: None,
             attributes: json!({"region": "eu"}),
         }));
         match active {
@@ -1049,6 +1054,7 @@ mod tests {
             id: tenant_id,
             name: "frozen".into(),
             status: TenantStatus::Frozen,
+            deleted_at: None,
             attributes: json!({}),
         }));
         match frozen {
@@ -1065,6 +1071,30 @@ mod tests {
             }
             TenantLoad::None | TenantLoad::Active(_) => {
                 panic!("frozen tenant must produce a lifecycle deny")
+            }
+        }
+
+        let tombstoned_active = tenant_load_from_record(Some(repo::AuthzTenantRecord {
+            id: tenant_id,
+            name: "deleted".into(),
+            status: TenantStatus::Active,
+            deleted_at: Some(chrono::Utc::now()),
+            attributes: json!({}),
+        }));
+        match tombstoned_active {
+            TenantLoad::Inactive(response) => {
+                assert!(!response.allowed);
+                assert_eq!(response.reason, "tenant is deleted");
+                assert_eq!(
+                    response.details,
+                    Some(json!({
+                        "tenant_id": tenant_id,
+                        "tenant_status": "deleted",
+                    }))
+                );
+            }
+            TenantLoad::None | TenantLoad::Active(_) => {
+                panic!("tombstoned tenant must produce a lifecycle deny")
             }
         }
 
@@ -1427,7 +1457,7 @@ mod db_tests {
     //! needs a live Postgres reachable via `DATABASE_URL`.
     use super::*;
     use crate::models::{
-        enums::{Effect, GrantKind, ScopeKind, SubjectKind, TenantStatus},
+        enums::{Effect, GrantKind, ScopeKind, SubjectKind},
         policy::CreatePolicyBinding,
         tenant::CreateTenant,
     };
@@ -1998,7 +2028,7 @@ mod db_tests {
         )
         .await
         .expect("create tenant");
-        crate::tenants::repo::change_tenant_status(&pool, t.id, TenantStatus::Deleted, None)
+        crate::tenants::repo::soft_delete_tenant(&pool, t.id, None)
             .await
             .expect("delete tenant");
 

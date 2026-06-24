@@ -555,7 +555,8 @@ fn is_unconditional(conditions: &serde_json::Value) -> bool {
 async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppError> {
     let active: Option<bool> = sqlx::query_scalar(
         r#"SELECT (actor.status = 'active'
-                   AND (actor.tenant_id IS NULL OR actor_tenant.status = 'active'))
+                   AND actor.deleted_at IS NULL
+                   AND (actor.tenant_id IS NULL OR (actor_tenant.status = 'active' AND actor_tenant.deleted_at IS NULL)))
            FROM entities actor
            LEFT JOIN tenants actor_tenant ON actor_tenant.id = actor.tenant_id
            WHERE actor.id = $1"#,
@@ -568,12 +569,13 @@ async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppErro
 }
 
 async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppError> {
-    let active: Option<bool> =
-        sqlx::query_scalar("SELECT status = 'active' FROM tenants WHERE id = $1")
-            .bind(tenant_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?;
+    let active: Option<bool> = sqlx::query_scalar(
+        "SELECT status = 'active' AND deleted_at IS NULL FROM tenants WHERE id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
     Ok(active.unwrap_or(false))
 }
 
