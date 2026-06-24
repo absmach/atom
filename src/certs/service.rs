@@ -25,6 +25,7 @@ use zeroize::Zeroize;
 use crate::{
     config::{CertsCaMode, Config},
     error::AppError,
+    identity,
 };
 
 use super::repo;
@@ -823,14 +824,22 @@ async fn persist_certificate(
         revoked_at: None,
         revocation_reason: None,
     };
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    if identity::repo::lock_active_entity(&mut tx, input.entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::not_found("entity not found"));
+    }
     let id = repo::insert_certificate_credential(
-        pool,
+        &mut tx,
         input.entity_id,
         &input.serial_number,
         serde_json::to_value(metadata).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?,
         input.not_after,
     )
     .await?;
+    tx.commit().await.map_err(AppError::Database)?;
     certificate_by_id(pool, id).await
 }
 

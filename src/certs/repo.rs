@@ -34,7 +34,8 @@ pub async fn entity_tenant_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<U
         LEFT JOIN tenants t ON t.id = e.tenant_id
         WHERE e.id = $1
           AND e.status = 'active'
-          AND (e.tenant_id IS NULL OR t.status = 'active')
+          AND e.deleted_at IS NULL
+          AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))
         "#,
     )
     .bind(entity_id)
@@ -45,7 +46,7 @@ pub async fn entity_tenant_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<U
 }
 
 pub async fn insert_certificate_credential(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
     serial_number: &str,
     metadata: Value,
@@ -63,7 +64,7 @@ pub async fn insert_certificate_credential(
     .bind(serial_number)
     .bind(metadata)
     .bind(expires_at)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(AppError::Database)
 }

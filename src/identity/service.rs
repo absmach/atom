@@ -25,9 +25,7 @@ use crate::{
     error::{db_err, AppError},
     keys::LoadedKey,
     models::{
-        enums::{
-            AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus, TenantStatus,
-        },
+        enums::{AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus},
         session::{
             LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
             SignupResponse,
@@ -156,11 +154,9 @@ async fn do_login_password(
         if identity.status != EntityStatus::Active {
             return Err(AppError::unauthorized("entity is not active"));
         }
-        // A soft-deleted entity, or one whose tenant is soft-deleted, must not be
-        // able to log in. The entity's own credentials are revoked on delete, but
-        // a deleted tenant deliberately keeps child credentials for recovery, so
-        // the tenant tombstone is enforced here.
-        ensure_login_target_not_deleted(pool, identity.entity_id).await?;
+        // Avoid password verification work for a principal that cannot receive
+        // a session. Session creation repeats this check under a row lock.
+        ensure_login_target_active(pool, identity.entity_id).await?;
 
         let hash = password_hash_for_login(
             pool,
@@ -195,17 +191,15 @@ fn login_attempt_identifier(identifier: &str) -> String {
     normalize_email_lossy(identifier)
 }
 
-/// Reject login when the entity is soft-deleted or its owning tenant is
-/// soft-deleted. Returns the same "entity is not active" error so the soft-delete
-/// state is not distinguishable from deactivation.
-async fn ensure_login_target_not_deleted(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
+async fn ensure_login_target_active(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
     let ok: Option<Uuid> = sqlx::query_scalar(
         r#"SELECT e.id
            FROM entities e
            LEFT JOIN tenants t ON t.id = e.tenant_id
            WHERE e.id = $1
+             AND e.status = 'active'
              AND e.deleted_at IS NULL
-             AND (t.id IS NULL OR (t.deleted_at IS NULL AND t.status <> 'deleted'))"#,
+             AND (e.tenant_id IS NULL OR (t.deleted_at IS NULL AND t.status = 'active'))"#,
     )
     .bind(entity_id)
     .fetch_optional(pool)
@@ -404,7 +398,14 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
     }
 
     let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
+    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::bad_request("invalid verification token"));
+    }
     let updated = sqlx::query(
         "UPDATE email_verification_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
@@ -431,10 +432,13 @@ pub async fn resend_verification(pool: &PgPool, cfg: &Config, email: &str) -> Re
         r#"SELECT ee.id AS email_id, ee.entity_id
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
+           LEFT JOIN tenants t ON t.id = e.tenant_id
            WHERE ee.email = $1
              AND ee.verified_at IS NULL
              AND e.kind = 'human'
-             AND e.status = 'active'"#,
+             AND e.status = 'active'
+             AND e.deleted_at IS NULL
+             AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))"#,
     )
     .bind(&email)
     .fetch_optional(pool)
@@ -482,9 +486,12 @@ pub async fn request_password_reset(
         r#"SELECT ee.id AS email_id, ee.entity_id
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
+           LEFT JOIN tenants t ON t.id = e.tenant_id
            WHERE ee.email = $1
              AND e.kind = 'human'
-             AND e.status = 'active'"#,
+             AND e.status = 'active'
+             AND e.deleted_at IS NULL
+             AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))"#,
     )
     .bind(&email)
     .fetch_optional(pool)
@@ -574,6 +581,12 @@ pub async fn reset_password(
     let password_hash = hash_secret(req.password.as_bytes())?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::bad_request("invalid password reset token"));
+    }
     let updated = sqlx::query(
         "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
@@ -790,32 +803,13 @@ async fn create_login_response(
     entity_id: Uuid,
     email_verified: Option<bool>,
 ) -> Result<LoginResponse, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"SELECT e.tenant_id, e.status, t.status AS tenant_status
-           FROM entities e
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE e.id = $1"#,
-    )
-    .bind(entity_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-    let tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
-    let status: EntityStatus = row.try_get("status").map_err(db_err)?;
-    if status != EntityStatus::Active {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let Some((_, tenant_id)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
         return Err(AppError::unauthorized("entity is not active"));
-    }
-    if let Some(tenant_status) = row
-        .try_get::<Option<TenantStatus>, _>("tenant_status")
-        .unwrap_or(None)
-    {
-        if tenant_status != TenantStatus::Active {
-            return Err(AppError::unauthorized("tenant is not active"));
-        }
-    }
+    };
 
-    let session = super::repo::create_session(pool, entity_id, cfg.jwt_expiry_secs).await?;
+    let session =
+        super::repo::create_session_in_tx(&mut tx, entity_id, cfg.jwt_expiry_secs).await?;
     let token = encode_jwt(
         entity_id,
         session.id,
@@ -825,6 +819,7 @@ async fn create_login_response(
         &cfg.jwt_issuer,
         &cfg.jwt_audience,
     )?;
+    tx.commit().await.map_err(db_err)?;
     Ok(LoginResponse {
         token,
         entity_id,
@@ -872,7 +867,8 @@ async fn login_identity_by_email(
         r#"SELECT e.id, e.status, ee.verified_at
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
-           WHERE ee.email = $1"#,
+           WHERE ee.email = $1
+             AND e.deleted_at IS NULL"#,
     )
     .bind(email)
     .fetch_optional(pool)
@@ -929,23 +925,30 @@ async fn login_entity_row(
     tenant_id: Option<Uuid>,
 ) -> Result<sqlx::postgres::PgRow, AppError> {
     if let Ok(entity_id) = Uuid::parse_str(identifier) {
-        let row =
-            match tenant_id {
-                Some(tenant_id) => sqlx::query(
-                    "SELECT id, tenant_id, status FROM entities WHERE id = $1 AND tenant_id = $2",
+        let row = match tenant_id {
+            Some(tenant_id) => {
+                sqlx::query(
+                    "SELECT id, tenant_id, status
+                     FROM entities
+                     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
                 )
                 .bind(entity_id)
                 .bind(tenant_id)
                 .fetch_optional(pool)
-                .await,
-                None => {
-                    sqlx::query("SELECT id, tenant_id, status FROM entities WHERE id = $1")
-                        .bind(entity_id)
-                        .fetch_optional(pool)
-                        .await
-                }
+                .await
             }
-            .map_err(db_err)?;
+            None => {
+                sqlx::query(
+                    "SELECT id, tenant_id, status
+                         FROM entities
+                         WHERE id = $1 AND deleted_at IS NULL",
+                )
+                .bind(entity_id)
+                .fetch_optional(pool)
+                .await
+            }
+        }
+        .map_err(db_err)?;
 
         return row.ok_or_else(|| AppError::unauthorized("invalid credentials"));
     }
@@ -953,7 +956,9 @@ async fn login_entity_row(
     let mut rows = match tenant_id {
         Some(tenant_id) => {
             sqlx::query(
-                "SELECT id, tenant_id, status FROM entities WHERE name = $1 AND tenant_id = $2",
+                "SELECT id, tenant_id, status
+                 FROM entities
+                 WHERE name = $1 AND tenant_id = $2 AND deleted_at IS NULL",
             )
             .bind(identifier)
             .bind(tenant_id)
@@ -961,10 +966,15 @@ async fn login_entity_row(
             .await
         }
         None => {
-            sqlx::query("SELECT id, tenant_id, status FROM entities WHERE name = $1 LIMIT 2")
-                .bind(identifier)
-                .fetch_all(pool)
-                .await
+            sqlx::query(
+                "SELECT id, tenant_id, status
+                 FROM entities
+                 WHERE name = $1 AND deleted_at IS NULL
+                 LIMIT 2",
+            )
+            .bind(identifier)
+            .fetch_all(pool)
+            .await
         }
     }
     .map_err(db_err)?;
@@ -991,16 +1001,20 @@ async fn resolve_login_tenant(
     use sqlx::Row;
     let Some(row) = (match (tenant_id, tenant_alias) {
         (Some(tenant_id), None) => {
-            sqlx::query("SELECT id, status FROM tenants WHERE id = $1")
+            sqlx::query("SELECT id, status FROM tenants WHERE id = $1 AND deleted_at IS NULL")
                 .bind(tenant_id)
                 .fetch_optional(pool)
                 .await
         }
         (None, Some(tenant_alias)) => {
-            sqlx::query("SELECT id, status FROM tenants WHERE lower(alias) = $1")
-                .bind(tenant_alias)
-                .fetch_optional(pool)
-                .await
+            sqlx::query(
+                "SELECT id, status
+                 FROM tenants
+                 WHERE lower(alias) = $1 AND deleted_at IS NULL",
+            )
+            .bind(tenant_alias)
+            .fetch_optional(pool)
+            .await
         }
         (None, None) => return Ok(None),
         (Some(_), Some(_)) => {
@@ -1250,6 +1264,12 @@ async fn upsert_oauth_identity(
             .map_err(db_err)?
     {
         let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+        if super::repo::lock_active_entity(&mut tx, entity_id)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::unauthorized("entity is not active"));
+        }
         sqlx::query(
             r#"UPDATE oauth_identities
                SET email = $3, email_verified = true, profile = $4, updated_at = now()
@@ -1272,7 +1292,16 @@ async fn upsert_oauth_identity(
         .await
         .map_err(db_err)?
     {
-        Some(row) => row.try_get("entity_id").map_err(db_err)?,
+        Some(row) => {
+            let entity_id = row.try_get("entity_id").map_err(db_err)?;
+            if super::repo::lock_active_entity(&mut tx, entity_id)
+                .await?
+                .is_none()
+            {
+                return Err(AppError::unauthorized("entity is not active"));
+            }
+            entity_id
+        }
         None => {
             let entity_id = Uuid::new_v4();
             let name = email.split('@').next().unwrap_or("human");
@@ -1336,6 +1365,13 @@ async fn create_exchange_code(
 ) -> Result<String, AppError> {
     let (code_id, code_secret, code) = new_secret_token("atomx");
     let code_hash = hash_secret(code_secret.as_bytes())?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::unauthorized("entity is not active"));
+    }
     sqlx::query(
         r#"INSERT INTO auth_exchange_codes (id, entity_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4)"#,
@@ -1344,9 +1380,10 @@ async fn create_exchange_code(
     .bind(entity_id)
     .bind(code_hash)
     .bind(Utc::now() + Duration::seconds(expiry_secs as i64))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(code)
 }
 
@@ -1547,7 +1584,13 @@ pub async fn create_password(
     entity_id: Uuid,
     password: &str,
 ) -> Result<(), AppError> {
-    validate_password_for_entity(pool, entity_id, password).await?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let Some((kind, _)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
+        return Err(AppError::not_found(format!(
+            "active entity {entity_id} not found"
+        )));
+    };
+    validate_password_for_kind(&kind, password)?;
     let hash = hash_secret(password.as_bytes())?;
     let id = Uuid::new_v4();
 
@@ -1558,23 +1601,14 @@ pub async fn create_password(
     .bind(entity_id)
     .bind(CredentialKind::Password)
     .bind(hash)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
-async fn validate_password_for_entity(
-    pool: &PgPool,
-    entity_id: Uuid,
-    password: &str,
-) -> Result<(), AppError> {
-    let kind: EntityKind = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
-        .bind(entity_id)
-        .fetch_one(pool)
-        .await
-        .map_err(db_err)?;
-
+fn validate_password_for_kind(kind: &EntityKind, password: &str) -> Result<(), AppError> {
     match kind {
         EntityKind::Human => validate_password_strength(password),
         EntityKind::Device
@@ -1606,6 +1640,15 @@ pub async fn create_api_key(
     let key_prefix = key[..13].to_string();
 
     let metadata = serde_json::json!({"description": req.description});
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::not_found(format!(
+            "active entity {entity_id} not found"
+        )));
+    }
 
     sqlx::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, expires_at, metadata)
@@ -1618,9 +1661,10 @@ pub async fn create_api_key(
     .bind(hash)
     .bind(req.expires_at)
     .bind(metadata)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
 
     Ok(ApiKeyResponse {
         credential_id: cred_id,

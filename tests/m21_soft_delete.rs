@@ -10,9 +10,11 @@ mod common;
 
 use atom::{
     config::PurgeConfig,
+    identity::service,
     models::{
         entity::ListEntities, enums::DeletedFilter, group::ListGroups, resource::ListResources,
-        role::ListRoles, tenant::ListTenants,
+        role::ListRoles, session::PasswordResetConfirmRequest, tenant::ListTenants,
+        token::CreateApiKey,
     },
 };
 use uuid::Uuid;
@@ -53,13 +55,10 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
         .execute(&pool)
         .await
         .expect("insert credential");
-    let session_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')")
-        .bind(session_id)
-        .bind(id)
-        .execute(&pool)
+    let session_id = atom::identity::repo::create_session(&pool, id, 3600)
         .await
-        .expect("insert session");
+        .expect("create session")
+        .id;
 
     atom::identity::repo::delete_entity(&pool, id, None)
         .await
@@ -69,12 +68,13 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
     assert!(atom::identity::repo::get_entity(&pool, id).await.is_err());
 
     // Tombstone set; credential revoked; session revoked — all immediately.
-    let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT deleted_at FROM entities WHERE id = $1")
+    let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
             .bind(id)
             .fetch_one(&pool)
             .await
             .expect("entity row still present");
+    assert_eq!(status, "inactive", "deleted entities must be disabled");
     assert!(deleted_at.is_some(), "entity should carry a tombstone");
 
     let cred_status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
@@ -91,6 +91,103 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
             .await
             .expect("session");
     assert!(revoked.is_some(), "session should be revoked");
+
+    assert!(
+        atom::identity::repo::create_session(&pool, id, 3600)
+            .await
+            .is_err(),
+        "deleted entity must not receive a new session"
+    );
+    assert!(
+        service::create_password(&pool, id, "replacement-secret")
+            .await
+            .is_err(),
+        "deleted entity must not receive a new password"
+    );
+    assert!(
+        service::create_api_key(
+            &pool,
+            id,
+            CreateApiKey {
+                expires_at: None,
+                description: None,
+            },
+        )
+        .await
+        .is_err(),
+        "deleted entity must not receive a new API key"
+    );
+    assert!(
+        atom::certs::repo::entity_tenant_id(&pool, id)
+            .await
+            .is_err(),
+        "deleted entity must not be eligible for certificate authentication"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn deleted_entity_cannot_consume_existing_password_reset_token() {
+    let pool = common::pool().await;
+    let id = make_entity(&pool, &format!("sd-reset-{}", Uuid::new_v4()), None).await;
+    let email_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+        .bind(email_id)
+        .bind(id)
+        .bind(format!("{id}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("insert email");
+
+    let token_id = Uuid::new_v4();
+    let token_secret = "ab".repeat(32);
+    let token = format!(
+        "atomr_{}_{}",
+        hex::encode(token_id.as_bytes()),
+        token_secret
+    );
+    let token_hash = service::hash_secret(token_secret.as_bytes()).expect("hash token");
+    sqlx::query(
+        r#"INSERT INTO password_reset_tokens
+             (id, entity_id, email_id, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, now() + interval '1 hour')"#,
+    )
+    .bind(token_id)
+    .bind(id)
+    .bind(email_id)
+    .bind(token_hash)
+    .execute(&pool)
+    .await
+    .expect("insert reset token");
+
+    atom::identity::repo::delete_entity(&pool, id, None)
+        .await
+        .expect("soft delete entity");
+
+    assert!(
+        service::reset_password(
+            &pool,
+            PasswordResetConfirmRequest {
+                token,
+                password: "replacement-password".to_string(),
+                confirm_password: Some("replacement-password".to_string()),
+            },
+        )
+        .await
+        .is_err(),
+        "deleted entity must not reset its password"
+    );
+
+    let consumed_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT consumed_at FROM password_reset_tokens WHERE id = $1")
+            .bind(token_id)
+            .fetch_one(&pool)
+            .await
+            .expect("reset token");
+    assert!(
+        consumed_at.is_none(),
+        "rejected reset token must remain unconsumed"
+    );
 }
 
 #[tokio::test]

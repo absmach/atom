@@ -18,6 +18,26 @@ use crate::{
 
 pub const AUTHENTICATED_USERS_GROUP_ID: Uuid = Uuid::from_u128(5);
 
+pub async fn lock_active_entity(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<Option<(EntityKind, Option<Uuid>)>, AppError> {
+    sqlx::query_as(
+        r#"SELECT e.kind, e.tenant_id
+           FROM entities e
+           LEFT JOIN tenants t ON t.id = e.tenant_id
+           WHERE e.id = $1
+             AND e.status = 'active'
+             AND e.deleted_at IS NULL
+             AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))
+           FOR UPDATE OF e"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
 pub async fn create_entity(pool: &PgPool, req: CreateEntity) -> Result<Entity, AppError> {
     let id = req.id.unwrap_or_else(Uuid::new_v4);
     let attrs = normalize_attributes(req.attributes);
@@ -486,10 +506,11 @@ fn entity_kind_as_str(kind: &EntityKind) -> &'static str {
     }
 }
 
-/// Soft-delete an entity: set the tombstone and immediately cut off access by
-/// revoking its credentials and active sessions. Physical removal is deferred to
-/// the purge cron. Hard delete (the old behavior) relied on FK cascade for the
-/// credential/session cleanup, so the revocations are now explicit.
+/// Soft-delete an entity: mark it inactive, set the tombstone, and immediately
+/// cut off access by revoking its credentials and active sessions. Physical
+/// removal is deferred to the purge cron. Hard delete (the old behavior) relied
+/// on FK cascade for the credential/session cleanup, so the revocations are now
+/// explicit.
 pub async fn delete_entity(
     pool: &PgPool,
     id: Uuid,
@@ -498,7 +519,8 @@ pub async fn delete_entity(
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     let result = sqlx::query(
-        "UPDATE entities SET deleted_at = now(), deleted_by = $2
+        "UPDATE entities
+         SET status = 'inactive', deleted_at = now(), deleted_by = $2, updated_at = now()
          WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -536,6 +558,22 @@ pub async fn create_session(
     entity_id: Uuid,
     expiry_secs: u64,
 ) -> Result<Session, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if lock_active_entity(&mut tx, entity_id).await?.is_none() {
+        return Err(AppError::not_found(format!(
+            "active entity {entity_id} not found"
+        )));
+    }
+    let session = create_session_in_tx(&mut tx, entity_id, expiry_secs).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(session)
+}
+
+pub(crate) async fn create_session_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    expiry_secs: u64,
+) -> Result<Session, AppError> {
     let id = Uuid::new_v4();
     let expires_at: DateTime<Utc> = Utc::now() + Duration::seconds(expiry_secs as i64);
 
@@ -547,7 +585,7 @@ pub async fn create_session(
     .bind(id)
     .bind(entity_id)
     .bind(expires_at)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(db_err)
 }
