@@ -1,4 +1,9 @@
 import type { TENANT_STATUS_MUTATIONS } from "@/components/crud/table/constants";
+import type { Row } from "@/components/crud/table/types";
+
+export function isDeletedRow(row: Row) {
+  return Boolean(row.deletedAt) || String(row.status ?? "") === "deleted";
+}
 
 export function tenantActionPastTense(
   action: keyof typeof TENANT_STATUS_MUTATIONS,

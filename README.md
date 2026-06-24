@@ -379,11 +379,13 @@ an explicit purge path.
 Physical purge is disabled by default. Enable the background purge job with
 `ATOM_PURGE_ENABLED=true`. Its defaults are `ATOM_PURGE_RETENTION_DAYS=90`,
 `ATOM_PURGE_INTERVAL_SECS=86400`, and `ATOM_PURGE_BATCH_SIZE=1000`. Expired
-tombstones are hard-deleted in batches, using the database's foreign-key
-cascades; purging a tenant removes its tenant-owned entities, groups,
-resources, roles, and related rows instead of orphaning them. The admin-only
-`purgeTenant` mutation can physically remove an already-soft-deleted tenant
-immediately, bypassing the retention window.
+tombstones are hard-deleted in bounded batches: each run removes at most one
+configured batch per table. A Postgres advisory lock coordinates application
+replicas so only one purge runs at a time. Purging a tenant uses the database's
+foreign-key cascades to remove tenant-owned entities, groups, resources, roles,
+and related rows instead of orphaning them. The admin-only `purgeTenant`
+mutation can physically remove an already-soft-deleted tenant immediately,
+bypassing the retention window.
 
 Profiles keep Atom's internal runtime/authz kind separate from user/domain subtypes:
 

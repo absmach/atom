@@ -28,6 +28,7 @@ import { CrudInspectSheet } from "@/components/crud/table/inspect-sheet";
 import type { CrudTableProps, Row } from "@/components/crud/table/types";
 import {
   defer,
+  isDeletedRow,
   singularize,
   tenantActionPastTense,
 } from "@/components/crud/table/utils";
@@ -366,6 +367,16 @@ function TableRowActions({
   row: Row;
   tenantStatusPending: boolean;
 }) {
+  if (isDeletedRow(row)) {
+    return (
+      <div className="flex justify-end gap-2">
+        <Button onClick={onInspect} size="sm" variant="outline">
+          Inspect
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="flex justify-end gap-2">
       <Button onClick={onInspect} size="sm" variant="outline">

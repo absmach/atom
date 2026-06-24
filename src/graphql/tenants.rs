@@ -1,11 +1,12 @@
 use async_graphql::{Context, Object, Result, SimpleObject, ID};
 
 use crate::{
+    audit,
     auth::{has_capability_in_scope, require_capability, Scope},
     authz::engine,
     error::AppError,
     models::{
-        enums::{DeletedFilter, TenantStatus},
+        enums::{AuditOutcome, DeletedFilter, TenantStatus},
         tenant as tenant_model,
         tenant::ListTenants,
     },
@@ -335,9 +336,22 @@ impl TenantMutation {
             .await
             .map_err(gql_error)?;
 
-        tenant_repo::purge_tenant(&state.pool, parse_id(id, "id")?)
+        let tenant_id = parse_id(id, "id")?;
+        let purged = tenant_repo::purge_tenant(&state.pool, tenant_id)
             .await
             .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "tenant.purge",
+            AuditOutcome::Allow,
+            serde_json::json!({
+                "tenant_id": purged.id,
+                "tenant_name": purged.name,
+            }),
+        )
+        .await;
 
         Ok(true)
     }

@@ -251,6 +251,14 @@ impl Entity {
         &self.0.attributes
     }
 
+    async fn deleted_at(&self) -> Option<String> {
+        self.0.deleted_at.map(timestamp)
+    }
+
+    async fn deleted_by(&self) -> Option<ID> {
+        self.0.deleted_by.map(id)
+    }
+
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
     }
@@ -367,6 +375,14 @@ impl Tenant {
         self.0.updated_by.map(id)
     }
 
+    async fn deleted_at(&self) -> Option<String> {
+        self.0.deleted_at.map(timestamp)
+    }
+
+    async fn deleted_by(&self) -> Option<ID> {
+        self.0.deleted_by.map(id)
+    }
+
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
     }
@@ -467,6 +483,14 @@ impl Resource {
 
     async fn attributes(&self) -> &Value {
         &self.0.attributes
+    }
+
+    async fn deleted_at(&self) -> Option<String> {
+        self.0.deleted_at.map(timestamp)
+    }
+
+    async fn deleted_by(&self) -> Option<ID> {
+        self.0.deleted_by.map(id)
     }
 
     async fn created_at(&self) -> String {
@@ -632,6 +656,14 @@ impl Group {
         &self.0.attributes
     }
 
+    async fn deleted_at(&self) -> Option<String> {
+        self.0.deleted_at.map(timestamp)
+    }
+
+    async fn deleted_by(&self) -> Option<ID> {
+        self.0.deleted_by.map(id)
+    }
+
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
     }
@@ -760,6 +792,14 @@ impl Role {
             .await
             .map_err(|err| async_graphql::Error::new(err.to_string()))?;
         Ok(blocks.into_iter().map(PermissionBlock::from).collect())
+    }
+
+    async fn deleted_at(&self) -> Option<String> {
+        self.0.deleted_at.map(timestamp)
+    }
+
+    async fn deleted_by(&self) -> Option<ID> {
+        self.0.deleted_by.map(id)
     }
 
     async fn created_at(&self) -> String {

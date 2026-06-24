@@ -16,6 +16,8 @@ pub struct Entity {
     pub profile_version_id: Option<Uuid>,
     pub status: EntityStatus,
     pub attributes: Value,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
 }

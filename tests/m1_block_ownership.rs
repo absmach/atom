@@ -348,21 +348,79 @@ async fn role_purge_collects_orphaned_block() {
         .execute(&p)
         .await
         .expect("age role tombstone");
-    atom::purge::purge_expired(
-        &p,
-        atom::config::PurgeConfig {
-            enabled: true,
-            retention_days: 90,
-            interval_secs: 1,
-            batch_size: 1000,
-        },
-    )
-    .await
-    .expect("purge");
+    for _ in 0..20 {
+        atom::purge::purge_expired(
+            &p,
+            atom::config::PurgeConfig {
+                enabled: true,
+                retention_days: 90,
+                interval_secs: 1,
+                batch_size: 1000,
+            },
+        )
+        .await
+        .expect("purge");
+        if !block_exists(&p, block_id).await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     assert!(
         !block_exists(&p, block_id).await,
         "a block only the purged role linked must be garbage-collected"
+    );
+}
+
+/// Standalone permission blocks are first-class objects. Purging an unrelated
+/// role must not collect a block merely because nothing currently references it.
+#[tokio::test]
+#[ignore]
+async fn role_purge_preserves_standalone_block() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    let read_cap = read_capability_id(&p).await;
+    let standalone_block = make_block(&p, tenant_id, read_cap).await;
+    let linked_block = make_block(&p, tenant_id, read_cap).await;
+    let role = make_role(&p, tenant_id).await;
+
+    atom::authz::repo::replace_role_permission_block_links(&p, role, &[linked_block])
+        .await
+        .expect("link");
+    atom::authz::repo::delete_role(&p, role, None)
+        .await
+        .expect("delete role");
+    sqlx::query("UPDATE roles SET deleted_at = now() - interval '100 days' WHERE id = $1")
+        .bind(role)
+        .execute(&p)
+        .await
+        .expect("age role tombstone");
+
+    for _ in 0..20 {
+        atom::purge::purge_expired(
+            &p,
+            atom::config::PurgeConfig {
+                enabled: true,
+                retention_days: 90,
+                interval_secs: 1,
+                batch_size: 1000,
+            },
+        )
+        .await
+        .expect("purge");
+        if !block_exists(&p, linked_block).await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        block_exists(&p, standalone_block).await,
+        "purging a role must not collect unrelated standalone blocks"
+    );
+    assert!(
+        !block_exists(&p, linked_block).await,
+        "the block orphaned by the purged role should still be collected"
     );
 }
 

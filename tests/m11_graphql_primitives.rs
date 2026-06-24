@@ -112,7 +112,7 @@ async fn profile_with_schema(pool: &PgPool, json_schema: Value) -> Uuid {
 }
 
 async fn delete_tenant_row(pool: &PgPool, tenant_id: Uuid) {
-    let _ = sqlx::query_as::<_, Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, created_at, updated_at")
+    let _ = sqlx::query_as::<_, Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at")
         .bind(tenant_id)
         .fetch_optional(pool)
         .await;

@@ -54,10 +54,12 @@ pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resou
     let parent_group_id = parent_group_id_from_attrs(&attrs)?;
     let alias = crate::models::alias::validate_alias_opt(req.alias)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let resource = sqlx::query_as::<_, Resource>(
         r#"INSERT INTO resources (id, kind, name, alias, tenant_id, owner_id, attributes)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at"#,
+           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
+                     deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.kind)
@@ -78,7 +80,7 @@ pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resou
 
 pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError> {
     sqlx::query_as::<_, Resource>(
-        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at FROM resources WHERE id = $1 AND deleted_at IS NULL",
+        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_one(pool)
@@ -95,7 +97,7 @@ pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Re
     }
 
     sqlx::query_as::<_, Resource>(
-        r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at
+        r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at
            FROM resources
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY array_position($1::uuid[], id)"#,
@@ -129,7 +131,8 @@ pub async fn list_resources(
                JOIN target_groups tg ON tg.id = gh.parent_id
                WHERE $5::boolean
            )
-           SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes, r.created_at, r.updated_at
+           SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes,
+                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE ($1::text IS NULL OR r.kind = $1)
@@ -202,14 +205,40 @@ pub async fn update_resource(
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
     let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!("resource {id} not found")));
+    };
+    crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM resources
+           WHERE id = $1
+             AND tenant_id IS NOT DISTINCT FROM $2
+             AND deleted_at IS NULL
+           FOR UPDATE"#,
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::not_found(format!("resource {id} not found")));
+    }
     let resource = sqlx::query_as::<_, Resource>(
         r#"UPDATE resources
            SET name       = COALESCE($2, name),
                attributes = COALESCE($3, attributes),
                alias      = CASE WHEN $4 THEN $5 ELSE alias END,
                updated_at = now()
-           WHERE id = $1
-           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes, created_at, updated_at"#,
+           WHERE id = $1 AND deleted_at IS NULL
+           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
+                     deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
@@ -283,10 +312,24 @@ pub async fn resolve_alias(
         .map(str::trim)
         .filter(|alias| !alias.is_empty());
     let tenant_id = match (tenant_id, tenant_alias, global) {
-        (Some(id), None, false) => Some(id),
+        (Some(id), None, false) => {
+            let id = sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT id FROM tenants
+                   WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::not_found(format!("active tenant {id} not found")))?;
+            Some(id)
+        }
         (None, Some(alias), false) => {
             let id = sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM tenants WHERE lower(alias) = lower($1)",
+                r#"SELECT id FROM tenants
+                   WHERE lower(alias) = lower($1)
+                     AND status = 'active'
+                     AND deleted_at IS NULL"#,
             )
             .bind(alias)
             .fetch_optional(pool)
@@ -312,12 +355,14 @@ pub async fn resolve_alias(
         AliasObjectClass::Entity => {
             "SELECT id FROM entities \
              WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
-               AND lower(alias) = $2"
+               AND lower(alias) = $2 \
+               AND deleted_at IS NULL"
         }
         AliasObjectClass::Resource => {
             "SELECT id FROM resources \
              WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
-               AND lower(alias) = $2"
+               AND lower(alias) = $2 \
+               AND deleted_at IS NULL"
         }
     };
 
@@ -378,14 +423,31 @@ async fn set_resource_parent_group_in_tx(
     group_id: Uuid,
 ) -> Result<(), AppError> {
     use sqlx::Row;
+    let resource_tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
+            .bind(resource_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    let Some(resource_tenant_id) = resource_tenant_id else {
+        return Err(AppError::bad_request(
+            "resource parent group reference is invalid",
+        ));
+    };
+    crate::tenants::repo::lock_optional_active_tenant(tx, resource_tenant_id).await?;
     let row = sqlx::query(
         r#"SELECT r.tenant_id AS resource_tenant_id, g.tenant_id AS group_tenant_id
            FROM resources r
            CROSS JOIN object_groups g
-           WHERE r.id = $1 AND g.id = $2"#,
+           WHERE r.id = $1 AND g.id = $2
+             AND r.tenant_id IS NOT DISTINCT FROM $3
+             AND r.deleted_at IS NULL
+             AND g.deleted_at IS NULL
+           FOR UPDATE OF r, g"#,
     )
     .bind(resource_id)
     .bind(group_id)
+    .bind(resource_tenant_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?
@@ -423,6 +485,35 @@ async fn clear_resource_parent_group_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     resource_id: Uuid,
 ) -> Result<(), AppError> {
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
+            .bind(resource_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!(
+            "resource {resource_id} not found"
+        )));
+    };
+    crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM resources
+           WHERE id = $1
+             AND tenant_id IS NOT DISTINCT FROM $2
+             AND deleted_at IS NULL
+           FOR UPDATE"#,
+    )
+    .bind(resource_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::not_found(format!(
+            "resource {resource_id} not found"
+        )));
+    }
     sqlx::query("DELETE FROM object_group_resources WHERE resource_id = $1")
         .bind(resource_id)
         .execute(&mut **tx)
@@ -488,18 +579,22 @@ pub struct EffectiveGrant {
 
 pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
     let id = Uuid::new_v4();
-    sqlx::query_as::<_, Role>(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
+    let role = sqlx::query_as::<_, Role>(
         r#"INSERT INTO roles (id, name, tenant_id, description)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
+           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(role)
 }
 
 pub async fn create_role_with_assignments(
@@ -560,10 +655,17 @@ pub async fn create_role_with_assignments(
     }
 
     let mut tx = pool.begin().await.map_err(db_err)?;
+    crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
+    let mut locked_member_ids = member_entity_ids.to_vec();
+    locked_member_ids.sort_unstable();
+    locked_member_ids.dedup();
+    for member_id in locked_member_ids {
+        lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
+    }
     let role = sqlx::query_as::<_, Role>(
         r#"INSERT INTO roles (id, name, tenant_id, description)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
+           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
@@ -608,7 +710,10 @@ pub async fn create_role_with_assignments(
                    SELECT $1, $2, 'active'
                    WHERE EXISTS (
                        SELECT 1 FROM entities
-                       WHERE id = $2 AND kind = 'human'
+                       WHERE id = $2
+                         AND kind = 'human'
+                         AND status = 'active'
+                         AND deleted_at IS NULL
                    )
                    ON CONFLICT (tenant_id, entity_id)
                    DO UPDATE SET status = 'active'"#,
@@ -639,10 +744,17 @@ pub async fn create_role_with_permission_blocks(
     ensure_entities_exist(pool, member_entity_ids).await?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
+    crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
+    let mut locked_member_ids = member_entity_ids.to_vec();
+    locked_member_ids.sort_unstable();
+    locked_member_ids.dedup();
+    for member_id in locked_member_ids {
+        lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
+    }
     let role = sqlx::query_as::<_, Role>(
         r#"INSERT INTO roles (id, name, tenant_id, description)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
+           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
@@ -675,7 +787,10 @@ pub async fn create_role_with_permission_blocks(
                    SELECT $1, $2, 'active'
                    WHERE EXISTS (
                        SELECT 1 FROM entities
-                       WHERE id = $2 AND kind = 'human'
+                       WHERE id = $2
+                         AND kind = 'human'
+                         AND status = 'active'
+                         AND deleted_at IS NULL
                    )
                    ON CONFLICT (tenant_id, entity_id)
                    DO UPDATE SET status = 'active'"#,
@@ -702,11 +817,28 @@ async fn lock_role(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     role_id: Uuid,
 ) -> Result<(), AppError> {
-    let locked: Option<Uuid> = sqlx::query_scalar("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
-        .bind(role_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+            .bind(role_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!("role {role_id} not found")));
+    };
+    crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM roles
+           WHERE id = $1
+             AND tenant_id IS NOT DISTINCT FROM $2
+             AND deleted_at IS NULL
+           FOR UPDATE"#,
+    )
+    .bind(role_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
     if locked.is_none() {
         return Err(AppError::not_found(format!("role {role_id} not found")));
     }
@@ -740,7 +872,7 @@ pub async fn replace_role_permission_block_links(
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
     let role_tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(role_id)
             .fetch_optional(pool)
             .await
@@ -1462,6 +1594,7 @@ pub async fn create_permission_block(
     validate_permission_block_input(pool, &req).await?;
     let conditions = normalize_conditions(req.conditions)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO permission_blocks
              (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
@@ -1644,13 +1777,14 @@ async fn validate_object_group_boundary(
 ) -> Result<(), AppError> {
     let group_id =
         group_id.ok_or_else(|| AppError::bad_request("object group scope requires groupId"))?;
-    let group_tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM object_groups WHERE id = $1")
-            .bind(group_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::bad_request("object group scope references unknown group"))?;
+    let group_tenant_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT tenant_id FROM object_groups WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(group_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?
+    .ok_or_else(|| AppError::bad_request("object group scope references unknown group"))?;
     if tenant_id.is_some() && group_tenant_id != tenant_id {
         return Err(AppError::bad_request(
             "object group scope must reference a group in the same tenant",
@@ -1661,7 +1795,7 @@ async fn validate_object_group_boundary(
 
 pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
     sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, created_at, updated_at
+        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
            FROM roles WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(id)
@@ -1697,7 +1831,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     }
 
     let items = sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, created_at, updated_at
+        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
            FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
@@ -2150,23 +2284,23 @@ async fn resolve_exact_object_target(
            FROM (
              SELECT 'entity'::text AS object_kind, ('entity:' || kind)::text AS object_type
              FROM entities
-             WHERE id = $1
+             WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
              SELECT 'resource'::text AS object_kind, ('resource:' || kind)::text AS object_type
              FROM resources
-             WHERE id = $1
+             WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
              SELECT 'group'::text AS object_kind, NULL::text AS object_type
              FROM groups
-             WHERE id = $1
+             WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
              SELECT 'tenant'::text AS object_kind, NULL::text AS object_type
              FROM tenants
-             WHERE id = $1
+             WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
              SELECT 'role'::text AS object_kind, NULL::text AS object_type
              FROM roles
-             WHERE id = $1
+             WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
              SELECT 'policy'::text AS object_kind, NULL::text AS object_type
              FROM effective_access_edges()
@@ -2193,23 +2327,36 @@ async fn resolve_exact_object_target(
 }
 
 pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Role, AppError> {
-    sqlx::query_as::<_, Role>(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!("role {id} not found")));
+    };
+    crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
+    let role = sqlx::query_as::<_, Role>(
         r#"UPDATE roles
            SET name        = COALESCE($2, name),
                description = COALESCE($3, description),
                updated_at  = now()
-           WHERE id = $1
-           RETURNING id, name, tenant_id, description, created_at, updated_at"#,
+           WHERE id = $1 AND deleted_at IS NULL
+           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.description)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("role {id} not found")),
         other => AppError::Database(other),
-    })
+    })?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(role)
 }
 
 /// Soft-delete a role by setting its tombstone. The role's assignments and
@@ -2864,6 +3011,72 @@ pub async fn delete_capability(pool: &PgPool, id: Uuid) -> Result<(), AppError> 
 
 // ─── Policy Bindings ──────────────────────────────────────────────────────────
 
+async fn lock_live_subject(
+    tx: &mut Transaction<'_, Postgres>,
+    assignment_tenant_id: Option<Uuid>,
+    subject_kind: &SubjectKind,
+    subject_id: Uuid,
+) -> Result<(), AppError> {
+    let subject_tenant_id: Option<Option<Uuid>> = match subject_kind {
+        SubjectKind::Entity => sqlx::query_scalar(
+            r#"SELECT tenant_id FROM entities
+                   WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
+        )
+        .bind(subject_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?,
+        SubjectKind::Group => sqlx::query_scalar(
+            r#"SELECT tenant_id FROM principal_groups
+                   WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
+        )
+        .bind(subject_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?,
+    };
+    let Some(subject_tenant_id) = subject_tenant_id else {
+        return Err(AppError::bad_request(
+            "assignment references a deleted, disabled, or unknown subject",
+        ));
+    };
+
+    let mut tenant_ids = [assignment_tenant_id, subject_tenant_id]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    tenant_ids.sort_unstable();
+    tenant_ids.dedup();
+    for tenant_id in tenant_ids {
+        crate::tenants::repo::lock_active_tenant(tx, tenant_id).await?;
+    }
+
+    let table = match subject_kind {
+        SubjectKind::Entity => "entities",
+        SubjectKind::Group => "principal_groups",
+    };
+    let sql = format!(
+        r#"SELECT id FROM {table}
+           WHERE id = $1
+             AND tenant_id IS NOT DISTINCT FROM $2
+             AND status = 'active'
+             AND deleted_at IS NULL
+           FOR UPDATE"#
+    );
+    let locked: Option<Uuid> = sqlx::query_scalar(&sql)
+        .bind(subject_id)
+        .bind(subject_tenant_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::bad_request(
+            "assignment subject changed during validation",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create_policy(
     pool: &PgPool,
     req: CreatePolicyBinding,
@@ -2877,8 +3090,10 @@ pub async fn create_policy(
         && req.effect == Effect::Allow;
     let conditions = normalize_conditions(req.conditions)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_live_subject(&mut tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     match req.grant_kind {
         GrantKind::Role => {
+            lock_role(&mut tx, req.grant_id).await?;
             if req.effect != Effect::Allow || conditions != serde_json::json!({}) {
                 return Err(AppError::bad_request(
                     "role assignment supports only allow effect without conditions; use direct policy for deny or conditional grants",
@@ -2945,21 +3160,18 @@ pub async fn create_policy(
             .map_err(db_err)?;
         }
     }
-    tx.commit().await.map_err(db_err)?;
-
-    let policy = get_policy(pool, id).await?;
-
     if should_sync_membership {
         if let Some(tenant_id) = membership_tenant_id {
-            sync_tenant_membership_for_policy(pool, tenant_id, membership_entity_id).await?;
+            sync_tenant_membership_for_policy(&mut tx, tenant_id, membership_entity_id).await?;
         }
     }
+    tx.commit().await.map_err(db_err)?;
 
-    Ok(policy)
+    get_policy(pool, id).await
 }
 
 async fn sync_tenant_membership_for_policy(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
@@ -2968,14 +3180,17 @@ async fn sync_tenant_membership_for_policy(
            SELECT $1, $2, 'active'
            WHERE EXISTS (
                SELECT 1 FROM entities
-               WHERE id = $2 AND kind = 'human'
+               WHERE id = $2
+                 AND kind = 'human'
+                 AND status = 'active'
+                 AND deleted_at IS NULL
            )
            ON CONFLICT (tenant_id, entity_id)
            DO UPDATE SET status = 'active'"#,
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
@@ -3001,6 +3216,7 @@ pub async fn create_role_assignment(
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_live_subject(&mut tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     // Lock the role and validate under the lock so a concurrent block-link
     // mutation cannot add a prohibited block against stale state: it blocks on
     // this same lock and re-validates against the assignment we are inserting.
@@ -3113,7 +3329,20 @@ pub async fn create_direct_policy(
 ) -> Result<DirectPolicy, AppError> {
     validate_direct_policy(pool, &req).await?;
     crate::guardrails::validate_direct_policy(pool, &req).await?;
-    sqlx::query_as::<_, DirectPolicy>(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_live_subject(&mut tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
+    let block_tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
+            .bind(req.permission_block_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    if block_tenant_id != Some(req.tenant_id) {
+        return Err(AppError::bad_request(
+            "direct policy references a missing or cross-tenant permission block",
+        ));
+    }
+    let policy = sqlx::query_as::<_, DirectPolicy>(
         r#"INSERT INTO direct_policies
              (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, $2, $3, $4)
@@ -3123,9 +3352,11 @@ pub async fn create_direct_policy(
     .bind(req.subject_kind)
     .bind(req.subject_id)
     .bind(req.permission_block_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(policy)
 }
 
 pub async fn list_direct_policies(
@@ -3417,6 +3648,8 @@ pub async fn subject_role_assignments(
                     name: row.try_get("role_name").map_err(db_err)?,
                     tenant_id: row.try_get("role_tenant_id").map_err(db_err)?,
                     description: row.try_get("role_description").map_err(db_err)?,
+                    deleted_at: None,
+                    deleted_by: None,
                     created_at: row.try_get("role_created_at").map_err(db_err)?,
                     updated_at: row.try_get("role_updated_at").map_err(db_err)?,
                 },
@@ -3493,19 +3726,21 @@ pub async fn object_tenant_id_by_id(
 ) -> Result<Option<Option<Uuid>>, AppError> {
     let row = sqlx::query(
         r#"SELECT tenant_id FROM (
-             SELECT tenant_id FROM entities WHERE id = $1
+             SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
-             SELECT tenant_id FROM groups WHERE id = $1
+             SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
-             SELECT tenant_id FROM resources WHERE id = $1
+             SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
-             SELECT tenant_id FROM roles WHERE id = $1
+             SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL
              UNION ALL
              SELECT tenant_id FROM effective_access_edges() WHERE id = $1
              UNION ALL
-             SELECT t.id AS tenant_id FROM tenants t WHERE t.id = $1
+             SELECT t.id AS tenant_id FROM tenants t WHERE t.id = $1 AND t.deleted_at IS NULL
              UNION ALL
-             SELECT e.tenant_id FROM credentials c JOIN entities e ON e.id = c.entity_id WHERE c.id = $1
+             SELECT e.tenant_id FROM credentials c
+             JOIN entities e ON e.id = c.entity_id AND e.deleted_at IS NULL
+             WHERE c.id = $1
              UNION ALL
              SELECT tenant_id FROM audit_logs WHERE id = $1
            ) matches

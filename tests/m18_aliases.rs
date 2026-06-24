@@ -147,6 +147,65 @@ async fn resolve_alias_is_case_insensitive() {
 
 #[tokio::test]
 #[ignore]
+async fn resolve_alias_ignores_deleted_object_after_alias_reuse() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p, &slug("dom")).await;
+    let object_alias = slug("reused");
+    let old = authz_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
+        .await
+        .expect("create old resource");
+    authz_repo::delete_resource(&p, old.id, None)
+        .await
+        .expect("delete old resource");
+    let replacement = authz_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
+        .await
+        .expect("reuse alias");
+
+    let resolved = authz_repo::resolve_alias(
+        &p,
+        Some(tenant_id),
+        None,
+        false,
+        AliasObjectClass::Resource,
+        &object_alias,
+    )
+    .await
+    .expect("resolve replacement");
+    assert_eq!(resolved.object_id, replacement.id);
+}
+
+#[tokio::test]
+#[ignore]
+async fn resolve_alias_ignores_deleted_tenant_after_alias_reuse() {
+    let p = pool().await;
+    let tenant_alias = slug("reused-tenant");
+    let old_tenant = make_tenant(&p, &tenant_alias).await;
+    tenant_repo::soft_delete_tenant(&p, old_tenant, None)
+        .await
+        .expect("delete old tenant");
+
+    let replacement_tenant = make_tenant(&p, &tenant_alias).await;
+    let object_alias = slug("meter");
+    let resource = authz_repo::create_resource(&p, resource_req(replacement_tenant, &object_alias))
+        .await
+        .expect("create replacement resource");
+
+    let resolved = authz_repo::resolve_alias(
+        &p,
+        None,
+        Some(&tenant_alias),
+        false,
+        AliasObjectClass::Resource,
+        &object_alias,
+    )
+    .await
+    .expect("resolve through replacement tenant");
+    assert_eq!(resolved.tenant_id, Some(replacement_tenant));
+    assert_eq!(resolved.object_id, resource.id);
+}
+
+#[tokio::test]
+#[ignore]
 async fn resolve_alias_supports_explicit_global_scope() {
     let p = pool().await;
     let object_alias = slug("global");

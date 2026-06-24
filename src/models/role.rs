@@ -10,6 +10,8 @@ pub struct Role {
     pub name: String,
     pub tenant_id: Option<Uuid>,
     pub description: Option<String>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
 }

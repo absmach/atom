@@ -17,7 +17,7 @@ use crate::{
 };
 
 const TENANT_COLS: &str =
-    "id, name, alias, status, tags, attributes, created_by, updated_by, created_at, updated_at";
+    "id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at";
 const INVITATION_COLS: &str =
     "ti.id, ti.tenant_id, ti.invitee_user_id, ti.invitee_email, ti.invited_by,
      ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
@@ -27,6 +27,12 @@ pub struct CreatedInvitation {
     pub invitation: TenantInvitation,
     pub token: Option<String>,
     pub email: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PurgedTenant {
+    pub id: Uuid,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +73,38 @@ pub fn tenant_admin_bootstrap(tenant_id: Uuid, creator_id: Uuid) -> TenantAdminB
         ],
         scope_ref: tenant_id.to_string(),
     }
+}
+
+pub async fn lock_active_tenant(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+) -> Result<(), AppError> {
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id
+           FROM tenants
+           WHERE id = $1 AND status = 'active' AND deleted_at IS NULL
+           FOR UPDATE"#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::not_found(format!(
+            "active tenant {tenant_id} not found"
+        )));
+    }
+    Ok(())
+}
+
+pub async fn lock_optional_active_tenant(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    if let Some(tenant_id) = tenant_id {
+        lock_active_tenant(tx, tenant_id).await?;
+    }
+    Ok(())
 }
 
 pub async fn create_tenant(
@@ -518,18 +556,22 @@ pub async fn soft_delete_tenant(
 /// Physically remove a tenant that has already been soft-deleted, bypassing the
 /// purge retention window. This cascades to all tenant-owned data, so it is an
 /// explicit, deliberate admin action (a soft delete is required first).
-pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let result = sqlx::query("DELETE FROM tenants WHERE id = $1 AND deleted_at IS NOT NULL")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppError> {
+    let purged = sqlx::query_as::<_, (Uuid, String)>(
+        "DELETE FROM tenants
+         WHERE id = $1 AND deleted_at IS NOT NULL
+         RETURNING id, name",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    let Some((id, name)) = purged else {
         return Err(AppError::not_found(format!(
             "no soft-deleted tenant {id} to purge"
         )));
-    }
-    Ok(())
+    };
+    Ok(PurgedTenant { id, name })
 }
 
 /// Sets `status` to a new value (non-delete lifecycle: active/inactive/frozen).
@@ -745,7 +787,7 @@ pub async fn list_tenant_members(
 
     let items = sqlx::query_as::<_, Entity>(
         r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.created_at, e.updated_at
+                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
            FROM tenant_memberships tm
            JOIN entities e ON e.id = tm.entity_id
            WHERE tm.tenant_id = $1
@@ -796,7 +838,7 @@ pub async fn list_tenant_assignable_entities(
 
     let items = sqlx::query_as::<_, Entity>(
         r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.created_at, e.updated_at
+                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
            FROM entities e
            WHERE e.kind = 'human'
              AND e.status = 'active'

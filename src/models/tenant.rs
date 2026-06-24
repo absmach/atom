@@ -15,6 +15,8 @@ pub struct Tenant {
     pub attributes: Value,
     pub created_by: Option<Uuid>,
     pub updated_by: Option<Uuid>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
 }

@@ -14,6 +14,8 @@ pub struct Resource {
     pub tenant_id: Option<Uuid>,
     pub owner_id: Option<Uuid>,
     pub attributes: Value,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
 }

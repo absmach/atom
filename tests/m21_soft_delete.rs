@@ -12,8 +12,13 @@ use atom::{
     config::PurgeConfig,
     identity::service,
     models::{
-        entity::ListEntities, enums::DeletedFilter, group::ListGroups, resource::ListResources,
-        role::ListRoles, session::PasswordResetConfirmRequest, tenant::ListTenants,
+        entity::{ListEntities, UpdateEntity},
+        enums::DeletedFilter,
+        group::{ListGroups, UpdateGroup},
+        resource::{ListResources, UpdateResource},
+        role::{ListRoles, UpdateRole},
+        session::PasswordResetConfirmRequest,
+        tenant::ListTenants,
         token::CreateApiKey,
     },
 };
@@ -235,6 +240,116 @@ async fn soft_deleted_role_and_resource_are_hidden() {
     assert!(atom::authz::repo::get_resource(&pool, resource_id)
         .await
         .is_err());
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_deleted_objects_are_read_only() {
+    let pool = common::pool().await;
+
+    let entity_id = make_entity(
+        &pool,
+        &format!("sd-readonly-entity-{}", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    atom::identity::repo::delete_entity(&pool, entity_id, None)
+        .await
+        .expect("delete entity");
+    assert!(
+        atom::identity::repo::update_entity(
+            &pool,
+            entity_id,
+            UpdateEntity {
+                name: Some("mutated".to_string()),
+                kind: None,
+                alias: None,
+                tenant_id: None,
+                profile_id: None,
+                profile_version_id: None,
+                status: None,
+                attributes: None,
+            },
+        )
+        .await
+        .is_err(),
+        "deleted entity must reject updates"
+    );
+
+    let group_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO object_groups (id, name) VALUES ($1, $2)")
+        .bind(group_id)
+        .bind(format!("sd-readonly-group-{group_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert group");
+    atom::identity::repo::delete_group(&pool, group_id, None)
+        .await
+        .expect("delete group");
+    assert!(
+        atom::identity::repo::update_group(
+            &pool,
+            group_id,
+            UpdateGroup {
+                name: Some("mutated".to_string()),
+                description: None,
+                status: None,
+                attributes: None,
+            },
+        )
+        .await
+        .is_err(),
+        "deleted group must reject updates"
+    );
+
+    let resource_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
+        .bind(resource_id)
+        .bind(format!("sd-readonly-resource-{resource_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert resource");
+    atom::authz::repo::delete_resource(&pool, resource_id, None)
+        .await
+        .expect("delete resource");
+    assert!(
+        atom::authz::repo::update_resource(
+            &pool,
+            resource_id,
+            UpdateResource {
+                name: Some("mutated".to_string()),
+                alias: None,
+                attributes: None,
+            },
+        )
+        .await
+        .is_err(),
+        "deleted resource must reject updates"
+    );
+
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(format!("sd-readonly-role-{role_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert role");
+    atom::authz::repo::delete_role(&pool, role_id, None)
+        .await
+        .expect("delete role");
+    assert!(
+        atom::authz::repo::update_role(
+            &pool,
+            role_id,
+            UpdateRole {
+                name: Some("mutated".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .is_err(),
+        "deleted role must reject updates"
+    );
 }
 
 #[tokio::test]
@@ -495,14 +610,19 @@ async fn purge_physically_removes_expired_tombstones_only() {
         interval_secs: 1,
         batch_size: 1000,
     };
-    atom::purge::purge_expired(&pool, cfg).await.expect("purge");
-
-    let old_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)")
+    let mut old_exists = true;
+    for _ in 0..20 {
+        atom::purge::purge_expired(&pool, cfg).await.expect("purge");
+        old_exists = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)")
             .bind(old)
             .fetch_one(&pool)
             .await
             .expect("check old");
+        if !old_exists {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let recent_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)")
             .bind(recent)
@@ -511,6 +631,79 @@ async fn purge_physically_removes_expired_tombstones_only() {
             .expect("check recent");
     assert!(!old_exists, "expired tombstone must be purged");
     assert!(recent_exists, "tombstone within retention must survive");
+}
+
+#[tokio::test]
+#[ignore]
+async fn purge_limits_each_table_to_one_configured_batch_per_run() {
+    let pool = common::pool().await;
+    let cfg = PurgeConfig {
+        enabled: true,
+        retention_days: 90,
+        interval_secs: 1,
+        batch_size: 1,
+    };
+    let mut surviving_pair = None;
+
+    // Other purge tests in this integration binary run in parallel and share
+    // the same advisory lock. Retry with a fresh pair if another test's purge
+    // consumes both rows, and wait if this invocation loses the lock.
+    'pairs: for _ in 0..10 {
+        let first = make_entity(&pool, &format!("sd-batch-a-{}", Uuid::new_v4()), None).await;
+        let second = make_entity(&pool, &format!("sd-batch-b-{}", Uuid::new_v4()), None).await;
+        let ids = vec![first, second];
+        sqlx::query(
+            r#"UPDATE entities
+               SET deleted_at = CASE
+                   WHEN id = $1 THEN now() - interval '1001 days'
+                   ELSE now() - interval '1000 days'
+               END
+               WHERE id = ANY($2)"#,
+        )
+        .bind(first)
+        .bind(&ids)
+        .execute(&pool)
+        .await
+        .expect("age tombstones");
+
+        for _ in 0..20 {
+            atom::purge::purge_expired(&pool, cfg)
+                .await
+                .expect("first purge");
+            let remaining: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1)")
+                    .bind(&ids)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count after first purge");
+            match remaining {
+                1 => {
+                    surviving_pair = Some(ids);
+                    break 'pairs;
+                }
+                2 => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                0 => continue 'pairs,
+                other => panic!("unexpected remaining entity count {other}"),
+            }
+        }
+    }
+
+    let ids = surviving_pair.expect("a purge run should observe one bounded entity batch");
+    for _ in 0..20 {
+        atom::purge::purge_expired(&pool, cfg)
+            .await
+            .expect("second purge");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_one(&pool)
+            .await
+            .expect("count after second purge");
+        if remaining == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the next bounded purge run should remove the surviving row");
 }
 
 #[tokio::test]
