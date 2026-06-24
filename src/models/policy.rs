@@ -1,10 +1,9 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::enums::{Effect, GrantKind, ScopeKind, SubjectKind};
-use crate::authz::compat::translate_legacy_scope;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PolicyBinding {
@@ -134,13 +133,13 @@ pub struct DirectPolicyList {
 
 /// Request to create a policy binding.
 ///
-/// Deserialization accepts the canonical post-M1 vocabulary
-/// (`platform` / `tenant` / `object_kind` / `object_type` / `object`)
-/// and the legacy form (`all` / `resource_kind` / `resource`). Legacy values
-/// are translated at the API edge — see [`crate::authz::compat`].
-#[derive(Debug)]
+/// Deserialization accepts the canonical scope vocabulary
+/// (`platform` / `tenant` / `object_kind` / `object_type` / `object` and the
+/// group-scope kinds).
+#[derive(Debug, Deserialize)]
 pub struct CreatePolicyBinding {
     /// Tenant that owns the binding. `None` means platform/global policy.
+    #[serde(default)]
     pub tenant_id: Option<Uuid>,
     pub subject_kind: SubjectKind,
     pub subject_id: Uuid,
@@ -157,53 +156,12 @@ pub struct CreatePolicyBinding {
     /// - `group_tree_object_type`: `<group UUID>:<kind>:<sub-kind>`.
     /// - `group_child_kind`: `<group UUID>:group`.
     /// - `group_descendant_kind`: `<group UUID>:group`.
+    #[serde(default)]
     pub scope_ref: Option<String>,
+    #[serde(default)]
     pub effect: Effect,
+    #[serde(default)]
     pub conditions: Value,
-}
-
-impl<'de> Deserialize<'de> for CreatePolicyBinding {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(default)]
-            tenant_id: Option<Uuid>,
-            subject_kind: SubjectKind,
-            subject_id: Uuid,
-            grant_kind: GrantKind,
-            grant_id: Uuid,
-            scope_kind: String,
-            #[serde(default)]
-            scope_ref: Option<String>,
-            #[serde(default)]
-            effect: Effect,
-            #[serde(default)]
-            conditions: Value,
-        }
-
-        let raw = Raw::deserialize(deserializer)?;
-        let (canonical_kind, canonical_ref) =
-            translate_legacy_scope(&raw.scope_kind, raw.scope_ref);
-        let scope_kind: ScopeKind =
-            serde_json::from_value(serde_json::Value::String(canonical_kind.clone()))
-                .map_err(|_| {
-                    serde::de::Error::custom(format!(
-                        "invalid scope_kind '{canonical_kind}' (expected one of platform, tenant, object_kind, object_type, object, group_object_type, group_tree_object_type, group_child_kind, group_descendant_kind)"
-                    ))
-                })?;
-
-        Ok(CreatePolicyBinding {
-            tenant_id: raw.tenant_id,
-            subject_kind: raw.subject_kind,
-            subject_id: raw.subject_id,
-            grant_kind: raw.grant_kind,
-            grant_id: raw.grant_id,
-            scope_kind,
-            scope_ref: canonical_ref,
-            effect: raw.effect,
-            conditions: raw.conditions,
-        })
-    }
 }
 
 impl CreatePolicyBinding {
@@ -306,31 +264,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_all_deserialises_to_platform() {
-        let req = parse(template("all", None)).expect("parse");
-        assert_eq!(req.scope_kind, ScopeKind::Platform);
-        assert_eq!(req.scope_ref, None);
+    fn canonical_scope_kinds_deserialise() {
+        let platform = parse(template("platform", None)).expect("parse");
+        assert_eq!(platform.scope_kind, ScopeKind::Platform);
+        assert_eq!(platform.scope_ref, None);
+
+        let object_type = parse(template("object_type", Some("resource:channel"))).expect("parse");
+        assert_eq!(object_type.scope_kind, ScopeKind::ObjectType);
+        assert_eq!(object_type.scope_ref.as_deref(), Some("resource:channel"));
     }
 
     #[test]
-    fn legacy_resource_kind_deserialises_to_object_type_with_prefix() {
-        let req = parse(template("resource_kind", Some("channel"))).expect("parse");
-        assert_eq!(req.scope_kind, ScopeKind::ObjectType);
-        assert_eq!(req.scope_ref.as_deref(), Some("resource:channel"));
-    }
-
-    #[test]
-    fn legacy_resource_deserialises_to_object() {
-        let uuid = "33333333-3333-3333-3333-333333333333";
-        let req = parse(template("resource", Some(uuid))).expect("parse");
-        assert_eq!(req.scope_kind, ScopeKind::Object);
-        assert_eq!(req.scope_ref.as_deref(), Some(uuid));
-    }
-
-    #[test]
-    fn unknown_scope_kind_fails_with_helpful_message() {
+    fn unknown_scope_kind_fails() {
         let err = parse(template("nonsense", None)).unwrap_err().to_string();
-        assert!(err.contains("invalid scope_kind"), "got: {err}");
+        assert!(err.contains("unknown variant"), "got: {err}");
     }
 
     #[test]

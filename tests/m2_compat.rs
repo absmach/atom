@@ -1,7 +1,7 @@
 //! M2 integration tests.
 //!
-//! Verifies HTTP-edge legacy-form translation lands canonical values in
-//! storage, and that `object_kind = entity` runs end-to-end through the PDP.
+//! Verifies entity-as-object authorization: `object_kind` / `object_type`
+//! scopes and platform inheritance run end-to-end through the PDP.
 //!
 //! Run with:
 //! ```bash
@@ -15,13 +15,6 @@ use atom::models::policy::{AuthzRequest, CreatePolicyBinding};
 use common::{admin_id, pool};
 use serde_json::json;
 use uuid::Uuid;
-
-async fn read_capability_id(pool: &sqlx::PgPool) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("read cap")
-}
 
 async fn manage_capability_id(pool: &sqlx::PgPool) -> Uuid {
     sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
@@ -52,103 +45,6 @@ async fn make_active_entity(pool: &sqlx::PgPool, tenant_id: Option<Uuid>, kind: 
         .await
         .expect("insert entity");
     id
-}
-
-#[tokio::test]
-#[ignore]
-async fn legacy_resource_kind_form_lands_namespaced_in_storage() {
-    let p = pool().await;
-    let tenant_id = make_tenant(&p).await;
-    let cap_id = read_capability_id(&p).await;
-    let subject_id = make_active_entity(&p, Some(tenant_id), "service").await;
-
-    // Simulate a legacy HTTP body. Deserialize through CreatePolicyBinding so
-    // the edge translator runs.
-    let body = json!({
-        "subject_kind": "entity",
-        "subject_id": subject_id,
-        "tenant_id": tenant_id,
-        "grant_kind": "capability",
-        "grant_id": cap_id,
-        "scope_kind": "resource_kind",
-        "scope_ref": "channel",
-    });
-    let req: CreatePolicyBinding = serde_json::from_value(body).expect("deserialize legacy form");
-    req.validate().expect("post-translation form must validate");
-
-    let stored = atom::authz::repo::create_policy(&p, req)
-        .await
-        .expect("create policy");
-
-    assert_eq!(stored.scope_kind, ScopeKind::ObjectType);
-    assert_eq!(stored.scope_ref.as_deref(), Some("resource:channel"));
-
-    // Verify the value in the DB row directly — the legacy form must NOT have
-    // landed in storage.
-    let (raw_kind, raw_ref): (String, String) = sqlx::query_as(
-        r#"SELECT pb.scope_mode, pb.object_type
-           FROM direct_policies dp
-           JOIN permission_blocks pb ON pb.id = dp.permission_block_id
-           WHERE dp.id = $1"#,
-    )
-    .bind(stored.id)
-    .fetch_one(&p)
-    .await
-    .expect("read permission block");
-    assert_eq!(raw_kind, "object_type");
-    assert_eq!(raw_ref, "resource:channel");
-
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(stored.id)
-        .execute(&p)
-        .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
-        .bind(subject_id)
-        .execute(&p)
-        .await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn legacy_all_form_lands_as_platform() {
-    let p = pool().await;
-    let cap_id = read_capability_id(&p).await;
-    let subject_id = make_active_entity(&p, None, "service").await;
-
-    let body = json!({
-        "subject_kind": "entity",
-        "subject_id": subject_id,
-        "grant_kind": "capability",
-        "grant_id": cap_id,
-        "scope_kind": "all",
-    });
-    let req: CreatePolicyBinding = serde_json::from_value(body).expect("deserialize legacy 'all'");
-    let stored = atom::authz::repo::create_policy(&p, req)
-        .await
-        .expect("create policy");
-
-    assert_eq!(stored.scope_kind, ScopeKind::Platform);
-
-    let raw: String = sqlx::query_scalar(
-        r#"SELECT pb.scope_mode
-           FROM direct_policies dp
-           JOIN permission_blocks pb ON pb.id = dp.permission_block_id
-           WHERE dp.id = $1"#,
-    )
-    .bind(stored.id)
-    .fetch_one(&p)
-    .await
-    .expect("read scope mode");
-    assert_eq!(raw, "platform");
-
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(stored.id)
-        .execute(&p)
-        .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
-        .bind(subject_id)
-        .execute(&p)
-        .await;
 }
 
 #[tokio::test]

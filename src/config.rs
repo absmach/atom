@@ -286,11 +286,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(SERVICE_ENTITY_ID),
-            self_registration_enabled: env_bool_default_with_legacy(
-                "ATOM_SELF_REGISTRATION_ENABLED",
-                "ATOM_SIGNUP_ENABLED",
-                true,
-            ),
+            self_registration_enabled: env_bool_default("ATOM_SELF_REGISTRATION_ENABLED", true),
             dev_allow_unverified_email_login: env_bool("ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
             auth_cookie_secure: std::env::var("ATOM_AUTH_COOKIE_SECURE")
@@ -433,13 +429,6 @@ fn env_bool(name: &str) -> bool {
 fn env_bool_default(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|value| parse_env_bool(&value))
-        .unwrap_or(default)
-}
-
-fn env_bool_default_with_legacy(name: &str, legacy_name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .map(|value| parse_env_bool(&value))
-        .or_else(|_| std::env::var(legacy_name).map(|value| parse_env_bool(&value)))
         .unwrap_or(default)
 }
 
