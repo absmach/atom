@@ -179,6 +179,97 @@ async fn purge_physically_removes_expired_tombstones_only() {
 
 #[tokio::test]
 #[ignore]
+async fn soft_deleted_role_stops_granting_in_the_pdp() {
+    use atom::models::policy::AuthzRequest;
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-grant-{}", Uuid::new_v4())).await;
+    let subject = make_entity(
+        &pool,
+        &format!("sd-subj-{}", Uuid::new_v4()),
+        Some(tenant_id),
+    )
+    .await;
+    let target = make_entity(
+        &pool,
+        &format!("sd-tgt-{}", Uuid::new_v4()),
+        Some(tenant_id),
+    )
+    .await;
+    let read_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("read action");
+
+    // Role granting read on entities in the tenant, assigned to the subject.
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(role_id)
+        .bind(format!("sd-grant-role-{role_id}"))
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("role");
+    let block_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO permission_blocks (scope_mode, object_kind, tenant_id, effect)
+         VALUES ('object_kind', 'entity', $1, 'allow') RETURNING id",
+    )
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    sqlx::query(
+        "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+    )
+    .bind(role_id)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("link");
+    sqlx::query("INSERT INTO role_assignments (tenant_id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
+        .bind(tenant_id)
+        .bind(subject)
+        .bind(role_id)
+        .execute(&pool)
+        .await
+        .expect("assign");
+
+    let req = AuthzRequest {
+        subject_id: subject,
+        action: "read".to_string(),
+        resource_id: None,
+        object_kind: Some("entity".to_string()),
+        object_id: Some(target),
+        context: serde_json::Value::Null,
+    };
+
+    let before = atom::authz::engine::evaluate(&pool, &req)
+        .await
+        .expect("evaluate before");
+    assert!(before.allowed, "role should grant read before deletion");
+
+    atom::authz::repo::delete_role(&pool, role_id, None)
+        .await
+        .expect("delete role");
+
+    let after = atom::authz::engine::evaluate(&pool, &req)
+        .await
+        .expect("evaluate after");
+    assert!(
+        !after.allowed,
+        "a soft-deleted role must not grant in the PDP"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn soft_delete_tenant_marks_and_revokes_child_sessions() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-tenant-{}", Uuid::new_v4())).await;

@@ -666,7 +666,8 @@ SELECT
     'allow'::text AS effect,
     '{}'::jsonb AS conditions,
     ra.created_at
-FROM role_assignments ra;
+FROM role_assignments ra
+JOIN roles r ON r.id = ra.role_id AND r.deleted_at IS NULL;
 $$;
 
 -- ─── Canonical grant expansion ─────────────────────────────────────────────────
@@ -762,7 +763,7 @@ AS $$
            pb.effect,
            pb.conditions
     FROM role_assignments ra
-    JOIN roles r ON r.id = ra.role_id
+    JOIN roles r ON r.id = ra.role_id AND r.deleted_at IS NULL
     JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
     JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
     JOIN permission_block_scopes pbs ON pbs.permission_block_id = pb.id

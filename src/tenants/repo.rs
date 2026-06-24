@@ -730,6 +730,7 @@ pub async fn list_tenant_members(
            JOIN entities e ON e.id = tm.entity_id
            WHERE tm.tenant_id = $1
              AND tm.status = 'active'
+             AND e.deleted_at IS NULL
              AND e.kind = 'human'
              AND ($2::text IS NULL OR e.name ILIKE $2 OR e.attributes::text ILIKE $2)
            ORDER BY e.created_at DESC
@@ -749,6 +750,7 @@ pub async fn list_tenant_members(
            JOIN entities e ON e.id = tm.entity_id
            WHERE tm.tenant_id = $1
              AND tm.status = 'active'
+             AND e.deleted_at IS NULL
              AND e.kind = 'human'
              AND ($2::text IS NULL OR e.name ILIKE $2 OR e.attributes::text ILIKE $2)"#,
     )
@@ -778,6 +780,7 @@ pub async fn list_tenant_assignable_entities(
            FROM entities e
            WHERE e.kind = 'human'
              AND e.status = 'active'
+             AND e.deleted_at IS NULL
              AND ($2::text IS NULL OR e.name ILIKE $2 OR e.attributes::text ILIKE $2)
              AND NOT EXISTS (
                  SELECT 1
@@ -802,6 +805,7 @@ pub async fn list_tenant_assignable_entities(
            FROM entities e
            WHERE e.kind = 'human'
              AND e.status = 'active'
+             AND e.deleted_at IS NULL
              AND ($2::text IS NULL OR e.name ILIKE $2 OR e.attributes::text ILIKE $2)
              AND NOT EXISTS (
                  SELECT 1
@@ -880,13 +884,13 @@ pub async fn list_tenant_role_assignments(
         r#"WITH RECURSIVE subject_groups(group_id, path) AS (
              SELECT gm.group_id, g.name
              FROM group_members gm
-             JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+             JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.deleted_at IS NULL
              WHERE gm.entity_id = $2
              UNION ALL
              SELECT gh.parent_id, parent.name || ' -> ' || sg.path
              FROM group_hierarchy gh
              JOIN subject_groups sg ON sg.group_id = gh.child_id
-             JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active'
+             JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.deleted_at IS NULL
            ), assignments AS (
              SELECT ra.role_id, 'direct'::text AS assignment_path
              FROM role_assignments ra
@@ -912,7 +916,7 @@ pub async fn list_tenant_role_assignments(
                     ORDER BY assignments.assignment_path
                   ) AS assignment_paths
            FROM assignments
-           JOIN roles r ON r.id = assignments.role_id
+           JOIN roles r ON r.id = assignments.role_id AND r.deleted_at IS NULL
            LEFT JOIN role_permission_blocks rpb ON rpb.role_id = r.id
            LEFT JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
            LEFT JOIN actions a ON a.id = pba.action_id

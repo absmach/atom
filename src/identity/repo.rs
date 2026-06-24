@@ -1001,7 +1001,7 @@ pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Ent
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            JOIN principal_group_members gm ON gm.entity_id = e.id
-           WHERE gm.group_id = $1
+           WHERE gm.group_id = $1 AND e.deleted_at IS NULL
            ORDER BY e.name"#,
     )
     .bind(group_id)
@@ -1011,11 +1011,16 @@ pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Ent
 }
 
 pub async fn get_entity_groups(pool: &PgPool, entity_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT group_id FROM principal_group_members WHERE entity_id = $1")
-        .bind(entity_id)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)
+    sqlx::query_scalar(
+        r#"SELECT gm.group_id
+           FROM principal_group_members gm
+           JOIN groups g ON g.id = gm.group_id AND g.deleted_at IS NULL
+           WHERE gm.entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
 
 // ─── Ownerships ──────────────────────────────────────────────────────────────
@@ -1046,7 +1051,7 @@ pub async fn list_owned(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Entity>, Ap
                   e.status, e.attributes, e.created_at, e.updated_at
            FROM entities e
            JOIN ownerships o ON o.owned_id = e.id
-           WHERE o.owner_id = $1
+           WHERE o.owner_id = $1 AND e.deleted_at IS NULL
            ORDER BY e.created_at DESC"#,
     )
     .bind(owner_id)

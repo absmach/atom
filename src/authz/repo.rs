@@ -1817,7 +1817,7 @@ async fn validate_composite_children(
                   EXISTS (SELECT 1 FROM effective_role_actions() rc WHERE rc.role_id = r.id) AS has_capabilities,
                   FALSE AS has_children
            FROM roles r
-           WHERE r.id = ANY($1::uuid[])"#,
+           WHERE r.id = ANY($1::uuid[]) AND r.deleted_at IS NULL"#,
     )
     .bind(&unique_child_ids)
     .fetch_all(pool)
