@@ -14,7 +14,7 @@ use atom::{
     models::{
         entity::{ListEntities, UpdateEntity},
         enums::DeletedFilter,
-        group::{ListGroups, UpdateGroup},
+        group::{CreateGroup, ListGroups, UpdateGroup},
         resource::{ListResources, UpdateResource},
         role::{ListRoles, UpdateRole},
         session::PasswordResetConfirmRequest,
@@ -254,6 +254,93 @@ async fn name_is_reusable_after_soft_delete() {
     // index is partial on deleted_at IS NULL.
     let second = make_entity(&pool, &name, None).await;
     assert_ne!(first, second);
+}
+
+#[tokio::test]
+#[ignore]
+async fn email_is_reusable_after_soft_delete() {
+    let pool = common::pool().await;
+    let email = format!("sd-reuse-{}@example.com", Uuid::new_v4());
+
+    let first = make_entity(&pool, &format!("sd-email-{}", Uuid::new_v4()), None).await;
+    sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+        .bind(Uuid::new_v4())
+        .bind(first)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("insert first email");
+
+    atom::identity::repo::delete_entity(&pool, first, None)
+        .await
+        .expect("soft delete first");
+
+    // The email row is tombstoned alongside the entity.
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted_at FROM entity_emails WHERE entity_id = $1")
+            .bind(first)
+            .fetch_one(&pool)
+            .await
+            .expect("first email row");
+    assert!(
+        deleted_at.is_some(),
+        "soft delete must tombstone the entity's email"
+    );
+
+    // The OAuth lookup (which filters deleted rows) no longer resolves the address
+    // to the tombstoned entity, so a returning user re-onboards as a new entity.
+    let resolved: Option<Uuid> = sqlx::query_scalar(
+        "SELECT entity_id FROM entity_emails WHERE email = $1 AND deleted_at IS NULL",
+    )
+    .bind(&email)
+    .fetch_optional(&pool)
+    .await
+    .expect("oauth lookup");
+    assert_eq!(resolved, None, "tombstoned email must not resolve");
+
+    // Re-registering the same address on a fresh entity must succeed now that the
+    // unique index is partial on deleted_at IS NULL.
+    let second = make_entity(&pool, &format!("sd-email-{}", Uuid::new_v4()), None).await;
+    sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+        .bind(Uuid::new_v4())
+        .bind(second)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("re-register email on a fresh entity");
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
+#[ignore]
+async fn get_entity_groups_does_not_duplicate_both_type_groups() {
+    let pool = common::pool().await;
+    let entity_id = make_entity(&pool, &format!("sd-grp-mem-{}", Uuid::new_v4()), None).await;
+
+    // `create_group` defaults to a 'both'-type group, inserting the same UUID into
+    // both principal_groups and object_groups.
+    let group = atom::identity::repo::create_group(
+        &pool,
+        CreateGroup {
+            id: None,
+            name: format!("sd-grp-dedup-{}", Uuid::new_v4()),
+            tenant_id: None,
+            group_type: None,
+            description: None,
+            attributes: serde_json::Value::Null,
+        },
+    )
+    .await
+    .expect("create group");
+    atom::identity::repo::add_group_member(&pool, group.id, entity_id)
+        .await
+        .expect("add member");
+
+    let groups = atom::identity::repo::get_entity_groups(&pool, entity_id)
+        .await
+        .expect("entity groups");
+    let hits = groups.iter().filter(|&&g| g == group.id).count();
+    assert_eq!(hits, 1, "a 'both'-type group must appear exactly once");
 }
 
 #[tokio::test]

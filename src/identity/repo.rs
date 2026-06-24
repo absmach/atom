@@ -655,6 +655,17 @@ pub async fn delete_entity(
     .await
     .map_err(db_err)?;
 
+    // Tombstone the email so its address frees for re-registration / OAuth
+    // re-onboarding (the partial unique index excludes deleted rows).
+    sqlx::query(
+        "UPDATE entity_emails SET deleted_at = now(), updated_at = now()
+         WHERE entity_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
     tx.commit().await.map_err(db_err)?;
     Ok(())
 }
@@ -1335,7 +1346,7 @@ pub async fn get_entity_groups(pool: &PgPool, entity_id: Uuid) -> Result<Vec<Uui
     sqlx::query_scalar(
         r#"SELECT gm.group_id
            FROM principal_group_members gm
-           JOIN groups g ON g.id = gm.group_id AND g.deleted_at IS NULL
+           JOIN principal_groups g ON g.id = gm.group_id AND g.deleted_at IS NULL
            WHERE gm.entity_id = $1"#,
     )
     .bind(entity_id)

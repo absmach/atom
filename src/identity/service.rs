@@ -1286,11 +1286,13 @@ async fn upsert_oauth_identity(
         return Ok(entity_id);
     }
 
-    let entity_id = match sqlx::query("SELECT entity_id FROM entity_emails WHERE email = $1")
-        .bind(email)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_err)?
+    let entity_id = match sqlx::query(
+        "SELECT entity_id FROM entity_emails WHERE email = $1 AND deleted_at IS NULL",
+    )
+    .bind(email)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?
     {
         Some(row) => {
             let entity_id = row.try_get("entity_id").map_err(db_err)?;

@@ -187,13 +187,17 @@ CREATE INDEX idx_sessions_active ON sessions(id) WHERE revoked_at IS NULL;
 CREATE TABLE entity_emails (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_id   UUID        NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    email       TEXT        NOT NULL UNIQUE,
+    email       TEXT        NOT NULL,
     verified_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at  TIMESTAMPTZ,
     UNIQUE (entity_id)
 );
 
+-- Partial unique index so an email frees on soft delete (re-registration / OAuth
+-- re-onboarding with the same address). Mirrors the name/alias partial indexes.
+CREATE UNIQUE INDEX idx_entity_emails_email ON entity_emails(email) WHERE deleted_at IS NULL;
 CREATE INDEX idx_entity_emails_entity ON entity_emails(entity_id);
 CREATE INDEX idx_entity_emails_verified ON entity_emails(verified_at);
 
