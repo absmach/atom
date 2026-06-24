@@ -623,13 +623,30 @@ pub async fn delete_entity(
         return Err(AppError::not_found(format!("entity {id} not found")));
     }
 
-    sqlx::query(
-        "UPDATE credentials SET status = 'revoked' WHERE entity_id = $1 AND status = 'active'",
+    let revoked_certificates: i64 = sqlx::query_scalar(
+        r#"WITH revoked AS (
+               UPDATE credentials
+               SET status = 'revoked',
+                   metadata = CASE
+                       WHEN kind = 'certificate'
+                       THEN metadata || jsonb_build_object(
+                           'revoked_at', now(),
+                           'revocation_reason', 'entity_deleted'
+                       )
+                       ELSE metadata
+                   END
+               WHERE entity_id = $1 AND status = 'active'
+               RETURNING kind
+           )
+           SELECT COUNT(*) FILTER (WHERE kind = 'certificate') FROM revoked"#,
     )
     .bind(id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
+    if revoked_certificates > 0 {
+        crate::certs::repo::mark_crl_dirty_tx(&mut tx).await?;
+    }
     sqlx::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )

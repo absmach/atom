@@ -366,11 +366,12 @@ deletes. Atom stamps `deleted_at` and `deleted_by`, hides the row from normal
 reads, listings, login, and authorization checks, and leaves physical removal to
 an explicit purge path.
 
-- Entity delete also revokes that entity's credentials and sessions.
-- Tenant delete sets tenant `status = deleted` and revokes sessions for child
-  entities in that tenant.
-- Entity, group, resource, and role delete leave their existing `status` value
-  unchanged; the tombstone is the lifecycle marker.
+- Entity delete also sets entity `status = inactive` and revokes that entity's
+  credentials and sessions.
+- Tenant delete sets tenant `status = deleted` and revokes credentials and
+  sessions for child entities in that tenant.
+- Group, resource, and role delete leave their existing `status` value
+  unchanged; the tombstone is the lifecycle marker for those objects.
 - Live name and alias uniqueness uses partial indexes, so names and aliases are
   reusable after soft delete.
 - Admin list queries expose a `deleted` filter for tombstone inspection; live

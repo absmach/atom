@@ -275,3 +275,16 @@ pub async fn mark_crl_dirty(pool: &PgPool) -> Result<(), AppError> {
     .map_err(AppError::Database)?;
     Ok(())
 }
+
+pub async fn mark_crl_dirty_tx(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE certificate_crl_state
+        SET dirty = TRUE, updated_at = now()
+        "#,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(())
+}

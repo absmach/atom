@@ -687,6 +687,12 @@ pub async fn create_role_with_assignments(
         .await?;
     }
 
+    let mut locked_child_role_ids = child_role_ids.to_vec();
+    locked_child_role_ids.sort_unstable();
+    locked_child_role_ids.dedup();
+    for child_role_id in locked_child_role_ids {
+        lock_role(&mut tx, child_role_id).await?;
+    }
     for child_role_id in child_role_ids {
         copy_role_permission_blocks(&mut tx, role.id, *child_role_id).await?;
     }
@@ -1176,6 +1182,7 @@ async fn copy_role_permission_blocks(
                   pb.object_id, pb.group_id, pb.effect, pb.conditions
            FROM role_permission_blocks rpb
            JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           JOIN roles r ON r.id = rpb.role_id AND r.deleted_at IS NULL
            WHERE rpb.role_id = $1"#,
     )
     .bind(source_role_id)
@@ -2417,19 +2424,13 @@ pub async fn add_composite_role_child(
     parent_role_id: Uuid,
     child_role_id: Uuid,
 ) -> Result<(), AppError> {
+    let parent = get_role(pool, parent_role_id).await?;
+    validate_composite_children(pool, parent_role_id, parent.tenant_id, &[child_role_id]).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, parent_role_id).await?;
+    lock_role(&mut tx, child_role_id).await?;
     copy_role_permission_blocks(&mut tx, parent_role_id, child_role_id).await?;
     tx.commit().await.map_err(db_err)?;
-    Ok(())
-}
-
-pub async fn remove_composite_role_child(
-    pool: &PgPool,
-    parent_role_id: Uuid,
-    child_role_id: Uuid,
-) -> Result<(), AppError> {
-    let _ = (pool, parent_role_id, child_role_id);
     Ok(())
 }
 
@@ -2438,8 +2439,16 @@ pub async fn replace_composite_role_children(
     parent_role_id: Uuid,
     child_role_ids: &[Uuid],
 ) -> Result<(), AppError> {
+    let parent = get_role(pool, parent_role_id).await?;
+    validate_composite_children(pool, parent_role_id, parent.tenant_id, child_role_ids).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, parent_role_id).await?;
+    let mut locked_child_role_ids = child_role_ids.to_vec();
+    locked_child_role_ids.sort_unstable();
+    locked_child_role_ids.dedup();
+    for child_role_id in locked_child_role_ids {
+        lock_role(&mut tx, child_role_id).await?;
+    }
     let old_block_ids = role_block_ids(&mut tx, parent_role_id).await?;
     unlink_role_blocks_and_gc(&mut tx, parent_role_id, &old_block_ids).await?;
     for child_role_id in child_role_ids {
@@ -3239,6 +3248,44 @@ pub async fn create_role_assignment(
     Ok(assignment)
 }
 
+pub(crate) async fn create_role_assignment_if_missing_in_tx(
+    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateRoleAssignment,
+) -> Result<(), AppError> {
+    lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
+    lock_role(tx, req.role_id).await?;
+    validate_role_assignment_in_tx(pool, tx, req).await?;
+    sqlx::query(
+        r#"INSERT INTO role_assignments
+             (tenant_id, subject_kind, subject_id, role_id)
+           SELECT $1, $2, $3, $4
+           WHERE NOT EXISTS (
+               SELECT 1 FROM role_assignments
+               WHERE tenant_id IS NOT DISTINCT FROM $1
+                 AND subject_kind = $2
+                 AND subject_id = $3
+                 AND role_id = $4
+           )"#,
+    )
+    .bind(req.tenant_id)
+    .bind(req.subject_kind.clone())
+    .bind(req.subject_id)
+    .bind(req.role_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+pub(crate) async fn lock_live_entity_subject_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    assignment_tenant_id: Option<Uuid>,
+    entity_id: Uuid,
+) -> Result<(), AppError> {
+    lock_live_subject(tx, assignment_tenant_id, &SubjectKind::Entity, entity_id).await
+}
+
 pub async fn list_role_assignments(
     pool: &PgPool,
     params: ListRoleAssignments,
@@ -3473,6 +3520,34 @@ async fn validate_role_assignment(
     .await
 }
 
+async fn validate_role_assignment_in_tx(
+    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateRoleAssignment,
+) -> Result<(), AppError> {
+    let role_tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+            .bind(req.role_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::bad_request("role assignment references unknown role"))?;
+    if role_tenant_id != req.tenant_id {
+        return Err(AppError::bad_request(
+            "role assignment tenantId must match role tenantId",
+        ));
+    }
+    validate_subject_boundary_in_tx(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
+    crate::guardrails::validate_role_assignment(
+        pool,
+        req.tenant_id,
+        req.subject_kind.clone(),
+        req.subject_id,
+        req.role_id,
+    )
+    .await
+}
+
 async fn validate_direct_policy(pool: &PgPool, req: &CreateDirectPolicy) -> Result<(), AppError> {
     let block_tenant_id: Option<Uuid> =
         sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
@@ -3489,6 +3564,66 @@ async fn validate_direct_policy(pool: &PgPool, req: &CreateDirectPolicy) -> Resu
         ));
     }
     validate_subject_boundary(pool, req.tenant_id, &req.subject_kind, req.subject_id).await
+}
+
+async fn validate_subject_boundary_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Option<Uuid>,
+    subject_kind: &SubjectKind,
+    subject_id: Uuid,
+) -> Result<(), AppError> {
+    match subject_kind {
+        SubjectKind::Entity => {
+            let entity_tenant_id: Option<Uuid> = sqlx::query_scalar(
+                "SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(subject_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
+            if let Some(tenant_id) = tenant_id {
+                let member: bool = sqlx::query_scalar(
+                    r#"SELECT EXISTS (
+                         SELECT 1 FROM tenant_memberships
+                         WHERE tenant_id = $1 AND entity_id = $2 AND status = 'active'
+                       )"#,
+                )
+                .bind(tenant_id)
+                .bind(subject_id)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(db_err)?;
+                if entity_tenant_id != Some(tenant_id) && !member {
+                    return Err(AppError::bad_request(
+                        "tenant assignment subject entity must belong to the tenant",
+                    ));
+                }
+            } else if entity_tenant_id.is_some() {
+                return Err(AppError::bad_request(
+                    "platform assignment cannot target tenant-owned entity",
+                ));
+            }
+        }
+        SubjectKind::Group => {
+            let group_tenant_id: Option<Uuid> = sqlx::query_scalar(
+                "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
+            )
+            .bind(subject_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| {
+                AppError::bad_request("assignment references unknown principal group")
+            })?;
+            if group_tenant_id != tenant_id {
+                return Err(AppError::bad_request(
+                    "assignment subject principal group must be in the same tenant",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn validate_subject_boundary(

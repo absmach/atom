@@ -60,6 +60,27 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
         .execute(&pool)
         .await
         .expect("insert credential");
+    let cert_id = Uuid::new_v4();
+    let serial = format!("{:032x}", cert_id.as_u128());
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, identifier, status)
+         VALUES ($1, $2, 'certificate', $3, 'active')",
+    )
+    .bind(cert_id)
+    .bind(id)
+    .bind(&serial)
+    .execute(&pool)
+    .await
+    .expect("insert certificate credential");
+    let issuer = format!("sd-issuer-{cert_id}");
+    sqlx::query(
+        "INSERT INTO certificate_crl_state (issuer_fingerprint_sha256, dirty)
+         VALUES ($1, FALSE)",
+    )
+    .bind(&issuer)
+    .execute(&pool)
+    .await
+    .expect("insert crl state");
     let session_id = atom::identity::repo::create_session(&pool, id, 3600)
         .await
         .expect("create session")
@@ -88,6 +109,31 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
         .await
         .expect("credential");
     assert_eq!(cred_status, "revoked");
+    let (cert_status, cert_metadata): (String, serde_json::Value) =
+        sqlx::query_as("SELECT status, metadata FROM credentials WHERE id = $1")
+            .bind(cert_id)
+            .fetch_one(&pool)
+            .await
+            .expect("certificate credential");
+    assert_eq!(cert_status, "revoked");
+    assert_eq!(
+        cert_metadata
+            .get("revocation_reason")
+            .and_then(serde_json::Value::as_str),
+        Some("entity_deleted")
+    );
+    assert!(
+        cert_metadata.get("revoked_at").is_some(),
+        "certificate revocation time should be recorded"
+    );
+    let crl_dirty: bool = sqlx::query_scalar(
+        "SELECT dirty FROM certificate_crl_state WHERE issuer_fingerprint_sha256 = $1",
+    )
+    .bind(&issuer)
+    .fetch_one(&pool)
+    .await
+    .expect("crl state");
+    assert!(crl_dirty, "entity certificate revocation should dirty CRLs");
 
     let revoked: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
@@ -945,7 +991,48 @@ async fn assignment_to_soft_deleted_subject_is_rejected_and_unlisted() {
 
 #[tokio::test]
 #[ignore]
-async fn soft_delete_tenant_marks_and_revokes_child_sessions() {
+async fn composite_role_helpers_reject_deleted_child_roles() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, &format!("sd-comp-ten-{}", Uuid::new_v4())).await;
+    let parent_role = Uuid::new_v4();
+    let child_role = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3), ($4, $5, $3)")
+        .bind(parent_role)
+        .bind(format!("sd-comp-parent-{parent_role}"))
+        .bind(tenant_id)
+        .bind(child_role)
+        .bind(format!("sd-comp-child-{child_role}"))
+        .execute(&pool)
+        .await
+        .expect("roles");
+    atom::authz::repo::delete_role(&pool, child_role, None)
+        .await
+        .expect("delete child role");
+
+    assert!(
+        atom::authz::repo::add_composite_role_child(&pool, parent_role, child_role)
+            .await
+            .is_err(),
+        "deleted child roles must not be copied into live parents"
+    );
+    assert!(
+        atom::authz::repo::replace_composite_role_children(&pool, parent_role, &[child_role])
+            .await
+            .is_err(),
+        "deleted replacement children must not be copied into live parents"
+    );
+    let copied_blocks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1")
+            .bind(parent_role)
+            .fetch_one(&pool)
+            .await
+            .expect("parent block count");
+    assert_eq!(copied_blocks, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-tenant-{}", Uuid::new_v4())).await;
     let entity_id = make_entity(
@@ -961,6 +1048,37 @@ async fn soft_delete_tenant_marks_and_revokes_child_sessions() {
         .execute(&pool)
         .await
         .expect("insert session");
+    let api_key_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, identifier, status)
+         VALUES ($1, $2, 'api_key', $3, 'active')",
+    )
+    .bind(api_key_id)
+    .bind(entity_id)
+    .bind(format!("sd-api-{api_key_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert api credential");
+    let cert_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, identifier, status)
+         VALUES ($1, $2, 'certificate', $3, 'active')",
+    )
+    .bind(cert_id)
+    .bind(entity_id)
+    .bind(format!("{:032x}", cert_id.as_u128()))
+    .execute(&pool)
+    .await
+    .expect("insert certificate credential");
+    let issuer = format!("sd-tenant-issuer-{cert_id}");
+    sqlx::query(
+        "INSERT INTO certificate_crl_state (issuer_fingerprint_sha256, dirty)
+         VALUES ($1, FALSE)",
+    )
+    .bind(&issuer)
+    .execute(&pool)
+    .await
+    .expect("insert crl state");
 
     atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
         .await
@@ -982,11 +1100,202 @@ async fn soft_delete_tenant_marks_and_revokes_child_sessions() {
             .await
             .expect("session");
     assert!(revoked.is_some(), "child session should be revoked");
+    let api_status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+        .bind(api_key_id)
+        .fetch_one(&pool)
+        .await
+        .expect("api credential");
+    assert_eq!(api_status, "revoked");
+    let (cert_status, cert_metadata): (String, serde_json::Value) =
+        sqlx::query_as("SELECT status, metadata FROM credentials WHERE id = $1")
+            .bind(cert_id)
+            .fetch_one(&pool)
+            .await
+            .expect("certificate credential");
+    assert_eq!(cert_status, "revoked");
+    assert_eq!(
+        cert_metadata
+            .get("revocation_reason")
+            .and_then(serde_json::Value::as_str),
+        Some("tenant_deleted")
+    );
+    assert!(
+        cert_metadata.get("revoked_at").is_some(),
+        "certificate revocation time should be recorded"
+    );
+    let crl_dirty: bool = sqlx::query_scalar(
+        "SELECT dirty FROM certificate_crl_state WHERE issuer_fingerprint_sha256 = $1",
+    )
+    .bind(&issuer)
+    .fetch_one(&pool)
+    .await
+    .expect("crl state");
+    assert!(crl_dirty, "tenant certificate revocation should dirty CRLs");
 
     // Tenant is hidden from reads.
     assert!(atom::tenants::repo::get_tenant(&pool, tenant_id)
         .await
         .is_err());
+}
+
+#[tokio::test]
+#[ignore]
+async fn invitation_acceptance_rejects_deleted_tenant_subject_and_role_atomically() {
+    async fn invitation_state(
+        pool: &sqlx::PgPool,
+        invitation_id: Uuid,
+        tenant_id: Uuid,
+        invitee_id: Uuid,
+    ) -> (Option<chrono::DateTime<chrono::Utc>>, i64, i64) {
+        let accepted_at =
+            sqlx::query_scalar("SELECT accepted_at FROM tenant_invitations WHERE id = $1")
+                .bind(invitation_id)
+                .fetch_one(pool)
+                .await
+                .expect("invitation accepted_at");
+        let memberships = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = $1 AND entity_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(invitee_id)
+        .fetch_one(pool)
+        .await
+        .expect("membership count");
+        let assignments = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM role_assignments WHERE tenant_id = $1 AND subject_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(invitee_id)
+        .fetch_one(pool)
+        .await
+        .expect("assignment count");
+        (accepted_at, memberships, assignments)
+    }
+
+    let pool = common::pool().await;
+    let inviter = make_entity(&pool, &format!("sd-inviter-{}", Uuid::new_v4()), None).await;
+
+    let deleted_tenant = make_tenant(&pool, &format!("sd-inv-del-ten-{}", Uuid::new_v4())).await;
+    let tenant_invitee = make_entity(&pool, &format!("sd-inv-user-{}", Uuid::new_v4()), None).await;
+    let deleted_tenant_invitation = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tenant_invitations
+           (id, tenant_id, invitee_user_id, invited_by, expires_at)
+         VALUES ($1, $2, $3, $4, now() + interval '1 hour')",
+    )
+    .bind(deleted_tenant_invitation)
+    .bind(deleted_tenant)
+    .bind(tenant_invitee)
+    .bind(inviter)
+    .execute(&pool)
+    .await
+    .expect("deleted tenant invitation");
+    atom::tenants::repo::soft_delete_tenant(&pool, deleted_tenant, None)
+        .await
+        .expect("delete tenant");
+    assert!(
+        atom::tenants::repo::accept_invitation(&pool, deleted_tenant, tenant_invitee)
+            .await
+            .is_err(),
+        "deleted tenant invitation must not be accepted"
+    );
+    assert_eq!(
+        invitation_state(
+            &pool,
+            deleted_tenant_invitation,
+            deleted_tenant,
+            tenant_invitee
+        )
+        .await,
+        (None, 0, 0)
+    );
+
+    let deleted_subject_tenant =
+        make_tenant(&pool, &format!("sd-inv-del-sub-ten-{}", Uuid::new_v4())).await;
+    let deleted_subject = make_entity(
+        &pool,
+        &format!("sd-inv-deleted-user-{}", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    let deleted_subject_invitation = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tenant_invitations
+           (id, tenant_id, invitee_user_id, invited_by, expires_at)
+         VALUES ($1, $2, $3, $4, now() + interval '1 hour')",
+    )
+    .bind(deleted_subject_invitation)
+    .bind(deleted_subject_tenant)
+    .bind(deleted_subject)
+    .bind(inviter)
+    .execute(&pool)
+    .await
+    .expect("deleted subject invitation");
+    atom::identity::repo::delete_entity(&pool, deleted_subject, None)
+        .await
+        .expect("delete subject");
+    assert!(
+        atom::tenants::repo::accept_invitation(&pool, deleted_subject_tenant, deleted_subject)
+            .await
+            .is_err(),
+        "deleted invitee must not be accepted"
+    );
+    assert_eq!(
+        invitation_state(
+            &pool,
+            deleted_subject_invitation,
+            deleted_subject_tenant,
+            deleted_subject
+        )
+        .await,
+        (None, 0, 0)
+    );
+
+    let deleted_role_tenant =
+        make_tenant(&pool, &format!("sd-inv-del-role-ten-{}", Uuid::new_v4())).await;
+    let role_invitee =
+        make_entity(&pool, &format!("sd-inv-role-user-{}", Uuid::new_v4()), None).await;
+    let deleted_role = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(deleted_role)
+        .bind(format!("sd-inv-role-{deleted_role}"))
+        .bind(deleted_role_tenant)
+        .execute(&pool)
+        .await
+        .expect("role");
+    let deleted_role_invitation = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tenant_invitations
+           (id, tenant_id, invitee_user_id, invited_by, role_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5, now() + interval '1 hour')",
+    )
+    .bind(deleted_role_invitation)
+    .bind(deleted_role_tenant)
+    .bind(role_invitee)
+    .bind(inviter)
+    .bind(deleted_role)
+    .execute(&pool)
+    .await
+    .expect("deleted role invitation");
+    atom::authz::repo::delete_role(&pool, deleted_role, None)
+        .await
+        .expect("delete role");
+    assert!(
+        atom::tenants::repo::accept_invitation(&pool, deleted_role_tenant, role_invitee)
+            .await
+            .is_err(),
+        "deleted role invitation must not be accepted"
+    );
+    assert_eq!(
+        invitation_state(
+            &pool,
+            deleted_role_invitation,
+            deleted_role_tenant,
+            role_invitee
+        )
+        .await,
+        (None, 0, 0)
+    );
 }
 
 #[tokio::test]

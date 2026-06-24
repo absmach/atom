@@ -8,7 +8,8 @@ use crate::{
     identity::service::{hash_secret, verify_secret},
     models::{
         entity::{Entity, EntityList},
-        enums::TenantStatus,
+        enums::{SubjectKind, TenantStatus},
+        policy::CreateRoleAssignment,
         tenant::{
             CreateTenant, CreateTenantInvitation, ListTenantInvitations, ListTenants, Tenant,
             TenantInvitation, TenantInvitationList, TenantList, UpdateTenant,
@@ -511,11 +512,9 @@ pub async fn update_tenant(
 }
 
 /// Soft-delete a tenant: mark `status = deleted`, stamp the tombstone, and
-/// immediately revoke every active session of entities in the tenant so they are
-/// logged out now. New logins are blocked by the tenant-tombstone check on the
-/// login path; the PDP already denies any object owned by a deleted tenant.
-/// Credentials are intentionally left intact so the tenant is recoverable.
-/// Physical removal (and the entity cascade) is deferred to the purge cron.
+/// immediately revoke every active credential and session of entities in the
+/// tenant. Physical removal (and the entity cascade) is deferred to the purge
+/// cron.
 pub async fn soft_delete_tenant(
     pool: &PgPool,
     id: Uuid,
@@ -538,6 +537,34 @@ pub async fn soft_delete_tenant(
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
         other => AppError::Database(other),
     })?;
+
+    let revoked_certificates: i64 = sqlx::query_scalar(
+        r#"WITH revoked AS (
+               UPDATE credentials c
+               SET status = 'revoked',
+                   metadata = CASE
+                       WHEN c.kind = 'certificate'
+                       THEN c.metadata || jsonb_build_object(
+                           'revoked_at', now(),
+                           'revocation_reason', 'tenant_deleted'
+                       )
+                       ELSE c.metadata
+                   END
+               FROM entities e
+               WHERE c.entity_id = e.id
+                 AND e.tenant_id = $1
+                 AND c.status = 'active'
+               RETURNING c.kind
+           )
+           SELECT COUNT(*) FILTER (WHERE kind = 'certificate') FROM revoked"#,
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if revoked_certificates > 0 {
+        crate::certs::repo::mark_crl_dirty_tx(&mut tx).await?;
+    }
 
     sqlx::query(
         "UPDATE sessions SET revoked_at = now()
@@ -1009,8 +1036,11 @@ pub async fn accept_invitation(
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
-    let role_id: Option<Uuid> = accept_invitation_row(pool, tenant_id, invitee_user_id).await?;
-    grant_invitation_role(pool, tenant_id, invitee_user_id, role_id).await
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let role_id = accept_invitation_row(&mut tx, tenant_id, invitee_user_id).await?;
+    grant_invitation_role(&mut tx, pool, tenant_id, invitee_user_id, role_id).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
 }
 
 pub async fn accept_invitation_token(
@@ -1021,14 +1051,16 @@ pub async fn accept_invitation_token(
     let (token_id, token_secret) = parse_secret_token(token, "atomi")
         .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
 
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let row = sqlx::query(
         r#"SELECT id, tenant_id, invitee_user_id, invitee_email, role_id,
                   secret_hash, expires_at, accepted_at, rejected_at, revoked_at
            FROM tenant_invitations
-           WHERE id = $1"#,
+           WHERE id = $1
+           FOR UPDATE"#,
     )
     .bind(token_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::bad_request("invalid invitation token"),
@@ -1076,26 +1108,35 @@ pub async fn accept_invitation_token(
                revoked_at = NULL,
                updated_at = now()
            WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+             AND rejected_at IS NULL
+             AND (expires_at IS NULL OR expires_at >= now())
            RETURNING role_id"#,
     )
     .bind(token_id)
     .bind(actor_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?
-    .flatten()
-    .or(role_id);
+    .ok_or_else(|| AppError::bad_request("invitation token expired"))?;
 
-    grant_invitation_role(pool, tenant_id, actor_id, updated_role_id).await?;
+    grant_invitation_role(
+        &mut tx,
+        pool,
+        tenant_id,
+        actor_id,
+        updated_role_id.or(role_id),
+    )
+    .await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(tenant_id)
 }
 
 async fn accept_invitation_row(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar(
+    sqlx::query_scalar::<_, Option<Uuid>>(
         r#"UPDATE tenant_invitations ti
            SET invitee_user_id = $2,
                accepted_by = $2,
@@ -1105,6 +1146,9 @@ async fn accept_invitation_row(
                updated_at = now()
            WHERE ti.tenant_id = $1
              AND ti.revoked_at IS NULL
+             AND ti.accepted_at IS NULL
+             AND ti.rejected_at IS NULL
+             AND (ti.expires_at IS NULL OR ti.expires_at >= now())
              AND (ti.invitee_user_id = $2
                   OR EXISTS (
                       SELECT 1 FROM entity_emails ee
@@ -1114,18 +1158,24 @@ async fn accept_invitation_row(
     )
     .bind(tenant_id)
     .bind(invitee_user_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)
-    .map(Option::flatten)
+    .and_then(|role_id| {
+        role_id.ok_or_else(|| AppError::not_found("tenant invitation not found or expired"))
+    })
 }
 
 async fn grant_invitation_role(
+    tx: &mut Transaction<'_, Postgres>,
     pool: &PgPool,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
     role_id: Option<Uuid>,
 ) -> Result<(), AppError> {
+    lock_active_tenant(tx, tenant_id).await?;
+    crate::authz::repo::lock_live_entity_subject_in_tx(tx, Some(tenant_id), invitee_user_id)
+        .await?;
     sqlx::query(
         r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
            VALUES ($1, $2, 'active')
@@ -1134,7 +1184,7 @@ async fn grant_invitation_role(
     )
     .bind(tenant_id)
     .bind(invitee_user_id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
@@ -1142,24 +1192,17 @@ async fn grant_invitation_role(
         return Ok(());
     };
 
-    sqlx::query(
-        r#"INSERT INTO role_assignments
-             (tenant_id, subject_kind, subject_id, role_id)
-           SELECT $1, 'entity', $2, $3
-           WHERE NOT EXISTS (
-               SELECT 1 FROM role_assignments
-               WHERE tenant_id = $1
-                 AND subject_kind = 'entity'
-                 AND subject_id = $2
-                 AND role_id = $3
-           )"#,
+    crate::authz::repo::create_role_assignment_if_missing_in_tx(
+        pool,
+        tx,
+        &CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: invitee_user_id,
+            role_id,
+        },
     )
-    .bind(tenant_id)
-    .bind(invitee_user_id)
-    .bind(role_id)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
+    .await?;
     Ok(())
 }
 
