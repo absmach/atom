@@ -428,6 +428,57 @@ impl PolicyMutation {
         Ok(true)
     }
 
+    /// Restore a soft-deleted role within the retention window. The role's
+    /// permission blocks survived the soft delete, so its grants resume flowing
+    /// through the PDP the moment it is restored — hence platform-admin only and
+    /// audit-logged.
+    async fn restore_role(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        let id = parse_id(id, "id")?;
+        authz_repo::restore_role(&state.pool, id, Some(auth.entity_id))
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "role.restore",
+            AuditOutcome::Allow,
+            serde_json::json!({ "role_id": id }),
+        )
+        .await;
+        Ok(true)
+    }
+
+    /// Physically purge an already-soft-deleted role, bypassing the retention
+    /// window. GCs permission blocks left orphaned by the removal. Deliberate,
+    /// irreversible, platform-admin only, and audit-logged.
+    async fn purge_role(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        let id = parse_id(id, "id")?;
+        authz_repo::purge_role(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "role.purge",
+            AuditOutcome::Allow,
+            serde_json::json!({ "role_id": id }),
+        )
+        .await;
+        Ok(true)
+    }
+
     async fn create_action(&self, ctx: &Context<'_>, input: CreateActionInput) -> Result<Action> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;

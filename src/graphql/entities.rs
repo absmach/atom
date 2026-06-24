@@ -1,11 +1,16 @@
 use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
+    audit,
     auth::Scope,
     authz::{engine, repo as authz_repo},
     error::AppError,
     identity::repo,
-    models::{access::AuthorizedObjectIdsQuery, entity as entity_model, enums::DeletedFilter},
+    models::{
+        access::AuthorizedObjectIdsQuery,
+        entity as entity_model,
+        enums::{AuditOutcome, DeletedFilter},
+    },
     state::AppState,
 };
 
@@ -262,6 +267,53 @@ impl EntityMutation {
         repo::delete_entity(&state.pool, id, Some(auth.entity_id))
             .await
             .map_err(gql_error)?;
+        Ok(true)
+    }
+
+    /// Restore a soft-deleted entity while it is still within the purge
+    /// retention window. Reinstates the identity (and frees the access it
+    /// carried), so it is platform-admin-only and audit-logged. Revoked
+    /// credentials and sessions are not reinstated — the entity must
+    /// re-authenticate.
+    async fn restore_entity(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        let id = parse_id(id, "id")?;
+        repo::restore_entity(&state.pool, id, Some(auth.entity_id))
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "entity.restore",
+            AuditOutcome::Allow,
+            serde_json::json!({ "entity_id": id }),
+        )
+        .await;
+        Ok(true)
+    }
+
+    /// Physically purge an already-soft-deleted entity, bypassing the retention
+    /// window. Deliberate, irreversible, platform-admin only, and audit-logged.
+    async fn purge_entity(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        let id = parse_id(id, "id")?;
+        repo::purge_entity(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "entity.purge",
+            AuditOutcome::Allow,
+            serde_json::json!({ "entity_id": id }),
+        )
+        .await;
         Ok(true)
     }
 

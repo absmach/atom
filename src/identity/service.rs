@@ -1680,13 +1680,25 @@ pub async fn revoke_credential(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let result = sqlx::query("UPDATE credentials SET status = $3 WHERE id = $1 AND entity_id = $2")
-        .bind(cred_id)
-        .bind(entity_id)
-        .bind(CredentialStatus::Revoked)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+    // Overwrite any prior revocation provenance (e.g. a `tenant_deleted` marker
+    // from a tenant soft delete) with this explicit revocation, so a later tenant
+    // restore — which only reactivates credentials still marked `tenant_deleted` —
+    // cannot resurrect a credential an admin has deliberately revoked.
+    let result = sqlx::query(
+        r#"UPDATE credentials
+           SET status = 'revoked',
+               metadata = metadata - 'revoked_at' - 'revocation_reason'
+                          || jsonb_build_object(
+                              'revoked_at', now(),
+                              'revocation_reason', 'manual'
+                          )
+           WHERE id = $1 AND entity_id = $2"#,
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found("credential not found"));
     }

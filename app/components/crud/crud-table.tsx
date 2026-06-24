@@ -36,7 +36,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/ui/data-table";
 import { requireResource } from "@/lib/crud/resources";
-import { SOFT_DELETE_RETENTION_NOTE } from "@/lib/crud/retention";
+import {
+  PERMANENT_DELETE_WARNING,
+  SOFT_DELETE_RETENTION_NOTE,
+} from "@/lib/crud/retention";
 import { graphqlClient } from "@/lib/graphql/client";
 import { extractIds, useNameMap } from "@/lib/reconcile/use-name-map";
 
@@ -50,6 +53,7 @@ export function CrudTable({
   page,
   limit,
   source,
+  showDeletedColumns = false,
 }: CrudTableProps) {
   const resource = requireResource(resourceKey);
   const router = useRouter();
@@ -124,6 +128,40 @@ export function CrudTable({
     },
     onSuccess: () => {
       toast.success(`${singularize(resource.title)} deleted`);
+      router.refresh();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  const restore = useMutation({
+    mutationFn: async (row: Row) => {
+      if (!resource.restoreMutation) {
+        throw new Error("Restore is not available for this resource.");
+      }
+      return graphqlClient({
+        query: resource.restoreMutation,
+        variables: { id: row.id },
+      });
+    },
+    onSuccess: () => {
+      toast.success(`${singularize(resource.title)} restored`);
+      router.refresh();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  const purge = useMutation({
+    mutationFn: async (row: Row) => {
+      if (!resource.purgeMutation) {
+        throw new Error("Permanent delete is not available for this resource.");
+      }
+      return graphqlClient({
+        query: resource.purgeMutation,
+        variables: { id: row.id },
+      });
+    },
+    onSuccess: () => {
+      toast.success(`${singularize(resource.title)} permanently deleted`);
       router.refresh();
     },
     onError: (error) => toast.error(error.message),
@@ -219,8 +257,14 @@ export function CrudTable({
     create.mutate(input);
   }
 
+  const visibleColumns = showDeletedColumns
+    ? resource.columns
+    : resource.columns.filter(
+        (col) => col.key !== "deletedAt" && col.key !== "deletedBy",
+      );
+
   const columns: ColumnDef<Row>[] = [
-    ...resource.columns.map((col) => ({
+    ...visibleColumns.map((col) => ({
       accessorKey: col.key,
       header: col.label,
       cell: ({ getValue }: { getValue: () => unknown }) =>
@@ -228,6 +272,11 @@ export function CrudTable({
     })),
     {
       id: "_row_actions",
+      // Pin the actions to the right edge so they stay visible while the rest of
+      // the (often wide) row scrolls horizontally underneath.
+      meta: {
+        className: "sticky right-0 z-10 bg-card",
+      },
       header: () => <span className="sr-only">Actions</span>,
       cell: ({ row }: { row: { original: Row } }) => (
         <TableRowActions
@@ -236,6 +285,14 @@ export function CrudTable({
           onDelete={(label) => {
             if (window.confirm(label)) destroy.mutate(row.original);
           }}
+          onRestore={() => restore.mutate(row.original)}
+          restorePending={restore.isPending}
+          canRestore={Boolean(resource.restoreMutation)}
+          onPurge={(label) => {
+            if (window.confirm(label)) purge.mutate(row.original);
+          }}
+          purgePending={purge.isPending}
+          canPurge={Boolean(resource.purgeMutation)}
           onEdit={editingSetters}
           onInspect={() => defer(() => setInspected(row.original))}
           onEntityStatusChange={(action) =>
@@ -342,6 +399,12 @@ function TableRowActions({
   destroyPending,
   entityStatusPending,
   onDelete,
+  onRestore,
+  restorePending,
+  canRestore,
+  onPurge,
+  purgePending,
+  canPurge,
   onEdit,
   onEntityStatusChange,
   onInspect,
@@ -357,6 +420,12 @@ function TableRowActions({
   destroyPending: boolean;
   entityStatusPending: boolean;
   onDelete: (label: string) => void;
+  onRestore: () => void;
+  restorePending: boolean;
+  canRestore: boolean;
+  onPurge: (label: string) => void;
+  purgePending: boolean;
+  canPurge: boolean;
   onEdit: EditingSetters;
   onEntityStatusChange: (action: keyof typeof ENTITY_STATUS_MUTATIONS) => void;
   onInspect: () => void;
@@ -375,6 +444,31 @@ function TableRowActions({
         <Button onClick={onInspect} size="sm" variant="outline">
           Inspect
         </Button>
+        {canRestore ? (
+          <Button
+            disabled={restorePending}
+            onClick={onRestore}
+            size="sm"
+            variant="outline"
+            className="border-green-500/50 text-green-600 hover:bg-green-500/10 hover:text-green-600 dark:border-green-500/40 dark:text-green-400"
+          >
+            Restore
+          </Button>
+        ) : null}
+        {canPurge ? (
+          <Button
+            disabled={purgePending}
+            onClick={() =>
+              onPurge(
+                `Permanently delete "${String(row.name ?? row.id)}"? ${PERMANENT_DELETE_WARNING}`,
+              )
+            }
+            size="sm"
+            variant="destructive"
+          >
+            Delete permanently
+          </Button>
+        ) : null}
       </div>
     );
   }

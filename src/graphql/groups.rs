@@ -1,12 +1,13 @@
 use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
+    audit,
     auth::Scope,
     authz::{engine, repo as authz_repo},
     identity::repo,
     models::{
         access::AuthorizedObjectIdsQuery,
-        enums::{DeletedFilter, EntityStatus},
+        enums::{AuditOutcome, DeletedFilter, EntityStatus},
         group::{CreateGroup, ListGroups, UpdateGroup},
         policy::AuthzRequest,
     },
@@ -422,6 +423,51 @@ impl GroupMutation {
         repo::delete_group(&state.pool, id, Some(auth.entity_id))
             .await
             .map_err(gql_error)?;
+        Ok(true)
+    }
+
+    /// Restore a soft-deleted group within the retention window. Platform-admin
+    /// only and audit-logged, since restoring a group reinstates the membership
+    /// paths and grants that flowed through it.
+    async fn restore_group(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        let id = parse_id(id, "id")?;
+        repo::restore_group(&state.pool, id, Some(auth.entity_id))
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "group.restore",
+            AuditOutcome::Allow,
+            serde_json::json!({ "group_id": id }),
+        )
+        .await;
+        Ok(true)
+    }
+
+    /// Physically purge an already-soft-deleted group, bypassing the retention
+    /// window. Deliberate, irreversible, platform-admin only, and audit-logged.
+    async fn purge_group(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        let id = parse_id(id, "id")?;
+        repo::purge_group(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            None,
+            "group.purge",
+            AuditOutcome::Allow,
+            serde_json::json!({ "group_id": id }),
+        )
+        .await;
         Ok(true)
     }
 

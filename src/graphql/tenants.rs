@@ -327,6 +327,37 @@ impl TenantMutation {
         Ok(true)
     }
 
+    /// Restore a soft-deleted tenant within the retention window. Reactivates the
+    /// tenant and un-hides its children automatically; revoked sessions and
+    /// certificates are not reinstated, so members must re-authenticate.
+    /// Admin-only and audit-logged.
+    async fn restore_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<Tenant> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+
+        let tenant_id = parse_id(id, "id")?;
+        let tenant = tenant_repo::restore_tenant(&state.pool, tenant_id, Some(auth.entity_id))
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            Some(auth.entity_id),
+            Some(tenant.id),
+            "tenant.restore",
+            AuditOutcome::Allow,
+            serde_json::json!({
+                "tenant_id": tenant.id,
+                "tenant_name": tenant.name,
+            }),
+        )
+        .await;
+
+        Ok(tenant.into())
+    }
+
     /// Physically purge an already-soft-deleted tenant and all its data,
     /// bypassing the purge retention window. Deliberate, irreversible, admin-only.
     async fn purge_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {

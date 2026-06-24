@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    error::{db_err, AppError},
+    error::{db_err, restore_conflict, AppError},
     models::{
         entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
         enums::EntityKind,
@@ -670,6 +670,117 @@ pub async fn delete_entity(
     Ok(())
 }
 
+/// Reverse a soft delete while the row is still in the purge retention window.
+///
+/// Clears the entity tombstone (and its email tombstone) and reactivates the
+/// row. Revoked credentials and sessions are intentionally NOT restored: a
+/// recovered identity must re-authenticate, so any access leaked before the
+/// delete is not silently reinstated. Fails with a conflict if the entity's
+/// tenant is still soft-deleted (restore the tenant first) or if its name/email
+/// was re-taken by a live row during the retention window.
+pub async fn restore_entity(
+    pool: &PgPool,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let _ = restored_by; // tombstone reversal is not itself attributed; kept for symmetry
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    // Ancestor guard: a child of a soft-deleted tenant stays hidden even after
+    // its own tombstone is cleared, so block the restore and point at the tenant.
+    let tenant_deleted: Option<bool> = sqlx::query_scalar(
+        "SELECT t.deleted_at IS NOT NULL
+         FROM entities e
+         LEFT JOIN tenants t ON t.id = e.tenant_id
+         WHERE e.id = $1 AND e.deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    match tenant_deleted {
+        None => {
+            return Err(AppError::not_found(format!(
+                "no soft-deleted entity {id} to restore"
+            )))
+        }
+        Some(true) => {
+            return Err(AppError::conflict(
+                "the entity's tenant is soft-deleted; restore the tenant first",
+            ))
+        }
+        Some(false) => {}
+    }
+
+    sqlx::query(
+        "UPDATE entities
+         SET status = 'active', deleted_at = NULL, deleted_by = NULL, updated_at = now()
+         WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(restore_conflict)?;
+
+    sqlx::query(
+        "UPDATE entity_emails SET deleted_at = NULL, updated_at = now()
+         WHERE entity_id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(restore_conflict)?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Physically remove an already-soft-deleted entity, bypassing the purge
+/// retention window. Irreversible: FK cascades drop its credentials, sessions,
+/// emails, memberships, and ownerships. A soft delete is required first (the
+/// row must already carry a tombstone).
+///
+/// `permission_blocks.object_id`, `direct_policies.subject_id`, and
+/// `role_assignments.subject_id` are bare UUIDs with no foreign key, so the
+/// authorization rows that reference this entity — object-scoped grants *on* it
+/// and direct/role grants *to* it — would otherwise survive as stale, dangling
+/// authz state. They are removed in the same transaction via the canonical
+/// [`crate::authz::repo::purge_authz_references_for_ids`], together with the
+/// entity's credentials (which the entity delete cascades away but which can
+/// themselves be the object of a credential-scoped block).
+pub async fn purge_entity(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    // Capture the cascaded credential ids before the delete removes them, so the
+    // authz cleanup can also drop any credential-scoped blocks.
+    let credential_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM credentials WHERE entity_id = $1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+    let deleted: Option<Uuid> = sqlx::query_scalar(
+        "DELETE FROM entities WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if deleted.is_none() {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted entity {id} to purge"
+        )));
+    }
+
+    let mut doomed = credential_ids;
+    doomed.push(id);
+    crate::authz::repo::purge_authz_references_for_ids(&mut tx, &doomed).await?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
 pub async fn create_session(
@@ -1229,6 +1340,104 @@ pub async fn delete_group(
     if result.is_none() {
         return Err(AppError::not_found(format!("group {id} not found")));
     }
+    Ok(())
+}
+
+/// Reverse a soft delete of a principal or object group within the retention
+/// window. Mirrors `delete_group`: clears the tombstone on whichever underlying
+/// table holds the id. Fails with a conflict if the group's tenant is still
+/// soft-deleted, or if its (name, tenant) was re-taken by a live group.
+pub async fn restore_group(
+    pool: &PgPool,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let _ = restored_by;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let tenant_deleted: Option<bool> = sqlx::query_scalar(
+        "SELECT t.deleted_at IS NOT NULL
+         FROM groups g
+         LEFT JOIN tenants t ON t.id = g.tenant_id
+         WHERE g.id = $1 AND g.deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    match tenant_deleted {
+        None => {
+            return Err(AppError::not_found(format!(
+                "no soft-deleted group {id} to restore"
+            )))
+        }
+        Some(true) => {
+            return Err(AppError::conflict(
+                "the group's tenant is soft-deleted; restore the tenant first",
+            ))
+        }
+        Some(false) => {}
+    }
+
+    sqlx::query(
+        r#"WITH p AS (
+             UPDATE principal_groups SET deleted_at = NULL, deleted_by = NULL
+             WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id
+           ),
+           o AS (
+             UPDATE object_groups SET deleted_at = NULL, deleted_by = NULL
+             WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id
+           )
+           SELECT id FROM p
+           UNION ALL
+           SELECT id FROM o"#,
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(restore_conflict)?;
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Physically remove an already-soft-deleted group (principal or object),
+/// bypassing the purge retention window. Irreversible: FK cascades drop its
+/// memberships, hierarchy edges, and resource links (and, for object groups,
+/// the `group_id`-scoped permission blocks). A soft delete is required first.
+///
+/// Object-scoped blocks (`object_id`) and direct/role grants to the group as a
+/// subject have no FK, so they are cleaned explicitly — see
+/// [`purge_object_authz_references`].
+pub async fn purge_group(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let deleted: Option<Uuid> = sqlx::query_scalar(
+        r#"WITH p AS (
+             DELETE FROM principal_groups
+             WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id
+           ),
+           o AS (
+             DELETE FROM object_groups
+             WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id
+           )
+           SELECT id FROM p
+           UNION ALL
+           SELECT id FROM o"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if deleted.is_none() {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted group {id} to purge"
+        )));
+    }
+
+    crate::authz::repo::purge_authz_references_for_ids(&mut tx, &[id]).await?;
+
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 

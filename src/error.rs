@@ -158,3 +158,18 @@ pub fn db_err(e: sqlx::Error) -> AppError {
         other => AppError::Database(other),
     }
 }
+
+/// Maps a unique-violation (23505) raised while clearing a tombstone back into a
+/// caller-facing conflict: a soft-deleted name/alias/email was re-taken by a live
+/// row while the record sat in the retention window, so it can no longer be
+/// restored under its old identifier. Other errors pass through `db_err`.
+pub fn restore_conflict(e: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(db) = &e {
+        if db.code().as_deref() == Some("23505") {
+            return AppError::conflict(
+                "a live record already uses this name; rename the conflicting record before restoring",
+            );
+        }
+    }
+    db_err(e)
+}

@@ -15,3 +15,8 @@ export const DEFAULT_RETENTION_DAYS = 90;
 export const SOFT_DELETE_RETENTION_NOTE =
   "It is hidden immediately and stays recoverable. When purge is enabled, it " +
   `is permanently removed after the retention period (default ${DEFAULT_RETENTION_DAYS} days).`;
+
+/** Shared warning appended to permanent-purge confirmation dialogs. */
+export const PERMANENT_DELETE_WARNING =
+  "This permanently removes the record and all data that cascades from it, " +
+  "bypassing the retention window. This cannot be undone.";
