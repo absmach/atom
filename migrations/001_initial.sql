@@ -1060,9 +1060,9 @@ VALUES
     (
         '00000000-0000-0000-0000-000000000003',
         'service',
-        'mg-service',
+        'example-service',
         'active',
-        '{"system": true, "purpose": "magistrala-service-integration"}'::jsonb
+        '{"system": true, "purpose": "example-service-integration"}'::jsonb
     );
 
 INSERT INTO roles (id, name, description)
@@ -1074,8 +1074,8 @@ VALUES
     ),
     (
         '00000000-0000-0000-0000-000000000004',
-        'mg-service',
-        'Magistrala service integration role'
+        'example-service',
+        'Example service integration role'
     ),
     (
         '00000000-0000-0000-0000-000000000006',
