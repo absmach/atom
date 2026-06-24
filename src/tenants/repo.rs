@@ -383,7 +383,16 @@ pub async fn list_tenants_for_entity(
             )
         )"#
     );
-    let base_filter = r#"($2::text IS NULL OR t.name = $2)
+    // Lifecycle predicate mirrors the PDP, which denies any read on a tenant that
+    // is not active (`engine::load_tenant`: inactive/frozen/deleted → deny). A
+    // scoped (non-platform) subject must therefore never see a non-active tenant
+    // in a listing, regardless of the `status`/`deleted` filter params — that is
+    // the platform-admin `list_tenants` path's job, not this one. Keyed on
+    // `status` (a soft delete also sets `status = 'deleted'`) plus an explicit
+    // tombstone guard so it does not depend on that coupling.
+    let base_filter = r#"t.status = 'active'
+             AND t.deleted_at IS NULL
+             AND ($2::text IS NULL OR t.name = $2)
              AND ($3::text IS NULL OR lower(t.alias) = lower($3))
              AND ($4::text IS NULL OR t.status = $4)
              AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)

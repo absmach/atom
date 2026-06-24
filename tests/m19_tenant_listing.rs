@@ -390,3 +390,47 @@ async fn tenant_visible_via_role_object_kind_grant() {
         "a role-linked object_kind='tenant' read grant must list the tenant"
     );
 }
+
+/// A tenant the caller can read must disappear from the scoped listing once it
+/// is no longer active, mirroring the PDP, which denies any read on an
+/// inactive/frozen/deleted tenant (`engine::load_tenant`). Before the lifecycle
+/// predicate the grant alone kept a frozen/inactive tenant visible to a
+/// non-platform subject.
+#[tokio::test]
+#[ignore]
+async fn non_active_tenant_hidden_from_scoped_listing() {
+    let p = pool().await;
+    let caller = make_human(&p, None).await;
+
+    for status in ["frozen", "inactive", "deleted"] {
+        let target = make_tenant(&p).await;
+        direct_block(
+            &p,
+            target,
+            caller,
+            "tenant",
+            None,
+            "allow",
+            read_id(&p).await,
+        )
+        .await;
+
+        // Active → visible (control: the grant resolves).
+        assert!(
+            visible_tenant_ids(&p, caller).await.contains(&target),
+            "an active tenant with a read allow must be listed"
+        );
+
+        sqlx::query("UPDATE tenants SET status = $2 WHERE id = $1")
+            .bind(target)
+            .bind(status)
+            .execute(&p)
+            .await
+            .expect("set tenant status");
+
+        assert!(
+            !visible_tenant_ids(&p, caller).await.contains(&target),
+            "a {status} tenant must not appear in the scoped listing"
+        );
+    }
+}
