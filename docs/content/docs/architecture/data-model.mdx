@@ -93,6 +93,34 @@ Credentials belong to entities:
 
 Plaintext passwords, API key secrets, and generated leaf private keys are never stored.
 
+## Disable, Delete, and Retention
+
+Disabling and deleting are different operations with different blast radius.
+
+**Disable** is a reversible status change. The row stays live and listable; the
+subject is just blocked from acting (entities become `inactive`, profiles
+`disabled`, tenants `inactive`/`frozen`). Re-enabling restores it. In the UI,
+disabled-family states render amber as a warning.
+
+**Delete** is a soft delete. The row is hidden immediately — a `deleted_at`
+tombstone is set, child sessions and credentials are revoked — but the data is
+not physically removed. Deleted rows are excluded from default (`Live`) listings
+and surface only under the `Deleted` filter. In the UI, delete renders red.
+
+Soft-deleted rows are removed permanently only by the **purge** background job,
+which deletes tombstones older than the retention window (reusing the existing
+foreign-key cascades). Purge is **disabled by default**: until it is enabled,
+tombstones are kept indefinitely, so a delete is recoverable.
+
+| Setting | Env var | Default |
+| --- | --- | --- |
+| Purge enabled | `ATOM_PURGE_ENABLED` | `false` |
+| Retention | `ATOM_PURGE_RETENTION_DAYS` | `90` days |
+| Sweep interval | `ATOM_PURGE_INTERVAL_SECS` | `86400` (daily) |
+
+A tenant can also be purged on demand via the `purgeTenant` mutation, which
+bypasses the retention window and is deliberately irreversible and admin-only.
+
 ## Authorization State
 
 The authorization model is split deliberately:

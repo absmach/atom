@@ -43,7 +43,7 @@ export function TenantActionButtons({
             onClick={() => onStatusChange("disable")}
             size="sm"
             variant="outline"
-            className="border-red-500/50 text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:border-red-500/40 dark:text-red-400"
+            className="border-amber-500/50 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:border-amber-500/40 dark:text-amber-400"
           >
             Disable
           </Button>
@@ -101,7 +101,7 @@ export function EntityActionButtons({
           onClick={() => onStatusChange("disable")}
           size="sm"
           variant="outline"
-          className="border-red-500/50 text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:border-red-500/40 dark:text-red-400"
+          className="border-amber-500/50 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:border-amber-500/40 dark:text-amber-400"
         >
           Disable
         </Button>
@@ -152,7 +152,7 @@ export function ProfileActionButtons({
           onClick={() => onStatusChange("disabled")}
           size="sm"
           variant="outline"
-          className="border-red-500/50 text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:border-red-500/40 dark:text-red-400"
+          className="border-amber-500/50 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600 dark:border-amber-500/40 dark:text-amber-400"
         >
           Disable
         </Button>

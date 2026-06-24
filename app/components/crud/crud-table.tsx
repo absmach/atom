@@ -36,6 +36,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/ui/data-table";
 import { requireResource } from "@/lib/crud/resources";
+import { SOFT_DELETE_RETENTION_NOTE } from "@/lib/crud/retention";
 import { graphqlClient } from "@/lib/graphql/client";
 import { extractIds, useNameMap } from "@/lib/reconcile/use-name-map";
 
@@ -389,7 +390,7 @@ function TableRowActions({
           isPending={tenantStatusPending}
           onDelete={() =>
             onDelete(
-              `Delete tenant "${String(row.name ?? row.id)}"? It will be hidden immediately, revoke child sessions, and be physically purged after the configured retention window when purge is enabled.`,
+              `Delete tenant "${String(row.name ?? row.id)}"? Revokes child sessions. ${SOFT_DELETE_RETENTION_NOTE}`,
             )
           }
           onEdit={() => onEdit.setTenant(row)}
@@ -402,7 +403,7 @@ function TableRowActions({
           isPending={entityStatusPending}
           onDelete={() =>
             onDelete(
-              `Delete entity "${String(row.name ?? row.id)}"? It will be hidden immediately, revoke credentials and sessions, and be physically purged after the configured retention window when purge is enabled.`,
+              `Delete entity "${String(row.name ?? row.id)}"? Revokes its credentials and sessions. ${SOFT_DELETE_RETENTION_NOTE}`,
             )
           }
           onEdit={() => defer(() => onEdit.setEntity(row))}
@@ -422,7 +423,7 @@ function TableRowActions({
           onEdit={() => defer(() => onEdit.setGroup(row))}
           onDelete={() =>
             onDelete(
-              `Delete group "${String(row.name ?? row.id)}"? It will be hidden immediately and be physically purged after the configured retention window when purge is enabled.`,
+              `Delete group "${String(row.name ?? row.id)}"? ${SOFT_DELETE_RETENTION_NOTE}`,
             )
           }
         />
@@ -432,7 +433,7 @@ function TableRowActions({
           onEdit={() => defer(() => onEdit.setResource(row))}
           onDelete={() =>
             onDelete(
-              `Delete resource "${String(row.name ?? row.id)}"? It will be hidden immediately and be physically purged after the configured retention window when purge is enabled.`,
+              `Delete resource "${String(row.name ?? row.id)}"? ${SOFT_DELETE_RETENTION_NOTE}`,
             )
           }
         />
@@ -442,7 +443,7 @@ function TableRowActions({
           onEdit={() => defer(() => onEdit.setRole(row))}
           onDelete={() =>
             onDelete(
-              `Delete role "${String(row.name ?? row.id)}"? It will be hidden immediately and be physically purged after the configured retention window when purge is enabled.`,
+              `Delete role "${String(row.name ?? row.id)}"? ${SOFT_DELETE_RETENTION_NOTE}`,
             )
           }
         />
