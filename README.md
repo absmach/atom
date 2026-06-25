@@ -273,6 +273,81 @@ directly, so use `./certs/...` paths there. Production should use
 intermediate certificate, and intermediate private key files mounted
 read-only. Atom never stores CA certificates or CA private keys in Postgres.
 
+### Metrics
+
+Prometheus metrics are available on the HTTP listener at
+`GET http://localhost:8080/metrics` and are enabled by default:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Set `ATOM_METRICS_ENABLED=false` to skip recorder installation and leave the
+route unmounted without rebuilding. For a build that does not link the metrics
+backend and compiles metric calls to no-ops, use:
+
+```bash
+cargo build --release --no-default-features
+```
+
+`/metrics` is intentionally unauthenticated and exposes internal operational
+data. Restrict it to the Prometheus scraper with a firewall, private network,
+reverse proxy, or service-mesh policy; do not expose it publicly.
+
+### gRPC transport security
+
+gRPC is plaintext when the TLS variables are unset. This is the local
+development default; production deployments must either enable TLS or confine
+the gRPC listener to a private network or service mesh that supplies transport
+security.
+
+For server-side TLS, place the PEM certificate chain and matching private key
+under the host directory configured by `ATOM_CERTS_CA_DIR` (default
+`./certs`). Compose already mounts that directory read-only at `/certs`:
+
+```dotenv
+ATOM_GRPC_TLS_CERT_PATH=/certs/grpc-server.crt
+ATOM_GRPC_TLS_KEY_PATH=/certs/grpc-server.key
+```
+
+Set both variables together. Setting only one, using unreadable files, or
+providing invalid or mismatched PEM material fails startup before either server
+reports ready. The server certificate must cover the hostname clients use,
+such as `localhost` for the commands below.
+
+To require and verify client certificates (mTLS), also provide a PEM CA bundle
+that issued the allowed client certificates:
+
+```dotenv
+ATOM_GRPC_TLS_CLIENT_CA_PATH=/certs/grpc-client-ca.crt
+```
+
+The corresponding host files are:
+
+- `certs/grpc-server.crt` — server certificate, optionally followed by its
+  intermediate chain;
+- `certs/grpc-server.key` — matching server private key;
+- `certs/grpc-client-ca.crt` — optional client CA bundle that enables mTLS;
+- `certs/root-ca.crt` — CA trusted by clients for the server certificate;
+- `certs/grpc-client.crt` and `certs/grpc-client.key` — client identity for
+  mTLS.
+
+For server TLS, invoke an Atom RPC with `grpcurl` and the repository proto:
+
+```bash
+grpcurl -cacert certs/root-ca.crt -proto proto/atom/v1/atom.proto -d "{\"token\":\"${ATOM_TOKEN}\"}" localhost:8081 atom.v1.AuthService/Authenticate
+```
+
+For mTLS, add the client certificate and key:
+
+```bash
+grpcurl -cacert certs/root-ca.crt -cert certs/grpc-client.crt -key certs/grpc-client.key -proto proto/atom/v1/atom.proto -d "{\"token\":\"${ATOM_TOKEN}\"}" localhost:8081 atom.v1.AuthService/Authenticate
+```
+
+For a host `cargo run`, use host paths such as
+`ATOM_GRPC_TLS_CERT_PATH=./certs/grpc-server.crt`; `/certs/...` paths apply
+inside the Compose containers.
+
 ### Port overrides
 
 If a host port is already occupied, override only the host-side port:
@@ -486,6 +561,9 @@ Generic application mapping:
 | `DATABASE_URL`                                                                                                                 | *(required)*                                         | Postgres connection string                                                              |
 | `LISTEN_ADDR`                                                                                                                  | `0.0.0.0:8080`                                       | HTTP bind address                                                                       |
 | `GRPC_ADDR`                                                                                                                    | `0.0.0.0:8081`                                       | gRPC bind address                                                                       |
+| `ATOM_GRPC_TLS_CERT_PATH`                                                                                                      | *(unset)*                                            | PEM server certificate chain; set with `ATOM_GRPC_TLS_KEY_PATH` to enable gRPC TLS      |
+| `ATOM_GRPC_TLS_KEY_PATH`                                                                                                       | *(unset)*                                            | PEM server private key; setting only one TLS cert/key path fails startup                |
+| `ATOM_GRPC_TLS_CLIENT_CA_PATH`                                                                                                 | *(unset)*                                            | PEM client CA bundle; requires server cert/key and enables mandatory mTLS               |
 | `ATOM_DB_MAX_CONNECTIONS` / `ATOM_DB_MIN_CONNECTIONS`                                                                          | `20` / `0`                                           | Postgres pool size controls                                                             |
 | `ATOM_DB_ACQUIRE_TIMEOUT_SECS` / `ATOM_DB_CONNECT_TIMEOUT_SECS`                                                                | `30` / `10`                                          | Pool acquire and startup connect timeouts                                               |
 | `ATOM_DB_IDLE_TIMEOUT_SECS` / `ATOM_DB_MAX_LIFETIME_SECS`                                                                      | `600` / `1800`                                       | Pool idle and lifetime limits                                                           |
@@ -505,6 +583,7 @@ Generic application mapping:
 | `ATOM_AUTH_BODY_LIMIT_BYTES` / `ATOM_GRAPHQL_BODY_LIMIT_BYTES` / `ATOM_CUSTOM_ENDPOINT_BODY_LIMIT_BYTES`                       | `32768` / `1048576` / `1048576`                      | Request body limits                                                                     |
 | `ATOM_GRAPHQL_MAX_DEPTH` / `ATOM_GRAPHQL_MAX_COMPLEXITY`                                                                       | `20` / `1000`                                        | GraphQL validation limits                                                               |
 | `ATOM_GRAPHQL_INTROSPECTION_ENABLED`                                                                                           | `false`                                              | Enables GraphQL introspection (off by default; opt in for dev)                          |
+| `ATOM_METRICS_ENABLED`                                                                                                         | `true`                                               | Mounts unauthenticated `/metrics`; set `false` to disable at runtime                    |
 | `JWT_EXPIRY_SECS`                                                                                                              | `3600`                                               | JWT lifetime in seconds                                                                 |
 | `ATOM_JWT_ISSUER`                                                                                                              | `ATOM_PUBLIC_BASE_URL`                               | JWT issuer claim                                                                        |
 | `ATOM_JWT_AUDIENCE`                                                                                                            | `magistrala`                                         | JWT audience claim                                                                      |

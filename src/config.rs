@@ -725,11 +725,11 @@ fn graphql_limits_from_env() -> Result<GraphqlLimitConfig> {
 
 /// gRPC TLS is enabled when both cert and key paths are set. Setting only one is
 /// a misconfiguration and fails fast at startup. `client_ca_path` (mTLS) is
-/// independent and optional.
+/// independent and optional. Blank values are treated as unset for Compose.
 fn grpc_tls_from_env() -> Result<Option<GrpcTlsConfig>> {
-    let cert_path = std::env::var("ATOM_GRPC_TLS_CERT_PATH").ok();
-    let key_path = std::env::var("ATOM_GRPC_TLS_KEY_PATH").ok();
-    let client_ca_path = std::env::var("ATOM_GRPC_TLS_CLIENT_CA_PATH").ok();
+    let cert_path = nonempty_env("ATOM_GRPC_TLS_CERT_PATH");
+    let key_path = nonempty_env("ATOM_GRPC_TLS_KEY_PATH");
+    let client_ca_path = nonempty_env("ATOM_GRPC_TLS_CLIENT_CA_PATH");
     match (cert_path, key_path) {
         (Some(cert_path), Some(key_path)) => Ok(Some(GrpcTlsConfig {
             cert_path,
@@ -748,6 +748,12 @@ fn grpc_tls_from_env() -> Result<Option<GrpcTlsConfig>> {
             "gRPC TLS requires both ATOM_GRPC_TLS_CERT_PATH and ATOM_GRPC_TLS_KEY_PATH"
         ),
     }
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn parse_cors_allowed_origins(public_base_url: &str) -> Vec<String> {
@@ -863,6 +869,21 @@ mod tests {
     }
 
     #[test]
+    fn blank_grpc_tls_env_is_treated_as_unset() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_GRPC_TLS_CERT_PATH", "");
+        std::env::set_var("ATOM_GRPC_TLS_KEY_PATH", " ");
+        std::env::set_var("ATOM_GRPC_TLS_CLIENT_CA_PATH", "");
+
+        let cfg = Config::from_env().expect("config");
+        assert!(cfg.grpc_tls.is_none());
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn graphql_introspection_opts_in_via_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -956,6 +977,9 @@ mod tests {
             "ATOM_RATE_LIMIT_ENABLED",
             "ATOM_TRUSTED_PROXY_CIDRS",
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
+            "ATOM_GRPC_TLS_CERT_PATH",
+            "ATOM_GRPC_TLS_KEY_PATH",
+            "ATOM_GRPC_TLS_CLIENT_CA_PATH",
         ] {
             std::env::remove_var(name);
         }
