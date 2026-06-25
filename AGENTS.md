@@ -196,6 +196,18 @@ Optional: `ADMIN_ENTITY_ID` — override the seeded admin UUID (default `0000000
 
 The runtime is production-hardened: configurable DB pool, five-category IP rate limiter, GraphQL depth/complexity/introspection limits (introspection **off** by default — opt in with `ATOM_GRAPHQL_INTROSPECTION_ENABLED=true`), per-route body limits, signing-key encryption at rest, audit retention, a `/health/ready` readiness probe, and graceful shutdown on SIGINT/SIGTERM (both the HTTP and gRPC servers drain in-flight requests before exit).
 
+### gRPC transport security
+
+The gRPC server (`src/grpc.rs`) supports optional in-process TLS, off by default.
+Set `ATOM_GRPC_TLS_CERT_PATH` + `ATOM_GRPC_TLS_KEY_PATH` (PEM) to enable
+server-side TLS; additionally set `ATOM_GRPC_TLS_CLIENT_CA_PATH` to require and
+verify client certificates (**mTLS**). Setting only one of cert/key fails fast at
+startup; a configured-but-unreadable file fails before the server reports
+`serving`. When TLS is **not** configured the transport is **plaintext** — it
+must then be confined to a private network or a service mesh that provides
+transport security, and a startup warning is logged. (The HTTP rate limiter does
+not cover gRPC; see backlog #10.)
+
 ## Metrics
 
 Prometheus metrics are exposed at `GET /metrics` (text exposition). All metric

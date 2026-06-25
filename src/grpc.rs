@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 
+use anyhow::Context;
 use tokio::net::TcpListener;
 use tonic::{
     metadata::MetadataMap,
-    transport::{server::TcpIncoming, Server},
+    transport::{server::TcpIncoming, Certificate, Identity, Server, ServerTlsConfig},
     Request, Response, Status,
 };
 use uuid::Uuid;
@@ -434,6 +435,27 @@ pub async fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
+/// Build the gRPC server TLS config from PEM files. With `client_ca_path` set,
+/// the server requires and verifies client certificates (mTLS).
+async fn build_grpc_tls_config(
+    cfg: &crate::config::GrpcTlsConfig,
+) -> anyhow::Result<ServerTlsConfig> {
+    let cert = tokio::fs::read(&cfg.cert_path)
+        .await
+        .with_context(|| format!("read gRPC TLS cert {}", cfg.cert_path))?;
+    let key = tokio::fs::read(&cfg.key_path)
+        .await
+        .with_context(|| format!("read gRPC TLS key {}", cfg.key_path))?;
+    let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(cert, key));
+    if let Some(ca_path) = &cfg.client_ca_path {
+        let ca = tokio::fs::read(ca_path)
+            .await
+            .with_context(|| format!("read gRPC TLS client CA {ca_path}"))?;
+        tls = tls.client_ca_root(Certificate::from_pem(ca));
+    }
+    Ok(tls)
+}
+
 pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     tracing::info!("grpc listening on {addr}");
@@ -462,11 +484,46 @@ pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()>
         .set_serving::<AliasServiceServer<AtomAlias>>()
         .await;
 
+    // Configure transport TLS before announcing "serving" so a misconfigured
+    // certificate fails fast as an error rather than after we claim readiness.
+    let mut builder = Server::builder();
+    match &state.config.grpc_tls {
+        Some(tls_cfg) => {
+            let tls = match build_grpc_tls_config(tls_cfg).await {
+                Ok(tls) => tls,
+                Err(err) => {
+                    let message = format!("gRPC TLS configuration failed on {addr}: {err}");
+                    state
+                        .set_grpc_status(GrpcRuntimeStatus::error(addr.to_string(), message.clone()))
+                        .await;
+                    anyhow::bail!(message);
+                }
+            };
+            builder = match builder.tls_config(tls) {
+                Ok(builder) => builder,
+                Err(err) => {
+                    let message = format!("gRPC TLS setup failed on {addr}: {err}");
+                    state
+                        .set_grpc_status(GrpcRuntimeStatus::error(addr.to_string(), message.clone()))
+                        .await;
+                    anyhow::bail!(message);
+                }
+            };
+            tracing::info!(
+                mtls = tls_cfg.client_ca_path.is_some(),
+                "grpc TLS enabled"
+            );
+        }
+        None => tracing::warn!(
+            "grpc TLS not configured; transport is plaintext — restrict it to a private network or service mesh"
+        ),
+    }
+
     state
         .set_grpc_status(GrpcRuntimeStatus::serving(addr.to_string()))
         .await;
 
-    let result = Server::builder()
+    let result = builder
         .add_service(health_service)
         .add_service(AuthzServiceServer::new(AtomAuthz {
             state: state.clone(),
@@ -515,6 +572,48 @@ mod tests {
     use tonic_health::pb::{
         health_check_response::ServingStatus, health_client::HealthClient, HealthCheckRequest,
     };
+
+    #[tokio::test]
+    async fn grpc_tls_config_builds_from_pem_files_and_mtls_ca() {
+        let dir = std::env::temp_dir().join(format!("atom-grpc-tls-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let server =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("server cert");
+        let ca = rcgen::generate_simple_self_signed(vec!["atom-ca".into()]).expect("ca cert");
+        let cert_path = dir.join("server.crt");
+        let key_path = dir.join("server.key");
+        let ca_path = dir.join("client-ca.crt");
+        std::fs::write(&cert_path, server.cert.pem()).expect("write cert");
+        std::fs::write(&key_path, server.signing_key.serialize_pem()).expect("write key");
+        std::fs::write(&ca_path, ca.cert.pem()).expect("write ca");
+
+        // Server-only TLS.
+        let cfg = crate::config::GrpcTlsConfig {
+            cert_path: cert_path.to_string_lossy().into_owned(),
+            key_path: key_path.to_string_lossy().into_owned(),
+            client_ca_path: None,
+        };
+        let tls = build_grpc_tls_config(&cfg).await.expect("server tls");
+        Server::builder().tls_config(tls).expect("apply server tls");
+
+        // mTLS (client CA present).
+        let mtls_cfg = crate::config::GrpcTlsConfig {
+            client_ca_path: Some(ca_path.to_string_lossy().into_owned()),
+            ..cfg
+        };
+        let mtls = build_grpc_tls_config(&mtls_cfg).await.expect("mtls");
+        Server::builder().tls_config(mtls).expect("apply mtls");
+
+        // Missing file fails (fast).
+        let missing = crate::config::GrpcTlsConfig {
+            cert_path: dir.join("nope.crt").to_string_lossy().into_owned(),
+            key_path: key_path.to_string_lossy().into_owned(),
+            client_ca_path: None,
+        };
+        assert!(build_grpc_tls_config(&missing).await.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[tokio::test]
     async fn bind_listener_fails_when_address_is_in_use() {

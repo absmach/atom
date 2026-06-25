@@ -17,6 +17,9 @@ pub struct Config {
     pub db_pool: DbPoolConfig,
     pub listen_addr: String,
     pub grpc_addr: String,
+    /// In-process TLS for the gRPC server. `None` = plaintext (the transport
+    /// must then be secured by the deployment: private network / service mesh).
+    pub grpc_tls: Option<GrpcTlsConfig>,
     pub signing_keys: SigningKeyConfig,
     pub audit_retention: AuditRetentionConfig,
     pub purge: PurgeConfig,
@@ -251,6 +254,17 @@ impl Default for GraphqlLimitConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcTlsConfig {
+    /// PEM server certificate (chain) path.
+    pub cert_path: String,
+    /// PEM private key path.
+    pub key_path: String,
+    /// Optional PEM CA bundle. When set, the server requires and verifies client
+    /// certificates (mTLS); when unset, server-side TLS only.
+    pub client_ca_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MetricsConfig {
     /// When true (default), the Prometheus recorder is installed at startup and
@@ -302,6 +316,7 @@ impl Config {
             listen_addr: std::env::var("LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
+            grpc_tls: grpc_tls_from_env()?,
             signing_keys: signing_keys_from_env()?,
             audit_retention: audit_retention_from_env()?,
             purge: purge_from_env()?,
@@ -381,6 +396,7 @@ impl Config {
             db_pool: DbPoolConfig::default(),
             listen_addr: "127.0.0.1:0".into(),
             grpc_addr: "127.0.0.1:0".into(),
+            grpc_tls: None,
             signing_keys: SigningKeyConfig {
                 allow_plaintext_signing_keys: true,
                 ..SigningKeyConfig::default()
@@ -705,6 +721,33 @@ fn graphql_limits_from_env() -> Result<GraphqlLimitConfig> {
         anyhow::bail!("ATOM_GRAPHQL_MAX_COMPLEXITY must be greater than zero");
     }
     Ok(cfg)
+}
+
+/// gRPC TLS is enabled when both cert and key paths are set. Setting only one is
+/// a misconfiguration and fails fast at startup. `client_ca_path` (mTLS) is
+/// independent and optional.
+fn grpc_tls_from_env() -> Result<Option<GrpcTlsConfig>> {
+    let cert_path = std::env::var("ATOM_GRPC_TLS_CERT_PATH").ok();
+    let key_path = std::env::var("ATOM_GRPC_TLS_KEY_PATH").ok();
+    let client_ca_path = std::env::var("ATOM_GRPC_TLS_CLIENT_CA_PATH").ok();
+    match (cert_path, key_path) {
+        (Some(cert_path), Some(key_path)) => Ok(Some(GrpcTlsConfig {
+            cert_path,
+            key_path,
+            client_ca_path,
+        })),
+        (None, None) => {
+            if client_ca_path.is_some() {
+                anyhow::bail!(
+                    "ATOM_GRPC_TLS_CLIENT_CA_PATH is set but ATOM_GRPC_TLS_CERT_PATH/ATOM_GRPC_TLS_KEY_PATH are not"
+                );
+            }
+            Ok(None)
+        }
+        _ => anyhow::bail!(
+            "gRPC TLS requires both ATOM_GRPC_TLS_CERT_PATH and ATOM_GRPC_TLS_KEY_PATH"
+        ),
+    }
 }
 
 fn parse_cors_allowed_origins(public_base_url: &str) -> Vec<String> {
