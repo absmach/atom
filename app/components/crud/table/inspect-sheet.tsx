@@ -13,6 +13,7 @@ import { ProfileInspectDetails } from "@/components/profiles/profile-inspect-det
 import { ResourceInspectDetails } from "@/components/resources/resource-inspect-details";
 import { RoleInspectDetails } from "@/components/roles/role-inspect-details";
 import { RolePermissionBlocksPanel } from "@/components/roles/role-permission-blocks-panel";
+import { RolePrincipalsPanel } from "@/components/roles/role-principals-panel";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -127,7 +128,13 @@ function InspectBody({
       <>
         <RoleInspectDetails row={inspected} />
         {inspected?.id ? (
-          <RolePermissionBlocksPanel roleId={String(inspected.id)} />
+          <>
+            <RolePermissionBlocksPanel roleId={String(inspected.id)} />
+            <RolePrincipalsPanel
+              roleId={String(inspected.id)}
+              tenantId={inspected.tenantId ? String(inspected.tenantId) : null}
+            />
+          </>
         ) : null}
       </>
     );

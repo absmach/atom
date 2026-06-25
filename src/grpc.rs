@@ -13,6 +13,7 @@ use crate::{
     auth::{authenticate_token, require_any_capability, scope_for_tenant, AuthContext, Scope},
     authz::{access, engine, repo},
     certs,
+    identity::service as identity_service,
     models::{alias::AliasObjectClass, enums::AuditOutcome, policy::AuthzRequest},
     state::{AppState, GrpcRuntimeStatus},
 };
@@ -27,9 +28,10 @@ use proto::{
     auth_service_server::{AuthService, AuthServiceServer},
     authz_service_server::{AuthzService, AuthzServiceServer},
     certificate_service_server::{CertificateService, CertificateServiceServer},
-    AuthenticateRequest, AuthenticateResponse, CheckRequest, CheckResponse, ResolveAliasRequest,
-    ResolveAliasResponse, ResolveCertificateRequest, ResolveCertificateResponse,
-    RevokeEntityCertificatesRequest, RevokeEntityCertificatesResponse,
+    AuthenticateCredentialRequest, AuthenticateCredentialResponse, AuthenticateRequest,
+    AuthenticateResponse, CheckRequest, CheckResponse, ResolveAliasRequest, ResolveAliasResponse,
+    ResolveCertificateRequest, ResolveCertificateResponse, RevokeEntityCertificatesRequest,
+    RevokeEntityCertificatesResponse,
 };
 
 // ─── AuthzService ─────────────────────────────────────────────────────────────
@@ -170,6 +172,99 @@ impl AuthService for AtomAuth {
             tenant_id: ctx.tenant_id.map(|t| t.to_string()).unwrap_or_default(),
             session_id: ctx.session_id.map(|s| s.to_string()).unwrap_or_default(),
         }))
+    }
+
+    async fn authenticate_credential(
+        &self,
+        request: Request<AuthenticateCredentialRequest>,
+    ) -> Result<Response<AuthenticateCredentialResponse>, Status> {
+        let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
+        let req = request.into_inner();
+
+        let kind = req.kind.trim();
+        if !(kind.is_empty() || kind.eq_ignore_ascii_case("password")) {
+            return Err(Status::invalid_argument(
+                "unsupported credential kind: expected password",
+            ));
+        }
+
+        let requested_tenant_id =
+            parse_optional_uuid(&req.tenant_id, "tenant_id").map_err(Status::from)?;
+        let tenant_alias = (!req.tenant_alias.trim().is_empty()).then_some(req.tenant_alias.trim());
+        let tenant_id = identity_service::resolve_credential_auth_tenant(
+            &self.state.pool,
+            requested_tenant_id,
+            tenant_alias,
+        )
+        .await
+        .map_err(Status::from)?;
+
+        require_credential_auth_access(&self.state.pool, auth.entity_id, tenant_id).await?;
+
+        let result = identity_service::authenticate_password_credential_in_tenant(
+            &self.state.pool,
+            &self.state.config,
+            &req.identifier,
+            &req.secret,
+            tenant_id,
+        )
+        .await;
+
+        let outcome = if result.is_ok() {
+            AuditOutcome::Allow
+        } else {
+            AuditOutcome::Deny
+        };
+        let entity_id = result.as_ref().ok().map(|auth| auth.entity_id);
+        let credential_id = result.as_ref().ok().map(|auth| auth.credential_id);
+        audit::write(
+            &self.state.pool,
+            Some(auth.entity_id),
+            tenant_id,
+            "auth.credential_authenticate",
+            outcome,
+            serde_json::json!({
+                "caller_entity_id": auth.entity_id,
+                "entity_id": entity_id,
+                "credential_id": credential_id,
+                "credential_kind": "password",
+                "identifier": req.identifier,
+                "transport": "grpc",
+            }),
+        )
+        .await;
+
+        let authenticated = result.map_err(Status::from)?;
+        Ok(Response::new(AuthenticateCredentialResponse {
+            entity_id: authenticated.entity_id.to_string(),
+            tenant_id: authenticated
+                .tenant_id
+                .map(|tenant_id| tenant_id.to_string())
+                .unwrap_or_default(),
+            credential_id: authenticated.credential_id.to_string(),
+        }))
+    }
+}
+
+async fn require_credential_auth_access(
+    pool: &sqlx::PgPool,
+    caller_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<(), Status> {
+    match tenant_id {
+        Some(tenant_id) => require_any_capability(
+            pool,
+            caller_id,
+            &[
+                ("authz.check", Scope::Tenant(tenant_id)),
+                ("authz.check", Scope::Platform),
+            ],
+        )
+        .await
+        .map_err(Status::from),
+        None => require_any_capability(pool, caller_id, &[("authz.check", Scope::Platform)])
+            .await
+            .map_err(Status::from),
     }
 }
 
@@ -321,6 +416,16 @@ fn parse_alias_object_class(value: &str) -> Option<AliasObjectClass> {
     } else {
         None
     }
+}
+
+fn parse_optional_uuid(value: &str, field: &str) -> Result<Option<Uuid>, crate::error::AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    Uuid::parse_str(value)
+        .map(Some)
+        .map_err(|_| crate::error::AppError::bad_request(format!("invalid {field}: expected UUID")))
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────

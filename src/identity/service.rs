@@ -51,6 +51,14 @@ pub fn verify_secret(secret: &[u8], hash: &str) -> bool {
 
 const DEFAULT_MIN_PASSWORD_CHARS: usize = 12;
 
+#[derive(Debug, Clone)]
+pub struct CredentialAuthentication {
+    pub entity_id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub credential_id: Uuid,
+    pub email_verified: Option<bool>,
+}
+
 pub fn validate_password_strength(password: &str) -> Result<(), AppError> {
     let min_password_chars = std::env::var("ATOM_MIN_PASSWORD_CHARS")
         .ok()
@@ -134,22 +142,50 @@ async fn do_login_password(
     tenant_alias: Option<&str>,
 ) -> Result<LoginResponse, AppError> {
     let login_tenant_id = resolve_login_tenant(pool, requested_tenant_id, tenant_alias).await?;
+    let authenticated =
+        authenticate_password_credential_in_tenant(pool, cfg, identifier, secret, login_tenant_id)
+            .await?;
+    create_login_response(
+        pool,
+        cfg,
+        primary_key,
+        authenticated.entity_id,
+        authenticated.email_verified,
+    )
+    .await
+}
+
+pub async fn resolve_credential_auth_tenant(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    tenant_alias: Option<&str>,
+) -> Result<Option<Uuid>, AppError> {
+    resolve_login_tenant(pool, tenant_id, tenant_alias).await
+}
+
+pub async fn authenticate_password_credential_in_tenant(
+    pool: &PgPool,
+    cfg: &Config,
+    identifier: &str,
+    secret: &str,
+    tenant_id: Option<Uuid>,
+) -> Result<CredentialAuthentication, AppError> {
     let attempt_identifier = login_attempt_identifier(identifier);
     if let Err(err) = ensure_login_not_throttled(
         pool,
         &attempt_identifier,
-        login_tenant_id,
+        tenant_id,
         cfg.login_failure_limit,
         cfg.login_failure_window_secs,
     )
     .await
     {
-        record_login_attempt(pool, &attempt_identifier, login_tenant_id, false).await;
+        record_login_attempt(pool, &attempt_identifier, tenant_id, false).await;
         return Err(err);
     }
 
     let result = async {
-        let identity = resolve_login_identity(pool, identifier, login_tenant_id).await?;
+        let identity = resolve_login_identity(pool, identifier, tenant_id).await?;
 
         if identity.status != EntityStatus::Active {
             return Err(AppError::unauthorized("entity is not active"));
@@ -158,13 +194,13 @@ async fn do_login_password(
         // a session. Session creation repeats this check under a row lock.
         ensure_login_target_active(pool, identity.entity_id).await?;
 
-        let hash = password_hash_for_login(
+        let credential = password_credential_for_login(
             pool,
             identity.entity_id,
             identity.credential_identifier.as_deref(),
         )
         .await?;
-        if !verify_secret(secret.as_bytes(), &hash) {
+        if !verify_secret(secret.as_bytes(), &credential.secret_hash) {
             return Err(AppError::unauthorized("invalid credentials"));
         }
 
@@ -172,18 +208,16 @@ async fn do_login_password(
             return Err(AppError::unauthorized("email verification required"));
         }
 
-        create_login_response(
-            pool,
-            cfg,
-            primary_key,
-            identity.entity_id,
-            identity.email_verified,
-        )
-        .await
+        Ok(CredentialAuthentication {
+            entity_id: identity.entity_id,
+            tenant_id: tenant_id.or(identity.tenant_id),
+            credential_id: credential.id,
+            email_verified: identity.email_verified,
+        })
     }
     .await;
 
-    record_login_attempt(pool, &attempt_identifier, login_tenant_id, result.is_ok()).await;
+    record_login_attempt(pool, &attempt_identifier, tenant_id, result.is_ok()).await;
     result
 }
 
@@ -832,9 +866,15 @@ async fn create_login_response(
 
 struct LoginIdentity {
     entity_id: Uuid,
+    tenant_id: Option<Uuid>,
     status: EntityStatus,
     email_verified: Option<bool>,
     credential_identifier: Option<String>,
+}
+
+struct PasswordCredential {
+    id: Uuid,
+    secret_hash: String,
 }
 
 async fn resolve_login_identity(
@@ -852,6 +892,7 @@ async fn resolve_login_identity(
     use sqlx::Row;
     Ok(LoginIdentity {
         entity_id: row.try_get("id").map_err(db_err)?,
+        tenant_id: row.try_get("tenant_id").unwrap_or(None),
         status: row.try_get("status").map_err(db_err)?,
         email_verified: None,
         credential_identifier: None,
@@ -864,7 +905,7 @@ async fn login_identity_by_email(
 ) -> Result<Option<LoginIdentity>, AppError> {
     use sqlx::Row;
     let row = sqlx::query(
-        r#"SELECT e.id, e.status, ee.verified_at
+        r#"SELECT e.id, e.tenant_id, e.status, ee.verified_at
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
            WHERE ee.email = $1
@@ -879,6 +920,7 @@ async fn login_identity_by_email(
         let verified_at: Option<DateTime<Utc>> = row.try_get("verified_at").unwrap_or(None);
         Ok(LoginIdentity {
             entity_id: row.try_get("id").map_err(db_err)?,
+            tenant_id: row.try_get("tenant_id").unwrap_or(None),
             status: row.try_get("status").map_err(db_err)?,
             email_verified: Some(verified_at.is_some()),
             credential_identifier: Some(email.to_string()),
@@ -887,14 +929,14 @@ async fn login_identity_by_email(
     .transpose()
 }
 
-async fn password_hash_for_login(
+async fn password_credential_for_login(
     pool: &PgPool,
     entity_id: Uuid,
     identifier: Option<&str>,
-) -> Result<String, AppError> {
+) -> Result<PasswordCredential, AppError> {
     use sqlx::Row;
     let row = sqlx::query(
-        r#"SELECT secret_hash
+        r#"SELECT id, secret_hash
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
@@ -914,9 +956,14 @@ async fn password_hash_for_login(
         other => AppError::Database(other),
     })?;
 
-    row.try_get::<Option<String>, _>("secret_hash")
+    let secret_hash = row
+        .try_get::<Option<String>, _>("secret_hash")
         .unwrap_or(None)
-        .ok_or_else(|| AppError::unauthorized("invalid credentials"))
+        .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
+    Ok(PasswordCredential {
+        id: row.try_get("id").map_err(db_err)?,
+        secret_hash,
+    })
 }
 
 async fn login_entity_row(
@@ -978,6 +1025,21 @@ async fn login_entity_row(
         }
     }
     .map_err(db_err)?;
+
+    if rows.is_empty() {
+        if let (Some(tenant_id), Some(alias)) = (tenant_id, normalize_alias(Some(identifier))) {
+            rows = sqlx::query(
+                "SELECT id, tenant_id, status
+                 FROM entities
+                 WHERE lower(alias) = $1 AND tenant_id = $2 AND deleted_at IS NULL",
+            )
+            .bind(alias)
+            .bind(tenant_id)
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)?;
+        }
+    }
 
     if rows.is_empty() {
         return Err(AppError::unauthorized("invalid credentials"));
