@@ -117,11 +117,14 @@ pub fn create_router(state: AppState) -> Router {
             post(keys::rotate_keys).layer(DefaultBodyLimit::max(auth_body_limit)),
         );
 
-    // Prometheus scrape endpoint. Mounted only when metrics are enabled. It
-    // exposes internal operational data and is unauthenticated by design — it
-    // must be network-restricted to the scraper (firewall / mesh / private
-    // network), see AGENTS.md.
-    let app = if state.config.metrics.enabled {
+    // Prometheus scrape endpoint. Mounted only when the operator enabled metrics
+    // (`config.metrics.enabled`) AND the recorder is actually installed
+    // (`metrics::enabled()`) — so it is never present under `--no-default-features`
+    // or when recorder installation failed, where it would otherwise return an
+    // empty 200. It exposes internal operational data and is unauthenticated by
+    // design — it must be network-restricted to the scraper (firewall / mesh /
+    // private network), see AGENTS.md.
+    let app = if state.config.metrics.enabled && crate::metrics::enabled() {
         app.route("/metrics", get(metrics_handler))
     } else {
         app
@@ -284,6 +287,29 @@ mod tests {
     async fn metrics_route_absent_when_disabled() {
         let mut state = test_state();
         state.config.metrics.enabled = false;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(not(feature = "metrics"))]
+    #[tokio::test]
+    async fn metrics_route_absent_without_feature_even_when_configured() {
+        // Operator enabled metrics in config, but the crate was built without the
+        // `metrics` feature: the recorder cannot exist, so the route must not
+        // mount (otherwise it would serve an empty 200).
+        let mut state = test_state();
+        state.config.metrics.enabled = true;
         let app = create_router(state);
 
         let response = app

@@ -37,6 +37,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind gRPC listener on {}", cfg.grpc_addr))?;
     let grpc_bound_addr = grpc_listener.local_addr()?;
+    // Validate gRPC TLS material before serving anything, so a bad cert aborts
+    // startup instead of leaving HTTP up with a permanently failing gRPC task.
+    let grpc_tls = grpc::load_tls_config(&cfg).await?;
 
     let state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer);
     state
@@ -49,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     // installs its own shutdown listener and drains on SIGINT/SIGTERM.
     let grpc_state = state.clone();
     let grpc_handle = tokio::spawn(async move {
-        if let Err(e) = grpc::serve(grpc_listener, grpc_state).await {
+        if let Err(e) = grpc::serve(grpc_listener, grpc_state, grpc_tls).await {
             tracing::error!("grpc server exited: {e}");
         }
     });

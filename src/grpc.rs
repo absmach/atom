@@ -435,6 +435,27 @@ pub async fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
+/// Load and validate the gRPC TLS config (if any) at startup, so a missing or
+/// invalid certificate aborts the process via `main` rather than only logging
+/// inside the spawned server task. Returns `None` when TLS is not configured.
+pub async fn load_tls_config(
+    cfg: &crate::config::Config,
+) -> anyhow::Result<Option<ServerTlsConfig>> {
+    match &cfg.grpc_tls {
+        Some(tls_cfg) => {
+            let tls = build_grpc_tls_config(tls_cfg)
+                .await
+                .with_context(|| "gRPC TLS configuration failed")?;
+            tracing::info!(
+                mtls = tls_cfg.client_ca_path.is_some(),
+                "grpc TLS configured"
+            );
+            Ok(Some(tls))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Build the gRPC server TLS config from PEM files. With `client_ca_path` set,
 /// the server requires and verifies client certificates (mTLS).
 async fn build_grpc_tls_config(
@@ -456,7 +477,11 @@ async fn build_grpc_tls_config(
     Ok(tls)
 }
 
-pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()> {
+pub async fn serve(
+    listener: TcpListener,
+    state: AppState,
+    tls: Option<ServerTlsConfig>,
+) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     tracing::info!("grpc listening on {addr}");
     let incoming = match TcpIncoming::from_listener(listener, true, None) {
@@ -484,21 +509,11 @@ pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()>
         .set_serving::<AliasServiceServer<AtomAlias>>()
         .await;
 
-    // Configure transport TLS before announcing "serving" so a misconfigured
-    // certificate fails fast as an error rather than after we claim readiness.
+    // The TLS config was already loaded and validated in `load_tls_config`
+    // before this task was spawned (fail-fast at startup); here we only apply it.
     let mut builder = Server::builder();
-    match &state.config.grpc_tls {
-        Some(tls_cfg) => {
-            let tls = match build_grpc_tls_config(tls_cfg).await {
-                Ok(tls) => tls,
-                Err(err) => {
-                    let message = format!("gRPC TLS configuration failed on {addr}: {err}");
-                    state
-                        .set_grpc_status(GrpcRuntimeStatus::error(addr.to_string(), message.clone()))
-                        .await;
-                    anyhow::bail!(message);
-                }
-            };
+    match tls {
+        Some(tls) => {
             builder = match builder.tls_config(tls) {
                 Ok(builder) => builder,
                 Err(err) => {
@@ -509,10 +524,7 @@ pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()>
                     anyhow::bail!(message);
                 }
             };
-            tracing::info!(
-                mtls = tls_cfg.client_ca_path.is_some(),
-                "grpc TLS enabled"
-            );
+            tracing::info!("grpc TLS enabled");
         }
         None => tracing::warn!(
             "grpc TLS not configured; transport is plaintext — restrict it to a private network or service mesh"
@@ -636,7 +648,7 @@ mod tests {
         let state = test_state();
         let grpc_state = state.clone();
         tokio::spawn(async move {
-            let _ = serve(listener, grpc_state).await;
+            let _ = serve(listener, grpc_state, None).await;
         });
 
         let mut client = health_client(addr).await;
