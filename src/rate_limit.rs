@@ -129,7 +129,10 @@ pub async fn middleware(State(state): State<AppState>, req: Request<Body>, next:
     let client = client_key(req.headers(), peer_addr, &cfg.trusted_proxy_cidrs);
     match state.rate_limiter.check(category, client, policy) {
         Ok(()) => next.run(req).await,
-        Err(retry_after_secs) => rate_limited_response(retry_after_secs),
+        Err(retry_after_secs) => {
+            crate::metrics::record_rate_limit_rejection(category.as_str());
+            rate_limited_response(retry_after_secs)
+        }
     }
 }
 

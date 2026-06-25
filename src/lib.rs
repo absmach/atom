@@ -18,6 +18,7 @@ pub mod guardrails;
 pub mod health;
 pub mod identity;
 pub mod keys;
+pub mod metrics;
 pub mod models;
 pub mod purge;
 pub mod rate_limit;

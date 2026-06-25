@@ -196,6 +196,34 @@ Optional: `ADMIN_ENTITY_ID` — override the seeded admin UUID (default `0000000
 
 The runtime is production-hardened: configurable DB pool, five-category IP rate limiter, GraphQL depth/complexity/introspection limits (introspection **off** by default — opt in with `ATOM_GRAPHQL_INTROSPECTION_ENABLED=true`), per-route body limits, signing-key encryption at rest, audit retention, a `/health/ready` readiness probe, and graceful shutdown on SIGINT/SIGTERM (both the HTTP and gRPC servers drain in-flight requests before exit).
 
+## Metrics
+
+Prometheus metrics are exposed at `GET /metrics` (text exposition). All metric
+emission goes through the `crate::metrics` façade — domain code calls semantic
+functions (`record_decision`, `record_audit_failure`, `record_rate_limit_rejection`)
+and never imports the `metrics` crate. The backend (`metrics` facade +
+`metrics-exporter-prometheus`) is confined to `src/metrics.rs` behind the
+`metrics` cargo feature (in `default`).
+
+Two off switches:
+- **Runtime:** `ATOM_METRICS_ENABLED=false` skips the recorder install and does
+  not mount `/metrics`; the façade calls fall through to the global no-op recorder.
+- **Compile-time (zero cost):** build with `--no-default-features` — the façade
+  compiles to inlined no-ops and the metrics crates are not linked.
+
+Series (v1): `atom_authz_decision_duration_seconds` (histogram, label `result`),
+`atom_audit_write_failures_total`, `atom_rate_limit_rejections_total` (label
+`category`), `atom_db_pool_connections` (gauge, label `state`). No tenant/entity/IP
+labels — cardinality is kept bounded. Per-check query count is deliberately not a
+metric (would require threading a counter through every repo call); the pool gauges
+cover capacity instead.
+
+**Security:** `/metrics` is unauthenticated by design and exposes internal
+operational data. It **must** be network-restricted to the scraper (firewall,
+service mesh, or a private network). Do not expose it publicly. Swapping the
+Prometheus pull exporter for an OTLP push exporter later is an `init`/`render`
+change in `src/metrics.rs` only — call sites do not move.
+
 ## Key Invariants
 
 - DENY always overrides ALLOW — never change this without explicit discussion.

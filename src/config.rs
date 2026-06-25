@@ -23,6 +23,7 @@ pub struct Config {
     pub rate_limits: RateLimitConfig,
     pub body_limits: BodyLimitConfig,
     pub graphql_limits: GraphqlLimitConfig,
+    pub metrics: MetricsConfig,
     pub jwt_expiry_secs: u64,
     pub jwt_issuer: String,
     pub jwt_audience: String,
@@ -251,6 +252,21 @@ impl Default for GraphqlLimitConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetricsConfig {
+    /// When true (default), the Prometheus recorder is installed at startup and
+    /// `/metrics` is mounted. Set ATOM_METRICS_ENABLED=false to skip both for
+    /// maximum-performance runs without a rebuild. (For a truly zero-cost build,
+    /// compile with `--no-default-features`.)
+    pub enabled: bool,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertsCaMode {
     FileIntermediateIssuer,
     FileRootIssuer,
@@ -292,6 +308,9 @@ impl Config {
             rate_limits: rate_limits_from_env()?,
             body_limits: body_limits_from_env()?,
             graphql_limits: graphql_limits_from_env()?,
+            metrics: MetricsConfig {
+                enabled: env_bool_default("ATOM_METRICS_ENABLED", true),
+            },
             jwt_expiry_secs: std::env::var("JWT_EXPIRY_SECS")
                 .unwrap_or_else(|_| "3600".to_string())
                 .parse()
@@ -374,6 +393,7 @@ impl Config {
             },
             body_limits: BodyLimitConfig::default(),
             graphql_limits: GraphqlLimitConfig::default(),
+            metrics: MetricsConfig::default(),
             jwt_expiry_secs: 3600,
             jwt_issuer: "http://localhost:8080".to_string(),
             jwt_audience: "magistrala".to_string(),

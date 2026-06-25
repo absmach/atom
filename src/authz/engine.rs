@@ -371,6 +371,15 @@ fn scope_target<'a>(
 }
 
 pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse, AppError> {
+    let start = std::time::Instant::now();
+    let result = evaluate_inner(pool, req).await;
+    if let Ok(response) = &result {
+        crate::metrics::record_decision(start.elapsed(), response.allowed);
+    }
+    result
+}
+
+async fn evaluate_inner(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse, AppError> {
     let ctx = match load_decision_context(pool, req).await? {
         DecisionContext::Denied(denied) => return Ok(denied.response),
         DecisionContext::Ready(ctx) => ctx,

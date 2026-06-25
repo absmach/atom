@@ -1,6 +1,6 @@
 use anyhow::Context;
 use atom::{
-    audit, certs, config, db, grpc, identity, keys, purge, routes,
+    audit, certs, config, db, grpc, identity, keys, metrics, purge, routes,
     state::{self, GrpcRuntimeStatus},
 };
 use tracing_subscriber::EnvFilter;
@@ -15,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::Config::from_env()?;
+    metrics::init(cfg.metrics.enabled);
     let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;

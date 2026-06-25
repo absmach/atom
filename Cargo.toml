@@ -46,6 +46,17 @@ ring = "0.17"
 time = "0.3"
 x509-parser = "0.18.1"
 zeroize = "1"
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }
+
+[features]
+# Metrics are on by default. Disable at compile time for maximum-performance
+# builds (`--no-default-features`): the `crate::metrics` façade then compiles to
+# inlined no-ops and the metrics crates are not linked at all. At runtime, leave
+# the feature on but set ATOM_METRICS_ENABLED=false to skip recorder install and
+# the /metrics route (façade calls fall through to the global no-op recorder).
+default = ["metrics"]
+metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [build-dependencies]
 tonic-build = "0.12"

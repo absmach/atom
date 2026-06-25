@@ -32,6 +32,7 @@ pub async fn write(
     .await;
 
     if let Err(e) = result {
+        crate::metrics::record_audit_failure();
         tracing::error!("audit write failed event={event}: {e}");
     }
 }
