@@ -283,7 +283,7 @@ async fn grpc_authenticate_credential_requires_service_auth_and_returns_identity
     let addr = listener.local_addr().expect("local addr");
     let grpc_state = state.clone();
     tokio::spawn(async move {
-        let _ = grpc::serve(listener, grpc_state).await;
+        let _ = grpc::serve(listener, grpc_state, None).await;
     });
 
     let (tenant_id, tenant_alias) = make_tenant(&pool).await;
