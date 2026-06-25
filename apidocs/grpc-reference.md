@@ -4,6 +4,8 @@
 ## Table of Contents
 
 - [atom/v1/atom.proto](#atom_v1_atom-proto)
+    - [AuthenticateCredentialRequest](#atom-v1-AuthenticateCredentialRequest)
+    - [AuthenticateCredentialResponse](#atom-v1-AuthenticateCredentialResponse)
     - [AuthenticateRequest](#atom-v1-AuthenticateRequest)
     - [AuthenticateResponse](#atom-v1-AuthenticateResponse)
     - [CheckRequest](#atom-v1-CheckRequest)
@@ -29,6 +31,42 @@
 <p align="right"><a href="#top">Top</a></p>
 
 ## atom/v1/atom.proto
+
+
+
+<a name="atom-v1-AuthenticateCredentialRequest"></a>
+
+### AuthenticateCredentialRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| identifier | [string](#string) |  | Username-style identifier supplied by protocol adapters such as MQTT brokers. For password credentials this may be an entity UUID, email, name, or a tenant-scoped entity alias. |
+| secret | [string](#string) |  | Plaintext secret supplied by the caller. Atom only stores its hash. |
+| kind | [string](#string) |  | Empty is treated as &#34;password&#34; for MQTT ergonomics. |
+| tenant_id | [string](#string) |  |  |
+| tenant_alias | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="atom-v1-AuthenticateCredentialResponse"></a>
+
+### AuthenticateCredentialResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entity_id | [string](#string) |  |  |
+| tenant_id | [string](#string) |  |  |
+| credential_id | [string](#string) |  |  |
+
+
+
 
 
 
@@ -245,6 +283,7 @@ Use this to authenticate incoming requests without decoding JWTs locally.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 | Authenticate | [AuthenticateRequest](#atom-v1-AuthenticateRequest) | [AuthenticateResponse](#atom-v1-AuthenticateResponse) |  |
+| AuthenticateCredential | [AuthenticateCredentialRequest](#atom-v1-AuthenticateCredentialRequest) | [AuthenticateCredentialResponse](#atom-v1-AuthenticateCredentialResponse) |  |
 
 
 <a name="atom-v1-AuthzService"></a>
@@ -292,4 +331,3 @@ runtime services that terminate mTLS outside Atom.
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
-
