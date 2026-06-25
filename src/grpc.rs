@@ -446,6 +446,13 @@ pub async fn load_tls_config(
             let tls = build_grpc_tls_config(tls_cfg)
                 .await
                 .with_context(|| "gRPC TLS configuration failed")?;
+            // Reading the files is not enough: tonic/rustls only parses and
+            // validates the cert, key, CA, and key/cert match when the config is
+            // applied to a builder. Do that here so malformed or mismatched PEM
+            // aborts startup instead of failing later inside the spawned task.
+            Server::builder()
+                .tls_config(tls.clone())
+                .with_context(|| "invalid gRPC TLS material")?;
             tracing::info!(
                 mtls = tls_cfg.client_ca_path.is_some(),
                 "grpc TLS configured"
@@ -623,6 +630,46 @@ mod tests {
             client_ca_path: None,
         };
         assert!(build_grpc_tls_config(&missing).await.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn load_tls_config_rejects_malformed_and_mismatched_pem() {
+        let dir = std::env::temp_dir().join(format!("atom-grpc-tls-bad-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // Two independent self-signed certs: cert from A, key from B = mismatch.
+        let a = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("cert a");
+        let b = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("cert b");
+        let cert_a = dir.join("a.crt");
+        let key_a = dir.join("a.key");
+        let key_b = dir.join("b.key");
+        let garbage = dir.join("garbage.crt");
+        std::fs::write(&cert_a, a.cert.pem()).expect("write cert a");
+        std::fs::write(&key_a, a.signing_key.serialize_pem()).expect("write key a");
+        std::fs::write(&key_b, b.signing_key.serialize_pem()).expect("write key b");
+        std::fs::write(
+            &garbage,
+            "-----BEGIN CERTIFICATE-----\nnot-base64-pem\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write garbage");
+
+        let cfg_with = |cert: &std::path::Path, key: &std::path::Path| {
+            let mut cfg = Config::for_tests();
+            cfg.grpc_tls = Some(crate::config::GrpcTlsConfig {
+                cert_path: cert.to_string_lossy().into_owned(),
+                key_path: key.to_string_lossy().into_owned(),
+                client_ca_path: None,
+            });
+            cfg
+        };
+
+        // Matching cert/key validates and loads.
+        assert!(load_tls_config(&cfg_with(&cert_a, &key_a)).await.is_ok());
+        // Malformed (readable but unparseable) cert PEM is rejected at startup.
+        assert!(load_tls_config(&cfg_with(&garbage, &key_a)).await.is_err());
+        // A key that does not match the certificate is rejected at startup.
+        assert!(load_tls_config(&cfg_with(&cert_a, &key_b)).await.is_err());
 
         std::fs::remove_dir_all(&dir).ok();
     }
