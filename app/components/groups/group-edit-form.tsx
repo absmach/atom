@@ -48,10 +48,18 @@ const REMOVE_GROUP_PARENT_MUTATION = `
   }
 `;
 
-const GROUPS_QUERY = `
-  query GroupEditGroups($tenantId: ID) {
-    groups(tenantId: $tenantId, limit: 200, offset: 0) {
-      items { id name tenantId parentId }
+const OBJECT_GROUPS_QUERY = `
+  query GroupEditObjectGroups($tenantId: ID) {
+    groups: objectGroups(tenantId: $tenantId, limit: 200, offset: 0) {
+      items { id name tenantId parentId groupType }
+    }
+  }
+`;
+
+const PRINCIPAL_GROUPS_QUERY = `
+  query GroupEditPrincipalGroups($tenantId: ID) {
+    groups: principalGroups(tenantId: $tenantId, limit: 200, offset: 0) {
+      items { id name tenantId parentId groupType }
     }
   }
 `;
@@ -70,6 +78,7 @@ export type GroupFormInitialValues = {
   id: string;
   name: string;
   tenantId: string;
+  groupType: string;
   parentId: string;
   description: string;
 };
@@ -93,15 +102,30 @@ export function GroupEditForm({
   });
 
   const groupsQuery = useQuery({
-    queryKey: ["group-edit-parent-options", group.tenantId, group.id],
+    queryKey: [
+      "group-edit-parent-options",
+      group.tenantId,
+      group.groupType,
+      group.id,
+    ],
     queryFn: ({ signal }) =>
       graphqlClient<{
         groups: {
-          items: { id: string; name: string; tenantId: string | null }[];
+          items: {
+            id: string;
+            name: string;
+            tenantId: string | null;
+            groupType: string;
+          }[];
         };
       }>({
-        query: GROUPS_QUERY,
-        variables: { tenantId: group.tenantId || undefined },
+        query:
+          group.groupType === "principal"
+            ? PRINCIPAL_GROUPS_QUERY
+            : OBJECT_GROUPS_QUERY,
+        variables: {
+          tenantId: group.tenantId || undefined,
+        },
         signal,
       }),
     staleTime: 30_000,
@@ -175,6 +199,12 @@ export function GroupEditForm({
             </FormItem>
           )}
         />
+        <div className="grid gap-1 rounded-lg border bg-muted/30 px-3 py-2">
+          <span className="text-xs font-medium uppercase text-muted-foreground">
+            Group type
+          </span>
+          <span className="text-sm">{groupTypeLabel(group.groupType)}</span>
+        </div>
         <FormField
           control={form.control}
           name="parentId"
@@ -202,8 +232,9 @@ export function GroupEditForm({
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Parent Object Groups extend where role permissions apply. They
-                do not grant access by themselves.
+                {group.groupType === "principal"
+                  ? "Parent Principal Groups extend inherited role assignments for identities."
+                  : "Parent Object Groups extend where role permissions apply. They do not grant access by themselves."}
               </p>
               <FormMessage />
             </FormItem>
@@ -220,4 +251,9 @@ export function GroupEditForm({
       </form>
     </Form>
   );
+}
+
+function groupTypeLabel(groupType: string) {
+  if (groupType === "principal") return "Principal group";
+  return "Object group";
 }

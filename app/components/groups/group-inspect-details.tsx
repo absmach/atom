@@ -22,6 +22,7 @@ export function GroupInspectDetails({ row }: { row: Row | null }) {
   const id = row?.id ? String(row.id) : "";
   const tenantId = row?.tenantId ? String(row.tenantId) : "";
   const parentId = row?.parentId ? String(row.parentId) : "";
+  const groupType = row?.groupType ? String(row.groupType) : "";
 
   const tenantQuery = useQuery({
     enabled: Boolean(tenantId),
@@ -105,6 +106,10 @@ export function GroupInspectDetails({ row }: { row: Row | null }) {
         </Field>
       ) : null}
 
+      <Field label="Group type">
+        <span className="text-sm">{groupTypeLabel(groupType)}</span>
+      </Field>
+
       <Field label="Parent group">
         <span className="text-sm">
           {parentId
@@ -113,7 +118,7 @@ export function GroupInspectDetails({ row }: { row: Row | null }) {
         </span>
       </Field>
 
-      <Field label="Child Object Groups">
+      <Field label={childGroupsLabel(groupType)}>
         {hierarchyQuery.data?.childGroups.items.length ? (
           <div className="flex flex-wrap gap-1">
             {hierarchyQuery.data.childGroups.items.map((child) => (
@@ -129,9 +134,9 @@ export function GroupInspectDetails({ row }: { row: Row | null }) {
           <span className="text-sm text-muted-foreground">No child groups</span>
         )}
         <p className="mt-2 text-xs text-muted-foreground">
-          Object Group nesting only defines where a role applies. Access is
-          still granted through role assignments to entities or Principal
-          Groups.
+          {groupType === "principal"
+            ? "Principal Group nesting extends inherited role assignments to member entities and child Principal Groups."
+            : "Object Group nesting only defines where a role applies. Access is still granted through role assignments to entities or Principal Groups."}
         </p>
       </Field>
 
@@ -155,6 +160,18 @@ export function GroupInspectDetails({ row }: { row: Row | null }) {
       </div>
     </div>
   );
+}
+
+function groupTypeLabel(groupType: string) {
+  if (groupType === "principal") return "Principal group";
+  if (groupType === "object") return "Object group";
+  return "Group";
+}
+
+function childGroupsLabel(groupType: string) {
+  if (groupType === "principal") return "Child Principal Groups";
+  if (groupType === "object") return "Child Object Groups";
+  return "Child Groups";
 }
 
 function Field({

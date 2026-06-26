@@ -861,10 +861,14 @@ pub async fn create_group(pool: &PgPool, req: CreateGroup) -> Result<Group, AppE
     } = req;
     let id = id.unwrap_or_else(Uuid::new_v4);
     let attrs = normalize_attributes(attributes);
-    let group_type = group_type.unwrap_or_else(|| "both".to_string());
+    let group_type = group_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("groupType is required: use object or principal"))?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
-    let group = match group_type.as_str() {
+    let group = match group_type {
         "principal" => sqlx::query_as::<_, Group>(
             r#"INSERT INTO principal_groups (id, name, tenant_id, description, attributes)
                    VALUES ($1, $2, $3, $4, $5)
@@ -895,41 +899,10 @@ pub async fn create_group(pool: &PgPool, req: CreateGroup) -> Result<Group, AppE
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?,
-        "both" => {
-            sqlx::query(
-                r#"INSERT INTO principal_groups (id, name, tenant_id, description, attributes)
-                   VALUES ($1, $2, $3, $4, $5)"#,
-            )
-            .bind(id)
-            .bind(&name)
-            .bind(tenant_id)
-            .bind(&description)
-            .bind(&attrs)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
-
-            let group = sqlx::query_as::<_, Group>(
-                r#"INSERT INTO object_groups (id, name, tenant_id, description, attributes)
-                   VALUES ($1, $2, $3, $4, $5)
-                   RETURNING id, name, tenant_id, 'object'::text AS group_type, description,
-                             NULL::uuid AS parent_id,
-                             status, attributes, deleted_at, deleted_by, created_at, updated_at"#,
-            )
-            .bind(id)
-            .bind(name)
-            .bind(tenant_id)
-            .bind(description)
-            .bind(attrs)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db_err)?;
-            group
-        }
-        other => {
-            return Err(AppError::bad_request(format!(
-                "unsupported group type '{other}'"
-            )))
+        _ => {
+            return Err(AppError::bad_request(
+                "groupType must be either 'object' or 'principal'",
+            ))
         }
     };
     tx.commit().await.map_err(db_err)?;

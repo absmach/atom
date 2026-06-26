@@ -48,6 +48,7 @@ export function groupFormInitialValues(row: Row): GroupFormInitialValues {
     id: String(row.id),
     name: typeof row.name === "string" ? row.name : "",
     tenantId: typeof row.tenantId === "string" ? row.tenantId : "",
+    groupType: typeof row.groupType === "string" ? row.groupType : "object",
     parentId: typeof row.parentId === "string" ? row.parentId : "",
     description: typeof row.description === "string" ? row.description : "",
   };

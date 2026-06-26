@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   entityFormInitialValues,
+  groupFormInitialValues,
   resourceFormInitialValues,
 } from "@/components/crud/table/initial-values";
 
@@ -30,5 +31,21 @@ describe("alias form initial values", () => {
   it("uses an empty alias when the row has none", () => {
     expect(entityFormInitialValues({ id: "entity-1" }).alias).toBe("");
     expect(resourceFormInitialValues({ id: "resource-1" }).alias).toBe("");
+  });
+});
+
+describe("group form initial values", () => {
+  it("loads group type for editing", () => {
+    expect(
+      groupFormInitialValues({
+        id: "group-1",
+        name: "Operators",
+        groupType: "principal",
+      }).groupType,
+    ).toBe("principal");
+  });
+
+  it("defaults missing group type to object", () => {
+    expect(groupFormInitialValues({ id: "group-1" }).groupType).toBe("object");
   });
 });

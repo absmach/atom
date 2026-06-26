@@ -65,16 +65,40 @@ async fn create_group_returns_group() {
     let schema = build_schema(state(pool));
     let name = format!("graphql-group-{}", Uuid::new_v4());
 
+    let missing_type = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createGroup(input: {{
+                name: "{name}-missing"
+              }}) {{
+                id
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(
+        missing_type
+            .errors
+            .iter()
+            .any(|err| err.message.contains("groupType is required")),
+        "{:?}",
+        missing_type.errors
+    );
+
     let response = schema
         .execute(authed(format!(
             r#"
             mutation {{
               createGroup(input: {{
                 name: "{name}",
+                groupType: "object",
                 description: "GraphQL group"
               }}) {{
                 id
                 name
+                groupType
                 tenantId
                 description
               }}
@@ -86,6 +110,7 @@ async fn create_group_returns_group() {
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let group = &response.data.into_json().expect("json data")["createGroup"];
     assert_eq!(group["name"], name);
+    assert_eq!(group["groupType"], "object");
     assert_eq!(group["description"], "GraphQL group");
     assert!(group["id"].as_str().is_some());
 }

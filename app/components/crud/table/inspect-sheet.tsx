@@ -106,10 +106,11 @@ function InspectBody({
     );
   }
   if (resourceKey === "groups") {
+    const groupType = inspected?.groupType ? String(inspected.groupType) : "";
     return (
       <>
         <GroupInspectDetails row={inspected} />
-        {inspected?.id ? (
+        {inspected?.id && groupType === "principal" ? (
           <GroupMembersPanel groupId={String(inspected.id)} />
         ) : null}
       </>

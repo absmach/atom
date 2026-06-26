@@ -356,17 +356,15 @@ async fn invitation_by_email_does_not_resolve_to_soft_deleted_user() {
 
 #[tokio::test]
 #[ignore]
-async fn get_entity_groups_does_not_duplicate_both_type_groups() {
+async fn create_group_requires_explicit_group_type() {
     let pool = common::pool().await;
-    let entity_id = make_entity(&pool, &format!("sd-grp-mem-{}", Uuid::new_v4()), None).await;
+    let id = Uuid::new_v4();
 
-    // `create_group` defaults to a 'both'-type group, inserting the same UUID into
-    // both principal_groups and object_groups.
-    let group = atom::identity::repo::create_group(
+    let err = atom::identity::repo::create_group(
         &pool,
         CreateGroup {
-            id: None,
-            name: format!("sd-grp-dedup-{}", Uuid::new_v4()),
+            id: Some(id),
+            name: format!("sd-grp-requires-type-{id}"),
             tenant_id: None,
             group_type: None,
             description: None,
@@ -374,16 +372,25 @@ async fn get_entity_groups_does_not_duplicate_both_type_groups() {
         },
     )
     .await
-    .expect("create group");
-    atom::identity::repo::add_group_member(&pool, group.id, entity_id)
-        .await
-        .expect("add member");
+    .expect_err("missing group type should fail");
+    assert!(
+        err.to_string().contains("groupType is required"),
+        "unexpected error: {err}"
+    );
 
-    let groups = atom::identity::repo::get_entity_groups(&pool, entity_id)
+    let principal_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM principal_groups WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("principal group count");
+    let object_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
         .await
-        .expect("entity groups");
-    let hits = groups.iter().filter(|&&g| g == group.id).count();
-    assert_eq!(hits, 1, "a 'both'-type group must appear exactly once");
+        .expect("object group count");
+    assert_eq!(principal_count, 0);
+    assert_eq!(object_count, 0);
 }
 
 #[tokio::test]

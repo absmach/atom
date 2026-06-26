@@ -31,6 +31,7 @@ export function FallbackCreateForm({
       {resourceKey === "groups" || resourceKey === "roles" ? (
         <QuickField name="description" label="Description" />
       ) : null}
+      {resourceKey === "groups" ? <GroupTypeField /> : null}
       {resourceKey !== "tenants" && resourceKey !== "action-applicability" ? (
         <TenantPickerField />
       ) : null}
@@ -91,6 +92,30 @@ function RequiredLabel({
       {children}
       {required ? <span className="text-destructive"> *</span> : null}
     </Label>
+  );
+}
+
+function GroupTypeField() {
+  return (
+    <div className="grid gap-2">
+      <RequiredLabel htmlFor="groupType" required>
+        Group type
+      </RequiredLabel>
+      <select
+        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        defaultValue="object"
+        id="groupType"
+        name="groupType"
+        required
+      >
+        <option value="object">Object group</option>
+        <option value="principal">Principal group</option>
+      </select>
+      <p className="text-xs text-muted-foreground">
+        Object groups scope access to objects. Principal groups collect
+        identities that receive role assignments.
+      </p>
+    </div>
   );
 }
 
