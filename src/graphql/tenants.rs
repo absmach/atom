@@ -537,6 +537,36 @@ impl TenantMutation {
             .map_err(gql_error)?;
         Ok(true)
     }
+
+    async fn add_tenant_member(
+        &self,
+        ctx: &Context<'_>,
+        tenant_id: ID,
+        entity_id: ID,
+        role_id: Option<ID>,
+    ) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let tenant_id = parse_id(tenant_id, "tenantId")?;
+        require_any_capability(
+            &state.pool,
+            auth.entity_id,
+            &[
+                ("manage", Scope::Tenant(tenant_id)),
+                ("policy.manage", Scope::Tenant(tenant_id)),
+            ],
+        )
+        .await?;
+        tenant_repo::add_tenant_member(
+            &state.pool,
+            tenant_id,
+            parse_id(entity_id, "entityId")?,
+            role_id.map(|id| parse_id(id, "roleId")).transpose()?,
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(true)
+    }
 }
 
 async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -> Result<Tenant> {

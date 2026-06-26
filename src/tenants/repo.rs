@@ -1034,6 +1034,46 @@ pub async fn remove_tenant_member(
     Ok(())
 }
 
+pub async fn add_tenant_member(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    entity_id: Uuid,
+    role_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    lock_active_tenant(&mut tx, tenant_id).await?;
+    crate::authz::repo::lock_live_entity_subject_in_tx(&mut tx, Some(tenant_id), entity_id).await?;
+
+    sqlx::query(
+        r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
+           VALUES ($1, $2, 'active')
+           ON CONFLICT (tenant_id, entity_id)
+           DO UPDATE SET status = 'active'"#,
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    if let Some(role_id) = role_id {
+        crate::authz::repo::create_role_assignment_if_missing_in_tx(
+            pool,
+            &mut tx,
+            &CreateRoleAssignment {
+                tenant_id: Some(tenant_id),
+                subject_kind: SubjectKind::Entity,
+                subject_id: entity_id,
+                role_id,
+            },
+        )
+        .await?;
+    }
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
 pub async fn list_tenant_role_assignments(
     pool: &PgPool,
     tenant_id: Uuid,
