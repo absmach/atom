@@ -211,6 +211,7 @@ mod tests {
             "enableTenant",
             "disableTenant",
             "freezeTenant",
+            "addTenantMember",
             "removeTenantMember",
             "createProfile",
             "createProfileVersion",
