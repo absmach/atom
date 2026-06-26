@@ -80,6 +80,7 @@ async fn read_role(pool: &sqlx::PgPool, tenant_id: Uuid, effect: &str) -> Uuid {
             name: format!("m19-role-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await
@@ -351,6 +352,7 @@ async fn tenant_visible_via_role_object_kind_grant() {
             name: format!("m19-ok-role-{}", Uuid::new_v4()),
             tenant_id: Some(target),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await

@@ -774,6 +774,10 @@ impl Role {
         self.0.description.as_deref()
     }
 
+    async fn attributes(&self) -> &Value {
+        &self.0.attributes
+    }
+
     async fn derived_kind(&self, ctx: &Context<'_>) -> Result<String> {
         let state = ctx.data::<AppState>()?;
         let kind = authz_repo::role_derived_kind(&state.pool, self.0.id)
@@ -1627,6 +1631,7 @@ pub struct CreateRoleInput {
     pub name: String,
     pub tenant_id: Option<ID>,
     pub description: Option<String>,
+    pub attributes: Option<Value>,
 }
 
 #[derive(InputObject)]
@@ -1644,6 +1649,7 @@ pub struct CreateRolePermissionBlockInput {
 pub struct UpdateRoleInput {
     pub name: Option<String>,
     pub description: Option<String>,
+    pub attributes: Option<Value>,
 }
 
 #[derive(InputObject)]

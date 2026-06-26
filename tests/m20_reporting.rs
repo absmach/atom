@@ -81,6 +81,7 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
             name: format!("m20-conditional-deny-{}", Uuid::new_v4()),
             tenant_id: Some(target_tenant),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await
@@ -132,6 +133,7 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
             name: format!("m20-empty-{}", Uuid::new_v4()),
             tenant_id: Some(target_tenant),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await
@@ -154,6 +156,7 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
             name: format!("m20-foreign-{}", Uuid::new_v4()),
             tenant_id: None,
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await

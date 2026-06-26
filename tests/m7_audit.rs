@@ -210,6 +210,7 @@ async fn read_role(pool: &sqlx::PgPool, tenant_id: Uuid, subject: Uuid, effect: 
             name: format!("m7-role-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await

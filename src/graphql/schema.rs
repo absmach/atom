@@ -375,13 +375,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn roles_query_exposes_derived_kind_filter() {
+    async fn role_schema_exposes_attributes_and_filters() {
         let schema = build_schema(test_state());
 
         let response = schema
             .execute(Request::new(
                 r#"
                 {
+                  roleType: __type(name: "Role") {
+                    fields { name }
+                  }
+                  createInput: __type(name: "CreateRoleInput") {
+                    inputFields { name }
+                  }
+                  updateInput: __type(name: "UpdateRoleInput") {
+                    inputFields { name }
+                  }
                   __schema {
                     queryType {
                       fields {
@@ -397,6 +406,15 @@ mod tests {
 
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         let data = response.data.into_json().expect("json data");
+        let role_fields = field_names(&data["roleType"]["fields"]);
+        assert!(role_fields.contains("attributes"));
+
+        let create_fields = field_names(&data["createInput"]["inputFields"]);
+        assert!(create_fields.contains("attributes"));
+
+        let update_fields = field_names(&data["updateInput"]["inputFields"]);
+        assert!(update_fields.contains("attributes"));
+
         let query_fields = data["__schema"]["queryType"]["fields"]
             .as_array()
             .expect("query fields");
@@ -407,6 +425,7 @@ mod tests {
         let arg_names = field_names(&roles_field["args"]);
 
         assert!(arg_names.contains("derivedKind"));
+        assert!(arg_names.contains("attributesContains"));
     }
 
     #[tokio::test]

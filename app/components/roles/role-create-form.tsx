@@ -8,6 +8,7 @@ import { useTenant } from "@/components/app-shell/tenant-provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { JsonEditor } from "@/components/ui/json-editor";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -55,6 +56,7 @@ const ROLE_DETAIL_QUERY = `
       name
       tenantId
       description
+      attributes
       permissionBlocks {
         id
         tenantId
@@ -72,13 +74,13 @@ const ROLE_DETAIL_QUERY = `
 
 const CREATE_ROLE_MUTATION = `
   mutation CreateRole($input: CreateRoleInput!) {
-    createRole(input: $input) { id name tenantId description createdAt updatedAt }
+    createRole(input: $input) { id name tenantId description attributes createdAt updatedAt }
   }
 `;
 
 const UPDATE_ROLE_MUTATION = `
   mutation UpdateRole($id: ID!, $input: UpdateRoleInput!) {
-    updateRole(id: $id, input: $input) { id name tenantId description createdAt updatedAt }
+    updateRole(id: $id, input: $input) { id name tenantId description attributes createdAt updatedAt }
   }
 `;
 
@@ -107,12 +109,14 @@ export type RoleFormInitialValues = {
   name: string;
   tenantId: string;
   description: string;
+  attributes: unknown;
 };
 
 type Draft = {
   name: string;
   tenantId: string;
   description: string;
+  attributesJson: string;
   permissionBlockIds: string[];
 };
 
@@ -133,6 +137,7 @@ export function RoleCreateForm({
     name: role?.name ?? "",
     tenantId: role?.tenantId ?? (isTenantScoped ? selection.id : ""),
     description: role?.description ?? "",
+    attributesJson: stringifyAttributes(role?.attributes),
     permissionBlockIds: [],
   });
   const hydratedRoleId = React.useRef<string | null>(null);
@@ -174,6 +179,7 @@ export function RoleCreateForm({
           name: string;
           tenantId?: string | null;
           description?: string | null;
+          attributes?: unknown;
           permissionBlocks: PermissionBlockOption[];
         };
       }>({
@@ -193,6 +199,7 @@ export function RoleCreateForm({
       name: current.name,
       tenantId: current.tenantId ?? "",
       description: current.description ?? "",
+      attributesJson: stringifyAttributes(current.attributes),
       permissionBlockIds: current.permissionBlocks.map((block) => block.id),
     });
   }, [role?.id, roleDetailQuery.data]);
@@ -215,6 +222,7 @@ export function RoleCreateForm({
         name: draft.name.trim(),
         tenantId: draft.tenantId || undefined,
         description: draft.description.trim() || undefined,
+        attributes: parseAttributes(draft.attributesJson),
       };
 
       const roleId = role?.id
@@ -236,6 +244,7 @@ export function RoleCreateForm({
             input: {
               name: input.name,
               description: input.description,
+              attributes: input.attributes,
             },
           },
         });
@@ -338,6 +347,16 @@ export function RoleCreateForm({
               }
             />
           </Field>
+
+          <Field label="Attributes JSON">
+            <JsonEditor
+              className="[&_.cm-editor]:min-h-36"
+              onChange={(value) =>
+                setDraft((prev) => ({ ...prev, attributesJson: value }))
+              }
+              value={draft.attributesJson}
+            />
+          </Field>
         </div>
       ) : null}
 
@@ -434,6 +453,15 @@ export function RoleCreateForm({
           <ReviewRow label="Description">
             {draft.description || "No description"}
           </ReviewRow>
+          <div className="grid gap-1">
+            <div className="text-xs font-medium uppercase text-muted-foreground">
+              Attributes
+            </div>
+            <JsonEditor
+              className="[&_.cm-editor]:min-h-36"
+              value={previewAttributes(draft.attributesJson)}
+            />
+          </div>
           <div className="grid gap-1">
             <div className="text-xs font-medium uppercase text-muted-foreground">
               Permission blocks
@@ -563,7 +591,45 @@ function ReviewRow({
 function validateDraft(draft: Draft) {
   const errors: string[] = [];
   if (!draft.name.trim()) errors.push("Role name is required");
+  try {
+    parseAttributes(draft.attributesJson);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : "Attributes invalid");
+  }
   return errors;
+}
+
+function parseAttributes(value: string) {
+  const raw = value.trim();
+  if (!raw) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Attributes must be valid JSON.");
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Attributes must be a JSON object.");
+  }
+
+  return parsed;
+}
+
+function stringifyAttributes(value: unknown) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return JSON.stringify(value, null, 2);
+  }
+  return "{}";
+}
+
+function previewAttributes(value: string) {
+  try {
+    return JSON.stringify(parseAttributes(value), null, 2);
+  } catch {
+    return value;
+  }
 }
 
 function permissionBlockLabel(block: PermissionBlockOption) {

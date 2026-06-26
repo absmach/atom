@@ -120,6 +120,7 @@ async fn role_capability_addition_rejects_existing_device_role_holder() {
             name: format!("m8-role-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
         &[CreateRolePermissionBlock {
             applies_to: "object_kind".to_string(),
@@ -210,6 +211,7 @@ async fn channel_scoped_role_rejects_rule_only_capability() {
             name: format!("m8-channel-publisher-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
         &[CreateRolePermissionBlock {
             applies_to: "object_type".to_string(),
@@ -231,6 +233,7 @@ async fn channel_scoped_role_rejects_rule_only_capability() {
             name: format!("m8-channel-execute-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
         &[CreateRolePermissionBlock {
             applies_to: "object_type".to_string(),
@@ -265,6 +268,7 @@ async fn exact_object_permission_block_uses_real_object_type() {
             name: format!("m8-rule-executor-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
         &[CreateRolePermissionBlock {
             applies_to: "object".to_string(),
@@ -286,6 +290,7 @@ async fn exact_object_permission_block_uses_real_object_type() {
             name: format!("m8-rule-publisher-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
         &[CreateRolePermissionBlock {
             applies_to: "object".to_string(),
@@ -366,6 +371,7 @@ async fn role_capability_addition_rejects_device_via_parent_group() {
             name: format!("m8-parent-role-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await
@@ -412,6 +418,7 @@ async fn concurrent_block_link_and_role_assignment_serialize() {
             name: format!("m8-race-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await

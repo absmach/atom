@@ -493,6 +493,7 @@ CREATE TABLE roles (
     name        TEXT        NOT NULL,
     tenant_id   UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     description TEXT,
+    attributes  JSONB       NOT NULL DEFAULT '{}',
     deleted_at  TIMESTAMPTZ,
     deleted_by  UUID        REFERENCES entities(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -502,6 +503,7 @@ CREATE TABLE roles (
 CREATE UNIQUE INDEX idx_roles_name_tenant
     ON roles(name, COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid))
     WHERE deleted_at IS NULL;
+CREATE INDEX idx_roles_attrs ON roles USING GIN(attributes);
 CREATE INDEX idx_roles_deleted_at ON roles(deleted_at) WHERE deleted_at IS NOT NULL;
 
 CREATE TABLE actions (

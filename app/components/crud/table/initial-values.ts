@@ -13,6 +13,10 @@ export function roleFormInitialValues(row: Row): RoleFormInitialValues {
     name: typeof row.name === "string" ? row.name : "",
     tenantId: typeof row.tenantId === "string" ? row.tenantId : "",
     description: typeof row.description === "string" ? row.description : "",
+    attributes:
+      row.attributes && typeof row.attributes === "object"
+        ? row.attributes
+        : {},
   };
 }
 

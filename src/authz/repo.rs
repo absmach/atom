@@ -703,22 +703,33 @@ pub struct EffectiveGrant {
 
 pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
     let id = Uuid::new_v4();
+    let attrs = normalize_attributes(req.attributes);
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let role = sqlx::query_as::<_, Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description, attributes)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, name, tenant_id, description, attributes,
+                     deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
+    .bind(attrs)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
     Ok(role)
+}
+
+fn normalize_attributes(attributes: Value) -> Value {
+    if attributes == Value::Null {
+        serde_json::json!({})
+    } else {
+        attributes
+    }
 }
 
 pub async fn create_role_with_assignments(
@@ -780,6 +791,7 @@ pub async fn create_role_with_assignments(
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
+    let attrs = normalize_attributes(req.attributes.clone());
     let mut locked_member_ids = member_entity_ids.to_vec();
     locked_member_ids.sort_unstable();
     locked_member_ids.dedup();
@@ -787,14 +799,16 @@ pub async fn create_role_with_assignments(
         lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
     }
     let role = sqlx::query_as::<_, Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description, attributes)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, name, tenant_id, description, attributes,
+                     deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
+    .bind(attrs)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -875,6 +889,7 @@ pub async fn create_role_with_permission_blocks(
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
+    let attrs = normalize_attributes(req.attributes.clone());
     let mut locked_member_ids = member_entity_ids.to_vec();
     locked_member_ids.sort_unstable();
     locked_member_ids.dedup();
@@ -882,14 +897,16 @@ pub async fn create_role_with_permission_blocks(
         lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
     }
     let role = sqlx::query_as::<_, Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description, attributes)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, name, tenant_id, description, attributes,
+                     deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
+    .bind(attrs)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -1905,7 +1922,8 @@ async fn validate_object_group_boundary(
 
 pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
     sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
+        r#"SELECT id, name, tenant_id, description, attributes,
+                  deleted_at, deleted_by, created_at, updated_at
            FROM roles WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(id)
@@ -1928,6 +1946,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
         .filter(|kind| !kind.is_empty())
         .map(str::to_ascii_lowercase);
     let deleted = params.deleted.as_str();
+    let attributes_contains = params.attributes_contains.map(normalize_attributes);
 
     if let Some(kind) = derived_kind.as_deref() {
         match kind {
@@ -1941,10 +1960,12 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     }
 
     let items = sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
+        r#"SELECT id, name, tenant_id, description, attributes,
+                  deleted_at, deleted_by, created_at, updated_at
            FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
+             AND ($7::jsonb IS NULL OR attributes @> $7::jsonb)
              AND (
                $3::text IS NULL
                OR ($3 = 'simple' AND EXISTS (
@@ -1966,6 +1987,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     .bind(limit)
     .bind(offset)
     .bind(deleted)
+    .bind(attributes_contains.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -1974,6 +1996,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
         r#"SELECT COUNT(*) FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
+             AND ($5::jsonb IS NULL OR attributes @> $5::jsonb)
              AND (
                $3::text IS NULL
                OR ($3 = 'simple' AND EXISTS (
@@ -1992,6 +2015,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     .bind(q)
     .bind(derived_kind)
     .bind(deleted)
+    .bind(attributes_contains)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -2442,13 +2466,16 @@ pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Rol
         r#"UPDATE roles
            SET name        = COALESCE($2, name),
                description = COALESCE($3, description),
+               attributes  = COALESCE($4, attributes),
                updated_at  = now()
            WHERE id = $1 AND deleted_at IS NULL
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
+           RETURNING id, name, tenant_id, description, attributes,
+                     deleted_at, deleted_by, created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.description)
+    .bind(req.attributes.map(normalize_attributes))
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
@@ -3929,6 +3956,7 @@ pub async fn subject_role_assignments(
              r.name AS role_name,
              r.tenant_id AS role_tenant_id,
              r.description AS role_description,
+             r.attributes AS role_attributes,
              r.created_at AS role_created_at,
              r.updated_at AS role_updated_at
            FROM effective_access_edges() pb
@@ -3983,6 +4011,7 @@ pub async fn subject_role_assignments(
                     name: row.try_get("role_name").map_err(db_err)?,
                     tenant_id: row.try_get("role_tenant_id").map_err(db_err)?,
                     description: row.try_get("role_description").map_err(db_err)?,
+                    attributes: row.try_get("role_attributes").map_err(db_err)?,
                     deleted_at: None,
                     deleted_by: None,
                     created_at: row.try_get("role_created_at").map_err(db_err)?,

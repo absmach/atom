@@ -97,6 +97,7 @@ async fn role_with_manage_block_cond(
             name: format!("gate-role-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await

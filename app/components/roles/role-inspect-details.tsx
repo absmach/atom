@@ -5,6 +5,7 @@ import { Check, Copy } from "lucide-react";
 import * as React from "react";
 import { DisplayTimeCell } from "@/components/display-time";
 import { Button } from "@/components/ui/button";
+import { JsonEditor } from "@/components/ui/json-editor";
 import { graphqlClient } from "@/lib/graphql/client";
 import { Action } from "@/lib/utils";
 
@@ -44,6 +45,13 @@ export function RoleInspectDetails({ row }: { row: Row | null }) {
   if (!row) return null;
 
   const tenantName = tenantQuery.data?.tenant.name ?? tenantId;
+  const attributes =
+    row.attributes &&
+    typeof row.attributes === "object" &&
+    !Array.isArray(row.attributes)
+      ? row.attributes
+      : {};
+  const attributesCode = JSON.stringify(attributes, null, 2);
 
   return (
     <div className="grid gap-3">
@@ -88,6 +96,13 @@ export function RoleInspectDetails({ row }: { row: Row | null }) {
           <span className="text-sm">{String(row.description)}</span>
         </Field>
       ) : null}
+
+      <div className="grid gap-1 rounded-lg border bg-background p-3">
+        <div className="text-xs font-medium uppercase text-muted-foreground">
+          Attributes
+        </div>
+        <JsonEditor value={attributesCode} />
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         {row.createdAt ? (

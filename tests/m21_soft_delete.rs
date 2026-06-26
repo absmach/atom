@@ -520,6 +520,7 @@ async fn soft_deleted_objects_are_read_only() {
             UpdateRole {
                 name: Some("mutated".to_string()),
                 description: None,
+                attributes: None,
             },
         )
         .await
@@ -737,6 +738,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             tenant_id: None,
             derived_kind: None,
             q: Some(role_name.clone()),
+            attributes_contains: None,
             deleted: DeletedFilter::Live,
             limit: 50,
             offset: 0,
@@ -751,6 +753,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             tenant_id: None,
             derived_kind: None,
             q: Some(role_name),
+            attributes_contains: None,
             deleted: DeletedFilter::Deleted,
             limit: 50,
             offset: 0,

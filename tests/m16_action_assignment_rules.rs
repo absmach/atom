@@ -222,6 +222,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
             name: format!("m16-role-{}", uuid::Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await

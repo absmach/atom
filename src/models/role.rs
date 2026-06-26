@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::enums::DeletedFilter;
@@ -10,6 +11,7 @@ pub struct Role {
     pub name: String,
     pub tenant_id: Option<Uuid>,
     pub description: Option<String>,
+    pub attributes: Value,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -21,6 +23,8 @@ pub struct CreateRole {
     pub name: String,
     pub tenant_id: Option<Uuid>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub attributes: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +39,7 @@ pub enum RoleDerivedKind {
 pub struct UpdateRole {
     pub name: Option<String>,
     pub description: Option<String>,
+    pub attributes: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +47,7 @@ pub struct ListRoles {
     pub tenant_id: Option<Uuid>,
     pub derived_kind: Option<String>,
     pub q: Option<String>,
+    pub attributes_contains: Option<Value>,
     #[serde(default)]
     pub deleted: DeletedFilter,
     #[serde(default = "default_limit")]

@@ -46,6 +46,7 @@ async fn make_role(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
             name: format!("own-role-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await

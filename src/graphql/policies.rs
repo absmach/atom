@@ -48,6 +48,7 @@ impl PolicyQuery {
         tenant_id: Option<ID>,
         derived_kind: Option<String>,
         q: Option<String>,
+        attributes_contains: Option<serde_json::Value>,
         deleted: Option<GqlDeletedFilter>,
         limit: Option<i32>,
         offset: Option<i32>,
@@ -68,6 +69,7 @@ impl PolicyQuery {
                 tenant_id,
                 derived_kind,
                 q,
+                attributes_contains,
                 deleted,
                 limit: limit.map(i64::from).unwrap_or(20),
                 offset: offset.map(i64::from).unwrap_or(0),
@@ -338,6 +340,7 @@ impl PolicyMutation {
             name: input.name,
             tenant_id,
             description: input.description,
+            attributes: input.attributes.unwrap_or(serde_json::Value::Null),
         };
         let role = authz_repo::create_role(&state.pool, create_req)
             .await
@@ -366,6 +369,7 @@ impl PolicyMutation {
             UpdateRole {
                 name: input.name,
                 description: input.description,
+                attributes: input.attributes,
             },
         )
         .await

@@ -218,13 +218,14 @@ export function CrudEditSheets({
           if (!nextOpen) setters.setRole(null);
         }}
       >
-        <SheetContent className="w-full overflow-y-auto sm:max-w-md!">
+        <SheetContent className="w-full overflow-y-auto sm:w-[min(90vw,64rem)]! sm:max-w-2xl!">
           <SheetHeader>
             <SheetTitle>
               {`Edit ${String(editing.role?.name ?? editing.role?.id ?? "role")}`}
             </SheetTitle>
             <SheetDescription>
-              Update this role&apos;s name, description, and permission blocks.
+              Update this role&apos;s name, description, attributes, and
+              permission blocks.
             </SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-4">

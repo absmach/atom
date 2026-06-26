@@ -132,6 +132,7 @@ async fn role_linked_deny_block_overrides_direct_allow() {
             name: format!("rb-role-deny-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await
@@ -207,6 +208,7 @@ async fn role_linked_conditional_allow_block_honours_conditions() {
             name: format!("rb-role-cond-{}", Uuid::new_v4()),
             tenant_id: Some(tenant_id),
             description: None,
+            attributes: serde_json::Value::Null,
         },
     )
     .await
