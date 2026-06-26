@@ -408,14 +408,15 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_capability(
+        require_any_capability(
             &state.pool,
             auth.entity_id,
-            "policy.manage",
-            Scope::Tenant(tenant_id),
+            &[
+                ("manage", Scope::Tenant(tenant_id)),
+                ("policy.manage", Scope::Tenant(tenant_id)),
+            ],
         )
-        .await
-        .map_err(gql_error)?;
+        .await?;
 
         let redirect_url = input
             .redirect_url
@@ -523,15 +524,14 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_any_capability(
+        require_capability(
             &state.pool,
             auth.entity_id,
-            &[
-                ("manage", Scope::Tenant(tenant_id)),
-                ("policy.manage", Scope::Tenant(tenant_id)),
-            ],
+            "policy.manage",
+            Scope::Tenant(tenant_id),
         )
-        .await?;
+        .await
+        .map_err(gql_error)?;
         tenant_repo::remove_tenant_member(&state.pool, tenant_id, parse_id(entity_id, "entityId")?)
             .await
             .map_err(gql_error)?;
@@ -548,15 +548,14 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_any_capability(
+        require_capability(
             &state.pool,
             auth.entity_id,
-            &[
-                ("manage", Scope::Tenant(tenant_id)),
-                ("policy.manage", Scope::Tenant(tenant_id)),
-            ],
+            "policy.manage",
+            Scope::Tenant(tenant_id),
         )
-        .await?;
+        .await
+        .map_err(gql_error)?;
         tenant_repo::add_tenant_member(
             &state.pool,
             tenant_id,
