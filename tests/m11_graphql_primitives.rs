@@ -194,6 +194,108 @@ async fn login_mutation_accepts_entity_uuid_identifier() {
 
 #[tokio::test]
 #[ignore]
+async fn login_mutation_accepts_email_attribute_for_admin_created_password() {
+    let pool = common::pool().await;
+    let tenant_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tenants (name, alias) VALUES ($1, $2) RETURNING id")
+            .bind(format!("graphql-login-tenant-{}", Uuid::new_v4()))
+            .bind(format!("login-{}", Uuid::new_v4().simple()))
+            .fetch_one(&pool)
+            .await
+            .expect("insert tenant");
+    let entity_id = Uuid::new_v4();
+    let name = format!("graphql-human-{entity_id}");
+    let email = format!("{name}@example.test");
+    sqlx::query(
+        r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
+           VALUES ($1, 'human', $2, $3, 'active', $4)"#,
+    )
+    .bind(entity_id)
+    .bind(&name)
+    .bind(tenant_id)
+    .bind(json!({"email": email}))
+    .execute(&pool)
+    .await
+    .expect("insert human");
+    service::create_password(&pool, entity_id, "test-password-123")
+        .await
+        .expect("create password");
+    let schema = build_schema(state(pool).await);
+
+    let response = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{email}",
+                secret: "test-password-123"
+              }}) {{
+                token
+                entityId
+                sessionId
+              }}
+            }}
+            "#
+        )))
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let login = &response.data.into_json().expect("json data")["login"];
+    assert_eq!(login["entityId"], entity_id.to_string());
+    assert!(login["token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty()));
+    assert!(login["sessionId"].as_str().is_some());
+}
+
+#[tokio::test]
+#[ignore]
+async fn login_mutation_accepts_canonical_email_with_unqualified_password() {
+    let pool = common::pool().await;
+    let (entity_id, name) = create_human(&pool).await;
+    let email = format!("{name}@example.test");
+    sqlx::query(
+        "INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(entity_id)
+    .bind(&email)
+    .execute(&pool)
+    .await
+    .expect("insert email");
+    service::create_password(&pool, entity_id, "test-password-123")
+        .await
+        .expect("create password");
+    let schema = build_schema(state(pool).await);
+
+    let response = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{email}",
+                secret: "test-password-123"
+              }}) {{
+                token
+                entityId
+                sessionId
+              }}
+            }}
+            "#
+        )))
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let login = &response.data.into_json().expect("json data")["login"];
+    assert_eq!(login["entityId"], entity_id.to_string());
+    assert!(login["token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty()));
+    assert!(login["sessionId"].as_str().is_some());
+}
+
+#[tokio::test]
+#[ignore]
 async fn create_password_allows_legacy_device_secret_and_login_by_uuid() {
     let pool = common::pool().await;
     let entity_id = create_device(&pool).await;

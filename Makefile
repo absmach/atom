@@ -7,6 +7,8 @@ ATOM_UI_IMAGE ?= $(ATOM_UI_IMAGE_NAME):$(ATOM_UI_IMAGE_TAG)
 BUILD_TARGET ?= release
 DOCKERFILE ?= Dockerfile
 BUILD_CONTEXT ?= .
+DOCKER_ATOM_DEV_IMAGE ?= $(ATOM_IMAGE)
+DOCKER_ATOM_DEV_CONTEXT ?= target/docker_atom_dev
 COMPOSE ?= docker compose
 COMPOSE_PROFILES ?= --profile default --profile atom-ui
 DEV_ENV_FILE ?= .env
@@ -16,7 +18,7 @@ COMPOSE_ENV = ATOM_IMAGE="$(ATOM_IMAGE)" ATOM_UI_IMAGE="$(ATOM_UI_IMAGE)"
 DEV_HTTP_PORT ?= 8090
 DEV_UI_PORT ?= 3000
 
-.PHONY: help db dev build atom-build ui-build up down logs restart docker-build docker-build-release
+.PHONY: help db dev build atom-build docker_atom_dev ui-build up down logs restart docker-build docker-build-release
 
 help:
 	@echo "First run: cp .env.example .env"
@@ -24,6 +26,7 @@ help:
 	@echo "Available targets:"
 	@echo "  make build               Rebuild Atom backend + Atom UI images (run after code changes)"
 	@echo "  make atom-build          Rebuild only the Atom backend image"
+	@echo "  make docker_atom_dev     Build Atom on the host, then copy the binary into a Docker image"
 	@echo "  make ui-build            Rebuild only the Atom UI image"
 	@echo "  make up                  Start Postgres, Atom, and Atom UI (builds images only if missing)"
 	@echo "  make db                  Start only Postgres (for host 'cargo run')"
@@ -47,6 +50,8 @@ help:
 	@echo "  BUILD_TARGET=$(BUILD_TARGET)"
 	@echo "  DOCKERFILE=$(DOCKERFILE)"
 	@echo "  BUILD_CONTEXT=$(BUILD_CONTEXT)"
+	@echo "  DOCKER_ATOM_DEV_IMAGE=$(DOCKER_ATOM_DEV_IMAGE)"
+	@echo "  DOCKER_ATOM_DEV_CONTEXT=$(DOCKER_ATOM_DEV_CONTEXT)"
 
 db:
 	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) up -d postgres
@@ -72,6 +77,19 @@ atom-build:
 		--target $(BUILD_TARGET) \
 		-t "$(ATOM_IMAGE)" \
 		$(BUILD_CONTEXT)
+
+docker_atom_dev:
+	@command -v cargo >/dev/null 2>&1 || { echo "cargo is required for 'make docker_atom_dev'"; exit 1; }
+	@test -n "$(DOCKER_ATOM_DEV_CONTEXT)" || { echo "DOCKER_ATOM_DEV_CONTEXT must not be empty"; exit 1; }
+	cargo build --release
+	rm -rf -- "$(DOCKER_ATOM_DEV_CONTEXT)"
+	mkdir -p "$(DOCKER_ATOM_DEV_CONTEXT)"
+	install -m 0755 target/release/atom "$(DOCKER_ATOM_DEV_CONTEXT)/atom"
+	cp -R migrations "$(DOCKER_ATOM_DEV_CONTEXT)/migrations"
+	cp Dockerfile.atom-dev "$(DOCKER_ATOM_DEV_CONTEXT)/Dockerfile"
+	docker build \
+		-t "$(DOCKER_ATOM_DEV_IMAGE)" \
+		"$(DOCKER_ATOM_DEV_CONTEXT)"
 
 ui-build:
 	docker build \

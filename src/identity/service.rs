@@ -896,7 +896,7 @@ async fn resolve_login_identity(
     tenant_id: Option<Uuid>,
 ) -> Result<LoginIdentity, AppError> {
     if let Ok(email) = normalize_email(identifier) {
-        if let Some(identity) = login_identity_by_email(pool, &email).await? {
+        if let Some(identity) = login_identity_by_email(pool, &email, tenant_id).await? {
             return Ok(identity);
         }
     }
@@ -936,31 +936,69 @@ async fn entity_email_verified(pool: &PgPool, entity_id: Uuid) -> Result<Option<
 async fn login_identity_by_email(
     pool: &PgPool,
     email: &str,
+    tenant_id: Option<Uuid>,
 ) -> Result<Option<LoginIdentity>, AppError> {
     use sqlx::Row;
-    let row = sqlx::query(
+    let canonical = sqlx::query(
         r#"SELECT e.id, e.tenant_id, e.status, ee.verified_at
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
            WHERE ee.email = $1
-             AND e.deleted_at IS NULL"#,
+             AND ee.deleted_at IS NULL
+             AND e.deleted_at IS NULL
+             AND ($2::uuid IS NULL OR e.tenant_id = $2)"#,
     )
     .bind(email)
+    .bind(tenant_id)
     .fetch_optional(pool)
     .await
     .map_err(db_err)?;
 
-    row.map(|row| {
+    if let Some(row) = canonical {
         let verified_at: Option<DateTime<Utc>> = row.try_get("verified_at").unwrap_or(None);
-        Ok(LoginIdentity {
+        return Ok(Some(LoginIdentity {
             entity_id: row.try_get("id").map_err(db_err)?,
             tenant_id: row.try_get("tenant_id").unwrap_or(None),
             status: row.try_get("status").map_err(db_err)?,
             email_verified: Some(verified_at.is_some()),
             credential_identifier: Some(email.to_string()),
-        })
-    })
-    .transpose()
+        }));
+    }
+
+    let mut rows = sqlx::query(
+        r#"SELECT e.id, e.tenant_id, e.status
+           FROM entities e
+           WHERE lower(btrim(e.attributes->>'email')) = $1
+             AND e.deleted_at IS NULL
+             AND ($2::uuid IS NULL OR e.tenant_id = $2)
+           LIMIT 2"#,
+    )
+    .bind(email)
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if rows.len() > 1 {
+        let message = if tenant_id.is_none() {
+            "tenant_id or tenant_alias required for this identifier"
+        } else {
+            "invalid credentials"
+        };
+        return Err(AppError::unauthorized(message));
+    }
+
+    let row = rows.remove(0);
+    Ok(Some(LoginIdentity {
+        entity_id: row.try_get("id").map_err(db_err)?,
+        tenant_id: row.try_get("tenant_id").unwrap_or(None),
+        status: row.try_get("status").map_err(db_err)?,
+        email_verified: None,
+        credential_identifier: None,
+    }))
 }
 
 async fn password_credential_for_login(
@@ -975,8 +1013,11 @@ async fn password_credential_for_login(
            WHERE entity_id = $1
              AND kind = $2
              AND status = $3
-             AND ($4::text IS NULL OR identifier = $4)
-           ORDER BY created_at DESC
+             AND (
+                 ($4::text IS NULL AND identifier IS NULL)
+                 OR ($4::text IS NOT NULL AND (identifier = $4 OR identifier IS NULL))
+             )
+           ORDER BY CASE WHEN identifier = $4 THEN 0 ELSE 1 END, created_at DESC
            LIMIT 1"#,
     )
     .bind(entity_id)

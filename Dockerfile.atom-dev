@@ -1,0 +1,22 @@
+FROM debian:bookworm-slim
+
+# Build through `make docker_atom_dev`; the staged context contains only the
+# host-built atom binary plus migrations for parity with the normal image.
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system atom \
+    && useradd --system --gid atom --home-dir /app --shell /usr/sbin/nologin atom
+
+WORKDIR /app
+COPY atom /usr/local/bin/atom
+COPY migrations ./migrations
+RUN chmod 0755 /usr/local/bin/atom \
+    && chown -R atom:atom /app /usr/local/bin/atom
+
+USER atom
+EXPOSE 8080 8081
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/health/ready || exit 1
+CMD ["atom"]

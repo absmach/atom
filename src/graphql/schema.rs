@@ -125,6 +125,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tenant_invitation_exposes_invitee_name() {
+        let schema = build_schema(test_state());
+
+        let response = schema
+            .execute(Request::new(
+                r#"
+                {
+                  __type(name: "TenantInvitation") {
+                    fields {
+                      name
+                    }
+                  }
+                }
+                "#,
+            ))
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().expect("json data");
+        let fields = field_names(&data["__type"]["fields"]);
+        assert!(fields.contains("inviteeName"));
+    }
+
+    #[tokio::test]
     async fn schema_exposes_generic_atom_operations_only() {
         let schema = build_schema(test_state());
 

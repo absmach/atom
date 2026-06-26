@@ -408,6 +408,10 @@ impl TenantInvitation {
         self.0.invitee_user_id.map(id)
     }
 
+    async fn invitee_name(&self) -> Option<&str> {
+        self.0.invitee_name.as_deref()
+    }
+
     async fn invitee_email(&self) -> Option<&str> {
         self.0.invitee_email.as_deref()
     }

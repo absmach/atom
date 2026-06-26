@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use rand::{rngs::OsRng, RngCore};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
 const TENANT_COLS: &str =
     "id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at";
 const INVITATION_COLS: &str =
-    "ti.id, ti.tenant_id, ti.invitee_user_id, ti.invitee_email, ti.invited_by,
+    "ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
      ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
      ti.revoked_at, ti.created_at, ti.updated_at";
 
@@ -774,6 +774,7 @@ pub async fn create_invitation(
                SELECT * FROM inserted
            ) ti
            LEFT JOIN roles r ON r.id = ti.role_id
+           LEFT JOIN entities e ON e.id = ti.invitee_user_id AND e.deleted_at IS NULL
            LIMIT 1"#
     ))
     .bind(tenant_id)
@@ -803,11 +804,12 @@ pub async fn list_tenant_invitations(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, TenantInvitation>(
-        r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, ti.invitee_email, ti.invited_by,
+        r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
                   ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
                   ti.revoked_at, ti.created_at, ti.updated_at
            FROM tenant_invitations ti
            LEFT JOIN roles r ON r.id = ti.role_id
+           LEFT JOIN entities e ON e.id = ti.invitee_user_id AND e.deleted_at IS NULL
            WHERE ti.tenant_id = $1
            ORDER BY ti.created_at DESC
            LIMIT $2 OFFSET $3"#,
@@ -835,11 +837,12 @@ pub async fn list_user_invitations(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, TenantInvitation>(
-        r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, ti.invitee_email, ti.invited_by,
+        r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
                   ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
                   ti.revoked_at, ti.created_at, ti.updated_at
            FROM tenant_invitations ti
            LEFT JOIN roles r ON r.id = ti.role_id
+           LEFT JOIN entities e ON e.id = ti.invitee_user_id AND e.deleted_at IS NULL
            WHERE ti.invitee_user_id = $1
               OR EXISTS (
                   SELECT 1 FROM entity_emails ee
@@ -1173,43 +1176,36 @@ pub async fn accept_invitation_token(
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::bad_request("invalid invitation token"),
+        sqlx::Error::RowNotFound => AppError::not_found("invitation not found"),
         other => AppError::Database(other),
     })?;
 
-    let secret_hash: String = row.try_get("secret_hash").map_err(db_err)?;
-    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
-    let accepted_at: Option<DateTime<Utc>> = row.try_get("accepted_at").unwrap_or(None);
-    let rejected_at: Option<DateTime<Utc>> = row.try_get("rejected_at").unwrap_or(None);
-    let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at").unwrap_or(None);
-    if accepted_at.is_some()
-        || rejected_at.is_some()
-        || revoked_at.is_some()
-        || expires_at < Utc::now()
-    {
-        return Err(AppError::bad_request("invitation token expired"));
-    }
+    let secret_hash: Option<String> = row.try_get("secret_hash").map_err(db_err)?;
+    let Some(secret_hash) = secret_hash else {
+        return Err(AppError::bad_request("invalid invitation token"));
+    };
     if !verify_secret(token_secret.as_bytes(), &secret_hash) {
         return Err(AppError::bad_request("invalid invitation token"));
     }
+    ensure_invitation_pending(&row)?;
 
     let tenant_id: Uuid = row.try_get("tenant_id").map_err(db_err)?;
     let invitee_user_id: Option<Uuid> = row.try_get("invitee_user_id").unwrap_or(None);
     if let Some(invitee_user_id) = invitee_user_id {
         if invitee_user_id != actor_id {
-            return Err(AppError::Forbidden);
+            return Err(invitation_wrong_user());
         }
     } else if let Some(email) = row
         .try_get::<Option<String>, _>("invitee_email")
         .unwrap_or(None)
     {
         if !entity_has_email(pool, actor_id, &email).await? {
-            return Err(AppError::Forbidden);
+            return Err(invitation_wrong_user());
         }
     }
 
-    let role_id: Option<Uuid> = row.try_get("role_id").unwrap_or(None);
-    let updated_role_id: Option<Uuid> = sqlx::query_scalar(
+    let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
+    let role_id: Option<Uuid> = sqlx::query_scalar(
         r#"UPDATE tenant_invitations
            SET invitee_user_id = $2,
                accepted_by = $2,
@@ -1217,26 +1213,16 @@ pub async fn accept_invitation_token(
                rejected_at = NULL,
                revoked_at = NULL,
                updated_at = now()
-           WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
-             AND rejected_at IS NULL
-             AND (expires_at IS NULL OR expires_at >= now())
+           WHERE id = $1
            RETURNING role_id"#,
     )
-    .bind(token_id)
+    .bind(invitation_id)
     .bind(actor_id)
-    .fetch_optional(&mut *tx)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)?
-    .ok_or_else(|| AppError::bad_request("invitation token expired"))?;
+    .map_err(db_err)?;
 
-    grant_invitation_role(
-        &mut tx,
-        pool,
-        tenant_id,
-        actor_id,
-        updated_role_id.or(role_id),
-    )
-    .await?;
+    grant_invitation_role(&mut tx, pool, tenant_id, actor_id, role_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(tenant_id)
 }
@@ -1246,35 +1232,28 @@ async fn accept_invitation_row(
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
+    let row = invitation_row_for_invitee(tx, tenant_id, invitee_user_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+    ensure_invitation_pending(&row)?;
+    let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
+
     sqlx::query_scalar::<_, Option<Uuid>>(
-        r#"UPDATE tenant_invitations ti
+        r#"UPDATE tenant_invitations
            SET invitee_user_id = $2,
                accepted_by = $2,
                accepted_at = now(),
                rejected_at = NULL,
                revoked_at = NULL,
                updated_at = now()
-           WHERE ti.tenant_id = $1
-             AND ti.revoked_at IS NULL
-             AND ti.accepted_at IS NULL
-             AND ti.rejected_at IS NULL
-             AND (ti.expires_at IS NULL OR ti.expires_at >= now())
-             AND (ti.invitee_user_id = $2
-                  OR EXISTS (
-                      SELECT 1 FROM entity_emails ee
-                      WHERE ee.entity_id = $2 AND lower(ee.email) = lower(ti.invitee_email)
-                        AND ee.deleted_at IS NULL
-                  ))
+           WHERE id = $1
            RETURNING role_id"#,
     )
-    .bind(tenant_id)
+    .bind(invitation_id)
     .bind(invitee_user_id)
-    .fetch_optional(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(db_err)
-    .and_then(|role_id| {
-        role_id.ok_or_else(|| AppError::not_found("tenant invitation not found or expired"))
-    })
 }
 
 async fn grant_invitation_role(
@@ -1322,22 +1301,23 @@ pub async fn reject_invitation(
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let row = invitation_row_for_invitee(&mut tx, tenant_id, invitee_user_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+    ensure_invitation_pending(&row)?;
+    let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
+
     sqlx::query(
         r#"UPDATE tenant_invitations
            SET rejected_at = now(), updated_at = now()
-           WHERE tenant_id = $1
-             AND (invitee_user_id = $2
-                  OR EXISTS (
-                      SELECT 1 FROM entity_emails ee
-                      WHERE ee.entity_id = $2 AND lower(ee.email) = lower(tenant_invitations.invitee_email)
-                        AND ee.deleted_at IS NULL
-                  ))"#,
+           WHERE id = $1"#,
     )
-    .bind(tenant_id)
-    .bind(invitee_user_id)
-    .execute(pool)
+    .bind(invitation_id)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -1346,16 +1326,23 @@ pub async fn revoke_invitation(
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let row = invitation_row_for_invitee(&mut tx, tenant_id, invitee_user_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+    ensure_invitation_pending(&row)?;
+    let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
+
     sqlx::query(
         r#"UPDATE tenant_invitations
            SET revoked_at = now(), updated_at = now()
-           WHERE tenant_id = $1 AND invitee_user_id = $2"#,
+           WHERE id = $1"#,
     )
-    .bind(tenant_id)
-    .bind(invitee_user_id)
-    .execute(pool)
+    .bind(invitation_id)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -1364,6 +1351,12 @@ pub async fn revoke_invitation_by_id(
     tenant_id: Uuid,
     invitation_id: Uuid,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let row = invitation_row_by_id(&mut tx, tenant_id, invitation_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+    ensure_invitation_pending(&row)?;
+
     sqlx::query(
         r#"UPDATE tenant_invitations
            SET revoked_at = now(), updated_at = now()
@@ -1371,10 +1364,86 @@ pub async fn revoke_invitation_by_id(
     )
     .bind(tenant_id)
     .bind(invitation_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(())
+}
+
+async fn invitation_row_for_invitee(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    invitee_user_id: Uuid,
+) -> Result<Option<PgRow>, AppError> {
+    sqlx::query(
+        r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, ti.invitee_email,
+                  ti.role_id, ti.secret_hash, ti.expires_at, ti.accepted_at,
+                  ti.rejected_at, ti.revoked_at
+           FROM tenant_invitations ti
+           WHERE ti.tenant_id = $1
+             AND (ti.invitee_user_id = $2
+                  OR EXISTS (
+                      SELECT 1 FROM entity_emails ee
+                      WHERE ee.entity_id = $2 AND lower(ee.email) = lower(ti.invitee_email)
+                        AND ee.deleted_at IS NULL
+                  ))
+           ORDER BY ti.created_at DESC
+           LIMIT 1
+           FOR UPDATE"#,
+    )
+    .bind(tenant_id)
+    .bind(invitee_user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
+async fn invitation_row_by_id(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    invitation_id: Uuid,
+) -> Result<Option<PgRow>, AppError> {
+    sqlx::query(
+        r#"SELECT id, tenant_id, invitee_user_id, invitee_email, role_id,
+                  secret_hash, expires_at, accepted_at, rejected_at, revoked_at
+           FROM tenant_invitations
+           WHERE tenant_id = $1 AND id = $2
+           FOR UPDATE"#,
+    )
+    .bind(tenant_id)
+    .bind(invitation_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
+fn ensure_invitation_pending(row: &PgRow) -> Result<(), AppError> {
+    let accepted_at: Option<DateTime<Utc>> = row.try_get("accepted_at").map_err(db_err)?;
+    if accepted_at.is_some() {
+        return Err(AppError::bad_request("invitation already accepted"));
+    }
+
+    let rejected_at: Option<DateTime<Utc>> = row.try_get("rejected_at").map_err(db_err)?;
+    if rejected_at.is_some() {
+        return Err(AppError::bad_request("invitation already rejected"));
+    }
+
+    let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at").map_err(db_err)?;
+    if revoked_at.is_some() {
+        return Err(AppError::bad_request("invitation already revoked"));
+    }
+
+    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at").map_err(db_err)?;
+    if expires_at.is_some_and(|expires_at| expires_at < Utc::now()) {
+        return Err(AppError::bad_request("invitation expired"));
+    }
+
+    Ok(())
+}
+
+fn invitation_wrong_user() -> AppError {
+    AppError::bad_request("invitation does not belong to this user")
 }
 
 async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, AppError> {

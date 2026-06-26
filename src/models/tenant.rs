@@ -73,6 +73,7 @@ pub struct TenantInvitation {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub invitee_user_id: Option<Uuid>,
+    pub invitee_name: Option<String>,
     pub invitee_email: Option<String>,
     pub invited_by: Uuid,
     pub role_id: Option<Uuid>,
