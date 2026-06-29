@@ -70,7 +70,8 @@ services:
       ATOM_PUBLIC_BASE_URL: ${ATOM_PUBLIC_BASE_URL:-http://localhost:8080}
       ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN: "${ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN:-false}"
       ATOM_OIDC_PROVIDERS: ${ATOM_OIDC_PROVIDERS:-}
-      RUST_LOG: info
+      ATOM_LOG_LEVEL: ${ATOM_LOG_LEVEL:-${RUST_LOG:-info}}
+      ATOM_LOG_FORMAT: ${ATOM_LOG_FORMAT:-text}
     volumes:
       - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
     ports:
@@ -140,7 +141,8 @@ services:
       ATOM_SELF_REGISTRATION_ENABLED: ${ATOM_SELF_REGISTRATION_ENABLED:-${ATOM_SIGNUP_ENABLED:-true}}
       ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN: "${ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN:-false}"
       ATOM_OIDC_PROVIDERS: ${ATOM_OIDC_PROVIDERS:-}
-      RUST_LOG: info
+      ATOM_LOG_LEVEL: ${ATOM_LOG_LEVEL:-${RUST_LOG:-info}}
+      ATOM_LOG_FORMAT: ${ATOM_LOG_FORMAT:-text}
     volumes:
       - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
     ports:

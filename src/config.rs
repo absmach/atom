@@ -15,6 +15,7 @@ pub const SERVICE_ENTITY_ID: Uuid =
 pub struct Config {
     pub database_url: String,
     pub db_pool: DbPoolConfig,
+    pub logging: LoggingConfig,
     pub listen_addr: String,
     pub grpc_addr: String,
     /// In-process TLS for the gRPC server. `None` = plaintext (the transport
@@ -291,6 +292,65 @@ impl Default for MetricsConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggingConfig {
+    /// Tracing filter directive. `ATOM_LOG_LEVEL` wins over legacy `RUST_LOG`.
+    pub level: String,
+    pub format: LogFormat,
+}
+
+impl LoggingConfig {
+    pub fn from_env() -> Result<Self> {
+        let level = non_empty_env("ATOM_LOG_LEVEL")
+            .or_else(|| non_empty_env("RUST_LOG"))
+            .unwrap_or_else(|| "info".to_string());
+        let format = LogFormat::from_env_value(
+            &std::env::var("ATOM_LOG_FORMAT").unwrap_or_else(|_| "text".to_string()),
+        )?;
+
+        Ok(Self { level, format })
+    }
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            format: LogFormat::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    pub fn from_env_value(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "text" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            other => anyhow::bail!("ATOM_LOG_FORMAT must be text or json, got {other}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Json => "json",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertsCaMode {
     FileIntermediateIssuer,
@@ -324,6 +384,7 @@ impl Config {
         Ok(Config {
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
             db_pool: db_pool_from_env()?,
+            logging: LoggingConfig::from_env()?,
             listen_addr: std::env::var("LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
@@ -411,6 +472,7 @@ impl Config {
         Self {
             database_url: "postgres://atom:atom@localhost/atom_test".into(),
             db_pool: DbPoolConfig::default(),
+            logging: LoggingConfig::default(),
             listen_addr: "127.0.0.1:0".into(),
             grpc_addr: "127.0.0.1:0".into(),
             grpc_tls: None,
@@ -846,7 +908,7 @@ fn public_url(public_base_url: &str, path: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use super::{public_url, Config};
+    use super::{public_url, Config, LogFormat};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -867,9 +929,12 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
         let _db_guard = DatabaseUrlGuard::set();
+        let _rust_log_guard = EnvVarGuard::unset("RUST_LOG");
 
         let cfg = Config::from_env().expect("config");
 
+        assert_eq!(cfg.logging.level, "info");
+        assert_eq!(cfg.logging.format, LogFormat::Text);
         assert_eq!(cfg.db_pool.max_connections, 20);
         assert_eq!(cfg.db_pool.acquire_timeout_secs, 30);
         assert!(!cfg.signing_keys.allow_plaintext_signing_keys);
@@ -883,6 +948,47 @@ mod tests {
             !cfg.graphql_limits.introspection_enabled,
             "GraphQL introspection must default off"
         );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn logging_config_reads_atom_env_and_keeps_rust_log_fallback() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        let _rust_log_guard = EnvVarGuard::set("RUST_LOG", "warn");
+
+        let cfg = Config::from_env().expect("config");
+        assert_eq!(cfg.logging.level, "warn");
+        assert_eq!(cfg.logging.format, LogFormat::Text);
+
+        std::env::set_var("ATOM_LOG_LEVEL", " ");
+        std::env::set_var("ATOM_LOG_FORMAT", " ");
+
+        let cfg = Config::from_env().expect("config");
+        assert_eq!(cfg.logging.level, "warn");
+        assert_eq!(cfg.logging.format, LogFormat::Text);
+
+        std::env::set_var("ATOM_LOG_LEVEL", "debug");
+        std::env::set_var("ATOM_LOG_FORMAT", "json");
+
+        let cfg = Config::from_env().expect("config");
+        assert_eq!(cfg.logging.level, "debug");
+        assert_eq!(cfg.logging.format, LogFormat::Json);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn invalid_logging_format_fails_config() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_LOG_FORMAT", "xml");
+
+        let err = Config::from_env().expect_err("invalid log format");
+        assert!(err.to_string().contains("ATOM_LOG_FORMAT"));
 
         clear_hardening_env();
     }
@@ -989,8 +1095,38 @@ mod tests {
         }
     }
 
+    struct EnvVarGuard {
+        name: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let prev = std::env::var(name).ok();
+            std::env::set_var(name, value);
+            Self { name, prev }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let prev = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self { name, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     fn clear_hardening_env() {
         for name in [
+            "ATOM_LOG_LEVEL",
+            "ATOM_LOG_FORMAT",
             "ATOM_DB_MAX_CONNECTIONS",
             "ATOM_DB_MIN_CONNECTIONS",
             "ATOM_DB_ACQUIRE_TIMEOUT_SECS",

@@ -10,11 +10,9 @@ use uuid::Uuid;
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
     let cfg = config::Config::from_env()?;
+    init_tracing(&cfg.logging)?;
+
     metrics::init(cfg.metrics.enabled);
     let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
 
@@ -73,6 +71,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("http server stopped; waiting for grpc to drain");
     if let Err(e) = grpc_handle.await {
         tracing::error!("grpc task join error: {e}");
+    }
+
+    Ok(())
+}
+
+fn init_tracing(logging: &config::LoggingConfig) -> anyhow::Result<()> {
+    let filter = EnvFilter::try_new(&logging.level)
+        .context("ATOM_LOG_LEVEL/RUST_LOG must be a valid tracing filter")?;
+
+    match logging.format {
+        config::LogFormat::Text => tracing_subscriber::fmt().with_env_filter(filter).init(),
+        config::LogFormat::Json => tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init(),
     }
 
     Ok(())
