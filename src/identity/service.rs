@@ -1013,11 +1013,14 @@ async fn password_credential_for_login(
            WHERE entity_id = $1
              AND kind = $2
              AND status = $3
-             AND (
-                 ($4::text IS NULL AND identifier IS NULL)
-                 OR ($4::text IS NOT NULL AND (identifier = $4 OR identifier IS NULL))
-             )
-           ORDER BY CASE WHEN identifier = $4 THEN 0 ELSE 1 END, created_at DESC
+             AND ($4::text IS NULL OR identifier = $4 OR identifier IS NULL)
+           ORDER BY
+             CASE
+               WHEN $4::text IS NOT NULL AND identifier = $4 THEN 0
+               WHEN identifier IS NULL THEN 1
+               ELSE 2
+             END,
+             created_at DESC
            LIMIT 1"#,
     )
     .bind(entity_id)

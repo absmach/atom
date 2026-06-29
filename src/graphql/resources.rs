@@ -1,4 +1,5 @@
 use async_graphql::{Context, Object, Result, ID};
+use serde_json::Value;
 
 use crate::{
     audit,
@@ -47,6 +48,7 @@ impl ResourceQuery {
         q: Option<String>,
         kind: Option<String>,
         tenant_id: Option<ID>,
+        attributes_contains: Option<Value>,
         parent_group_id: Option<ID>,
         include_descendants: Option<bool>,
         deleted: Option<GqlDeletedFilter>,
@@ -71,6 +73,7 @@ impl ResourceQuery {
                     q,
                     kind: kind.clone(),
                     tenant_id,
+                    attributes_contains,
                     parent_group_id,
                     include_descendants,
                     deleted,
@@ -102,6 +105,7 @@ impl ResourceQuery {
                 object_type,
                 tenant_id,
                 q,
+                attributes_contains,
                 profile_id: None,
                 entity_status: None,
                 group_type: None,

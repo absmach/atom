@@ -48,6 +48,7 @@ pub struct ListResources {
     pub q: Option<String>,
     pub kind: Option<String>,
     pub tenant_id: Option<Uuid>,
+    pub attributes_contains: Option<Value>,
     pub parent_group_id: Option<Uuid>,
     pub include_descendants: bool,
     #[serde(default)]

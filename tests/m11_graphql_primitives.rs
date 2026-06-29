@@ -496,6 +496,78 @@ async fn create_list_and_get_resource_channel() {
 
 #[tokio::test]
 #[ignore]
+async fn resources_query_filters_by_attributes_contains() {
+    let pool = common::pool().await;
+    let schema = build_schema(state(pool).await);
+    let marker = format!("graphql-attrs-{}", Uuid::new_v4());
+
+    let active = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createResource(input: {{
+                kind: "alarm",
+                name: "active-alarm-{marker}",
+                attributes: {{ marker: "{marker}", status: "active", severity: 90 }}
+              }}) {{
+                id
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(active.errors.is_empty(), "{:?}", active.errors);
+    let active_id = active.data.into_json().expect("json data")["createResource"]["id"]
+        .as_str()
+        .expect("active id")
+        .to_owned();
+
+    let cleared = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createResource(input: {{
+                kind: "alarm",
+                name: "cleared-alarm-{marker}",
+                attributes: {{ marker: "{marker}", status: "cleared", severity: 90 }}
+              }}) {{
+                id
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(cleared.errors.is_empty(), "{:?}", cleared.errors);
+    let cleared_id = cleared.data.into_json().expect("json data")["createResource"]["id"]
+        .as_str()
+        .expect("cleared id")
+        .to_owned();
+
+    let listed = schema
+        .execute(authed(format!(
+            r#"
+            {{
+              resources(
+                kind: "alarm",
+                attributesContains: {{ marker: "{marker}", status: "active", severity: 90 }}
+              ) {{
+                items {{ id kind attributes }}
+                total
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+    let data = listed.data.into_json().expect("json data");
+    let items = data["resources"]["items"].as_array().expect("items");
+    assert_eq!(data["resources"]["total"], 1);
+    assert!(items.iter().any(|item| item["id"] == active_id));
+    assert!(!items.iter().any(|item| item["id"] == cleared_id));
+}
+
+#[tokio::test]
+#[ignore]
 async fn create_entity_with_profile_still_derives_kind() {
     let pool = common::pool().await;
     let profile_id = seeded_client_profile(&pool).await;

@@ -95,6 +95,7 @@ pub struct AuthorizedObjectIdsQuery {
     pub object_type: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub q: Option<String>,
+    pub attributes_contains: Option<Value>,
     pub profile_id: Option<Uuid>,
     pub entity_status: Option<EntityStatus>,
     /// Only used when `object_kind == "group"`: restricts candidates to a

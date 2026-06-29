@@ -121,6 +121,7 @@ pub async fn list_resources(
     let include_descendants = params.include_descendants;
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let items = sqlx::query_as::<_, Resource>(
         r#"WITH RECURSIVE target_groups(id) AS (
@@ -139,6 +140,7 @@ pub async fn list_resources(
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
              AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+             AND ($9::jsonb IS NULL OR r.attributes @> $9::jsonb)
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND r.deleted_at IS NULL)
                   OR ($8::text = 'deleted' AND r.deleted_at IS NOT NULL))
@@ -153,6 +155,7 @@ pub async fn list_resources(
     .bind(limit)
     .bind(offset)
     .bind(deleted)
+    .bind(attributes_contains.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -173,6 +176,7 @@ pub async fn list_resources(
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
              AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+             AND ($7::jsonb IS NULL OR r.attributes @> $7::jsonb)
              AND ($6::text = 'all'
                   OR ($6::text = 'live' AND r.deleted_at IS NULL)
                   OR ($6::text = 'deleted' AND r.deleted_at IS NOT NULL))"#,
@@ -183,6 +187,7 @@ pub async fn list_resources(
     .bind(parent_group_id)
     .bind(include_descendants)
     .bind(deleted)
+    .bind(attributes_contains)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -4245,6 +4250,7 @@ pub async fn authorized_resource_kinds(
             object_type: None,
             tenant_id,
             q: None,
+            attributes_contains: None,
             profile_id: None,
             entity_status: None,
             group_type: None,
@@ -4273,19 +4279,20 @@ async fn authorized_resource_rows(
     };
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let select_clause = match projection {
         AuthorizedResourceProjection::Ids => {
             "SELECT id, COUNT(*) OVER() AS total
              FROM authorized
              ORDER BY created_at DESC
-             LIMIT $8 OFFSET $9"
+             LIMIT $9 OFFSET $10"
         }
         AuthorizedResourceProjection::Kinds => {
             "SELECT DISTINCT sub_kind AS kind
              FROM authorized
              ORDER BY kind
-             LIMIT $8 OFFSET $9"
+             LIMIT $9 OFFSET $10"
         }
     };
     let sql = r#"WITH RECURSIVE target_groups(id) AS (
@@ -4316,6 +4323,7 @@ async fn authorized_resource_rows(
                      AND ($4::text IS NULL OR r.kind = $4 OR 'resource:' || r.kind = $4)
                      AND ($5::text IS NULL OR r.name ILIKE $5 OR r.attributes::text ILIKE $5)
                      AND ($6::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+                     AND ($8::jsonb IS NULL OR r.attributes @> $8::jsonb)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
@@ -4373,6 +4381,7 @@ async fn authorized_resource_rows(
         .bind(q)
         .bind(params.parent_group_id)
         .bind(params.include_descendants)
+        .bind(attributes_contains)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)

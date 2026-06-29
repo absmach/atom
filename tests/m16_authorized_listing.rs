@@ -9,7 +9,11 @@
 
 mod common;
 
-use atom::models::access::AuthorizedObjectIdsQuery;
+use atom::models::{
+    access::AuthorizedObjectIdsQuery, enums::DeletedFilter, resource::ListResources,
+};
+use chrono::{Duration, Utc};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 async fn make_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
@@ -49,6 +53,68 @@ async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str, name: &
         .await
         .expect("insert resource");
     id
+}
+
+async fn make_resource_with_attributes_at(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    kind: &str,
+    name: &str,
+    attributes: Value,
+    created_at: chrono::DateTime<Utc>,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO resources (id, kind, name, tenant_id, attributes, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("{name}-{id}"))
+    .bind(tenant_id)
+    .bind(attributes)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .expect("insert resource with attributes");
+    id
+}
+
+async fn grant_resource_read(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    subject_id: Uuid,
+    resource_id: Uuid,
+    action_id: Uuid,
+) {
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .bind(resource_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert read block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(action_id)
+    .execute(pool)
+    .await
+    .expect("insert read action");
+    sqlx::query(
+        r#"INSERT INTO direct_policies
+           (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
+    )
+    .bind(tenant_id)
+    .bind(subject_id)
+    .bind(block_id)
+    .execute(pool)
+    .await
+    .expect("assign read policy");
 }
 
 async fn make_group(pool: &sqlx::PgPool, tenant_id: Uuid, group_type: &str, name: &str) -> Uuid {
@@ -188,6 +254,7 @@ async fn authorized(
             object_type: object_type.map(ToOwned::to_owned),
             tenant_id: Some(tenant_id),
             q: None,
+            attributes_contains: None,
             profile_id: None,
             entity_status: None,
             group_type: None,
@@ -200,6 +267,130 @@ async fn authorized(
     .await
     .expect("authorized listing")
     .ids
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_resources_attributes_contains_filters_items_and_total() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m16-resource-attrs-list").await;
+    let now = Utc::now();
+    let older_match = make_resource_with_attributes_at(
+        &pool,
+        tenant_id,
+        "alarm",
+        "older-match",
+        json!({"rule_id": "rule-attrs", "status": "active", "severity": 90}),
+        now - Duration::seconds(3),
+    )
+    .await;
+    let newer_match = make_resource_with_attributes_at(
+        &pool,
+        tenant_id,
+        "alarm",
+        "newer-match",
+        json!({"rule_id": "rule-attrs", "status": "active", "severity": 90}),
+        now - Duration::seconds(2),
+    )
+    .await;
+    make_resource_with_attributes_at(
+        &pool,
+        tenant_id,
+        "alarm",
+        "different-severity",
+        json!({"rule_id": "rule-attrs", "status": "active", "severity": 10}),
+        now - Duration::seconds(1),
+    )
+    .await;
+
+    let page = atom::authz::repo::list_resources(
+        &pool,
+        ListResources {
+            q: None,
+            kind: Some("alarm".to_string()),
+            tenant_id: Some(tenant_id),
+            attributes_contains: Some(
+                json!({"rule_id": "rule-attrs", "status": "active", "severity": 90}),
+            ),
+            parent_group_id: None,
+            include_descendants: false,
+            deleted: DeletedFilter::Live,
+            limit: 1,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list resources by attributes");
+
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, newer_match);
+    assert_ne!(page.items[0].id, older_match);
+}
+
+#[tokio::test]
+#[ignore]
+async fn authorized_resource_attributes_contains_filters_before_limit_and_authorization() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m16-resource-attrs-authz").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "subject").await;
+    let read_id = action_id(&pool, "read").await;
+    let now = Utc::now();
+    let authorized_match = make_resource_with_attributes_at(
+        &pool,
+        tenant_id,
+        "alarm",
+        "authorized-match",
+        json!({"rule_id": "rule-authz", "status": "active"}),
+        now - Duration::seconds(3),
+    )
+    .await;
+    let unauthorized_match = make_resource_with_attributes_at(
+        &pool,
+        tenant_id,
+        "alarm",
+        "unauthorized-match",
+        json!({"rule_id": "rule-authz", "status": "active"}),
+        now - Duration::seconds(2),
+    )
+    .await;
+    let authorized_nonmatch = make_resource_with_attributes_at(
+        &pool,
+        tenant_id,
+        "alarm",
+        "authorized-nonmatch",
+        json!({"rule_id": "other-rule", "status": "active"}),
+        now - Duration::seconds(1),
+    )
+    .await;
+    grant_resource_read(&pool, tenant_id, subject_id, authorized_match, read_id).await;
+    grant_resource_read(&pool, tenant_id, subject_id, authorized_nonmatch, read_id).await;
+
+    let response = atom::authz::repo::authorized_object_ids(
+        &pool,
+        AuthorizedObjectIdsQuery {
+            subject_id,
+            action: "read".to_string(),
+            object_kind: "resource".to_string(),
+            object_type: Some("resource:alarm".to_string()),
+            tenant_id: Some(tenant_id),
+            q: None,
+            attributes_contains: Some(json!({"rule_id": "rule-authz", "status": "active"})),
+            profile_id: None,
+            entity_status: None,
+            group_type: None,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 1,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("authorized resource attributes listing");
+
+    assert_eq!(response.total, 1);
+    assert_eq!(response.ids, vec![authorized_match]);
+    assert!(!response.ids.contains(&unauthorized_match));
 }
 
 #[tokio::test]
@@ -611,6 +802,7 @@ async fn authorized_groups(
             object_type: None,
             tenant_id: Some(tenant_id),
             q: None,
+            attributes_contains: None,
             profile_id: None,
             entity_status: None,
             group_type: group_type.map(ToOwned::to_owned),

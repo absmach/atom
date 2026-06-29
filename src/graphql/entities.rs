@@ -128,6 +128,7 @@ impl EntityQuery {
                 object_type: parsed_kind.as_ref().map(entity_object_type),
                 tenant_id,
                 q,
+                attributes_contains: None,
                 profile_id,
                 entity_status: parsed_status,
                 group_type: None,
