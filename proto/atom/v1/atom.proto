@@ -67,13 +67,17 @@ message AuthenticateResponse {
 }
 
 message AuthenticateCredentialRequest {
-  // Username-style identifier supplied by protocol adapters such as MQTT
-  // brokers. For password credentials this may be an entity UUID, email, name,
-  // or a tenant-scoped entity alias.
+  // Username-style identifier supplied by protocol adapters. For password
+  // credentials this may be an entity UUID, email, name, or a tenant-scoped
+  // entity alias. For shared_key credentials this identifies the machine entity
+  // whose key is being presented.
   string identifier   = 1;
-  // Plaintext secret supplied by the caller. Atom only stores its hash.
+  // Plaintext secret supplied by the caller. Atom stores an Argon2 verifier for
+  // authentication. Retrievable shared keys also store an encrypted reveal copy
+  // and a keyed lookup digest; plaintext is never stored.
   string secret       = 2;
-  // Empty is treated as "password" for MQTT ergonomics.
+  // Supported values are "password" and "shared_key". Empty falls back to
+  // "password" — the simplest auth model (basic username/secret).
   string kind         = 3;
   string tenant_id    = 4;
   string tenant_alias = 5;

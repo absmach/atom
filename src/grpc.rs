@@ -15,7 +15,11 @@ use crate::{
     authz::{access, engine, repo},
     certs,
     identity::service as identity_service,
-    models::{alias::AliasObjectClass, enums::AuditOutcome, policy::AuthzRequest},
+    models::{
+        alias::AliasObjectClass,
+        enums::{AuditOutcome, CredentialKind},
+        policy::AuthzRequest,
+    },
     state::{AppState, GrpcRuntimeStatus},
 };
 
@@ -196,15 +200,7 @@ impl AuthService for AtomAuth {
         let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
         let req = request.into_inner();
 
-        let kind = req.kind.trim();
-        if !(kind.is_empty()
-            || kind.eq_ignore_ascii_case("password")
-            || kind.eq_ignore_ascii_case("shared_key"))
-        {
-            return Err(Status::invalid_argument(
-                "unsupported credential kind: expected password or shared_key",
-            ));
-        }
+        let credential_kind = parse_credential_auth_kind(&req.kind)?;
 
         let requested_tenant_id =
             parse_optional_uuid(&req.tenant_id, "tenant_id").map_err(Status::from)?;
@@ -219,12 +215,13 @@ impl AuthService for AtomAuth {
 
         require_credential_auth_access(&self.state.pool, auth.entity_id, tenant_id).await?;
 
-        let result = identity_service::authenticate_password_credential_in_tenant(
+        let result = identity_service::authenticate_credential_in_tenant(
             &self.state.pool,
             &self.state.config,
             &req.identifier,
             &req.secret,
             tenant_id,
+            credential_kind,
         )
         .await;
 
@@ -442,6 +439,16 @@ fn parse_alias_object_class(value: &str) -> Option<AliasObjectClass> {
         Some(AliasObjectClass::Resource)
     } else {
         None
+    }
+}
+
+fn parse_credential_auth_kind(value: &str) -> Result<CredentialKind, Status> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "password" => Ok(CredentialKind::Password),
+        "shared_key" => Ok(CredentialKind::SharedKey),
+        _ => Err(Status::invalid_argument(
+            "unsupported credential kind: expected password or shared_key",
+        )),
     }
 }
 

@@ -98,7 +98,7 @@ pub async fn login_password_with_tenant(
     tenant_id: Option<Uuid>,
     tenant_alias: Option<&str>,
 ) -> Result<LoginResponse, AppError> {
-    let result = do_login_password(
+    login_credential_with_tenant(
         pool,
         cfg,
         primary_key,
@@ -106,6 +106,30 @@ pub async fn login_password_with_tenant(
         secret,
         tenant_id,
         tenant_alias,
+        CredentialKind::Password,
+    )
+    .await
+}
+
+pub async fn login_credential_with_tenant(
+    pool: &PgPool,
+    cfg: &Config,
+    primary_key: &LoadedKey,
+    identifier: &str,
+    secret: &str,
+    tenant_id: Option<Uuid>,
+    tenant_alias: Option<&str>,
+    requested_kind: CredentialKind,
+) -> Result<LoginResponse, AppError> {
+    let result = do_login_credential(
+        pool,
+        cfg,
+        primary_key,
+        identifier,
+        secret,
+        tenant_id,
+        tenant_alias,
+        requested_kind,
     )
     .await;
 
@@ -117,7 +141,12 @@ pub async fn login_password_with_tenant(
                 .await
                 .ok()
                 .flatten();
-            (Some(r.entity_id), tenant_id, AuditOutcome::Allow, Some(*kind))
+            (
+                Some(r.entity_id),
+                tenant_id,
+                AuditOutcome::Allow,
+                Some(*kind),
+            )
         }
         Err(AppError::Unauthorized(_)) => (None, None, AuditOutcome::Deny, None),
         Err(_) => return result.map(|(r, _)| r),
@@ -145,7 +174,7 @@ pub async fn login_password_with_tenant(
     result.map(|(r, _)| r)
 }
 
-async fn do_login_password(
+async fn do_login_credential(
     pool: &PgPool,
     cfg: &Config,
     primary_key: &LoadedKey,
@@ -153,11 +182,18 @@ async fn do_login_password(
     secret: &str,
     requested_tenant_id: Option<Uuid>,
     tenant_alias: Option<&str>,
+    requested_kind: CredentialKind,
 ) -> Result<(LoginResponse, CredentialKind), AppError> {
     let login_tenant_id = resolve_login_tenant(pool, requested_tenant_id, tenant_alias).await?;
-    let authenticated =
-        authenticate_password_credential_in_tenant(pool, cfg, identifier, secret, login_tenant_id)
-            .await?;
+    let authenticated = authenticate_credential_in_tenant(
+        pool,
+        cfg,
+        identifier,
+        secret,
+        login_tenant_id,
+        requested_kind,
+    )
+    .await?;
     let response = create_login_response(
         pool,
         cfg,
@@ -184,6 +220,25 @@ pub async fn authenticate_password_credential_in_tenant(
     secret: &str,
     tenant_id: Option<Uuid>,
 ) -> Result<CredentialAuthentication, AppError> {
+    authenticate_credential_in_tenant(
+        pool,
+        cfg,
+        identifier,
+        secret,
+        tenant_id,
+        CredentialKind::Password,
+    )
+    .await
+}
+
+pub async fn authenticate_credential_in_tenant(
+    pool: &PgPool,
+    cfg: &Config,
+    identifier: &str,
+    secret: &str,
+    tenant_id: Option<Uuid>,
+    requested_kind: CredentialKind,
+) -> Result<CredentialAuthentication, AppError> {
     let attempt_identifier = login_attempt_identifier(identifier);
     if let Err(err) = ensure_login_not_throttled(
         pool,
@@ -208,11 +263,13 @@ pub async fn authenticate_password_credential_in_tenant(
         // a session. Session creation repeats this check under a row lock.
         ensure_login_target_active(pool, identity.entity_id).await?;
 
-        let credential = password_style_credential_for_login(
+        let credential = credential_for_login(
             pool,
+            &cfg.signing_keys,
             identity.entity_id,
             secret,
             identity.credential_identifier.as_deref(),
+            requested_kind,
         )
         .await?;
 
@@ -1048,18 +1105,32 @@ async fn login_identity_by_email(
     }))
 }
 
-async fn password_style_credential_for_login(
+async fn credential_for_login(
     pool: &PgPool,
+    signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     secret: &str,
     identifier: Option<&str>,
+    requested_kind: CredentialKind,
 ) -> Result<PasswordCredential, AppError> {
-    if let Some(credential) = password_credential_for_login(pool, entity_id, identifier).await? {
-        if verify_secret(secret.as_bytes(), &credential.secret_hash) {
-            return Ok(credential);
+    match requested_kind {
+        CredentialKind::Password => {
+            if let Some(credential) =
+                password_credential_for_login(pool, entity_id, identifier).await?
+            {
+                if verify_secret(secret.as_bytes(), &credential.secret_hash) {
+                    return Ok(credential);
+                }
+            }
+            Err(AppError::unauthorized("invalid credentials"))
         }
+        CredentialKind::SharedKey => {
+            shared_key_credential_for_login(pool, signing_keys, entity_id, secret).await
+        }
+        CredentialKind::ApiKey | CredentialKind::Certificate => Err(AppError::bad_request(
+            format!("unsupported credential kind: {requested_kind:?}"),
+        )),
     }
-    shared_key_credential_for_login(pool, entity_id, secret).await
 }
 
 async fn password_credential_for_login(
@@ -1109,6 +1180,7 @@ async fn password_credential_for_login(
 
 async fn shared_key_credential_for_login(
     pool: &PgPool,
+    signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     secret: &str,
 ) -> Result<PasswordCredential, AppError> {
@@ -1123,9 +1195,16 @@ async fn shared_key_credential_for_login(
         }
     }
 
-    // Fallback for operator-supplied keys that carry no embedded locator. Bounded
-    // by the (small) number of active shared keys on the entity.
-    for credential in active_shared_keys(pool, entity_id).await? {
+    let lookup_hash = shared_key_lookup_hash(signing_keys, secret.as_bytes())?;
+    for credential in active_shared_keys_by_lookup_hash(pool, entity_id, &lookup_hash).await? {
+        if verify_secret(secret.as_bytes(), &credential.secret_hash) {
+            return Ok(credential);
+        }
+    }
+
+    // Compatibility fallback for rows created before lookup digests existed.
+    // Modern shared-key rows must be found by credential id or lookup hash.
+    for credential in active_shared_keys_without_lookup_hash(pool, entity_id).await? {
         if verify_secret(secret.as_bytes(), &credential.secret_hash) {
             return Ok(credential);
         }
@@ -1170,7 +1249,37 @@ async fn active_shared_key_by_id(
     row.map(shared_key_credential_from_row).transpose()
 }
 
-async fn active_shared_keys(
+async fn active_shared_keys_by_lookup_hash(
+    pool: &PgPool,
+    entity_id: Uuid,
+    lookup_hash: &[u8],
+) -> Result<Vec<PasswordCredential>, AppError> {
+    let rows = sqlx::query(
+        r#"SELECT c.id, c.secret_hash
+           FROM credentials c
+           JOIN entities e ON e.id = c.entity_id
+           WHERE c.entity_id = $1
+             AND c.kind = $2
+             AND c.status = $3
+             AND c.secret_lookup_hash = $4
+             AND e.kind <> 'human'
+             AND (c.expires_at IS NULL OR c.expires_at > now())
+           ORDER BY c.created_at DESC"#,
+    )
+    .bind(entity_id)
+    .bind(CredentialKind::SharedKey)
+    .bind(CredentialStatus::Active)
+    .bind(lookup_hash)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    rows.into_iter()
+        .map(shared_key_credential_from_row)
+        .collect()
+}
+
+async fn active_shared_keys_without_lookup_hash(
     pool: &PgPool,
     entity_id: Uuid,
 ) -> Result<Vec<PasswordCredential>, AppError> {
@@ -1181,6 +1290,7 @@ async fn active_shared_keys(
            WHERE c.entity_id = $1
              AND c.kind = $2
              AND c.status = $3
+             AND c.secret_lookup_hash IS NULL
              AND e.kind <> 'human'
              AND (c.expires_at IS NULL OR c.expires_at > now())
            ORDER BY c.created_at DESC"#,
@@ -1192,10 +1302,14 @@ async fn active_shared_keys(
     .await
     .map_err(db_err)?;
 
-    rows.into_iter().map(shared_key_credential_from_row).collect()
+    rows.into_iter()
+        .map(shared_key_credential_from_row)
+        .collect()
 }
 
-fn shared_key_credential_from_row(row: sqlx::postgres::PgRow) -> Result<PasswordCredential, AppError> {
+fn shared_key_credential_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<PasswordCredential, AppError> {
     use sqlx::Row;
     let secret_hash = row
         .try_get::<Option<String>, _>("secret_hash")
@@ -2006,14 +2120,15 @@ pub async fn create_shared_key(
     let hash = hash_secret(key.as_bytes())?;
     // The recoverable copy is envelope-encrypted; the plaintext never touches the DB.
     let sealed = encrypt_recoverable_secret(signing_keys, cred_id, key.as_bytes())?;
+    let lookup_hash = shared_key_lookup_hash(signing_keys, key.as_bytes())?;
     let metadata = serde_json::json!({ "description": req.description });
 
     sqlx::query(
         r#"INSERT INTO credentials
              (id, entity_id, kind, secret_hash,
               secret_ciphertext, secret_nonce, secret_key_id, secret_enc_alg,
-              expires_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+              secret_lookup_hash, expires_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
     )
     .bind(cred_id)
     .bind(entity_id)
@@ -2023,6 +2138,7 @@ pub async fn create_shared_key(
     .bind(sealed.nonce)
     .bind(&signing_keys.key_encryption_key_id)
     .bind(crypto::AEAD_ALG)
+    .bind(lookup_hash)
     .bind(req.expires_at)
     .bind(metadata)
     .execute(&mut *tx)
@@ -2135,6 +2251,18 @@ fn encrypt_recoverable_secret(
         )
     })?;
     crypto::encrypt(kek.expose(), credential_id.as_bytes(), plaintext)
+}
+
+fn shared_key_lookup_hash(
+    signing_keys: &SigningKeyConfig,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let kek = signing_keys.key_encryption_key.as_ref().ok_or_else(|| {
+        AppError::bad_request(
+            "ATOM_KEY_ENCRYPTION_KEY must be set to authenticate retrievable shared keys",
+        )
+    })?;
+    Ok(crypto::hmac_sha256(kek.expose(), plaintext))
 }
 
 fn lost_shared_key_error() -> AppError {

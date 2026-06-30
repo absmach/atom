@@ -8,7 +8,10 @@
 //! credential's UUID) so a ciphertext cannot be transplanted between rows.
 
 use rand::{rngs::OsRng, RngCore};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::{
+    aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM},
+    hmac,
+};
 
 use crate::error::AppError;
 
@@ -42,9 +45,16 @@ pub fn encrypt(key: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<Sealed, AppEr
 }
 
 /// Decrypt `ciphertext` produced by [`encrypt`] with the same `key` and `aad`.
-pub fn decrypt(key: &[u8], aad: &[u8], ciphertext: &[u8], nonce: &[u8]) -> Result<Vec<u8>, AppError> {
+pub fn decrypt(
+    key: &[u8],
+    aad: &[u8],
+    ciphertext: &[u8],
+    nonce: &[u8],
+) -> Result<Vec<u8>, AppError> {
     if nonce.len() != NONCE_LEN {
-        return Err(AppError::Internal(anyhow::anyhow!("invalid aead nonce length")));
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "invalid aead nonce length"
+        )));
     }
     let mut nonce_bytes = [0_u8; NONCE_LEN];
     nonce_bytes.copy_from_slice(nonce);
@@ -58,6 +68,12 @@ pub fn decrypt(key: &[u8], aad: &[u8], ciphertext: &[u8], nonce: &[u8]) -> Resul
         )
         .map_err(|_| AppError::Internal(anyhow::anyhow!("aead decrypt")))?;
     Ok(plaintext.to_vec())
+}
+
+/// Compute a keyed lookup digest for recoverable credentials.
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    hmac::sign(&key, data).as_ref().to_vec()
 }
 
 fn aead_key(key: &[u8]) -> Result<LessSafeKey, AppError> {
@@ -92,5 +108,21 @@ mod tests {
         let mut sealed = encrypt(&key(), b"aad", b"secret").unwrap();
         sealed.ciphertext[0] ^= 0xff;
         assert!(decrypt(&key(), b"aad", &sealed.ciphertext, &sealed.nonce).is_err());
+    }
+
+    #[test]
+    fn hmac_lookup_digest_is_keyed() {
+        assert_eq!(
+            hmac_sha256(&key(), b"secret"),
+            hmac_sha256(&key(), b"secret")
+        );
+        assert_ne!(
+            hmac_sha256(&key(), b"secret"),
+            hmac_sha256(&[8u8; 32], b"secret")
+        );
+        assert_ne!(
+            hmac_sha256(&key(), b"secret"),
+            hmac_sha256(&key(), b"other")
+        );
     }
 }

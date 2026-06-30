@@ -6,7 +6,7 @@ use crate::{
     auth::{has_capability_in_scope, require_capability, AuthContext, Scope},
     error::AppError,
     identity::{repo, service},
-    models::enums::AuditOutcome,
+    models::enums::{AuditOutcome, CredentialKind},
     state::AppState,
 };
 
@@ -42,19 +42,11 @@ pub struct AuthMutation;
 #[Object]
 impl AuthMutation {
     async fn login(&self, ctx: &Context<'_>, input: LoginInput) -> Result<LoginResponse> {
-        // The credential that actually authenticates is determined by the secret
-        // itself (password vs. machine shared key) and reported back in the audit
-        // log; the client only declares which families it is presenting.
-        if !matches!(input.kind.as_str(), "password" | "shared_key") {
-            return Err(async_graphql::Error::new(format!(
-                "unsupported credential kind: {}",
-                input.kind
-            )));
-        }
+        let credential_kind = parse_login_credential_kind(&input.kind)?;
 
         let state = ctx.data::<AppState>()?;
         let keys = state.keys.read().await;
-        let response = service::login_password_with_tenant(
+        let response = service::login_credential_with_tenant(
             &state.pool,
             &state.config,
             &keys.primary,
@@ -62,6 +54,7 @@ impl AuthMutation {
             &input.secret,
             parse_optional_id(input.tenant_id, "tenantId")?,
             input.tenant_alias.as_deref(),
+            credential_kind,
         )
         .await
         .map_err(gql_error)?;
@@ -135,6 +128,16 @@ impl AuthMutation {
         .await
         .map(Into::into)
         .map_err(gql_error)
+    }
+}
+
+fn parse_login_credential_kind(value: &str) -> Result<CredentialKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "password" => Ok(CredentialKind::Password),
+        "shared_key" => Ok(CredentialKind::SharedKey),
+        other => Err(async_graphql::Error::new(format!(
+            "unsupported credential kind: {other}"
+        ))),
     }
 }
 

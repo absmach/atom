@@ -16,7 +16,9 @@ use atom::{
     },
     identity::{repo as identity_repo, service as identity_service},
     keys::{self, ActiveKeys},
-    models::{entity::CreateEntity, enums::EntityKind, tenant::CreateTenant},
+    models::{
+        entity::CreateEntity, enums::EntityKind, tenant::CreateTenant, token::CreateSharedKey,
+    },
     state::AppState,
     tenants::repo as tenant_repo,
 };
@@ -288,6 +290,19 @@ async fn grpc_authenticate_credential_requires_service_auth_and_returns_identity
 
     let (tenant_id, tenant_alias) = make_tenant(&pool).await;
     let (entity_id, _, alias, credential_id) = make_device(&pool, tenant_id).await;
+    let shared_secret = format!("manual-grpc-key-{}", Uuid::new_v4());
+    let shared_key = identity_service::create_shared_key(
+        &pool,
+        &Config::for_tests().signing_keys,
+        entity_id,
+        CreateSharedKey {
+            expires_at: None,
+            description: Some("gRPC imported key".into()),
+            key: Some(shared_secret.clone()),
+        },
+    )
+    .await
+    .expect("create shared key");
     let admin_token = token_for(&pool, &keys, common::admin_id()).await;
     let service_id = make_service(&pool).await;
     let service_token = token_for(&pool, &keys, service_id).await;
@@ -337,6 +352,41 @@ async fn grpc_authenticate_credential_requires_service_auth_and_returns_identity
     assert_eq!(response.entity_id, entity_id.to_string());
     assert_eq!(response.tenant_id, tenant_id.to_string());
     assert_eq!(response.credential_id, credential_id.to_string());
+
+    let shared_response = client
+        .authenticate_credential(authed_request(
+            &admin_token,
+            AuthenticateCredentialRequest {
+                identifier: entity_id.to_string(),
+                secret: shared_secret.clone(),
+                kind: "shared_key".into(),
+                tenant_id: tenant_id.to_string(),
+                tenant_alias: String::new(),
+            },
+        ))
+        .await
+        .expect("authenticate shared key")
+        .into_inner();
+    assert_eq!(shared_response.entity_id, entity_id.to_string());
+    assert_eq!(
+        shared_response.credential_id,
+        shared_key.credential_id.to_string()
+    );
+
+    let wrong_kind = client
+        .authenticate_credential(authed_request(
+            &admin_token,
+            AuthenticateCredentialRequest {
+                identifier: entity_id.to_string(),
+                secret: shared_secret,
+                kind: "password".into(),
+                tenant_id: tenant_id.to_string(),
+                tenant_alias: String::new(),
+            },
+        ))
+        .await
+        .expect_err("shared key must not authenticate as password");
+    assert_eq!(wrong_kind.code(), Code::Unauthenticated);
 
     let unsupported = client
         .authenticate_credential(authed_request(

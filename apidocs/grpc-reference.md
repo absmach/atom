@@ -42,9 +42,9 @@
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| identifier | [string](#string) |  | Username-style identifier supplied by protocol adapters such as MQTT brokers. For password credentials this may be an entity UUID, email, name, or a tenant-scoped entity alias. |
-| secret | [string](#string) |  | Plaintext secret supplied by the caller. Atom only stores its hash. |
-| kind | [string](#string) |  | Empty is treated as &#34;password&#34; for MQTT ergonomics. |
+| identifier | [string](#string) |  | Username-style identifier supplied by protocol adapters. For password credentials this may be an entity UUID, email, name, or a tenant-scoped entity alias. For shared_key credentials this identifies the machine entity whose key is being presented. |
+| secret | [string](#string) |  | Plaintext secret supplied by the caller. Atom stores an Argon2 verifier for authentication. Retrievable shared keys also store an encrypted reveal copy and a keyed lookup digest; plaintext is never stored. |
+| kind | [string](#string) |  | Supported values are &#34;password&#34; and &#34;shared_key&#34;. Empty falls back to &#34;password&#34; — the simplest auth model (basic username/secret). |
 | tenant_id | [string](#string) |  |  |
 | tenant_alias | [string](#string) |  |  |
 

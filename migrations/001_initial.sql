@@ -155,6 +155,10 @@ CREATE TABLE credentials (
     secret_nonce      BYTEA,
     secret_key_id     TEXT,
     secret_enc_alg    TEXT,
+    -- HMAC-SHA256 lookup digest for indexed shared-key authentication. The
+    -- digest is keyed with ATOM_KEY_ENCRYPTION_KEY, so a DB-only leak does not
+    -- enable cheap enumeration of arbitrary operator-supplied keys.
+    secret_lookup_hash BYTEA,
     metadata    JSONB       NOT NULL DEFAULT '{}',
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
     expires_at  TIMESTAMPTZ,
@@ -173,6 +177,11 @@ CREATE INDEX idx_credentials_certificate_status_expiry
 CREATE INDEX idx_credentials_shared_key_status
     ON credentials(entity_id, status, expires_at)
     WHERE kind = 'shared_key';
+CREATE INDEX idx_credentials_shared_key_lookup
+    ON credentials(entity_id, secret_lookup_hash, expires_at)
+    WHERE kind = 'shared_key'
+      AND status = 'active'
+      AND secret_lookup_hash IS NOT NULL;
 
 -- Shared keys are retrievable machine secrets: allowed for any machine entity,
 -- forbidden for humans. The stable invariant enforced here is "shared_key =>

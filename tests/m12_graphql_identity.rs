@@ -14,6 +14,7 @@ use atom::{
     graphql::build_schema,
     identity::service as identity_service,
     keys::{ActiveKeys, LoadedKey},
+    models::enums::CredentialKind,
     state::AppState,
 };
 use sqlx::PgPool;
@@ -319,8 +320,13 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     let key = shared_key["key"].as_str().expect("shared key").to_owned();
     assert!(key.starts_with("atom_shared_"));
 
-    let (hash, metadata, ciphertext): (String, serde_json::Value, Option<Vec<u8>>) = sqlx::query_as(
-        "SELECT secret_hash, metadata, secret_ciphertext FROM credentials WHERE id = $1",
+    let (hash, metadata, ciphertext, lookup_hash): (
+        String,
+        serde_json::Value,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    ) = sqlx::query_as(
+        "SELECT secret_hash, metadata, secret_ciphertext, secret_lookup_hash FROM credentials WHERE id = $1",
     )
     .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
     .fetch_one(&pool)
@@ -331,6 +337,7 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     assert!(metadata.get("shared_key").is_none());
     let ciphertext = ciphertext.expect("secret ciphertext stored");
     assert!(!ciphertext.windows(key.len()).any(|w| w == key.as_bytes()));
+    assert_eq!(lookup_hash.expect("lookup hash stored").len(), 32);
 
     let device_kind_change = sqlx::query("UPDATE entities SET kind = 'human' WHERE id = $1")
         .bind(device_id)
@@ -389,18 +396,36 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
         key
     );
 
-    let authenticated = identity_service::authenticate_password_credential_in_tenant(
+    let password_kind_rejected = identity_service::authenticate_credential_in_tenant(
         &pool,
         &Config::for_tests(),
         &device_id.to_string(),
         &key,
         None,
+        CredentialKind::Password,
+    )
+    .await
+    .expect_err("shared key must not authenticate as password");
+    assert!(password_kind_rejected
+        .to_string()
+        .contains("invalid credentials"));
+
+    let authenticated = identity_service::authenticate_credential_in_tenant(
+        &pool,
+        &Config::for_tests(),
+        &device_id.to_string(),
+        &key,
+        None,
+        CredentialKind::SharedKey,
     )
     .await
     .expect("authenticate shared key");
     assert_eq!(authenticated.entity_id, device_id);
     assert_eq!(authenticated.credential_id.to_string(), credential_id);
-    assert_eq!(authenticated.kind, atom::models::enums::CredentialKind::SharedKey);
+    assert_eq!(
+        authenticated.kind,
+        atom::models::enums::CredentialKind::SharedKey
+    );
 
     // Tampering with the stored ciphertext must surface as an unrecoverable key
     // rather than returning a wrong secret.
@@ -429,6 +454,75 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     assert!(lost_key.errors[0]
         .message
         .contains("could not retrieve the shared key"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn arbitrary_shared_key_uses_indexed_lookup_and_explicit_kind() {
+    let pool = common::pool().await;
+    let device_id = entity(&pool, "device").await;
+    let schema = build_schema(state(pool.clone()));
+    let manual_key = format!("manual-device-key-{}", Uuid::new_v4());
+
+    let created = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createSharedKey(entityId: "{device_id}", input: {{
+                key: "{manual_key}",
+                description: "Imported provisioning key"
+              }}) {{
+                credentialId
+                key
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let created_json = created.data.into_json().expect("json data");
+    let credential_id = created_json["createSharedKey"]["credentialId"]
+        .as_str()
+        .expect("credential id")
+        .to_owned();
+    assert_eq!(created_json["createSharedKey"]["key"], manual_key);
+
+    let (stored_hash, lookup_hash, metadata): (String, Option<Vec<u8>>, serde_json::Value) =
+        sqlx::query_as(
+            "SELECT secret_hash, secret_lookup_hash, metadata FROM credentials WHERE id = $1",
+        )
+        .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
+        .fetch_one(&pool)
+        .await
+        .expect("credential row");
+    assert_ne!(stored_hash, manual_key);
+    assert_eq!(lookup_hash.expect("lookup hash stored").len(), 32);
+    assert!(metadata.get("shared_key").is_none());
+
+    let authenticated = identity_service::authenticate_credential_in_tenant(
+        &pool,
+        &Config::for_tests(),
+        &device_id.to_string(),
+        &manual_key,
+        None,
+        CredentialKind::SharedKey,
+    )
+    .await
+    .expect("authenticate arbitrary shared key");
+    assert_eq!(authenticated.entity_id, device_id);
+    assert_eq!(authenticated.credential_id.to_string(), credential_id);
+
+    let wrong_kind = identity_service::authenticate_credential_in_tenant(
+        &pool,
+        &Config::for_tests(),
+        &device_id.to_string(),
+        &manual_key,
+        None,
+        CredentialKind::Password,
+    )
+    .await
+    .expect_err("shared key must not authenticate as password");
+    assert!(wrong_kind.to_string().contains("invalid credentials"));
 }
 
 #[tokio::test]
@@ -478,17 +572,21 @@ async fn shared_key_works_for_non_device_machine_entities() {
         key
     );
 
-    let authenticated = identity_service::authenticate_password_credential_in_tenant(
+    let authenticated = identity_service::authenticate_credential_in_tenant(
         &pool,
         &Config::for_tests(),
         &service_id.to_string(),
         &key,
         None,
+        CredentialKind::SharedKey,
     )
     .await
     .expect("authenticate shared key for service entity");
     assert_eq!(authenticated.entity_id, service_id);
-    assert_eq!(authenticated.kind, atom::models::enums::CredentialKind::SharedKey);
+    assert_eq!(
+        authenticated.kind,
+        atom::models::enums::CredentialKind::SharedKey
+    );
 }
 
 #[tokio::test]

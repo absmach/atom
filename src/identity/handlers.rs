@@ -124,9 +124,9 @@ pub async fn login(
 ) -> Result<Response, AppError> {
     use crate::models::enums::CredentialKind;
     match req.kind {
-        CredentialKind::Password => {
+        CredentialKind::Password | CredentialKind::SharedKey => {
             let keys = state.keys.read().await;
-            let resp = service::login_password_with_tenant(
+            let resp = service::login_credential_with_tenant(
                 &state.pool,
                 &state.config,
                 &keys.primary,
@@ -134,6 +134,7 @@ pub async fn login(
                 &req.secret,
                 req.tenant_id,
                 req.tenant_alias.as_deref(),
+                req.kind,
             )
             .await?;
             let cookie = auth_cookie(
