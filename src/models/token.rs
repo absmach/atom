@@ -15,3 +15,17 @@ pub struct CreateApiKey {
     pub expires_at: Option<DateTime<Utc>>,
     pub description: Option<String>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct SharedKeyResponse {
+    pub credential_id: Uuid,
+    pub key: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSharedKey {
+    pub expires_at: Option<DateTime<Utc>>,
+    pub description: Option<String>,
+    pub key: Option<String>,
+}

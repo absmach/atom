@@ -30,7 +30,7 @@ use crate::{
             LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
             SignupResponse,
         },
-        token::{ApiKeyResponse, CreateApiKey},
+        token::{ApiKeyResponse, CreateApiKey, CreateSharedKey, SharedKeyResponse},
     },
 };
 
@@ -200,17 +200,18 @@ pub async fn authenticate_password_credential_in_tenant(
         // a session. Session creation repeats this check under a row lock.
         ensure_login_target_active(pool, identity.entity_id).await?;
 
-        let credential = password_credential_for_login(
+        let credential = password_style_credential_for_login(
             pool,
             identity.entity_id,
+            secret,
             identity.credential_identifier.as_deref(),
         )
         .await?;
-        if !verify_secret(secret.as_bytes(), &credential.secret_hash) {
-            return Err(AppError::unauthorized("invalid credentials"));
-        }
 
-        if identity.email_verified == Some(false) && !cfg.dev_allow_unverified_email_login {
+        if credential.kind == CredentialKind::Password
+            && identity.email_verified == Some(false)
+            && !cfg.dev_allow_unverified_email_login
+        {
             return Err(AppError::unauthorized("email verification required"));
         }
 
@@ -923,6 +924,7 @@ struct LoginIdentity {
 
 struct PasswordCredential {
     id: Uuid,
+    kind: CredentialKind,
     secret_hash: String,
 }
 
@@ -1037,11 +1039,25 @@ async fn login_identity_by_email(
     }))
 }
 
+async fn password_style_credential_for_login(
+    pool: &PgPool,
+    entity_id: Uuid,
+    secret: &str,
+    identifier: Option<&str>,
+) -> Result<PasswordCredential, AppError> {
+    if let Some(credential) = password_credential_for_login(pool, entity_id, identifier).await? {
+        if verify_secret(secret.as_bytes(), &credential.secret_hash) {
+            return Ok(credential);
+        }
+    }
+    shared_key_credential_for_login(pool, entity_id, secret).await
+}
+
 async fn password_credential_for_login(
     pool: &PgPool,
     entity_id: Uuid,
     identifier: Option<&str>,
-) -> Result<PasswordCredential, AppError> {
+) -> Result<Option<PasswordCredential>, AppError> {
     use sqlx::Row;
     let row = sqlx::query(
         r#"SELECT id, secret_hash
@@ -1063,21 +1079,66 @@ async fn password_credential_for_login(
     .bind(CredentialKind::Password)
     .bind(CredentialStatus::Active)
     .bind(identifier)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::unauthorized("invalid credentials"),
-        other => AppError::Database(other),
-    })?;
+    .map_err(db_err)?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
 
     let secret_hash = row
         .try_get::<Option<String>, _>("secret_hash")
         .unwrap_or(None)
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
-    Ok(PasswordCredential {
+    Ok(Some(PasswordCredential {
         id: row.try_get("id").map_err(db_err)?,
+        kind: CredentialKind::Password,
         secret_hash,
-    })
+    }))
+}
+
+async fn shared_key_credential_for_login(
+    pool: &PgPool,
+    entity_id: Uuid,
+    secret: &str,
+) -> Result<PasswordCredential, AppError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"SELECT c.id, c.secret_hash
+           FROM credentials c
+           JOIN entities e ON e.id = c.entity_id
+           WHERE c.entity_id = $1
+             AND e.kind = $2
+             AND c.kind = $3
+             AND c.status = $4
+             AND (c.expires_at IS NULL OR c.expires_at > now())
+           ORDER BY c.created_at DESC"#,
+    )
+    .bind(entity_id)
+    .bind(EntityKind::Device)
+    .bind(CredentialKind::SharedKey)
+    .bind(CredentialStatus::Active)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let secret_hash = row
+                .try_get::<Option<String>, _>("secret_hash")
+                .unwrap_or(None)
+                .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
+            Ok(PasswordCredential {
+                id: row.try_get("id").map_err(db_err)?,
+                kind: CredentialKind::SharedKey,
+                secret_hash,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?
+        .into_iter()
+        .find(|credential| verify_secret(secret.as_bytes(), &credential.secret_hash))
+        .ok_or_else(|| AppError::unauthorized("invalid credentials"))
 }
 
 async fn login_entity_row(
@@ -1849,6 +1910,152 @@ pub async fn create_api_key(
         key,
         expires_at: req.expires_at,
     })
+}
+
+pub async fn create_shared_key(
+    pool: &PgPool,
+    entity_id: Uuid,
+    req: CreateSharedKey,
+) -> Result<SharedKeyResponse, AppError> {
+    let cred_id = Uuid::new_v4();
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let Some((kind, _)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
+        return Err(AppError::not_found(format!(
+            "active entity {entity_id} not found"
+        )));
+    };
+    if kind != EntityKind::Device {
+        return Err(AppError::bad_request(
+            "shared keys can only be created for device entities",
+        ));
+    }
+
+    let key = match req.key {
+        Some(key) => {
+            validate_machine_secret(&key)?;
+            key
+        }
+        None => make_shared_key(cred_id),
+    };
+    let hash = hash_secret(key.as_bytes())?;
+    let metadata = serde_json::json!({
+        "description": req.description,
+        "shared_key": &key,
+    });
+
+    sqlx::query(
+        r#"INSERT INTO credentials (id, entity_id, kind, secret_hash, expires_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .bind(CredentialKind::SharedKey)
+    .bind(hash)
+    .bind(req.expires_at)
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
+
+    Ok(SharedKeyResponse {
+        credential_id: cred_id,
+        key,
+        expires_at: req.expires_at,
+    })
+}
+
+pub async fn reveal_shared_key(
+    pool: &PgPool,
+    entity_id: Uuid,
+    credential_id: Uuid,
+) -> Result<SharedKeyResponse, AppError> {
+    use sqlx::Row;
+
+    let row = sqlx::query(
+        r#"SELECT c.expires_at,
+                  c.status,
+                  c.secret_hash,
+                  c.metadata,
+                  e.status AS entity_status,
+                  t.status AS tenant_status
+           FROM credentials c
+           JOIN entities e ON e.id = c.entity_id
+           LEFT JOIN tenants t ON t.id = e.tenant_id
+           WHERE c.id = $1
+             AND c.entity_id = $2
+             AND c.kind = $3
+             AND e.kind = $4
+             AND e.deleted_at IS NULL
+             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
+    )
+    .bind(credential_id)
+    .bind(entity_id)
+    .bind(CredentialKind::SharedKey)
+    .bind(EntityKind::Device)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found("shared key not found"),
+        other => AppError::Database(other),
+    })?;
+
+    let status: CredentialStatus = row.try_get("status").map_err(db_err)?;
+    if status != CredentialStatus::Active {
+        return Err(AppError::unauthorized("shared key revoked"));
+    }
+    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at").map_err(db_err)?;
+    if expires_at.is_some_and(|expires_at| expires_at < Utc::now()) {
+        return Err(AppError::unauthorized("shared key expired"));
+    }
+
+    let entity_status: EntityStatus = row.try_get("entity_status").map_err(db_err)?;
+    if entity_status != EntityStatus::Active {
+        return Err(AppError::unauthorized("entity is not active"));
+    }
+    if let Some(tenant_status) = row
+        .try_get::<Option<crate::models::enums::TenantStatus>, _>("tenant_status")
+        .unwrap_or(None)
+    {
+        if tenant_status != crate::models::enums::TenantStatus::Active {
+            return Err(AppError::unauthorized("tenant is not active"));
+        }
+    }
+
+    let metadata: Value = row.try_get("metadata").map_err(db_err)?;
+    let secret_hash: Option<String> = row.try_get("secret_hash").map_err(db_err)?;
+    let secret_hash = secret_hash.ok_or_else(lost_shared_key_error)?;
+    let key = metadata
+        .get("shared_key")
+        .and_then(Value::as_str)
+        .ok_or_else(lost_shared_key_error)?
+        .to_string();
+
+    if !verify_secret(key.as_bytes(), &secret_hash) {
+        return Err(lost_shared_key_error());
+    }
+
+    Ok(SharedKeyResponse {
+        credential_id,
+        key,
+        expires_at,
+    })
+}
+
+fn lost_shared_key_error() -> AppError {
+    AppError::conflict(
+        "could not retrieve the device key; the stored key is lost, please set a new device key",
+    )
+}
+
+fn make_shared_key(cred_id: Uuid) -> String {
+    let mut secret_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut secret_bytes);
+    format!(
+        "atom_shared_{}_{}",
+        hex::encode(cred_id.as_bytes()),
+        hex::encode(secret_bytes)
+    )
 }
 
 pub async fn revoke_credential(

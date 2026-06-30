@@ -56,6 +56,26 @@ const CREATE_API_KEY_MUTATION = `
   }
 `;
 
+const CREATE_SHARED_KEY_MUTATION = `
+  mutation CreateSharedKey($entityId: ID!, $input: CreateSharedKeyInput!) {
+    createSharedKey(entityId: $entityId, input: $input) {
+      credentialId
+      key
+      expiresAt
+    }
+  }
+`;
+
+const REVEAL_SHARED_KEY_MUTATION = `
+  mutation RevealSharedKey($entityId: ID!, $credentialId: ID!) {
+    revealSharedKey(entityId: $entityId, credentialId: $credentialId) {
+      credentialId
+      key
+      expiresAt
+    }
+  }
+`;
+
 const REVOKE_CREDENTIAL_MUTATION = `
   mutation RevokeCredential($entityId: ID!, $credentialId: ID!) {
     revokeCredential(entityId: $entityId, credentialId: $credentialId)
@@ -138,11 +158,21 @@ type Credential = {
   createdAt: string;
 };
 
-type CredentialKind = "password" | "api_key" | "certificate";
+type CredentialKind =
+  | "password"
+  | "api_key"
+  | "shared_key"
+  | "certificate";
 
 type AddCredentialState =
   | { kind: "password"; password: string; confirm: string }
   | { kind: "api_key"; description: string; expiresAt: string }
+  | {
+      kind: "shared_key";
+      description: string;
+      expiresAt: string;
+      key: string;
+    }
   | {
       kind: "certificate";
       commonName: string;
@@ -153,6 +183,12 @@ type AddCredentialState =
     };
 
 type ApiKeyResult = {
+  credentialId: string;
+  key: string;
+  expiresAt: string | null;
+};
+
+type SharedKeyResult = {
   credentialId: string;
   key: string;
   expiresAt: string | null;
@@ -173,19 +209,28 @@ type DownloadableCertificate = {
   certificatePem: string;
 };
 
-export function EntityCredentials({ entityId }: { entityId: string }) {
+export function EntityCredentials({
+  entityId,
+  entityKind,
+}: {
+  entityId: string;
+  entityKind?: string;
+}) {
   const [activeForm, setActiveForm] = React.useState<CredentialKind | null>(
     null,
   );
   const [createdApiKey, setCreatedApiKey] = React.useState<ApiKeyResult | null>(
     null,
   );
+  const [visibleSharedKey, setVisibleSharedKey] =
+    React.useState<SharedKeyResult | null>(null);
   const [createdCertificate, setCreatedCertificate] =
     React.useState<CertificateResult | null>(null);
   const [showPassword, setShowPassword] = React.useState(false);
   const [form, setForm] = React.useState<AddCredentialState>(
     newCredentialForm("password"),
   );
+  const isDeviceEntity = entityKind === "device";
 
   const { data, error, isFetching, refetch } = useQuery({
     enabled: Boolean(entityId),
@@ -223,6 +268,36 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
       setCreatedApiKey(data.createApiKey);
       setActiveForm(null);
       void refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const createSharedKey = useMutation({
+    mutationFn: async (input: {
+      description?: string;
+      expiresAt?: string;
+      key?: string;
+    }) =>
+      graphqlClient<{ createSharedKey: SharedKeyResult }>({
+        query: CREATE_SHARED_KEY_MUTATION,
+        variables: { entityId, input },
+      }),
+    onSuccess: (data) => {
+      setVisibleSharedKey(data.createSharedKey);
+      setActiveForm(null);
+      void refetch();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const revealSharedKey = useMutation({
+    mutationFn: async (credentialId: string) =>
+      graphqlClient<{ revealSharedKey: SharedKeyResult }>({
+        query: REVEAL_SHARED_KEY_MUTATION,
+        variables: { entityId, credentialId },
+      }),
+    onSuccess: (data) => {
+      setVisibleSharedKey(data.revealSharedKey);
     },
     onError: (err) => toast.error(err.message),
   });
@@ -341,6 +416,16 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
       if (form.description.trim()) input.description = form.description.trim();
       if (form.expiresAt.trim()) input.expiresAt = form.expiresAt.trim();
       createApiKey.mutate(input);
+    } else if (form.kind === "shared_key") {
+      const input: {
+        description?: string;
+        expiresAt?: string;
+        key?: string;
+      } = {};
+      if (form.description.trim()) input.description = form.description.trim();
+      if (form.expiresAt.trim()) input.expiresAt = form.expiresAt.trim();
+      if (form.key.trim()) input.key = form.key.trim();
+      createSharedKey.mutate(input);
     } else {
       const ttlSecs = form.ttlSecs.trim()
         ? Number.parseInt(form.ttlSecs.trim(), 10)
@@ -373,6 +458,7 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
   const isPending =
     createPassword.isPending ||
     createApiKey.isPending ||
+    createSharedKey.isPending ||
     issueCertificate.isPending ||
     issueCertificateFromCsr.isPending;
 
@@ -382,14 +468,16 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
         <div className="text-sm font-medium">Credentials</div>
         {!activeForm ? (
           <div className="flex flex-wrap justify-end gap-2">
-            <Button
-              onClick={() => openForm("password")}
-              size="sm"
-              variant="outline"
-            >
-              <Lock data-icon="inline-start" className="size-3.5" />
-              Add password
-            </Button>
+            {!isDeviceEntity ? (
+              <Button
+                onClick={() => openForm("password")}
+                size="sm"
+                variant="outline"
+              >
+                <Lock data-icon="inline-start" className="size-3.5" />
+                Add password
+              </Button>
+            ) : null}
             <Button
               onClick={() => openForm("api_key")}
               size="sm"
@@ -398,6 +486,16 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
               <KeyRound data-icon="inline-start" className="size-3.5" />
               Add API key
             </Button>
+            {isDeviceEntity ? (
+              <Button
+                onClick={() => openForm("shared_key")}
+                size="sm"
+                variant="outline"
+              >
+                <KeyRound data-icon="inline-start" className="size-3.5" />
+                Add shared key
+              </Button>
+            ) : null}
             <Button
               onClick={() => openForm("certificate")}
               size="sm"
@@ -414,6 +512,13 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
         <ApiKeyRevealBanner
           apiKey={createdApiKey}
           onDismiss={() => setCreatedApiKey(null)}
+        />
+      ) : null}
+
+      {visibleSharedKey ? (
+        <SharedKeyRevealBanner
+          sharedKey={visibleSharedKey}
+          onDismiss={() => setVisibleSharedKey(null)}
         />
       ) : null}
 
@@ -507,6 +612,70 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
                     onChange={(v) =>
                       setForm((prev) =>
                         prev.kind === "api_key"
+                          ? { ...prev, expiresAt: v }
+                          : prev,
+                      )
+                    }
+                    placeholder="No expiry"
+                  />
+                </div>
+              </>
+            ) : form.kind === "shared_key" ? (
+              <>
+                <div className="grid gap-2">
+                  <Label htmlFor="shared-key-description">Description</Label>
+                  <Input
+                    id="shared-key-description"
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev.kind === "shared_key"
+                          ? { ...prev, description: e.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder="e.g. field provisioning key"
+                    value={form.description}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="shared-key-secret">Shared key</Label>
+                  <div className="relative">
+                    <Input
+                      autoComplete="new-password"
+                      id="shared-key-secret"
+                      onChange={(e) =>
+                        setForm((prev) =>
+                          prev.kind === "shared_key"
+                            ? { ...prev, key: e.target.value }
+                            : prev,
+                        )
+                      }
+                      placeholder="Generated when blank"
+                      type={showPassword ? "text" : "password"}
+                      value={form.key}
+                    />
+                    <Button
+                      className="absolute right-1 top-1/2 -translate-y-1/2"
+                      onClick={() => setShowPassword((v) => !v)}
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="size-3.5" />
+                      ) : (
+                        <Eye className="size-3.5" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <Label>Expires at (optional)</Label>
+                  <DateTimePicker
+                    value={form.expiresAt || undefined}
+                    onChange={(v) =>
+                      setForm((prev) =>
+                        prev.kind === "shared_key"
                           ? { ...prev, expiresAt: v }
                           : prev,
                       )
@@ -655,11 +824,17 @@ export function EntityCredentials({ entityId }: { entityId: string }) {
                   ? () => downloadCertificate.mutate(cred.identifier as string)
                   : undefined
               }
+              onReveal={
+                cred.kind === "shared_key"
+                  ? () => revealSharedKey.mutate(cred.id)
+                  : undefined
+              }
               revoking={
                 revokeCredential.isPending || revokeCertificate.isPending
               }
               renewing={renewCertificate.isPending}
               downloading={downloadCertificate.isPending}
+              revealing={revealSharedKey.isPending}
             />
           ))}
         </div>
@@ -673,17 +848,21 @@ function CredentialRow({
   onRevoke,
   onRenew,
   onDownload,
+  onReveal,
   revoking,
   renewing,
   downloading,
+  revealing,
 }: {
   cred: Credential;
   onRevoke: () => void;
   onRenew?: () => void;
   onDownload?: () => void;
+  onReveal?: () => void;
   revoking: boolean;
   renewing: boolean;
   downloading: boolean;
+  revealing: boolean;
 }) {
   return (
     <div className="flex items-start justify-between gap-3 rounded-lg border bg-background p-3">
@@ -742,6 +921,17 @@ function CredentialRow({
               <span className="sr-only">Renew</span>
             </Button>
           ) : null}
+          {onReveal ? (
+            <Button
+              disabled={revealing}
+              onClick={onReveal}
+              size="sm"
+              variant="ghost"
+            >
+              <Eye className="size-3.5" />
+              <span className="sr-only">Reveal shared key</span>
+            </Button>
+          ) : null}
           <Button
             disabled={revoking}
             onClick={onRevoke}
@@ -766,6 +956,10 @@ function CredentialKindIcon({ kind }: { kind: string }) {
       return (
         <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       );
+    case "shared_key":
+      return (
+        <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+      );
     default:
       return (
         <FileKey className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -779,6 +973,8 @@ function credentialKindLabel(kind: string) {
       return "Password";
     case "api_key":
       return "API Key";
+    case "shared_key":
+      return "Shared key";
     case "certificate":
       return "Certificate";
     default:
@@ -792,6 +988,13 @@ function newCredentialForm(kind: CredentialKind): AddCredentialState {
       return { kind: "password", password: "", confirm: "" };
     case "api_key":
       return { kind: "api_key", description: "", expiresAt: "" };
+    case "shared_key":
+      return {
+        kind: "shared_key",
+        description: "",
+        expiresAt: "",
+        key: "",
+      };
     case "certificate":
       return {
         kind: "certificate",
@@ -810,6 +1013,8 @@ function newCredentialTitle(kind: CredentialKind) {
       return "Add password";
     case "api_key":
       return "Add API key";
+    case "shared_key":
+      return "Add shared key";
     case "certificate":
       return "Issue certificate";
   }
@@ -846,6 +1051,46 @@ function ApiKeyRevealBanner({
       <div className="mb-3 flex gap-2">
         <code className="min-w-0 flex-1 break-all rounded bg-yellow-100 px-2 py-1 font-mono text-xs text-yellow-900 dark:bg-yellow-900 dark:text-yellow-100">
           {apiKey.key}
+        </code>
+        <Button onClick={copy} size="sm" variant="outline">
+          {copied ? "Copied!" : "Copy"}
+        </Button>
+      </div>
+      <Button onClick={onDismiss} size="sm" variant="outline">
+        Dismiss
+      </Button>
+    </div>
+  );
+}
+
+function SharedKeyRevealBanner({
+  sharedKey,
+  onDismiss,
+}: {
+  sharedKey: SharedKeyResult;
+  onDismiss: () => void;
+}) {
+  const [copied, setCopied] = React.useState(false);
+
+  async function copy() {
+    await navigator.clipboard.writeText(sharedKey.key);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 dark:border-sky-800 dark:bg-sky-950">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="text-sm font-medium text-sky-900 dark:text-sky-100">
+          Shared key
+        </div>
+        <Badge variant="outline" className="text-xs">
+          retrievable
+        </Badge>
+      </div>
+      <div className="mb-3 flex gap-2">
+        <code className="min-w-0 flex-1 break-all rounded bg-sky-100 px-2 py-1 font-mono text-xs text-sky-950 dark:bg-sky-900 dark:text-sky-100">
+          {sharedKey.key}
         </code>
         <Button onClick={copy} size="sm" variant="outline">
           {copied ? "Copied!" : "Copy"}

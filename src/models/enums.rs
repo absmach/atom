@@ -28,6 +28,7 @@ pub enum CredentialKind {
     Password,
     ApiKey,
     Certificate,
+    SharedKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]

@@ -145,7 +145,7 @@ ALTER TABLE tenants
 CREATE TABLE credentials (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_id   UUID        NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    kind        TEXT        NOT NULL CHECK (kind IN ('password', 'api_key', 'certificate')),
+    kind        TEXT        NOT NULL CHECK (kind IN ('password', 'api_key', 'certificate', 'shared_key')),
     identifier  TEXT,
     secret_hash TEXT,
     metadata    JSONB       NOT NULL DEFAULT '{}',
@@ -163,6 +163,59 @@ CREATE UNIQUE INDEX idx_credentials_certificate_serial
 CREATE INDEX idx_credentials_certificate_status_expiry
     ON credentials(kind, status, expires_at)
     WHERE kind = 'certificate';
+CREATE INDEX idx_credentials_shared_key_status
+    ON credentials(entity_id, status, expires_at)
+    WHERE kind = 'shared_key';
+
+CREATE OR REPLACE FUNCTION enforce_shared_key_device_credential() RETURNS trigger AS $$
+DECLARE
+    entity_kind TEXT;
+BEGIN
+    IF NEW.kind <> 'shared_key' THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT e.kind
+      INTO entity_kind
+      FROM entities e
+     WHERE e.id = NEW.entity_id
+     FOR UPDATE;
+
+    IF entity_kind IS DISTINCT FROM 'device' THEN
+        RAISE EXCEPTION 'shared_key credentials can only belong to device entities'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_credentials_shared_key_device_only
+    BEFORE INSERT OR UPDATE OF entity_id, kind ON credentials
+    FOR EACH ROW EXECUTE FUNCTION enforce_shared_key_device_credential();
+
+CREATE OR REPLACE FUNCTION prevent_non_device_entity_with_shared_key() RETURNS trigger AS $$
+BEGIN
+    IF NEW.kind <> 'device'
+       AND EXISTS (
+           SELECT 1
+             FROM credentials c
+            WHERE c.entity_id = NEW.id
+              AND c.kind = 'shared_key'
+       ) THEN
+        RAISE EXCEPTION 'entities with shared_key credentials must remain device entities'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_entities_shared_key_device_only
+    BEFORE UPDATE OF kind ON entities
+    FOR EACH ROW
+    WHEN (OLD.kind IS DISTINCT FROM NEW.kind)
+    EXECUTE FUNCTION prevent_non_device_entity_with_shared_key();
 
 CREATE TABLE certificate_crl_state (
     issuer_fingerprint_sha256 TEXT PRIMARY KEY,

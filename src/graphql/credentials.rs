@@ -12,8 +12,8 @@ use crate::{
 use super::{
     auth::{gql_error, require_auth, require_credential_management},
     types::{
-        parse_id, parse_optional_timestamp, ApiKeyResponse, CreateApiKeyInput, Credential,
-        CredentialList,
+        parse_id, parse_optional_timestamp, ApiKeyResponse, CreateApiKeyInput,
+        CreateSharedKeyInput, Credential, CredentialList, SharedKeyResponse,
     },
 };
 
@@ -107,6 +107,79 @@ impl CredentialMutation {
                 details: serde_json::json!({
                     "entity_id": entity_id,
                     "kind": "api_key",
+                    "credential_id": response.credential_id
+                }),
+            },
+        )
+        .await;
+        Ok(response.into())
+    }
+
+    async fn create_shared_key(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: ID,
+        input: CreateSharedKeyInput,
+    ) -> Result<SharedKeyResponse> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let entity_id = parse_id(entity_id, "entityId")?;
+        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let response = service::create_shared_key(
+            &state.pool,
+            entity_id,
+            token_model::CreateSharedKey {
+                expires_at: parse_optional_timestamp(input.expires_at, "expiresAt")?,
+                description: input.description,
+                key: input.key,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: Some("entity"),
+                target_id: Some(entity_id),
+                event: "credential.create",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "kind": "shared_key",
+                    "credential_id": response.credential_id
+                }),
+            },
+        )
+        .await;
+        Ok(response.into())
+    }
+
+    async fn reveal_shared_key(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: ID,
+        credential_id: ID,
+    ) -> Result<SharedKeyResponse> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let entity_id = parse_id(entity_id, "entityId")?;
+        let credential_id = parse_id(credential_id, "credentialId")?;
+        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let response = service::reveal_shared_key(&state.pool, entity_id, credential_id)
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: Some("entity"),
+                target_id: Some(entity_id),
+                event: "credential.reveal",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "kind": "shared_key",
                     "credential_id": response.credential_id
                 }),
             },

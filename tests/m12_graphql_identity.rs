@@ -12,6 +12,7 @@ use atom::{
     auth::AuthContext,
     config::Config,
     graphql::build_schema,
+    identity::service as identity_service,
     keys::{ActiveKeys, LoadedKey},
     state::AppState,
 };
@@ -255,6 +256,172 @@ async fn create_api_key_returns_secret_once_and_credentials_list_contains_it() {
             && credential["kind"] == "api_key"
             && credential["status"] == "active"
     }));
+}
+
+#[tokio::test]
+#[ignore]
+async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
+    let pool = common::pool().await;
+    let device_id = entity(&pool, "device").await;
+    let human_id = entity(&pool, "human").await;
+    let schema = build_schema(state(pool.clone()));
+
+    let rejected = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createSharedKey(entityId: "{human_id}", input: {{}}) {{
+                credentialId
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(!rejected.errors.is_empty());
+    assert!(rejected.errors[0]
+        .message
+        .contains("can only be created for device entities"));
+
+    let direct_human_insert = sqlx::query(
+        "INSERT INTO credentials (entity_id, kind, secret_hash) VALUES ($1, 'shared_key', 'hash')",
+    )
+    .bind(human_id)
+    .execute(&pool)
+    .await;
+    let db_err = direct_human_insert
+        .expect_err("DB constraint should reject shared_key credentials for non-device entities")
+        .into_database_error()
+        .expect("database error");
+    assert_eq!(db_err.code().as_deref(), Some("23514"));
+
+    let created = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createSharedKey(entityId: "{device_id}", input: {{
+                description: "Provisioning key"
+              }}) {{
+                credentialId
+                key
+                expiresAt
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let created_json = created.data.into_json().expect("json data");
+    let shared_key = &created_json["createSharedKey"];
+    let credential_id = shared_key["credentialId"]
+        .as_str()
+        .expect("credential id")
+        .to_owned();
+    let key = shared_key["key"].as_str().expect("shared key").to_owned();
+    assert!(key.starts_with("atom_shared_"));
+
+    let (hash, metadata): (String, serde_json::Value) =
+        sqlx::query_as("SELECT secret_hash, metadata FROM credentials WHERE id = $1")
+            .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
+            .fetch_one(&pool)
+            .await
+            .expect("credential row");
+    assert_ne!(hash, key);
+    assert_eq!(metadata["shared_key"].as_str(), Some(key.as_str()));
+
+    let device_kind_change = sqlx::query("UPDATE entities SET kind = 'human' WHERE id = $1")
+        .bind(device_id)
+        .execute(&pool)
+        .await;
+    let db_err = device_kind_change
+        .expect_err("DB constraint should reject changing a shared-key device to non-device")
+        .into_database_error()
+        .expect("database error");
+    assert_eq!(db_err.code().as_deref(), Some("23514"));
+
+    let listed = schema
+        .execute(authed(format!(
+            r#"
+            {{
+              credentials(entityId: "{device_id}") {{
+                items {{
+                  id
+                  kind
+                  status
+                  identifier
+                }}
+                total
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+    let credentials = listed.data.into_json().expect("json data")["credentials"]["items"]
+        .as_array()
+        .expect("credentials")
+        .clone();
+    assert!(credentials.iter().any(|credential| {
+        credential["id"] == credential_id
+            && credential["kind"] == "shared_key"
+            && credential["status"] == "active"
+            && credential["identifier"].is_null()
+    }));
+
+    let revealed = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              revealSharedKey(entityId: "{device_id}", credentialId: "{credential_id}") {{
+                credentialId
+                key
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(revealed.errors.is_empty(), "{:?}", revealed.errors);
+    assert_eq!(
+        revealed.data.into_json().expect("json data")["revealSharedKey"]["key"],
+        key
+    );
+
+    let authenticated = identity_service::authenticate_password_credential_in_tenant(
+        &pool,
+        &Config::for_tests(),
+        &device_id.to_string(),
+        &key,
+        None,
+    )
+    .await
+    .expect("authenticate shared key");
+    assert_eq!(authenticated.entity_id, device_id);
+    assert_eq!(authenticated.credential_id.to_string(), credential_id);
+
+    sqlx::query(
+        r#"UPDATE credentials
+           SET metadata = jsonb_set(metadata, '{shared_key}', to_jsonb('mismatched-key'::text))
+           WHERE id = $1"#,
+    )
+    .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
+    .execute(&pool)
+    .await
+    .expect("corrupt shared key metadata");
+
+    let lost_key = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              revealSharedKey(entityId: "{device_id}", credentialId: "{credential_id}") {{
+                key
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(!lost_key.errors.is_empty());
+    assert!(lost_key.errors[0]
+        .message
+        .contains("could not retrieve the device key"));
 }
 
 #[tokio::test]

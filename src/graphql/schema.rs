@@ -266,6 +266,8 @@ mod tests {
             "removeGroupMember",
             "createPassword",
             "createApiKey",
+            "createSharedKey",
+            "revealSharedKey",
             "revokeCredential",
             "issueCertificate",
             "issueCertificateFromCsr",
@@ -476,7 +478,7 @@ mod tests {
         assert_eq!(enum_names(&data, "effect"), set(&["allow", "deny"]));
         assert_eq!(
             enum_names(&data, "credentialKind"),
-            set(&["password", "api_key", "certificate"])
+            set(&["password", "api_key", "certificate", "shared_key"])
         );
         assert_eq!(
             enum_names(&data, "auditOutcome"),

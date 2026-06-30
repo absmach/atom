@@ -115,6 +115,7 @@ pub enum GqlCredentialKind {
     Password,
     ApiKey,
     Certificate,
+    SharedKey,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
@@ -724,6 +725,23 @@ pub struct ApiKeyResponse(pub token_model::ApiKeyResponse);
 
 #[Object]
 impl ApiKeyResponse {
+    async fn credential_id(&self) -> ID {
+        id(self.0.credential_id)
+    }
+
+    async fn key(&self) -> &str {
+        &self.0.key
+    }
+
+    async fn expires_at(&self) -> Option<String> {
+        self.0.expires_at.map(timestamp)
+    }
+}
+
+pub struct SharedKeyResponse(pub token_model::SharedKeyResponse);
+
+#[Object]
+impl SharedKeyResponse {
     async fn credential_id(&self) -> ID {
         id(self.0.credential_id)
     }
@@ -1635,6 +1653,13 @@ pub struct CreateApiKeyInput {
 }
 
 #[derive(InputObject)]
+pub struct CreateSharedKeyInput {
+    pub expires_at: Option<String>,
+    pub description: Option<String>,
+    pub key: Option<String>,
+}
+
+#[derive(InputObject)]
 pub struct CreateRoleInput {
     pub name: String,
     pub tenant_id: Option<ID>,
@@ -2278,6 +2303,12 @@ impl From<token_model::ApiKeyResponse> for ApiKeyResponse {
     }
 }
 
+impl From<token_model::SharedKeyResponse> for SharedKeyResponse {
+    fn from(response: token_model::SharedKeyResponse) -> Self {
+        SharedKeyResponse(response)
+    }
+}
+
 impl From<entity_model::Ownership> for Ownership {
     fn from(ownership: entity_model::Ownership) -> Self {
         Ownership(ownership)
@@ -2681,6 +2712,7 @@ impl From<GqlCredentialKind> for CredentialKind {
             GqlCredentialKind::Password => CredentialKind::Password,
             GqlCredentialKind::ApiKey => CredentialKind::ApiKey,
             GqlCredentialKind::Certificate => CredentialKind::Certificate,
+            GqlCredentialKind::SharedKey => CredentialKind::SharedKey,
         }
     }
 }
@@ -2691,6 +2723,7 @@ impl From<&CredentialKind> for GqlCredentialKind {
             CredentialKind::Password => GqlCredentialKind::Password,
             CredentialKind::ApiKey => GqlCredentialKind::ApiKey,
             CredentialKind::Certificate => GqlCredentialKind::Certificate,
+            CredentialKind::SharedKey => GqlCredentialKind::SharedKey,
         }
     }
 }

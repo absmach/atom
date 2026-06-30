@@ -116,7 +116,12 @@ function InspectBody({
           <EntityInspectDetails row={inspected} />
           <InspectAuthzAction resourceKey={resourceKey} row={inspected} />
           {inspected?.id ? (
-            <EntityCredentials entityId={String(inspected.id)} />
+            <EntityCredentials
+              entityId={String(inspected.id)}
+              entityKind={
+                typeof inspected.kind === "string" ? inspected.kind : undefined
+              }
+            />
           ) : null}
         </TabsContent>
         <TabsContent value="audit">
