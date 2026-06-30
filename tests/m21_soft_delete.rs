@@ -53,7 +53,7 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
     let pool = common::pool().await;
     let id = make_entity(&pool, &format!("sd-entity-{}", Uuid::new_v4()), None).await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'api_key', $3, 'active')")
+    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(id)
         .bind(format!("key-{cred_id}"))
@@ -964,7 +964,7 @@ async fn soft_deleted_role_stops_granting_in_the_pdp() {
         context: serde_json::Value::Null,
     };
 
-    let before = atom::authz::engine::evaluate(&pool, &req)
+    let before = atom::authz::engine::evaluate(&pool, &req, None)
         .await
         .expect("evaluate before");
     assert!(before.allowed, "role should grant read before deletion");
@@ -973,7 +973,7 @@ async fn soft_deleted_role_stops_granting_in_the_pdp() {
         .await
         .expect("delete role");
 
-    let after = atom::authz::engine::evaluate(&pool, &req)
+    let after = atom::authz::engine::evaluate(&pool, &req, None)
         .await
         .expect("evaluate after");
     assert!(
@@ -1312,7 +1312,7 @@ async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
     let api_key_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO credentials (id, entity_id, kind, identifier, status)
-         VALUES ($1, $2, 'api_key', $3, 'active')",
+         VALUES ($1, $2, 'access_token', $3, 'active')",
     )
     .bind(api_key_id)
     .bind(entity_id)
@@ -1768,6 +1768,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
             object_id: Some(target),
             context: serde_json::Value::Null,
         },
+        None,
     )
     .await
     .expect("evaluate");

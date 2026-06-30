@@ -88,10 +88,14 @@ function RequiredLabel({
   required?: boolean;
 }) {
   return (
-    <Label htmlFor={htmlFor}>
-      {children}
-      {required ? <span className="text-destructive"> *</span> : null}
-    </Label>
+    <span className="flex items-center gap-1">
+      <Label htmlFor={htmlFor}>{children}</Label>
+      {required ? (
+        <span aria-hidden="true" className="text-destructive">
+          *
+        </span>
+      ) : null}
+    </span>
   );
 }
 

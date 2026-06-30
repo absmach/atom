@@ -78,7 +78,7 @@ async fn inactive_tenant_denies_with_lifecycle_reason() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req).await.expect("eval");
+    let resp = atom::authz::engine::evaluate(&p, &req, None).await.expect("eval");
     assert!(!resp.allowed);
     assert_eq!(resp.reason, "tenant is inactive");
     let details = resp.details.expect("M3 details required");
@@ -106,7 +106,7 @@ async fn frozen_tenant_denies_with_lifecycle_reason() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req).await.expect("eval");
+    let resp = atom::authz::engine::evaluate(&p, &req, None).await.expect("eval");
     assert!(!resp.allowed);
     assert_eq!(resp.reason, "tenant is frozen");
     assert_eq!(resp.details.unwrap()["tenant_status"], "frozen");
@@ -132,7 +132,7 @@ async fn deleted_tenant_denies_with_lifecycle_reason() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req).await.expect("eval");
+    let resp = atom::authz::engine::evaluate(&p, &req, None).await.expect("eval");
     assert!(!resp.allowed);
     assert_eq!(resp.reason, "tenant is deleted");
     assert_eq!(resp.details.unwrap()["tenant_status"], "deleted");
@@ -161,7 +161,7 @@ async fn frozen_tenant_blocks_authz_on_objects_inside_it() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req).await.expect("eval");
+    let resp = atom::authz::engine::evaluate(&p, &req, None).await.expect("eval");
     assert!(!resp.allowed);
     assert_eq!(resp.reason, "tenant is frozen");
 
@@ -197,7 +197,7 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req).await.expect("eval");
+    let resp = atom::authz::engine::evaluate(&p, &req, None).await.expect("eval");
     assert!(
         resp.allowed,
         "platform resource must be unaffected by lifecycle check: {}",

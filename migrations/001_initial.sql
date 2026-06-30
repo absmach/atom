@@ -145,9 +145,14 @@ ALTER TABLE tenants
 CREATE TABLE credentials (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_id   UUID        NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    kind        TEXT        NOT NULL CHECK (kind IN ('password', 'api_key', 'certificate', 'shared_key')),
+    kind        TEXT        NOT NULL CHECK (kind IN ('password', 'access_token', 'certificate', 'shared_key')),
     identifier  TEXT,
     secret_hash TEXT,
+    -- Access tokens with scoped = true carry a permission ceiling
+    -- (credential_permission_limits) and fail closed if it is absent. scoped is
+    -- independent of whether limit rows exist, so a deleted ceiling denies rather
+    -- than silently granting full owner authority.
+    scoped      BOOLEAN     NOT NULL DEFAULT false,
     -- Recoverable secrets (e.g. shared keys) are envelope-encrypted at rest; the
     -- plaintext is never stored. secret_hash remains the auth verifier, these
     -- columns are the reveal source. See src/crypto.rs and identity::service.
@@ -776,6 +781,58 @@ SELECT
         WHEN pb.scope_mode IN ('group_child_groups', 'group_descendant_groups') THEN pb.group_id::text || ':group'
     END AS scope_ref
 FROM permission_blocks pb;
+
+-- Permission ceiling for a scoped access token. Mirrors permission_blocks' scope
+-- shape so the PDP/gate matchers can be reused unchanged. Effective access of a
+-- scoped token = owner's live grants ∩ these allow-list limits (no deny in v1).
+-- v1 supports the directly-matchable scope modes only; group-tree ceilings are a
+-- future extension.
+CREATE TABLE credential_permission_limits (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    credential_id UUID        NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    scope_mode    TEXT        NOT NULL CHECK (scope_mode IN ('platform', 'tenant', 'object_kind', 'object_type', 'object')),
+    tenant_id     UUID        REFERENCES tenants(id) ON DELETE CASCADE,
+    object_kind   TEXT,
+    object_type   TEXT,
+    object_id     UUID,
+    conditions    JSONB       NOT NULL DEFAULT '{}',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT credential_permission_limits_conditions_is_object
+        CHECK (jsonb_typeof(conditions) = 'object'),
+    CHECK (
+        (scope_mode = 'platform' AND tenant_id IS NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL)
+        OR (scope_mode = 'tenant' AND tenant_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL)
+        OR (scope_mode = 'object_kind' AND object_kind IS NOT NULL AND object_id IS NULL AND object_type IS NULL)
+        OR (scope_mode = 'object_type' AND object_kind IS NOT NULL AND object_type IS NOT NULL AND object_id IS NULL)
+        OR (scope_mode = 'object' AND object_id IS NOT NULL)
+    )
+);
+CREATE INDEX idx_credential_permission_limits_credential
+    ON credential_permission_limits(credential_id);
+
+CREATE TABLE credential_permission_limit_actions (
+    limit_id  UUID NOT NULL REFERENCES credential_permission_limits(id) ON DELETE CASCADE,
+    action_id UUID NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+    PRIMARY KEY (limit_id, action_id)
+);
+CREATE INDEX idx_credential_permission_limit_actions_action
+    ON credential_permission_limit_actions(action_id);
+
+-- Canonical (scope_kind, scope_ref) for a ceiling row, mirroring
+-- permission_block_scopes so match_grant / scope_values_match treat a ceiling
+-- entry exactly like a permission block.
+CREATE VIEW credential_permission_limit_scopes AS
+SELECT
+    l.id AS limit_id,
+    l.scope_mode AS scope_kind,
+    CASE
+        WHEN l.scope_mode = 'platform' THEN NULL
+        WHEN l.scope_mode = 'tenant' THEN l.tenant_id::text
+        WHEN l.scope_mode = 'object_kind' THEN l.object_kind
+        WHEN l.scope_mode = 'object_type' THEN l.object_kind || ':' || l.object_type
+        WHEN l.scope_mode = 'object' THEN l.object_id::text
+    END AS scope_ref
+FROM credential_permission_limits l;
 
 -- Single subject grant expansion: direct policies, role-linked permission
 -- blocks, and active tenant-membership tenant visibility for one subject,

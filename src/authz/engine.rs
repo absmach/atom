@@ -370,16 +370,24 @@ fn scope_target<'a>(
     }
 }
 
-pub async fn evaluate(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse, AppError> {
+pub async fn evaluate(
+    pool: &PgPool,
+    req: &AuthzRequest,
+    ceiling: Option<&repo::CredentialCeiling>,
+) -> Result<AuthzResponse, AppError> {
     let start = std::time::Instant::now();
-    let result = evaluate_inner(pool, req).await;
+    let result = evaluate_inner(pool, req, ceiling).await;
     if let Ok(response) = &result {
         crate::metrics::record_decision(start.elapsed(), response.allowed);
     }
     result
 }
 
-async fn evaluate_inner(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzResponse, AppError> {
+async fn evaluate_inner(
+    pool: &PgPool,
+    req: &AuthzRequest,
+    ceiling: Option<&repo::CredentialCeiling>,
+) -> Result<AuthzResponse, AppError> {
     let ctx = match load_decision_context(pool, req).await? {
         DecisionContext::Denied(denied) => return Ok(denied.response),
         DecisionContext::Ready(ctx) => ctx,
@@ -400,11 +408,36 @@ async fn evaluate_inner(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzRespon
         }
     }
 
-    if has_allow {
-        Ok(AuthzResponse::allow())
-    } else {
-        Ok(AuthzResponse::deny("no matching allow policy"))
+    if !has_allow {
+        return Ok(AuthzResponse::deny("no matching allow policy"));
     }
+
+    // Access-token ceiling: the owner's grant allows, but a scoped token only
+    // confers access its ceiling also permits. Fails closed when the ceiling is
+    // empty.
+    if let Some(ceiling) = ceiling {
+        if !ceiling_permits(ceiling, &target, &ctx.capability_ids, &ctx.eval_ctx) {
+            return Ok(AuthzResponse::deny(
+                "denied by access token permission ceiling",
+            ));
+        }
+    }
+
+    Ok(AuthzResponse::allow())
+}
+
+/// Whether a scoped token's ceiling permits the request, reusing the same grant
+/// matcher used for the owner's policies. An empty ceiling permits nothing.
+fn ceiling_permits(
+    ceiling: &repo::CredentialCeiling,
+    target: &ScopeMatchObject<'_>,
+    capability_ids: &std::collections::HashSet<Uuid>,
+    eval_ctx: &serde_json::Value,
+) -> bool {
+    ceiling
+        .entries
+        .iter()
+        .any(|entry| match_grant(entry, target, capability_ids, eval_ctx).is_none())
 }
 
 /// Whether the subject is allowed any of `actions` on the object, evaluated
@@ -418,6 +451,7 @@ pub async fn allows_any(
     object_kind: &str,
     object_id: Uuid,
     actions: &[&str],
+    ceiling: Option<&repo::CredentialCeiling>,
 ) -> Result<bool, AppError> {
     for action in actions {
         let resp = evaluate(
@@ -430,6 +464,7 @@ pub async fn allows_any(
                 object_id: Some(object_id),
                 context: Value::Null,
             },
+            ceiling,
         )
         .await?;
         if resp.allowed {
@@ -1795,7 +1830,7 @@ mod db_tests {
             object_id: Some(t.id),
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
         assert!(resp.allowed, "admin should be allowed: {}", resp.reason);
 
         let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
@@ -1840,7 +1875,7 @@ mod db_tests {
             object_id: Some(t.id),
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
         assert!(!resp.allowed);
 
         let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
@@ -1905,7 +1940,7 @@ mod db_tests {
             object_id: None,
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
         assert!(resp.allowed, "legacy form must still work: {}", resp.reason);
 
         let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
@@ -1989,7 +2024,7 @@ mod db_tests {
         let credential_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO credentials (id, entity_id, kind, identifier, metadata)
-             VALUES ($1, $2, 'api_key', $3, $4)",
+             VALUES ($1, $2, 'access_token', $3, $4)",
         )
         .bind(credential_id)
         .bind(entity_id)
@@ -2013,7 +2048,7 @@ mod db_tests {
         .await
         .expect("resolve credential")
         .expect("credential exists");
-        assert_eq!(credential.kind, "api_key");
+        assert_eq!(credential.kind, "access_token");
         assert_eq!(credential.attributes, json!({"environment": "test"}));
         assert_eq!(credential.parent_group_id, None);
         assert!(credential.ancestor_group_ids.is_empty());
@@ -2049,7 +2084,7 @@ mod db_tests {
             object_id: Some(t.id),
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req).await.expect("evaluate");
+        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
         assert!(!resp.allowed);
         assert_eq!(resp.reason, "tenant is deleted");
         let details = resp.details.expect("M3 must surface lifecycle details");

@@ -105,16 +105,22 @@ impl AuthzService for AtomAuthz {
         let tenant_id = access::authz_request_tenant_id(&self.state.pool, &authz_req)
             .await
             .map_err(Status::from)?;
-        access::require_authz_check_access(
-            &self.state.pool,
+        // A scoped access token's ceiling caps the caller's right to invoke check.
+        crate::auth::scope_request_ceiling(
             &auth,
-            authz_req.subject_id,
-            tenant_id,
+            access::require_authz_check_access(
+                &self.state.pool,
+                &auth,
+                authz_req.subject_id,
+                tenant_id,
+            ),
         )
         .await
         .map_err(Status::from)?;
 
-        let resp = engine::evaluate(&self.state.pool, &authz_req)
+        // Delegated check: caller's token ceiling gates the right to ask (above),
+        // not the subject's decision.
+        let resp = engine::evaluate(&self.state.pool, &authz_req, None)
             .await
             .map_err(Status::from)?;
         let (target_kind, target_id) = authz_request_target(&authz_req);

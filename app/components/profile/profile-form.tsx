@@ -29,6 +29,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Textarea } from "@/components/ui/textarea";
 import { graphqlClient } from "@/lib/graphql/client";
@@ -74,15 +75,24 @@ const CREATE_PASSWORD_MUTATION = `
   }
 `;
 
-const PERSONAL_ACCESS_TOKENS_QUERY = `
-  query ProfilePersonalAccessTokens {
-    personalAccessTokens {
+const ACCESS_TOKENS_QUERY = `
+  query ProfileAccessTokens {
+    accessTokens {
       items {
         credentialId
         name
         description
         identifier
         status
+        scoped
+        permissions {
+          actions
+          scopeMode
+          tenantId
+          objectKind
+          objectType
+          objectId
+        }
         expiresAt
         createdAt
       }
@@ -91,9 +101,9 @@ const PERSONAL_ACCESS_TOKENS_QUERY = `
   }
 `;
 
-const CREATE_PERSONAL_ACCESS_TOKEN_MUTATION = `
-  mutation CreatePersonalAccessToken($input: CreatePersonalAccessTokenInput!) {
-    createPersonalAccessToken(input: $input) {
+const CREATE_ACCESS_TOKEN_MUTATION = `
+  mutation CreateAccessToken($input: CreateAccessTokenInput!) {
+    createAccessToken(input: $input) {
       credentialId
       token
       name
@@ -103,9 +113,21 @@ const CREATE_PERSONAL_ACCESS_TOKEN_MUTATION = `
   }
 `;
 
-const REVOKE_PERSONAL_ACCESS_TOKEN_MUTATION = `
-  mutation RevokePersonalAccessToken($credentialId: ID!) {
-    revokePersonalAccessToken(credentialId: $credentialId)
+const REVOKE_ACCESS_TOKEN_MUTATION = `
+  mutation RevokeAccessToken($credentialId: ID!) {
+    revokeAccessToken(credentialId: $credentialId)
+  }
+`;
+
+const REPLACE_ACCESS_TOKEN_PERMISSIONS_MUTATION = `
+  mutation ReplaceAccessTokenPermissions(
+    $credentialId: ID!
+    $permissions: [AccessTokenPermissionInput!]!
+  ) {
+    replaceAccessTokenPermissions(
+      credentialId: $credentialId
+      permissions: $permissions
+    )
   }
 `;
 
@@ -117,27 +139,87 @@ type CredentialsData = {
   credentials: { items: { id: string; kind: string }[] };
 };
 
-type PersonalAccessToken = {
+type AccessTokenPermission = {
+  actions: string[];
+  scopeMode: string;
+  tenantId: string | null;
+  objectKind: string | null;
+  objectType: string | null;
+  objectId: string | null;
+};
+
+type AccessToken = {
   credentialId: string;
   name: string;
   description: string | null;
   identifier: string | null;
   status: string;
+  scoped: boolean;
+  permissions: AccessTokenPermission[];
   expiresAt: string | null;
   createdAt: string;
 };
 
-type PersonalAccessTokensData = {
-  personalAccessTokens: { items: PersonalAccessToken[]; total: number };
+type AccessTokensData = {
+  accessTokens: { items: AccessToken[]; total: number };
 };
 
-type CreatedPersonalAccessToken = {
+type CreatedAccessToken = {
   credentialId: string;
   token: string;
   name: string;
   description: string | null;
   expiresAt: string | null;
 };
+
+const SCOPE_MODES = [
+  "platform",
+  "tenant",
+  "object_kind",
+  "object_type",
+  "object",
+] as const;
+type ScopeMode = (typeof SCOPE_MODES)[number];
+
+// A permission row in the create form, edited as raw strings before being
+// translated into a GraphQL AccessTokenPermissionInput on submit.
+type PermissionDraft = {
+  actions: string;
+  scopeMode: ScopeMode;
+  tenantId: string;
+  objectKind: string;
+  objectType: string;
+  objectId: string;
+};
+
+function emptyPermissionDraft(): PermissionDraft {
+  return {
+    actions: "",
+    scopeMode: "object_kind",
+    tenantId: "",
+    objectKind: "",
+    objectType: "",
+    objectId: "",
+  };
+}
+
+function draftsFromPermissions(
+  permissions: AccessTokenPermission[],
+): PermissionDraft[] {
+  if (permissions.length === 0) {
+    return [emptyPermissionDraft()];
+  }
+  return permissions.map((permission) => ({
+    actions: permission.actions.join(", "),
+    scopeMode: (SCOPE_MODES.includes(permission.scopeMode as ScopeMode)
+      ? permission.scopeMode
+      : "object_kind") as ScopeMode,
+    tenantId: permission.tenantId ?? "",
+    objectKind: permission.objectKind ?? "",
+    objectType: permission.objectType ?? "",
+    objectId: permission.objectId ?? "",
+  }));
+}
 
 const accountSchema = z.object({
   firstName: z.string().min(1, "First name is required"),
@@ -159,7 +241,7 @@ const passwordSchema = z
     path: ["confirmPassword"],
   });
 
-const personalAccessTokenSchema = z.object({
+const accessTokenSchema = z.object({
   name: z.string().trim().min(1, "Name is required"),
   description: z.string(),
   expiresAt: z.string(),
@@ -167,7 +249,7 @@ const personalAccessTokenSchema = z.object({
 
 type AccountValues = z.infer<typeof accountSchema>;
 type PasswordValues = z.infer<typeof passwordSchema>;
-type PersonalAccessTokenValues = z.infer<typeof personalAccessTokenSchema>;
+type AccessTokenValues = z.infer<typeof accessTokenSchema>;
 
 export function ProfileForm({ entityId }: { entityId: string }) {
   const queryClient = useQueryClient();
@@ -224,7 +306,7 @@ export function ProfileForm({ entityId }: { entityId: string }) {
         }
       />
       <PasswordSection entityId={entityId} />
-      <PersonalAccessTokenSection />
+      <AccessTokenSection />
     </div>
   );
 }
@@ -440,32 +522,40 @@ function PasswordSection({ entityId }: { entityId: string }) {
   );
 }
 
-function PersonalAccessTokenSection() {
+function AccessTokenSection() {
   const queryClient = useQueryClient();
   const [createdToken, setCreatedToken] =
-    React.useState<CreatedPersonalAccessToken | null>(null);
-  const form = useForm<PersonalAccessTokenValues>({
-    resolver: zodResolver(personalAccessTokenSchema),
+    React.useState<CreatedAccessToken | null>(null);
+  const [permissions, setPermissions] = React.useState<PermissionDraft[]>([
+    emptyPermissionDraft(),
+  ]);
+  const form = useForm<AccessTokenValues>({
+    resolver: zodResolver(accessTokenSchema),
     defaultValues: { name: "", description: "", expiresAt: "" },
   });
 
   const { data, error, isLoading } = useQuery({
-    queryKey: ["profile-personal-access-tokens"],
+    queryKey: ["profile-access-tokens"],
     queryFn: ({ signal }) =>
-      graphqlClient<PersonalAccessTokensData>({
-        query: PERSONAL_ACCESS_TOKENS_QUERY,
+      graphqlClient<AccessTokensData>({
+        query: ACCESS_TOKENS_QUERY,
         signal,
       }),
     staleTime: 15_000,
   });
 
   const createToken = useMutation({
-    mutationFn: async (values: PersonalAccessTokenValues) => {
+    mutationFn: async (values: AccessTokenValues) => {
+      const permissionInputs = buildPermissionInputs(permissions);
+      if (permissionInputs.length === 0) {
+        throw new Error("Add at least one permission with an action");
+      }
       const input: {
         name: string;
         description?: string;
         expiresAt?: string;
-      } = { name: values.name.trim() };
+        permissions: ReturnType<typeof buildPermissionInputs>;
+      } = { name: values.name.trim(), permissions: permissionInputs };
       if (values.description.trim()) {
         input.description = values.description.trim();
       }
@@ -473,18 +563,19 @@ function PersonalAccessTokenSection() {
         input.expiresAt = values.expiresAt.trim();
       }
       return graphqlClient<{
-        createPersonalAccessToken: CreatedPersonalAccessToken;
+        createAccessToken: CreatedAccessToken;
       }>({
-        query: CREATE_PERSONAL_ACCESS_TOKEN_MUTATION,
+        query: CREATE_ACCESS_TOKEN_MUTATION,
         variables: { input },
       });
     },
     onSuccess: (response) => {
-      setCreatedToken(response.createPersonalAccessToken);
+      setCreatedToken(response.createAccessToken);
       form.reset({ name: "", description: "", expiresAt: "" });
-      toast.success("Personal access token created");
+      setPermissions([emptyPermissionDraft()]);
+      toast.success("Access token created");
       void queryClient.invalidateQueries({
-        queryKey: ["profile-personal-access-tokens"],
+        queryKey: ["profile-access-tokens"],
       });
     },
     onError: (err) => toast.error(err.message),
@@ -493,31 +584,62 @@ function PersonalAccessTokenSection() {
   const revokeToken = useMutation({
     mutationFn: async (credentialId: string) =>
       graphqlClient({
-        query: REVOKE_PERSONAL_ACCESS_TOKEN_MUTATION,
+        query: REVOKE_ACCESS_TOKEN_MUTATION,
         variables: { credentialId },
       }),
     onSuccess: () => {
-      toast.success("Personal access token revoked");
+      toast.success("Access token revoked");
       void queryClient.invalidateQueries({
-        queryKey: ["profile-personal-access-tokens"],
+        queryKey: ["profile-access-tokens"],
       });
     },
     onError: (err) => toast.error(err.message),
   });
 
-  const tokens = data?.personalAccessTokens.items ?? [];
+  const replacePermissions = useMutation({
+    mutationFn: async (args: {
+      credentialId: string;
+      drafts: PermissionDraft[];
+    }) => {
+      const permissions = buildPermissionInputs(args.drafts);
+      if (permissions.length === 0) {
+        throw new Error("Add at least one permission with an action");
+      }
+      return graphqlClient({
+        query: REPLACE_ACCESS_TOKEN_PERMISSIONS_MUTATION,
+        variables: { credentialId: args.credentialId, permissions },
+      });
+    },
+    onSuccess: () => {
+      toast.success("Access token permissions updated");
+      void queryClient.invalidateQueries({
+        queryKey: ["profile-access-tokens"],
+      });
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const tokens = data?.accessTokens.items ?? [];
+
+  function updatePermission(index: number, patch: Partial<PermissionDraft>) {
+    setPermissions((prev) =>
+      prev.map((p, i) => (i === index ? { ...p, ...patch } : p)),
+    );
+  }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Personal Access Tokens</CardTitle>
+        <CardTitle>Access Tokens</CardTitle>
         <CardDescription>
-          Create and revoke tokens for command-line and API access.
+          Create scoped tokens for command-line and API access. A token can never
+          exceed your own permissions, and is further limited to the permissions
+          you grant it below.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {createdToken ? (
-          <PersonalAccessTokenReveal
+          <AccessTokenReveal
             token={createdToken}
             onDismiss={() => setCreatedToken(null)}
           />
@@ -581,6 +703,34 @@ function PersonalAccessTokenSection() {
                 </FormItem>
               )}
             />
+
+            <div className="grid gap-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">Permissions</span>
+                <Button
+                  onClick={() =>
+                    setPermissions((prev) => [...prev, emptyPermissionDraft()])
+                  }
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Add permission
+                </Button>
+              </div>
+              {permissions.map((permission, index) => (
+                <PermissionDraftRow
+                  key={index}
+                  permission={permission}
+                  canRemove={permissions.length > 1}
+                  onChange={(patch) => updatePermission(index, patch)}
+                  onRemove={() =>
+                    setPermissions((prev) => prev.filter((_, i) => i !== index))
+                  }
+                />
+              ))}
+            </div>
+
             <div className="flex justify-end">
               <Button type="submit" disabled={createToken.isPending}>
                 {createToken.isPending ? (
@@ -602,22 +752,33 @@ function PersonalAccessTokenSection() {
             </div>
           ) : error ? (
             <div className="p-4 text-sm text-destructive">
-              Failed to load personal access tokens.
+              Failed to load access tokens.
             </div>
           ) : tokens.length === 0 ? (
             <div className="p-4 text-sm text-muted-foreground">
-              No personal access tokens.
+              No access tokens.
             </div>
           ) : (
             <div className="divide-y">
               {tokens.map((token) => (
-                <PersonalAccessTokenRow
+                <AccessTokenRow
                   key={token.credentialId}
                   token={token}
                   onRevoke={(credentialId) => revokeToken.mutate(credentialId)}
                   revokePending={
                     revokeToken.isPending &&
                     revokeToken.variables === token.credentialId
+                  }
+                  onReplacePermissions={(drafts) =>
+                    replacePermissions.mutateAsync({
+                      credentialId: token.credentialId,
+                      drafts,
+                    })
+                  }
+                  replacePending={
+                    replacePermissions.isPending &&
+                    replacePermissions.variables?.credentialId ===
+                      token.credentialId
                   }
                 />
               ))}
@@ -629,19 +790,208 @@ function PersonalAccessTokenSection() {
   );
 }
 
-function PersonalAccessTokenRow({
+/// Translate the raw permission drafts into GraphQL inputs, dropping rows with no
+/// actions and only including the scope fields relevant to each scope mode.
+function buildPermissionInputs(drafts: PermissionDraft[]) {
+  const inputs: Array<{
+    actions: string[];
+    scopeMode: string;
+    tenantId?: string;
+    objectKind?: string;
+    objectType?: string;
+    objectId?: string;
+  }> = [];
+  for (const draft of drafts) {
+    const actions = draft.actions
+      .split(",")
+      .map((a) => a.trim())
+      .filter(Boolean);
+    if (actions.length === 0) {
+      continue;
+    }
+    const input: (typeof inputs)[number] = {
+      actions,
+      scopeMode: draft.scopeMode,
+    };
+    if (draft.scopeMode === "tenant" && draft.tenantId.trim()) {
+      input.tenantId = draft.tenantId.trim();
+    }
+    if (
+      (draft.scopeMode === "object_kind" || draft.scopeMode === "object_type") &&
+      draft.objectKind.trim()
+    ) {
+      input.objectKind = draft.objectKind.trim();
+    }
+    if (draft.scopeMode === "object_type" && draft.objectType.trim()) {
+      input.objectType = draft.objectType.trim();
+    }
+    if (draft.scopeMode === "object" && draft.objectId.trim()) {
+      input.objectId = draft.objectId.trim();
+    }
+    inputs.push(input);
+  }
+  return inputs;
+}
+
+function PermissionDraftRow({
+  permission,
+  canRemove,
+  onChange,
+  onRemove,
+}: {
+  permission: PermissionDraft;
+  canRemove: boolean;
+  onChange: (patch: Partial<PermissionDraft>) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="grid gap-2 rounded-md border p-3">
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,auto)_auto] sm:items-end">
+        <div className="grid gap-1">
+          <Label>Actions</Label>
+          <Input
+            aria-label="Actions"
+            onChange={(e) => onChange({ actions: e.target.value })}
+            placeholder="read, manage"
+            value={permission.actions}
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label>Scope</Label>
+          <select
+            aria-label="Scope"
+            className="h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-sm"
+            onChange={(e) =>
+              onChange({ scopeMode: e.target.value as ScopeMode })
+            }
+            value={permission.scopeMode}
+          >
+            {SCOPE_MODES.map((mode) => (
+              <option key={mode} value={mode}>
+                {mode}
+              </option>
+            ))}
+          </select>
+        </div>
+        {canRemove ? (
+          <Button
+            onClick={onRemove}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <Trash2 data-icon="inline-start" />
+            Remove
+          </Button>
+        ) : null}
+      </div>
+      {permission.scopeMode === "tenant" ? (
+        <div className="grid gap-1">
+          <Label>Tenant ID</Label>
+          <Input
+            aria-label="Tenant ID"
+            onChange={(e) => onChange({ tenantId: e.target.value })}
+            placeholder="tenant uuid"
+            value={permission.tenantId}
+          />
+        </div>
+      ) : null}
+      {permission.scopeMode === "object_kind" ||
+      permission.scopeMode === "object_type" ? (
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-1">
+            <Label>Object kind</Label>
+            <Input
+              aria-label="Object kind"
+              onChange={(e) => onChange({ objectKind: e.target.value })}
+              placeholder="entity"
+              value={permission.objectKind}
+            />
+          </div>
+          {permission.scopeMode === "object_type" ? (
+            <div className="grid gap-1">
+              <Label>Object type</Label>
+              <Input
+                aria-label="Object type"
+                onChange={(e) => onChange({ objectType: e.target.value })}
+                placeholder="device"
+                value={permission.objectType}
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {permission.scopeMode === "object" ? (
+        <div className="grid gap-1">
+          <Label>Object ID</Label>
+          <Input
+            aria-label="Object ID"
+            onChange={(e) => onChange({ objectId: e.target.value })}
+            placeholder="object uuid"
+            value={permission.objectId}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function permissionSummary(permission: AccessTokenPermission): string {
+  const actions = permission.actions.join(", ") || "—";
+  let target = permission.scopeMode;
+  if (permission.scopeMode === "tenant" && permission.tenantId) {
+    target = `tenant ${permission.tenantId}`;
+  } else if (permission.scopeMode === "object_kind" && permission.objectKind) {
+    target = `kind ${permission.objectKind}`;
+  } else if (
+    permission.scopeMode === "object_type" &&
+    permission.objectKind &&
+    permission.objectType
+  ) {
+    target = `${permission.objectKind}:${permission.objectType}`;
+  } else if (permission.scopeMode === "object" && permission.objectId) {
+    target = `object ${permission.objectId}`;
+  }
+  return `${actions} on ${target}`;
+}
+
+function AccessTokenRow({
   token,
   onRevoke,
   revokePending,
+  onReplacePermissions,
+  replacePending,
 }: {
-  token: PersonalAccessToken;
+  token: AccessToken;
   onRevoke: (credentialId: string) => void;
   revokePending: boolean;
+  onReplacePermissions: (drafts: PermissionDraft[]) => Promise<unknown>;
+  replacePending: boolean;
 }) {
   const active = token.status === "active";
+  const [editing, setEditing] = React.useState(false);
+  const [drafts, setDrafts] = React.useState<PermissionDraft[]>(() =>
+    draftsFromPermissions(token.permissions),
+  );
+
+  function startEditing() {
+    setDrafts(draftsFromPermissions(token.permissions));
+    setEditing(true);
+  }
+
+  function updateDraft(index: number, patch: Partial<PermissionDraft>) {
+    setDrafts((prev) =>
+      prev.map((p, i) => (i === index ? { ...p, ...patch } : p)),
+    );
+  }
+
+  async function save() {
+    await onReplacePermissions(drafts);
+    setEditing(false);
+  }
 
   return (
-    <div className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+    <div className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0 space-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <KeyRound className="size-4 shrink-0 text-muted-foreground" />
@@ -649,9 +999,19 @@ function PersonalAccessTokenRow({
           <Badge variant={active ? "secondary" : "outline"}>
             {token.status}
           </Badge>
+          {token.scoped ? <Badge variant="outline">scoped</Badge> : null}
         </div>
         {token.description ? (
           <p className="text-sm text-muted-foreground">{token.description}</p>
+        ) : null}
+        {token.permissions.length > 0 ? (
+          <ul className="space-y-0.5 text-xs text-muted-foreground">
+            {token.permissions.map((permission, index) => (
+              <li key={index} className="font-mono">
+                {permissionSummary(permission)}
+              </li>
+            ))}
+          </ul>
         ) : null}
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
           {token.identifier ? (
@@ -668,31 +1028,90 @@ function PersonalAccessTokenRow({
             )}
           </span>
         </div>
+
+        {editing ? (
+          <div className="mt-3 grid gap-2">
+            {drafts.map((permission, index) => (
+              <PermissionDraftRow
+                key={index}
+                permission={permission}
+                canRemove={drafts.length > 1}
+                onChange={(patch) => updateDraft(index, patch)}
+                onRemove={() =>
+                  setDrafts((prev) => prev.filter((_, i) => i !== index))
+                }
+              />
+            ))}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() =>
+                  setDrafts((prev) => [...prev, emptyPermissionDraft()])
+                }
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                Add permission
+              </Button>
+              <Button
+                disabled={replacePending}
+                onClick={() => void save()}
+                size="sm"
+                type="button"
+              >
+                {replacePending ? (
+                  <Loader2 className="animate-spin" />
+                ) : null}
+                Save permissions
+              </Button>
+              <Button
+                onClick={() => setEditing(false)}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </div>
-      <Button
-        className="justify-self-start sm:justify-self-end"
-        disabled={!active || revokePending}
-        onClick={() => onRevoke(token.credentialId)}
-        size="sm"
-        type="button"
-        variant="outline"
-      >
-        {revokePending ? (
-          <Loader2 className="animate-spin" />
-        ) : (
-          <Trash2 data-icon="inline-start" />
-        )}
-        Revoke
-      </Button>
+      <div className="flex flex-wrap gap-2 justify-self-start sm:justify-self-end">
+        {active && token.scoped && !editing ? (
+          <Button
+            onClick={startEditing}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <KeyRound data-icon="inline-start" />
+            Edit permissions
+          </Button>
+        ) : null}
+        <Button
+          disabled={!active || revokePending}
+          onClick={() => onRevoke(token.credentialId)}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {revokePending ? (
+            <Loader2 className="animate-spin" />
+          ) : (
+            <Trash2 data-icon="inline-start" />
+          )}
+          Revoke
+        </Button>
+      </div>
     </div>
   );
 }
 
-function PersonalAccessTokenReveal({
+function AccessTokenReveal({
   token,
   onDismiss,
 }: {
-  token: CreatedPersonalAccessToken;
+  token: CreatedAccessToken;
   onDismiss: () => void;
 }) {
   const [copied, setCopied] = React.useState(false);
@@ -709,7 +1128,7 @@ function PersonalAccessTokenReveal({
       <AlertDescription>
         <div className="grid gap-3">
           <div className="font-medium">
-            Personal access token created — copy it now
+            Access token created — copy it now
           </div>
           <code className="block break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
             {token.token}

@@ -75,7 +75,7 @@ async fn admin_platform_binding_authorises() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req)
+    let resp = atom::authz::engine::evaluate(&p, &req, None)
         .await
         .expect("evaluate");
     assert!(
@@ -127,7 +127,7 @@ async fn object_type_binding_matches_namespaced_resource_subkind() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &allow_req)
+    let resp = atom::authz::engine::evaluate(&p, &allow_req, None)
         .await
         .expect("evaluate channel");
     assert!(resp.allowed, "channel must be allowed: {}", resp.reason);
@@ -141,7 +141,7 @@ async fn object_type_binding_matches_namespaced_resource_subkind() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &deny_req)
+    let resp = atom::authz::engine::evaluate(&p, &deny_req, None)
         .await
         .expect("evaluate device_config");
     assert!(
@@ -200,7 +200,7 @@ async fn object_binding_matches_specific_resource_uuid() {
         context: json!({}),
     };
     assert!(
-        atom::authz::engine::evaluate(&p, &allow)
+        atom::authz::engine::evaluate(&p, &allow, None)
             .await
             .expect("evaluate")
             .allowed
@@ -215,7 +215,7 @@ async fn object_binding_matches_specific_resource_uuid() {
         context: json!({}),
     };
     assert!(
-        !atom::authz::engine::evaluate(&p, &deny)
+        !atom::authz::engine::evaluate(&p, &deny, None)
             .await
             .expect("evaluate")
             .allowed
@@ -271,7 +271,7 @@ async fn object_kind_binding_matches_every_resource_kind() {
             object_id: None,
             context: json!({}),
         };
-        let resp = atom::authz::engine::evaluate(&p, &req)
+        let resp = atom::authz::engine::evaluate(&p, &req, None)
             .await
             .expect("evaluate");
         assert!(

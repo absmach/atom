@@ -82,7 +82,9 @@ impl AuthzMutation {
         access::require_authz_check_access(&state.pool, &auth, req.subject_id, tenant_id)
             .await
             .map_err(gql_error)?;
-        let response = engine::evaluate(&state.pool, &req)
+        // Delegated check: the caller's token ceiling does not alter the
+        // subject's decision (it gates the caller's right to ask, enforced above).
+        let response = engine::evaluate(&state.pool, &req, None)
             .await
             .map_err(gql_error)?;
         audit_authz_check(
@@ -137,7 +139,7 @@ impl AuthzMutation {
             access::require_authz_check_access(&state.pool, &auth, req.subject_id, tenant_id)
                 .await
                 .map_err(gql_error)?;
-            let response = engine::evaluate(&state.pool, &req)
+            let response = engine::evaluate(&state.pool, &req, None)
                 .await
                 .map_err(gql_error)?;
             audit_authz_check(

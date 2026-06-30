@@ -60,6 +60,7 @@ fn authed(query: impl Into<String>) -> GraphqlRequest {
         entity_id: common::admin_id(),
         tenant_id: None,
         session_id: None,
+        ..Default::default()
     })
 }
 
@@ -335,6 +336,7 @@ async fn service_context_creation_requires_super_admin() {
                 entity_id: ordinary_entity_id,
                 tenant_id: None,
                 session_id: None,
+        ..Default::default()
             }),
         )
         .await;

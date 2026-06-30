@@ -40,6 +40,7 @@ fn authed(query: impl Into<String>) -> Request {
         entity_id: common::admin_id(),
         tenant_id: None,
         session_id: None,
+        ..Default::default()
     })
 }
 
@@ -184,6 +185,7 @@ async fn refresh_session_mutation_extends_current_session() {
                 entity_id,
                 tenant_id: None,
                 session_id: Some(session.id),
+        ..Default::default()
             }),
         )
         .await;
@@ -228,6 +230,7 @@ async fn refresh_session_mutation_requires_session_token() {
                 entity_id,
                 tenant_id: None,
                 session_id: None,
+        ..Default::default()
             }),
         )
         .await;

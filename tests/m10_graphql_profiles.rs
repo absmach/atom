@@ -88,6 +88,7 @@ fn authed(query: impl Into<String>) -> Request {
         entity_id: common::admin_id(),
         tenant_id: None,
         session_id: None,
+        ..Default::default()
     })
 }
 

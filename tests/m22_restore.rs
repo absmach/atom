@@ -40,7 +40,7 @@ async fn restore_entity_reverses_soft_delete_but_keeps_credentials_revoked() {
     let pool = common::pool().await;
     let id = make_entity(&pool, &format!("rs-entity-{}", Uuid::new_v4()), None).await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'api_key', $3, 'active')")
+    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(id)
         .bind(format!("rs-key-{cred_id}"))
@@ -266,7 +266,7 @@ async fn restore_tenant_reactivates_and_unhides_children() {
     )
     .await;
     let api_key_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'api_key', $3, 'active')")
+    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(api_key_id)
         .bind(child)
         .bind(format!("rs-rt-key-{api_key_id}"))
@@ -346,7 +346,7 @@ async fn purge_entity_physically_removes_a_tombstoned_row_and_cascades() {
     let pool = common::pool().await;
     let id = make_entity(&pool, &format!("pg-entity-{}", Uuid::new_v4()), None).await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'api_key', $3, 'active')")
+    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(id)
         .bind(format!("pg-key-{cred_id}"))
@@ -979,7 +979,7 @@ async fn tenant_restore_does_not_undo_an_explicit_credential_revocation() {
     )
     .await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'api_key', $3, 'active')")
+    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(child)
         .bind(format!("tr-expl-key-{cred_id}"))
@@ -1026,7 +1026,7 @@ async fn tenant_restore_does_not_reactivate_credentials_of_a_deleted_child() {
     )
     .await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'api_key', $3, 'active')")
+    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(child)
         .bind(format!("tr-del-key-{cred_id}"))

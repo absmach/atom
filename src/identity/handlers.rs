@@ -547,7 +547,7 @@ pub async fn create_api_key(
             outcome: AuditOutcome::Allow,
             details: serde_json::json!({
                 "entity_id": entity_id,
-                "kind": "api_key",
+                "kind": "access_token",
                 "credential_id": resp.credential_id
             }),
         },

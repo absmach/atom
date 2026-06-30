@@ -58,6 +58,7 @@ impl EntityQuery {
                 "entity",
                 id,
                 &["read", "manage"],
+                auth.ceiling_for(auth.entity_id),
             )
             .await
             .map_err(gql_error)?;

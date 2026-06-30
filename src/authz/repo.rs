@@ -703,6 +703,67 @@ pub struct EffectiveGrant {
     pub conditions: Value,
 }
 
+/// The permission ceiling carried by a scoped access token. Each entry is an
+/// allow-only `EffectiveGrant` shaped exactly like a permission-block grant, so
+/// the existing PDP matcher (`match_grant`) and the coarse control-plane gate
+/// (`gate_action_allows`) evaluate it with no parallel logic.
+///
+/// `scoped` records intent independently of `entries`: a scoped token whose limit
+/// rows were deleted yields `entries = []` and must fail closed (deny everything),
+/// never silently widen to the owner's full authority.
+#[derive(Debug, Clone)]
+pub struct CredentialCeiling {
+    pub entries: Vec<EffectiveGrant>,
+}
+
+/// Load the ceiling for a scoped access-token credential. Returns the (possibly
+/// empty) set of allow grants the token is limited to.
+pub async fn load_credential_ceiling(
+    pool: &PgPool,
+    credential_id: Uuid,
+) -> Result<CredentialCeiling, AppError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"SELECT l.id        AS limit_id,
+                  s.scope_kind AS scope_kind,
+                  s.scope_ref  AS scope_ref,
+                  l.conditions AS conditions,
+                  la.action_id AS action_id
+           FROM credential_permission_limits l
+           JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
+           JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+           WHERE l.credential_id = $1"#,
+    )
+    .bind(credential_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let entries = rows
+        .into_iter()
+        .map(|row| {
+            let limit_id: Uuid = row.try_get("limit_id").map_err(db_err)?;
+            Ok(EffectiveGrant {
+                assignment_id: limit_id,
+                block_id: limit_id,
+                role_id: None,
+                role_name: None,
+                via: "access_token_ceiling".to_string(),
+                // Tenant restriction is expressed through the ceiling scope itself;
+                // no separate assignment boundary.
+                tenant_boundary: None,
+                scope_kind: row.try_get("scope_kind").map_err(db_err)?,
+                scope_ref: row.try_get("scope_ref").map_err(db_err)?,
+                capability_id: row.try_get("action_id").map_err(db_err)?,
+                effect: Effect::Allow,
+                conditions: row.try_get("conditions").map_err(db_err)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+
+    Ok(CredentialCeiling { entries })
+}
+
 pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(db_err)?;

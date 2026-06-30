@@ -39,12 +39,22 @@ pub struct Claims {
     pub iat: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct AuthContext {
     pub entity_id: Uuid,
     pub tenant_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
+    /// The credential that authenticated this request, when it was an access
+    /// token (`atom_...`). `None` for JWT/session auth.
+    pub credential_id: Option<Uuid>,
+    /// True when authenticated by a *scoped* access token — its authority is
+    /// capped by `ceiling`. Fails closed: a scoped token with an empty ceiling
+    /// grants nothing.
+    pub scoped: bool,
+    /// The loaded permission ceiling for a scoped access token; `None` for
+    /// unscoped tokens and JWT/session auth (no cap).
+    pub ceiling: Option<std::sync::Arc<crate::authz::repo::CredentialCeiling>>,
 }
 
 /// Extractor that requires the authenticated entity to hold a `manage` policy
@@ -237,6 +247,7 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
         entity_id,
         tenant_id: entity_tenant_id,
         session_id: Some(session_id),
+        ..Default::default()
     })
 }
 
@@ -251,6 +262,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
                   c.secret_hash,
                   c.status,
                   c.expires_at,
+                  c.scoped,
                   e.tenant_id,
                   e.status AS entity_status,
                   t.status AS tenant_status
@@ -262,7 +274,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
              AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
     )
     .bind(cred_id)
-    .bind(CredentialKind::ApiKey)
+    .bind(CredentialKind::AccessToken)
     .fetch_one(&state.pool)
     .await
     .map_err(|e| match e {
@@ -314,11 +326,87 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
 
     let tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
 
+    // Scoped access tokens carry a permission ceiling loaded here once per request
+    // and intersected with the owner's live grants at every authorization point.
+    let scoped: bool = row.try_get("scoped").unwrap_or(false);
+    let ceiling = if scoped {
+        Some(std::sync::Arc::new(
+            crate::authz::repo::load_credential_ceiling(&state.pool, cred_id).await?,
+        ))
+    } else {
+        None
+    };
+
     Ok(AuthContext {
         entity_id,
         tenant_id,
         session_id: None,
+        credential_id: Some(cred_id),
+        scoped,
+        ceiling,
     })
+}
+
+impl AuthContext {
+    /// The permission ceiling to apply when `subject_id` is the token owner
+    /// acting on its own behalf. Returns `None` for unscoped/JWT auth and for
+    /// decisions about a *different* subject (delegated `authz.check`), where the
+    /// caller's token must not alter the subject's decision.
+    pub fn ceiling_for(
+        &self,
+        subject_id: Uuid,
+    ) -> Option<&crate::authz::repo::CredentialCeiling> {
+        if self.scoped && subject_id == self.entity_id {
+            self.ceiling.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+/// The scoped access-token ceiling for the current request, owner-bound. Set once
+/// per request at the auth boundary ([`scope_request_ceiling`]) and read by the
+/// control-plane gates so a scoped token cannot exceed its ceiling on any gated
+/// mutation, without threading the ceiling through every gate call site.
+struct RequestCeiling {
+    owner: Uuid,
+    ceiling: std::sync::Arc<crate::authz::repo::CredentialCeiling>,
+}
+
+tokio::task_local! {
+    static REQUEST_CEILING: Option<RequestCeiling>;
+}
+
+/// Run `fut` with the request's access-token ceiling installed for the gates to
+/// read. Wrap every request entry point that resolves a Bearer token and may
+/// reach a control-plane gate (GraphQL execution, gRPC methods).
+pub async fn scope_request_ceiling<F>(auth: &AuthContext, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    let current = match (auth.scoped, &auth.ceiling) {
+        (true, Some(ceiling)) => Some(RequestCeiling {
+            owner: auth.entity_id,
+            ceiling: ceiling.clone(),
+        }),
+        _ => None,
+    };
+    REQUEST_CEILING.scope(current, fut).await
+}
+
+/// Whether the current request's token ceiling (if any) permits `action_id` at
+/// `scopes` for `entity_id`. Returns `true` when there is no active ceiling for
+/// this subject (unscoped token, JWT, background/system context). A scoped token
+/// with an empty or non-matching ceiling returns `false` — fail closed.
+fn ceiling_gate_allows(entity_id: Uuid, action_id: Uuid, scopes: &[ScopeCheck]) -> bool {
+    REQUEST_CEILING
+        .try_with(|current| match current {
+            Some(rc) if rc.owner == entity_id => {
+                gate_action_allows(&rc.ceiling.entries, action_id, scopes)
+            }
+            _ => true,
+        })
+        .unwrap_or(true)
 }
 
 /// Validate a Bearer token (JWT or API key) and return the authenticated context.
@@ -445,11 +533,9 @@ pub async fn has_capability_in_scope(
     };
     let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
     let gate_tenant = gate_tenant_context(pool, scope).await?;
-    Ok(gate_action_allows(
-        &grants,
-        action_id,
-        &[(scope, gate_tenant)],
-    ))
+    let scopes = [(scope, gate_tenant)];
+    Ok(gate_action_allows(&grants, action_id, &scopes)
+        && ceiling_gate_allows(entity_id, action_id, &scopes))
 }
 
 /// The tenant whose objects the gate concerns, used to apply the same assignment
@@ -661,7 +747,9 @@ pub async fn require_any_capability(
     // Any one action whose combined scopes yield an allow (not overridden by a
     // deny at any of them) authorizes the request.
     for (action_id, action_scopes) in &by_action {
-        if gate_action_allows(&grants, *action_id, action_scopes) {
+        if gate_action_allows(&grants, *action_id, action_scopes)
+            && ceiling_gate_allows(entity_id, *action_id, action_scopes)
+        {
             return Ok(());
         }
     }

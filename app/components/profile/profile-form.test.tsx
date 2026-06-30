@@ -40,14 +40,25 @@ const profileResponse = {
 };
 
 const tokensResponse = {
-  personalAccessTokens: {
+  accessTokens: {
     items: [
       {
-        credentialId: "pat-1",
+        credentialId: "tok-1",
         name: "Laptop CLI",
         description: "Local scripts",
         identifier: "atom_abcdef12",
         status: "active",
+        scoped: true,
+        permissions: [
+          {
+            actions: ["read"],
+            scopeMode: "object_kind",
+            tenantId: null,
+            objectKind: "entity",
+            objectType: null,
+            objectId: null,
+          },
+        ],
         expiresAt: null,
         createdAt: "2026-06-05T00:00:00Z",
       },
@@ -56,7 +67,7 @@ const tokensResponse = {
   },
 };
 
-describe("ProfileForm personal access tokens", () => {
+describe("ProfileForm access tokens", () => {
   afterEach(() => {
     cleanup();
   });
@@ -65,62 +76,117 @@ describe("ProfileForm personal access tokens", () => {
     mocks.graphqlClient.mockReset();
     mocks.graphqlClient.mockImplementation(async ({ query }) => {
       if (query.includes("ProfileEntity")) return profileResponse;
-      if (query.includes("ProfilePersonalAccessTokens")) return tokensResponse;
-      if (query.includes("CreatePersonalAccessToken")) {
+      if (query.includes("ProfileAccessTokens")) return tokensResponse;
+      if (query.includes("CreateAccessToken")) {
         return {
-          createPersonalAccessToken: {
-            credentialId: "pat-created",
-            token: "atom_created_personal_access_token",
+          createAccessToken: {
+            credentialId: "tok-created",
+            token: "atom_created_access_token",
             name: "CI runner",
             description: "Build scripts",
             expiresAt: null,
           },
         };
       }
-      if (query.includes("RevokePersonalAccessToken")) {
-        return { revokePersonalAccessToken: true };
+      if (query.includes("RevokeAccessToken")) {
+        return { revokeAccessToken: true };
+      }
+      if (query.includes("ReplaceAccessTokenPermissions")) {
+        return { replaceAccessTokenPermissions: true };
       }
       return {};
     });
   });
 
-  it("lists personal access tokens in the profile page", async () => {
+  it("lists access tokens with their permission summary", async () => {
     renderProfileForm();
 
-    expect(
-      await screen.findByText("Personal Access Tokens"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Access Tokens")).toBeInTheDocument();
     expect(await screen.findByText("Laptop CLI")).toBeInTheDocument();
     expect(screen.getByText("Local scripts")).toBeInTheDocument();
     expect(screen.getByText("atom_abcdef12")).toBeInTheDocument();
+    expect(screen.getByText("read on kind entity")).toBeInTheDocument();
   });
 
-  it("creates and reveals a token without sending an entity id", async () => {
+  it("creates a token with permissions and without an entity id", async () => {
     const user = userEvent.setup();
     renderProfileForm();
 
-    await screen.findByText("Personal Access Tokens");
+    await screen.findByText("Access Tokens");
     await user.type(screen.getByLabelText("Name"), "CI runner");
     await user.type(screen.getByLabelText("Description"), "Build scripts");
+    await user.type(screen.getByLabelText("Actions"), "read");
+    await user.type(screen.getByLabelText("Object kind"), "entity");
     await user.click(screen.getByRole("button", { name: "Create token" }));
 
     expect(
-      await screen.findByText("atom_created_personal_access_token"),
+      await screen.findByText("atom_created_access_token"),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(
-        mocks.graphqlClient.mock.calls.some(
-          ([request]) =>
-            request.query.includes("CreatePersonalAccessToken") &&
-            request.variables.input.name === "CI runner" &&
-            request.variables.input.description === "Build scripts" &&
-            request.variables.entityId === undefined,
-        ),
+        mocks.graphqlClient.mock.calls.some(([request]) => {
+          if (!request.query.includes("CreateAccessToken")) return false;
+          const input = request.variables.input;
+          return (
+            input.name === "CI runner" &&
+            request.variables.entityId === undefined &&
+            Array.isArray(input.permissions) &&
+            input.permissions[0].actions[0] === "read" &&
+            input.permissions[0].scopeMode === "object_kind" &&
+            input.permissions[0].objectKind === "entity"
+          );
+        }),
       ).toBe(true);
     });
   });
 
-  it("revokes a personal access token by credential id", async () => {
+  it("blocks creation when no permission action is given", async () => {
+    const user = userEvent.setup();
+    renderProfileForm();
+
+    await screen.findByText("Access Tokens");
+    await user.type(screen.getByLabelText("Name"), "no-perms");
+    await user.click(screen.getByRole("button", { name: "Create token" }));
+
+    await waitFor(() => {
+      expect(
+        mocks.graphqlClient.mock.calls.some(([request]) =>
+          request.query.includes("CreateAccessToken"),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it("replaces an existing token's permissions in place", async () => {
+    const user = userEvent.setup();
+    renderProfileForm();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Edit permissions" }),
+    );
+
+    // The create form also has an Actions field; the editor's is the last one.
+    const actions = screen.getAllByLabelText("Actions").at(-1)!;
+    await user.clear(actions);
+    await user.type(actions, "manage");
+    await user.click(screen.getByRole("button", { name: "Save permissions" }));
+
+    await waitFor(() => {
+      expect(
+        mocks.graphqlClient.mock.calls.some(([request]) => {
+          if (!request.query.includes("ReplaceAccessTokenPermissions")) {
+            return false;
+          }
+          return (
+            request.variables.credentialId === "tok-1" &&
+            request.variables.permissions[0].actions[0] === "manage"
+          );
+        }),
+      ).toBe(true);
+    });
+  });
+
+  it("revokes an access token by credential id", async () => {
     const user = userEvent.setup();
     renderProfileForm();
 
@@ -130,8 +196,8 @@ describe("ProfileForm personal access tokens", () => {
       expect(
         mocks.graphqlClient.mock.calls.some(
           ([request]) =>
-            request.query.includes("RevokePersonalAccessToken") &&
-            request.variables.credentialId === "pat-1",
+            request.query.includes("RevokeAccessToken") &&
+            request.variables.credentialId === "tok-1",
         ),
       ).toBe(true);
     });

@@ -32,8 +32,9 @@ use crate::{
             SignupResponse,
         },
         token::{
-            ApiKeyResponse, CreateApiKey, CreatePersonalAccessToken, CreateSharedKey,
-            PersonalAccessTokenResponse, PersonalAccessTokenSummary, SharedKeyResponse,
+            AccessTokenPermission, AccessTokenPermissionSummary, AccessTokenResponse,
+            AccessTokenSummary, ApiKeyResponse, CreateAccessToken, CreateApiKey, CreateSharedKey,
+            SharedKeyResponse,
         },
     },
 };
@@ -54,7 +55,6 @@ pub fn verify_secret(secret: &[u8], hash: &str) -> bool {
 }
 
 const DEFAULT_MIN_PASSWORD_CHARS: usize = 12;
-const PERSONAL_ACCESS_TOKEN_USAGE: &str = "personal_access_token";
 
 #[derive(Debug, Clone)]
 pub struct CredentialAuthentication {
@@ -1125,7 +1125,7 @@ async fn credential_for_login(
         CredentialKind::SharedKey => {
             shared_key_credential_for_login(pool, signing_keys, entity_id, secret).await
         }
-        CredentialKind::ApiKey | CredentialKind::Certificate => Err(AppError::bad_request(
+        CredentialKind::AccessToken | CredentialKind::Certificate => Err(AppError::bad_request(
             format!("unsupported credential kind: {requested_kind:?}"),
         )),
     }
@@ -2057,36 +2057,178 @@ pub async fn create_api_key(
     })
 }
 
-pub async fn create_personal_access_token(
+pub async fn create_access_token(
     pool: &PgPool,
     entity_id: Uuid,
-    req: CreatePersonalAccessToken,
-) -> Result<PersonalAccessTokenResponse, AppError> {
+    req: CreateAccessToken,
+) -> Result<AccessTokenResponse, AppError> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
+        return Err(AppError::bad_request("access token name is required"));
+    }
+    if req.permissions.is_empty() {
         return Err(AppError::bad_request(
-            "personal access token name is required",
+            "access token requires at least one permission",
         ));
     }
     let description = req
         .description
         .map(|description| description.trim().to_string())
         .filter(|description| !description.is_empty());
-    let metadata = serde_json::json!({
-        "usage": PERSONAL_ACCESS_TOKEN_USAGE,
-        "name": &name,
-        "description": &description,
-    });
-    let (cred_id, token) =
-        create_api_key_credential(pool, entity_id, req.expires_at, metadata).await?;
 
-    Ok(PersonalAccessTokenResponse {
+    let cred_id = Uuid::new_v4();
+    let mut secret_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut secret_bytes);
+    let hash = hash_secret(&secret_bytes)?;
+    let token = make_api_key(cred_id, &secret_bytes);
+    let key_prefix = token[..13].to_string();
+    let metadata = serde_json::json!({ "name": &name, "description": &description });
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::not_found(format!(
+            "active entity {entity_id} not found"
+        )));
+    }
+    // Self-service tokens are always scoped: their authority is capped by the
+    // ceiling, never the owner's full set.
+    sqlx::query(
+        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, scoped, expires_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, true, $6, $7)"#,
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .bind(CredentialKind::AccessToken)
+    .bind(key_prefix)
+    .bind(hash)
+    .bind(req.expires_at)
+    .bind(metadata)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    for permission in &req.permissions {
+        write_ceiling_limit(&mut tx, cred_id, permission).await?;
+    }
+    tx.commit().await.map_err(db_err)?;
+
+    Ok(AccessTokenResponse {
         credential_id: cred_id,
         token,
         name,
         description,
         expires_at: req.expires_at,
     })
+}
+
+/// Owner-only replacement of a scoped access token's permission ceiling.
+pub async fn replace_access_token_permissions(
+    pool: &PgPool,
+    entity_id: Uuid,
+    cred_id: Uuid,
+    permissions: Vec<AccessTokenPermission>,
+) -> Result<(), AppError> {
+    if permissions.is_empty() {
+        return Err(AppError::bad_request(
+            "access token requires at least one permission",
+        ));
+    }
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let scoped: Option<bool> = sqlx::query_scalar(
+        r#"SELECT scoped FROM credentials
+           WHERE id = $1 AND entity_id = $2 AND kind = $3 AND status = 'active'
+           FOR UPDATE"#,
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .bind(CredentialKind::AccessToken)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    match scoped {
+        None => return Err(AppError::not_found("access token not found")),
+        Some(false) => {
+            return Err(AppError::bad_request(
+                "cannot set permissions on an unscoped access token",
+            ))
+        }
+        Some(true) => {}
+    }
+
+    sqlx::query("DELETE FROM credential_permission_limits WHERE credential_id = $1")
+        .bind(cred_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    for permission in &permissions {
+        write_ceiling_limit(&mut tx, cred_id, permission).await?;
+    }
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// Insert one ceiling allow-list entry and its actions inside an open tx. Invalid
+/// scope/field combinations are rejected by the table CHECK; unknown action names
+/// are a bad request.
+async fn write_ceiling_limit(
+    tx: &mut Transaction<'_, Postgres>,
+    cred_id: Uuid,
+    permission: &AccessTokenPermission,
+) -> Result<(), AppError> {
+    if permission.actions.is_empty() {
+        return Err(AppError::bad_request(
+            "each permission requires at least one action",
+        ));
+    }
+    let conditions = permission
+        .conditions
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let limit_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO credential_permission_limits
+             (id, credential_id, scope_mode, tenant_id, object_kind, object_type, object_id, conditions)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+    )
+    .bind(limit_id)
+    .bind(cred_id)
+    .bind(&permission.scope_mode)
+    .bind(permission.tenant_id)
+    .bind(&permission.object_kind)
+    .bind(&permission.object_type)
+    .bind(permission.object_id)
+    .bind(conditions)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23514") => {
+            AppError::bad_request("invalid permission scope for access token")
+        }
+        other => AppError::Database(other),
+    })?;
+
+    for action in &permission.actions {
+        let action_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+            .bind(action)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+        let action_id =
+            action_id.ok_or_else(|| AppError::bad_request(format!("unknown action: {action}")))?;
+        sqlx::query(
+            r#"INSERT INTO credential_permission_limit_actions (limit_id, action_id)
+               VALUES ($1, $2) ON CONFLICT DO NOTHING"#,
+        )
+        .bind(limit_id)
+        .bind(action_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    }
+    Ok(())
 }
 
 async fn create_api_key_credential(
@@ -2120,7 +2262,7 @@ async fn create_api_key_credential(
     )
     .bind(cred_id)
     .bind(entity_id)
-    .bind(CredentialKind::ApiKey)
+    .bind(CredentialKind::AccessToken)
     .bind(key_prefix)
     .bind(hash)
     .bind(expires_at)
@@ -2133,49 +2275,97 @@ async fn create_api_key_credential(
     Ok((cred_id, key))
 }
 
-pub async fn list_personal_access_tokens(
+pub async fn list_access_tokens(
     pool: &PgPool,
     entity_id: Uuid,
-) -> Result<Vec<PersonalAccessTokenSummary>, AppError> {
+) -> Result<Vec<AccessTokenSummary>, AppError> {
     use sqlx::Row;
 
     let rows = sqlx::query(
         r#"SELECT id,
-                  COALESCE(NULLIF(metadata->>'name', ''), identifier, 'Personal access token') AS name,
+                  COALESCE(NULLIF(metadata->>'name', ''), identifier, 'Access token') AS name,
                   NULLIF(metadata->>'description', '') AS description,
                   identifier,
                   status,
+                  scoped,
                   expires_at,
                   created_at
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
-             AND metadata->>'usage' = $3
            ORDER BY created_at DESC"#,
     )
     .bind(entity_id)
-    .bind(CredentialKind::ApiKey)
-    .bind(PERSONAL_ACCESS_TOKEN_USAGE)
+    .bind(CredentialKind::AccessToken)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    let mut summaries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let credential_id: Uuid = row.try_get("id").map_err(db_err)?;
+        summaries.push(AccessTokenSummary {
+            credential_id,
+            name: row.try_get("name").map_err(db_err)?,
+            description: row.try_get("description").map_err(db_err)?,
+            identifier: row.try_get("identifier").map_err(db_err)?,
+            status: row.try_get("status").map_err(db_err)?,
+            scoped: row.try_get("scoped").map_err(db_err)?,
+            permissions: load_access_token_permissions(pool, credential_id).await?,
+            expires_at: row.try_get("expires_at").map_err(db_err)?,
+            created_at: row.try_get("created_at").map_err(db_err)?,
+        });
+    }
+    Ok(summaries)
+}
+
+/// Render a token's ceiling for display: one entry per limit row with its action
+/// names, grouped from credential_permission_limits.
+async fn load_access_token_permissions(
+    pool: &PgPool,
+    credential_id: Uuid,
+) -> Result<Vec<AccessTokenPermissionSummary>, AppError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"SELECT l.id,
+                  l.scope_mode,
+                  l.tenant_id,
+                  l.object_kind,
+                  l.object_type,
+                  l.object_id,
+                  l.conditions,
+                  COALESCE(
+                      ARRAY_AGG(a.name ORDER BY a.name) FILTER (WHERE a.name IS NOT NULL),
+                      '{}'
+                  ) AS actions
+           FROM credential_permission_limits l
+           LEFT JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+           LEFT JOIN actions a ON a.id = la.action_id
+           WHERE l.credential_id = $1
+           GROUP BY l.id
+           ORDER BY l.created_at"#,
+    )
+    .bind(credential_id)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
     rows.into_iter()
         .map(|row| {
-            Ok(PersonalAccessTokenSummary {
-                credential_id: row.try_get("id").map_err(db_err)?,
-                name: row.try_get("name").map_err(db_err)?,
-                description: row.try_get("description").map_err(db_err)?,
-                identifier: row.try_get("identifier").map_err(db_err)?,
-                status: row.try_get("status").map_err(db_err)?,
-                expires_at: row.try_get("expires_at").map_err(db_err)?,
-                created_at: row.try_get("created_at").map_err(db_err)?,
+            Ok(AccessTokenPermissionSummary {
+                actions: row.try_get("actions").map_err(db_err)?,
+                scope_mode: row.try_get("scope_mode").map_err(db_err)?,
+                tenant_id: row.try_get("tenant_id").map_err(db_err)?,
+                object_kind: row.try_get("object_kind").map_err(db_err)?,
+                object_type: row.try_get("object_type").map_err(db_err)?,
+                object_id: row.try_get("object_id").map_err(db_err)?,
+                conditions: row.try_get("conditions").map_err(db_err)?,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()
 }
 
-pub async fn revoke_personal_access_token(
+pub async fn revoke_access_token(
     pool: &PgPool,
     entity_id: Uuid,
     cred_id: Uuid,
@@ -2190,18 +2380,16 @@ pub async fn revoke_personal_access_token(
                           )
            WHERE id = $1
              AND entity_id = $2
-             AND kind = $3
-             AND metadata->>'usage' = $4"#,
+             AND kind = $3"#,
     )
     .bind(cred_id)
     .bind(entity_id)
-    .bind(CredentialKind::ApiKey)
-    .bind(PERSONAL_ACCESS_TOKEN_USAGE)
+    .bind(CredentialKind::AccessToken)
     .execute(pool)
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {
-        return Err(AppError::not_found("personal access token not found"));
+        return Err(AppError::not_found("access token not found"));
     }
     Ok(())
 }

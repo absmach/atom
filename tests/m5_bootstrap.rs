@@ -168,6 +168,7 @@ async fn creator_can_immediately_manage_own_tenant_but_not_another_tenant() {
             object_id: Some(tenant_id),
             context: json!({}),
         },
+        None,
     )
     .await
     .expect("own tenant authz");
@@ -183,6 +184,7 @@ async fn creator_can_immediately_manage_own_tenant_but_not_another_tenant() {
             object_id: Some(other_tenant_id),
             context: json!({}),
         },
+        None,
     )
     .await
     .expect("other tenant authz");

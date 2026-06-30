@@ -952,6 +952,7 @@ function CredentialKindIcon({ kind }: { kind: string }) {
   switch (kind) {
     case "password":
       return <Lock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />;
+    case "access_token":
     case "api_key":
       return (
         <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -971,8 +972,9 @@ function credentialKindLabel(kind: string) {
   switch (kind) {
     case "password":
       return "Password";
+    case "access_token":
     case "api_key":
-      return "API key";
+      return "Access token";
     case "shared_key":
       return "Shared key";
     case "certificate":

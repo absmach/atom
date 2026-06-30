@@ -380,6 +380,7 @@ async fn execution_auth_context(
                 entity_id: service_entity_id,
                 tenant_id,
                 session_id: None,
+                ..Default::default()
             })
         }
         _ => Err(AppError::bad_request("unsupported api endpoint auth mode")),

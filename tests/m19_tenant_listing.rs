@@ -172,13 +172,13 @@ async fn active_membership_lists_and_reads_tenant() {
         "an active tenant membership must list the tenant"
     );
     assert!(
-        atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+        atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
             .await
             .expect("tenant read check"),
         "an active tenant membership must authorize tenant read"
     );
     assert!(
-        !atom::authz::engine::allows_any(&p, caller, "resource", channel, &["read"])
+        !atom::authz::engine::allows_any(&p, caller, "resource", channel, &["read"], None)
             .await
             .expect("resource read check"),
         "tenant membership read must not authorize reading resources inside the tenant"
@@ -201,7 +201,7 @@ async fn inactive_membership_statuses_do_not_list_tenant() {
             "a {status} tenant membership must not list the tenant"
         );
         assert!(
-            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
                 .await
                 .expect("tenant read check"),
             "a {status} tenant membership must not authorize tenant read"
@@ -236,7 +236,7 @@ async fn explicit_tenant_read_deny_overrides_membership_visibility() {
         "an explicit read deny must hide a membership-visible tenant"
     );
     assert!(
-        !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+        !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
             .await
             .expect("tenant read check"),
         "an explicit read deny must override membership tenant read"
@@ -272,7 +272,7 @@ async fn membership_does_not_list_non_active_tenant() {
             "a {status} tenant must not appear through membership"
         );
         assert!(
-            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"])
+            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
                 .await
                 .expect("tenant read check"),
             "a {status} tenant must not be readable through membership"

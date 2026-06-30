@@ -43,6 +43,7 @@ fn authed(query: impl Into<String>) -> Request {
         entity_id: common::admin_id(),
         tenant_id: None,
         session_id: None,
+        ..Default::default()
     })
 }
 
@@ -51,6 +52,7 @@ fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
         entity_id,
         tenant_id: None,
         session_id: None,
+        ..Default::default()
     })
 }
 

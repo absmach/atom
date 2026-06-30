@@ -178,7 +178,7 @@ async fn role_linked_deny_block_overrides_direct_allow() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req)
+    let resp = atom::authz::engine::evaluate(&p, &req, None)
         .await
         .expect("evaluate");
     assert!(
@@ -255,7 +255,7 @@ async fn role_linked_conditional_allow_block_honours_conditions() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &deny_req)
+    let resp = atom::authz::engine::evaluate(&p, &deny_req, None)
         .await
         .expect("evaluate unmet");
     assert!(
@@ -273,7 +273,7 @@ async fn role_linked_conditional_allow_block_honours_conditions() {
         object_id: None,
         context: json!({"mfa": true}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &allow_req)
+    let resp = atom::authz::engine::evaluate(&p, &allow_req, None)
         .await
         .expect("evaluate met");
     assert!(

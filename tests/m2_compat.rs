@@ -81,7 +81,7 @@ async fn entity_as_object_can_be_authorised_via_object_kind_form() {
         object_id: Some(device),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req)
+    let resp = atom::authz::engine::evaluate(&p, &req, None)
         .await
         .expect("evaluate");
     assert!(
@@ -100,7 +100,7 @@ async fn entity_as_object_can_be_authorised_via_object_kind_form() {
         object_id: Some(other_device),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &deny)
+    let resp = atom::authz::engine::evaluate(&p, &deny, None)
         .await
         .expect("evaluate");
     assert!(!resp.allowed);
@@ -153,7 +153,7 @@ async fn entity_subtype_scope_uses_namespaced_object_type() {
             object_id: Some(d),
             context: json!({}),
         };
-        let resp = atom::authz::engine::evaluate(&p, &req)
+        let resp = atom::authz::engine::evaluate(&p, &req, None)
             .await
             .expect("evaluate");
         assert!(resp.allowed, "device must match: {}", resp.reason);
@@ -168,7 +168,7 @@ async fn entity_subtype_scope_uses_namespaced_object_type() {
         object_id: Some(svc),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req)
+    let resp = atom::authz::engine::evaluate(&p, &req, None)
         .await
         .expect("evaluate");
     assert!(
@@ -203,7 +203,7 @@ async fn admin_platform_inherits_into_entity_objects() {
         object_id: Some(target),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req)
+    let resp = atom::authz::engine::evaluate(&p, &req, None)
         .await
         .expect("evaluate");
     assert!(

@@ -34,7 +34,9 @@ pub enum EntityStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKind {
     Password,
-    ApiKey,
+    /// Bearer token credential (`atom_...`). Serves both provisioned "API key" use
+    /// (unscoped) and self-service personal tokens (scoped via a permission ceiling).
+    AccessToken,
     Certificate,
     SharedKey,
 }
@@ -46,7 +48,9 @@ impl CredentialKind {
     pub fn allowed_for(&self, entity: &EntityKind) -> bool {
         match self {
             CredentialKind::SharedKey => entity.is_machine(),
-            CredentialKind::Password | CredentialKind::ApiKey | CredentialKind::Certificate => true,
+            CredentialKind::Password
+            | CredentialKind::AccessToken
+            | CredentialKind::Certificate => true,
         }
     }
 }

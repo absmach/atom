@@ -76,6 +76,7 @@ impl GroupQuery {
                 object_id: Some(id),
                 context: serde_json::Value::Null,
             },
+            auth.ceiling_for(auth.entity_id),
         )
         .await
         .map_err(gql_error)?

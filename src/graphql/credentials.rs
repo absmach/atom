@@ -12,10 +12,9 @@ use crate::{
 use super::{
     auth::{gql_error, require_auth, require_credential_management},
     types::{
-        parse_id, parse_optional_timestamp, ApiKeyResponse, CreateApiKeyInput,
-        CreatePersonalAccessTokenInput, CreateSharedKeyInput, Credential, CredentialList,
-        PersonalAccessToken, PersonalAccessTokenList, PersonalAccessTokenResponse,
-        SharedKeyResponse,
+        parse_id, parse_optional_timestamp, AccessToken, AccessTokenList,
+        AccessTokenPermissionInput, AccessTokenResponse, ApiKeyResponse, CreateAccessTokenInput,
+        CreateApiKeyInput, CreateSharedKeyInput, Credential, CredentialList, SharedKeyResponse,
     },
 };
 
@@ -39,15 +38,15 @@ impl CredentialQuery {
         })
     }
 
-    async fn personal_access_tokens(&self, ctx: &Context<'_>) -> Result<PersonalAccessTokenList> {
+    async fn access_tokens(&self, ctx: &Context<'_>) -> Result<AccessTokenList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let tokens = service::list_personal_access_tokens(&state.pool, auth.entity_id)
+        let tokens = service::list_access_tokens(&state.pool, auth.entity_id)
             .await
             .map_err(gql_error)?;
         let total = tokens.len() as i64;
-        Ok(PersonalAccessTokenList {
-            items: tokens.into_iter().map(PersonalAccessToken::from).collect(),
+        Ok(AccessTokenList {
+            items: tokens.into_iter().map(AccessToken::from).collect(),
             total,
         })
     }
@@ -121,7 +120,7 @@ impl CredentialMutation {
                 outcome: AuditOutcome::Allow,
                 details: serde_json::json!({
                     "entity_id": entity_id,
-                    "kind": "api_key",
+                    "kind": "access_token",
                     "credential_id": response.credential_id
                 }),
             },
@@ -130,20 +129,26 @@ impl CredentialMutation {
         Ok(response.into())
     }
 
-    async fn create_personal_access_token(
+    async fn create_access_token(
         &self,
         ctx: &Context<'_>,
-        input: CreatePersonalAccessTokenInput,
-    ) -> Result<PersonalAccessTokenResponse> {
+        input: CreateAccessTokenInput,
+    ) -> Result<AccessTokenResponse> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let response = service::create_personal_access_token(
+        let permissions = input
+            .permissions
+            .into_iter()
+            .map(permission_input_into_model)
+            .collect::<Result<Vec<_>>>()?;
+        let response = service::create_access_token(
             &state.pool,
             auth.entity_id,
-            token_model::CreatePersonalAccessToken {
+            token_model::CreateAccessToken {
                 name: input.name,
                 description: input.description,
                 expires_at: parse_optional_timestamp(input.expires_at, "expiresAt")?,
+                permissions,
             },
         )
         .await
@@ -159,8 +164,8 @@ impl CredentialMutation {
                 outcome: AuditOutcome::Allow,
                 details: serde_json::json!({
                     "entity_id": auth.entity_id,
-                    "kind": "api_key",
-                    "usage": "personal_access_token",
+                    "kind": "access_token",
+                    "scoped": true,
                     "name": &response.name,
                     "credential_id": response.credential_id
                 }),
@@ -170,15 +175,51 @@ impl CredentialMutation {
         Ok(response.into())
     }
 
-    async fn revoke_personal_access_token(
+    async fn replace_access_token_permissions(
         &self,
         ctx: &Context<'_>,
         credential_id: ID,
+        permissions: Vec<AccessTokenPermissionInput>,
     ) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let credential_id = parse_id(credential_id, "credentialId")?;
-        service::revoke_personal_access_token(&state.pool, auth.entity_id, credential_id)
+        let permissions = permissions
+            .into_iter()
+            .map(permission_input_into_model)
+            .collect::<Result<Vec<_>>>()?;
+        service::replace_access_token_permissions(
+            &state.pool,
+            auth.entity_id,
+            credential_id,
+            permissions,
+        )
+        .await
+        .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: auth.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(credential_id),
+                event: "credential.update",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "kind": "access_token",
+                    "credential_id": credential_id
+                }),
+            },
+        )
+        .await;
+        Ok(true)
+    }
+
+    async fn revoke_access_token(&self, ctx: &Context<'_>, credential_id: ID) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let credential_id = parse_id(credential_id, "credentialId")?;
+        service::revoke_access_token(&state.pool, auth.entity_id, credential_id)
             .await
             .map_err(gql_error)?;
         audit::write(
@@ -191,8 +232,7 @@ impl CredentialMutation {
                 event: "credential.revoke",
                 outcome: AuditOutcome::Allow,
                 details: serde_json::json!({
-                    "kind": "api_key",
-                    "usage": "personal_access_token",
+                    "kind": "access_token",
                     "credential_id": credential_id
                 }),
             },
@@ -339,4 +379,26 @@ async fn credential_tenant_id(
     .map_err(gql_error)?
     .ok_or_else(|| async_graphql::Error::new("credential not found"))?;
     Ok(tenant_id)
+}
+
+fn permission_input_into_model(
+    input: AccessTokenPermissionInput,
+) -> Result<token_model::AccessTokenPermission> {
+    let tenant_id = input
+        .tenant_id
+        .map(|id| parse_id(id, "tenantId"))
+        .transpose()?;
+    let object_id = input
+        .object_id
+        .map(|id| parse_id(id, "objectId"))
+        .transpose()?;
+    Ok(token_model::AccessTokenPermission {
+        actions: input.actions,
+        scope_mode: input.scope_mode,
+        tenant_id,
+        object_kind: input.object_kind,
+        object_type: input.object_type,
+        object_id,
+        conditions: input.conditions,
+    })
 }

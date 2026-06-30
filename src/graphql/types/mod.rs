@@ -113,7 +113,7 @@ pub enum GqlCreateActionAssignmentRuleDecision {
 #[graphql(name = "CredentialKind", rename_items = "snake_case")]
 pub enum GqlCredentialKind {
     Password,
-    ApiKey,
+    AccessToken,
     Certificate,
     SharedKey,
 }
@@ -755,10 +755,43 @@ impl SharedKeyResponse {
     }
 }
 
-pub struct PersonalAccessToken(pub token_model::PersonalAccessTokenSummary);
+pub struct AccessTokenPermission(pub token_model::AccessTokenPermissionSummary);
 
 #[Object]
-impl PersonalAccessToken {
+impl AccessTokenPermission {
+    async fn actions(&self) -> &[String] {
+        &self.0.actions
+    }
+
+    async fn scope_mode(&self) -> &str {
+        &self.0.scope_mode
+    }
+
+    async fn tenant_id(&self) -> Option<ID> {
+        self.0.tenant_id.map(id)
+    }
+
+    async fn object_kind(&self) -> Option<&str> {
+        self.0.object_kind.as_deref()
+    }
+
+    async fn object_type(&self) -> Option<&str> {
+        self.0.object_type.as_deref()
+    }
+
+    async fn object_id(&self) -> Option<ID> {
+        self.0.object_id.map(id)
+    }
+
+    async fn conditions(&self) -> &serde_json::Value {
+        &self.0.conditions
+    }
+}
+
+pub struct AccessToken(pub token_model::AccessTokenSummary);
+
+#[Object]
+impl AccessToken {
     async fn credential_id(&self) -> ID {
         id(self.0.credential_id)
     }
@@ -779,6 +812,18 @@ impl PersonalAccessToken {
         credential_status_as_str(&self.0.status)
     }
 
+    async fn scoped(&self) -> bool {
+        self.0.scoped
+    }
+
+    async fn permissions(&self) -> Vec<AccessTokenPermission> {
+        self.0
+            .permissions
+            .iter()
+            .map(|p| AccessTokenPermission(clone_permission_summary(p)))
+            .collect()
+    }
+
     async fn expires_at(&self) -> Option<String> {
         self.0.expires_at.map(timestamp)
     }
@@ -788,10 +833,24 @@ impl PersonalAccessToken {
     }
 }
 
-pub struct PersonalAccessTokenResponse(pub token_model::PersonalAccessTokenResponse);
+fn clone_permission_summary(
+    p: &token_model::AccessTokenPermissionSummary,
+) -> token_model::AccessTokenPermissionSummary {
+    token_model::AccessTokenPermissionSummary {
+        actions: p.actions.clone(),
+        scope_mode: p.scope_mode.clone(),
+        tenant_id: p.tenant_id,
+        object_kind: p.object_kind.clone(),
+        object_type: p.object_type.clone(),
+        object_id: p.object_id,
+        conditions: p.conditions.clone(),
+    }
+}
+
+pub struct AccessTokenResponse(pub token_model::AccessTokenResponse);
 
 #[Object]
-impl PersonalAccessTokenResponse {
+impl AccessTokenResponse {
     async fn credential_id(&self) -> ID {
         id(self.0.credential_id)
     }
@@ -1711,10 +1770,22 @@ pub struct CreateApiKeyInput {
 }
 
 #[derive(InputObject)]
-pub struct CreatePersonalAccessTokenInput {
+pub struct CreateAccessTokenInput {
     pub name: String,
     pub description: Option<String>,
     pub expires_at: Option<String>,
+    pub permissions: Vec<AccessTokenPermissionInput>,
+}
+
+#[derive(InputObject)]
+pub struct AccessTokenPermissionInput {
+    pub actions: Vec<String>,
+    pub scope_mode: String,
+    pub tenant_id: Option<ID>,
+    pub object_kind: Option<String>,
+    pub object_type: Option<String>,
+    pub object_id: Option<ID>,
+    pub conditions: Option<serde_json::Value>,
 }
 
 #[derive(InputObject)]
@@ -2022,8 +2093,8 @@ pub struct CredentialList {
 }
 
 #[derive(Default)]
-pub struct PersonalAccessTokenList {
-    pub items: Vec<PersonalAccessToken>,
+pub struct AccessTokenList {
+    pub items: Vec<AccessToken>,
     pub total: i64,
 }
 
@@ -2283,8 +2354,8 @@ impl CredentialList {
 }
 
 #[Object]
-impl PersonalAccessTokenList {
-    async fn items(&self) -> &[PersonalAccessToken] {
+impl AccessTokenList {
+    async fn items(&self) -> &[AccessToken] {
         &self.items
     }
 
@@ -2391,15 +2462,15 @@ impl From<token_model::SharedKeyResponse> for SharedKeyResponse {
     }
 }
 
-impl From<token_model::PersonalAccessTokenSummary> for PersonalAccessToken {
-    fn from(token: token_model::PersonalAccessTokenSummary) -> Self {
-        PersonalAccessToken(token)
+impl From<token_model::AccessTokenSummary> for AccessToken {
+    fn from(token: token_model::AccessTokenSummary) -> Self {
+        AccessToken(token)
     }
 }
 
-impl From<token_model::PersonalAccessTokenResponse> for PersonalAccessTokenResponse {
-    fn from(response: token_model::PersonalAccessTokenResponse) -> Self {
-        PersonalAccessTokenResponse(response)
+impl From<token_model::AccessTokenResponse> for AccessTokenResponse {
+    fn from(response: token_model::AccessTokenResponse) -> Self {
+        AccessTokenResponse(response)
     }
 }
 
@@ -2804,7 +2875,7 @@ impl From<GqlCredentialKind> for CredentialKind {
     fn from(kind: GqlCredentialKind) -> Self {
         match kind {
             GqlCredentialKind::Password => CredentialKind::Password,
-            GqlCredentialKind::ApiKey => CredentialKind::ApiKey,
+            GqlCredentialKind::AccessToken => CredentialKind::AccessToken,
             GqlCredentialKind::Certificate => CredentialKind::Certificate,
             GqlCredentialKind::SharedKey => CredentialKind::SharedKey,
         }
@@ -2815,7 +2886,7 @@ impl From<&CredentialKind> for GqlCredentialKind {
     fn from(kind: &CredentialKind) -> Self {
         match kind {
             CredentialKind::Password => GqlCredentialKind::Password,
-            CredentialKind::ApiKey => GqlCredentialKind::ApiKey,
+            CredentialKind::AccessToken => GqlCredentialKind::AccessToken,
             CredentialKind::Certificate => GqlCredentialKind::Certificate,
             CredentialKind::SharedKey => GqlCredentialKind::SharedKey,
         }
