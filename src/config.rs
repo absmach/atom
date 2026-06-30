@@ -478,6 +478,9 @@ impl Config {
             grpc_tls: None,
             signing_keys: SigningKeyConfig {
                 allow_plaintext_signing_keys: true,
+                // Provide a deterministic KEK so tests exercise encryption at rest
+                // for recoverable secrets (shared keys).
+                key_encryption_key: SecretBytes::new(vec![7u8; 32]).ok(),
                 ..SigningKeyConfig::default()
             },
             audit_policy: AuditPolicyConfig::default(),

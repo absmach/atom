@@ -189,12 +189,12 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-Environment variables: copy `.env.example` to `.env`. Required: `DATABASE_URL`. Signing uses ES256 keys bootstrapped/loaded at startup (optionally encrypted at rest via `ATOM_KEY_ENCRYPTION_KEY`) — there is no `JWT_SECRET`.
+Environment variables: copy `.env.example` to `.env`. Required: `DATABASE_URL`. Signing uses ES256 keys bootstrapped/loaded at startup — there is no `JWT_SECRET`. `ATOM_KEY_ENCRYPTION_KEY` is the single root AES-256-GCM key encrypting all recoverable secrets at rest (signing private keys and retrievable credential secrets such as shared keys); it is required to create shared keys.
 
 Optional: `ADMIN_SECRET` — if set, bootstraps the admin entity's password on first boot.
 Optional: `ADMIN_ENTITY_ID` — override the seeded admin UUID (default `00000000-0000-0000-0000-000000000001`).
 
-The runtime is production-hardened: configurable DB pool, five-category IP rate limiter, GraphQL depth/complexity/introspection limits (introspection **off** by default — opt in with `ATOM_GRAPHQL_INTROSPECTION_ENABLED=true`), per-route body limits, signing-key encryption at rest, audit retention, a `/health/ready` readiness probe, and graceful shutdown on SIGINT/SIGTERM (both the HTTP and gRPC servers drain in-flight requests before exit).
+The runtime is production-hardened: configurable DB pool, five-category IP rate limiter, GraphQL depth/complexity/introspection limits (introspection **off** by default — opt in with `ATOM_GRAPHQL_INTROSPECTION_ENABLED=true`), per-route body limits, encryption at rest for recoverable secrets (signing keys, shared keys), audit retention, a `/health/ready` readiness probe, and graceful shutdown on SIGINT/SIGTERM (both the HTTP and gRPC servers drain in-flight requests before exit).
 
 ### gRPC transport security
 

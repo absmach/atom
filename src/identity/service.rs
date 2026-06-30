@@ -21,7 +21,8 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::{encode_jwt, make_api_key},
-    config::{Config, OidcProviderConfig, SmtpTls},
+    config::{Config, OidcProviderConfig, SigningKeyConfig, SmtpTls},
+    crypto,
     error::{db_err, AppError},
     keys::LoadedKey,
     models::{
@@ -56,6 +57,9 @@ pub struct CredentialAuthentication {
     pub entity_id: Uuid,
     pub tenant_id: Option<Uuid>,
     pub credential_id: Uuid,
+    /// The credential kind that actually authenticated, so callers (audit, gRPC)
+    /// report the truth rather than the kind the client claimed.
+    pub kind: CredentialKind,
     pub email_verified: Option<bool>,
 }
 
@@ -105,18 +109,18 @@ pub async fn login_password_with_tenant(
     )
     .await;
 
-    let (entity_id_opt, tenant_id_opt, outcome) = match &result {
-        Ok(r) => {
+    let (entity_id_opt, tenant_id_opt, outcome, kind) = match &result {
+        Ok((r, kind)) => {
             let tenant_id = sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
                 .bind(r.entity_id)
                 .fetch_optional(pool)
                 .await
                 .ok()
                 .flatten();
-            (Some(r.entity_id), tenant_id, AuditOutcome::Allow)
+            (Some(r.entity_id), tenant_id, AuditOutcome::Allow, Some(*kind))
         }
-        Err(AppError::Unauthorized(_)) => (None, None, AuditOutcome::Deny),
-        Err(_) => return result,
+        Err(AppError::Unauthorized(_)) => (None, None, AuditOutcome::Deny, None),
+        Err(_) => return result.map(|(r, _)| r),
     };
 
     audit::write_hot_path(
@@ -130,12 +134,15 @@ pub async fn login_password_with_tenant(
             target_id: entity_id_opt,
             event: "auth.login",
             outcome,
-            details: serde_json::json!({"identifier": identifier}),
+            details: serde_json::json!({
+                "identifier": identifier,
+                "credential_kind": kind,
+            }),
         },
     )
     .await;
 
-    result
+    result.map(|(r, _)| r)
 }
 
 async fn do_login_password(
@@ -146,19 +153,20 @@ async fn do_login_password(
     secret: &str,
     requested_tenant_id: Option<Uuid>,
     tenant_alias: Option<&str>,
-) -> Result<LoginResponse, AppError> {
+) -> Result<(LoginResponse, CredentialKind), AppError> {
     let login_tenant_id = resolve_login_tenant(pool, requested_tenant_id, tenant_alias).await?;
     let authenticated =
         authenticate_password_credential_in_tenant(pool, cfg, identifier, secret, login_tenant_id)
             .await?;
-    create_login_response(
+    let response = create_login_response(
         pool,
         cfg,
         primary_key,
         authenticated.entity_id,
         authenticated.email_verified,
     )
-    .await
+    .await?;
+    Ok((response, authenticated.kind))
 }
 
 pub async fn resolve_credential_auth_tenant(
@@ -219,6 +227,7 @@ pub async fn authenticate_password_credential_in_tenant(
             entity_id: identity.entity_id,
             tenant_id: tenant_id.or(identity.tenant_id),
             credential_id: credential.id,
+            kind: credential.kind,
             email_verified: identity.email_verified,
         })
     }
@@ -1103,42 +1112,100 @@ async fn shared_key_credential_for_login(
     entity_id: Uuid,
     secret: &str,
 ) -> Result<PasswordCredential, AppError> {
-    use sqlx::Row;
+    // Fast path: server-generated shared keys embed their own credential id, so a
+    // single indexed lookup + one verify authenticates in O(1) regardless of how
+    // many keys the entity holds.
+    if let Some(cred_id) = embedded_shared_key_credential_id(secret) {
+        if let Some(credential) = active_shared_key_by_id(pool, entity_id, cred_id).await? {
+            if verify_secret(secret.as_bytes(), &credential.secret_hash) {
+                return Ok(credential);
+            }
+        }
+    }
+
+    // Fallback for operator-supplied keys that carry no embedded locator. Bounded
+    // by the (small) number of active shared keys on the entity.
+    for credential in active_shared_keys(pool, entity_id).await? {
+        if verify_secret(secret.as_bytes(), &credential.secret_hash) {
+            return Ok(credential);
+        }
+    }
+    Err(AppError::unauthorized("invalid credentials"))
+}
+
+/// Parse the credential UUID embedded in a server-generated shared key
+/// (`atom_shared_<credid-hex>_<random-hex>`). Returns `None` for operator-supplied
+/// keys that do not follow this layout.
+fn embedded_shared_key_credential_id(secret: &str) -> Option<Uuid> {
+    let rest = secret.strip_prefix("atom_shared_")?;
+    let id_hex = rest.split('_').next()?;
+    let bytes = hex::decode(id_hex).ok()?;
+    Uuid::from_slice(&bytes).ok()
+}
+
+async fn active_shared_key_by_id(
+    pool: &PgPool,
+    entity_id: Uuid,
+    credential_id: Uuid,
+) -> Result<Option<PasswordCredential>, AppError> {
+    let row = sqlx::query(
+        r#"SELECT c.id, c.secret_hash
+           FROM credentials c
+           JOIN entities e ON e.id = c.entity_id
+           WHERE c.id = $1
+             AND c.entity_id = $2
+             AND c.kind = $3
+             AND c.status = $4
+             AND e.kind <> 'human'
+             AND (c.expires_at IS NULL OR c.expires_at > now())"#,
+    )
+    .bind(credential_id)
+    .bind(entity_id)
+    .bind(CredentialKind::SharedKey)
+    .bind(CredentialStatus::Active)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+
+    row.map(shared_key_credential_from_row).transpose()
+}
+
+async fn active_shared_keys(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Vec<PasswordCredential>, AppError> {
     let rows = sqlx::query(
         r#"SELECT c.id, c.secret_hash
            FROM credentials c
            JOIN entities e ON e.id = c.entity_id
            WHERE c.entity_id = $1
-             AND e.kind = $2
-             AND c.kind = $3
-             AND c.status = $4
+             AND c.kind = $2
+             AND c.status = $3
+             AND e.kind <> 'human'
              AND (c.expires_at IS NULL OR c.expires_at > now())
            ORDER BY c.created_at DESC"#,
     )
     .bind(entity_id)
-    .bind(EntityKind::Device)
     .bind(CredentialKind::SharedKey)
     .bind(CredentialStatus::Active)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
-    rows.into_iter()
-        .map(|row| {
-            let secret_hash = row
-                .try_get::<Option<String>, _>("secret_hash")
-                .unwrap_or(None)
-                .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
-            Ok(PasswordCredential {
-                id: row.try_get("id").map_err(db_err)?,
-                kind: CredentialKind::SharedKey,
-                secret_hash,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?
-        .into_iter()
-        .find(|credential| verify_secret(secret.as_bytes(), &credential.secret_hash))
-        .ok_or_else(|| AppError::unauthorized("invalid credentials"))
+    rows.into_iter().map(shared_key_credential_from_row).collect()
+}
+
+fn shared_key_credential_from_row(row: sqlx::postgres::PgRow) -> Result<PasswordCredential, AppError> {
+    use sqlx::Row;
+    let secret_hash = row
+        .try_get::<Option<String>, _>("secret_hash")
+        .unwrap_or(None)
+        .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
+    Ok(PasswordCredential {
+        id: row.try_get("id").map_err(db_err)?,
+        kind: CredentialKind::SharedKey,
+        secret_hash,
+    })
 }
 
 async fn login_entity_row(
@@ -1848,12 +1915,10 @@ pub async fn create_password(
 }
 
 fn validate_password_for_kind(kind: &EntityKind, password: &str) -> Result<(), AppError> {
-    match kind {
-        EntityKind::Human => validate_password_strength(password),
-        EntityKind::Device
-        | EntityKind::Service
-        | EntityKind::Workload
-        | EntityKind::Application => validate_machine_secret(password),
+    if kind.is_machine() {
+        validate_machine_secret(password)
+    } else {
+        validate_password_strength(password)
     }
 }
 
@@ -1914,6 +1979,7 @@ pub async fn create_api_key(
 
 pub async fn create_shared_key(
     pool: &PgPool,
+    signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     req: CreateSharedKey,
 ) -> Result<SharedKeyResponse, AppError> {
@@ -1924,9 +1990,9 @@ pub async fn create_shared_key(
             "active entity {entity_id} not found"
         )));
     };
-    if kind != EntityKind::Device {
+    if !CredentialKind::SharedKey.allowed_for(&kind) {
         return Err(AppError::bad_request(
-            "shared keys can only be created for device entities",
+            "shared keys cannot be created for human entities",
         ));
     }
 
@@ -1938,19 +2004,25 @@ pub async fn create_shared_key(
         None => make_shared_key(cred_id),
     };
     let hash = hash_secret(key.as_bytes())?;
-    let metadata = serde_json::json!({
-        "description": req.description,
-        "shared_key": &key,
-    });
+    // The recoverable copy is envelope-encrypted; the plaintext never touches the DB.
+    let sealed = encrypt_recoverable_secret(signing_keys, cred_id, key.as_bytes())?;
+    let metadata = serde_json::json!({ "description": req.description });
 
     sqlx::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, secret_hash, expires_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6)"#,
+        r#"INSERT INTO credentials
+             (id, entity_id, kind, secret_hash,
+              secret_ciphertext, secret_nonce, secret_key_id, secret_enc_alg,
+              expires_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
     )
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::SharedKey)
     .bind(hash)
+    .bind(sealed.ciphertext)
+    .bind(sealed.nonce)
+    .bind(&signing_keys.key_encryption_key_id)
+    .bind(crypto::AEAD_ALG)
     .bind(req.expires_at)
     .bind(metadata)
     .execute(&mut *tx)
@@ -1967,6 +2039,7 @@ pub async fn create_shared_key(
 
 pub async fn reveal_shared_key(
     pool: &PgPool,
+    signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<SharedKeyResponse, AppError> {
@@ -1976,7 +2049,8 @@ pub async fn reveal_shared_key(
         r#"SELECT c.expires_at,
                   c.status,
                   c.secret_hash,
-                  c.metadata,
+                  c.secret_ciphertext,
+                  c.secret_nonce,
                   e.status AS entity_status,
                   t.status AS tenant_status
            FROM credentials c
@@ -1985,14 +2059,13 @@ pub async fn reveal_shared_key(
            WHERE c.id = $1
              AND c.entity_id = $2
              AND c.kind = $3
-             AND e.kind = $4
+             AND e.kind <> 'human'
              AND e.deleted_at IS NULL
              AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
     )
     .bind(credential_id)
     .bind(entity_id)
     .bind(CredentialKind::SharedKey)
-    .bind(EntityKind::Device)
     .fetch_one(pool)
     .await
     .map_err(|e| match e {
@@ -2022,14 +2095,21 @@ pub async fn reveal_shared_key(
         }
     }
 
-    let metadata: Value = row.try_get("metadata").map_err(db_err)?;
     let secret_hash: Option<String> = row.try_get("secret_hash").map_err(db_err)?;
     let secret_hash = secret_hash.ok_or_else(lost_shared_key_error)?;
-    let key = metadata
-        .get("shared_key")
-        .and_then(Value::as_str)
-        .ok_or_else(lost_shared_key_error)?
-        .to_string();
+    let ciphertext: Option<Vec<u8>> = row.try_get("secret_ciphertext").map_err(db_err)?;
+    let nonce: Option<Vec<u8>> = row.try_get("secret_nonce").map_err(db_err)?;
+    let (Some(ciphertext), Some(nonce)) = (ciphertext, nonce) else {
+        return Err(lost_shared_key_error());
+    };
+
+    let kek = signing_keys
+        .key_encryption_key
+        .as_ref()
+        .ok_or_else(lost_shared_key_error)?;
+    let key_bytes = crypto::decrypt(kek.expose(), credential_id.as_bytes(), &ciphertext, &nonce)
+        .map_err(|_| lost_shared_key_error())?;
+    let key = String::from_utf8(key_bytes).map_err(|_| lost_shared_key_error())?;
 
     if !verify_secret(key.as_bytes(), &secret_hash) {
         return Err(lost_shared_key_error());
@@ -2042,9 +2122,24 @@ pub async fn reveal_shared_key(
     })
 }
 
+/// Envelope-encrypt a recoverable credential secret, binding the ciphertext to the
+/// credential id. Requires the deployment KEK; refuses to fall back to plaintext.
+fn encrypt_recoverable_secret(
+    signing_keys: &SigningKeyConfig,
+    credential_id: Uuid,
+    plaintext: &[u8],
+) -> Result<crypto::Sealed, AppError> {
+    let kek = signing_keys.key_encryption_key.as_ref().ok_or_else(|| {
+        AppError::bad_request(
+            "ATOM_KEY_ENCRYPTION_KEY must be set to create retrievable shared keys",
+        )
+    })?;
+    crypto::encrypt(kek.expose(), credential_id.as_bytes(), plaintext)
+}
+
 fn lost_shared_key_error() -> AppError {
     AppError::conflict(
-        "could not retrieve the device key; the stored key is lost, please set a new device key",
+        "could not retrieve the shared key; the stored key is lost, please set a new shared key",
     )
 }
 

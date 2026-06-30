@@ -77,8 +77,8 @@ describe("EntityCredentials", () => {
     expect(screen.getByText("Certificate")).toBeInTheDocument();
     expect(screen.getByText("0abc1234")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Add password" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Add password" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Add API key" }),
     ).toBeInTheDocument();
@@ -93,7 +93,7 @@ describe("EntityCredentials", () => {
     ).toBeInTheDocument();
   });
 
-  it("hides the shared key action for non-device entities", async () => {
+  it("hides the shared key action for human entities", async () => {
     renderEntityCredentials("human");
 
     expect(await screen.findByText("Password")).toBeInTheDocument();
@@ -103,6 +103,18 @@ describe("EntityCredentials", () => {
     expect(
       screen.queryByRole("button", { name: "Add shared key" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers shared keys alongside passwords for non-device machine entities", async () => {
+    renderEntityCredentials("service");
+
+    expect(await screen.findByText("Password")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Add password" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Add shared key" }),
+    ).toBeInTheDocument();
   });
 
   it("opens one explicit add form at a time", async () => {

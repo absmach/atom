@@ -197,9 +197,12 @@ impl AuthService for AtomAuth {
         let req = request.into_inner();
 
         let kind = req.kind.trim();
-        if !(kind.is_empty() || kind.eq_ignore_ascii_case("password")) {
+        if !(kind.is_empty()
+            || kind.eq_ignore_ascii_case("password")
+            || kind.eq_ignore_ascii_case("shared_key"))
+        {
             return Err(Status::invalid_argument(
-                "unsupported credential kind: expected password",
+                "unsupported credential kind: expected password or shared_key",
             ));
         }
 
@@ -232,6 +235,7 @@ impl AuthService for AtomAuth {
         };
         let entity_id = result.as_ref().ok().map(|auth| auth.entity_id);
         let credential_id = result.as_ref().ok().map(|auth| auth.credential_id);
+        let credential_kind = result.as_ref().ok().map(|auth| auth.kind);
         audit::write_hot_path(
             &self.state.pool,
             self.state.config.audit_policy,
@@ -245,7 +249,7 @@ impl AuthService for AtomAuth {
                 outcome,
                 details: serde_json::json!({
                     "entity_id": entity_id,
-                    "credential_kind": "password",
+                    "credential_kind": credential_kind,
                     "identifier": req.identifier,
                     "transport": "grpc",
                 }),

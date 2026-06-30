@@ -42,7 +42,10 @@ pub struct AuthMutation;
 #[Object]
 impl AuthMutation {
     async fn login(&self, ctx: &Context<'_>, input: LoginInput) -> Result<LoginResponse> {
-        if input.kind != "password" {
+        // The credential that actually authenticates is determined by the secret
+        // itself (password vs. machine shared key) and reported back in the audit
+        // log; the client only declares which families it is presenting.
+        if !matches!(input.kind.as_str(), "password" | "shared_key") {
             return Err(async_graphql::Error::new(format!(
                 "unsupported credential kind: {}",
                 input.kind

@@ -230,7 +230,9 @@ export function EntityCredentials({
   const [form, setForm] = React.useState<AddCredentialState>(
     newCredentialForm("password"),
   );
-  const isDeviceEntity = entityKind === "device";
+  // Shared keys are retrievable machine secrets: offered to every non-human
+  // entity. Passwords coexist and remain available for all kinds.
+  const isMachineEntity = entityKind !== undefined && entityKind !== "human";
 
   const { data, error, isFetching, refetch } = useQuery({
     enabled: Boolean(entityId),
@@ -468,16 +470,14 @@ export function EntityCredentials({
         <div className="text-sm font-medium">Credentials</div>
         {!activeForm ? (
           <div className="flex flex-wrap justify-end gap-2">
-            {!isDeviceEntity ? (
-              <Button
-                onClick={() => openForm("password")}
-                size="sm"
-                variant="outline"
-              >
-                <Lock data-icon="inline-start" className="size-3.5" />
-                Add password
-              </Button>
-            ) : null}
+            <Button
+              onClick={() => openForm("password")}
+              size="sm"
+              variant="outline"
+            >
+              <Lock data-icon="inline-start" className="size-3.5" />
+              Add password
+            </Button>
             <Button
               onClick={() => openForm("api_key")}
               size="sm"
@@ -486,7 +486,7 @@ export function EntityCredentials({
               <KeyRound data-icon="inline-start" className="size-3.5" />
               Add API key
             </Button>
-            {isDeviceEntity ? (
+            {isMachineEntity ? (
               <Button
                 onClick={() => openForm("shared_key")}
                 size="sm"
@@ -972,7 +972,7 @@ function credentialKindLabel(kind: string) {
     case "password":
       return "Password";
     case "api_key":
-      return "API Key";
+      return "API key";
     case "shared_key":
       return "Shared key";
     case "certificate":

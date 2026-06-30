@@ -6,8 +6,7 @@ use p256::{
     pkcs8::{DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding},
     SecretKey,
 };
-use rand::{rngs::OsRng, RngCore};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use rand::rngs::OsRng;
 use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -15,12 +14,12 @@ use uuid::Uuid;
 use crate::{
     auth::{require_capability, AuthContext, Scope},
     config::SigningKeyConfig,
+    crypto,
     error::{db_err, AppError},
     state::AppState,
 };
 
-const SIGNING_KEY_ENCRYPTION_ALG: &str = "AES-256-GCM";
-const AES_GCM_NONCE_LEN: usize = 12;
+const SIGNING_KEY_ENCRYPTION_ALG: &str = crypto::AEAD_ALG;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -228,19 +227,10 @@ fn encrypt_private_key(
     kid: &str,
     private_pem: &str,
 ) -> Result<EncryptedPrivateKey, AppError> {
-    let key = aead_key(cfg)?;
-    let mut nonce = [0_u8; AES_GCM_NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
-    let mut ciphertext = private_pem.as_bytes().to_vec();
-    key.seal_in_place_append_tag(
-        Nonce::assume_unique_for_key(nonce),
-        Aad::from(kid.as_bytes()),
-        &mut ciphertext,
-    )
-    .map_err(|_| AppError::Internal(anyhow::anyhow!("encrypt signing private key")))?;
+    let sealed = crypto::encrypt(kek(cfg)?, kid.as_bytes(), private_pem.as_bytes())?;
     Ok(EncryptedPrivateKey {
-        ciphertext,
-        nonce: nonce.to_vec(),
+        ciphertext: sealed.ciphertext,
+        nonce: sealed.nonce,
     })
 }
 
@@ -250,35 +240,21 @@ fn decrypt_private_key(
     ciphertext: &[u8],
     nonce: &[u8],
 ) -> Result<String, AppError> {
-    if nonce.len() != AES_GCM_NONCE_LEN {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "signing key {kid} has invalid nonce length"
-        )));
-    }
-    let mut nonce_bytes = [0_u8; AES_GCM_NONCE_LEN];
-    nonce_bytes.copy_from_slice(nonce);
-    let key = aead_key(cfg)?;
-    let mut plaintext = ciphertext.to_vec();
-    let plaintext = key
-        .open_in_place(
-            Nonce::assume_unique_for_key(nonce_bytes),
-            Aad::from(kid.as_bytes()),
-            &mut plaintext,
-        )
+    let plaintext = crypto::decrypt(kek(cfg)?, kid.as_bytes(), ciphertext, nonce)
         .map_err(|_| AppError::Internal(anyhow::anyhow!("decrypt signing private key {kid}")))?;
-    String::from_utf8(plaintext.to_vec())
+    String::from_utf8(plaintext)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("signing key {kid} is not UTF-8: {e}")))
 }
 
-fn aead_key(cfg: &SigningKeyConfig) -> Result<LessSafeKey, AppError> {
-    let key = cfg.key_encryption_key.as_ref().ok_or_else(|| {
-        AppError::Internal(anyhow::anyhow!(
-            "ATOM_KEY_ENCRYPTION_KEY is required to load encrypted signing keys"
-        ))
-    })?;
-    let unbound = UnboundKey::new(&AES_256_GCM, key.expose())
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid signing key encryption key")))?;
-    Ok(LessSafeKey::new(unbound))
+fn kek(cfg: &SigningKeyConfig) -> Result<&[u8], AppError> {
+    cfg.key_encryption_key
+        .as_ref()
+        .map(|k| k.expose())
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "ATOM_KEY_ENCRYPTION_KEY is required to load encrypted signing keys"
+            ))
+        })
 }
 
 // ─── Database operations ──────────────────────────────────────────────────────

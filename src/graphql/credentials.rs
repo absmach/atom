@@ -127,6 +127,7 @@ impl CredentialMutation {
         let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
         let response = service::create_shared_key(
             &state.pool,
+            &state.config.signing_keys,
             entity_id,
             token_model::CreateSharedKey {
                 expires_at: parse_optional_timestamp(input.expires_at, "expiresAt")?,
@@ -166,9 +167,10 @@ impl CredentialMutation {
         let entity_id = parse_id(entity_id, "entityId")?;
         let credential_id = parse_id(credential_id, "credentialId")?;
         let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
-        let response = service::reveal_shared_key(&state.pool, entity_id, credential_id)
-            .await
-            .map_err(gql_error)?;
+        let response =
+            service::reveal_shared_key(&state.pool, &state.config.signing_keys, entity_id, credential_id)
+                .await
+                .map_err(gql_error)?;
         audit::write(
             &state.pool,
             audit::AuditEvent {

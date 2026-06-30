@@ -280,7 +280,7 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     assert!(!rejected.errors.is_empty());
     assert!(rejected.errors[0]
         .message
-        .contains("can only be created for device entities"));
+        .contains("cannot be created for human entities"));
 
     let direct_human_insert = sqlx::query(
         "INSERT INTO credentials (entity_id, kind, secret_hash) VALUES ($1, 'shared_key', 'hash')",
@@ -289,7 +289,7 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     .execute(&pool)
     .await;
     let db_err = direct_human_insert
-        .expect_err("DB constraint should reject shared_key credentials for non-device entities")
+        .expect_err("DB constraint should reject shared_key credentials for human entities")
         .into_database_error()
         .expect("database error");
     assert_eq!(db_err.code().as_deref(), Some("23514"));
@@ -319,14 +319,18 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     let key = shared_key["key"].as_str().expect("shared key").to_owned();
     assert!(key.starts_with("atom_shared_"));
 
-    let (hash, metadata): (String, serde_json::Value) =
-        sqlx::query_as("SELECT secret_hash, metadata FROM credentials WHERE id = $1")
-            .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
-            .fetch_one(&pool)
-            .await
-            .expect("credential row");
+    let (hash, metadata, ciphertext): (String, serde_json::Value, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT secret_hash, metadata, secret_ciphertext FROM credentials WHERE id = $1",
+    )
+    .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
+    .fetch_one(&pool)
+    .await
+    .expect("credential row");
     assert_ne!(hash, key);
-    assert_eq!(metadata["shared_key"].as_str(), Some(key.as_str()));
+    // The plaintext key is never persisted; only the envelope-encrypted copy is.
+    assert!(metadata.get("shared_key").is_none());
+    let ciphertext = ciphertext.expect("secret ciphertext stored");
+    assert!(!ciphertext.windows(key.len()).any(|w| w == key.as_bytes()));
 
     let device_kind_change = sqlx::query("UPDATE entities SET kind = 'human' WHERE id = $1")
         .bind(device_id)
@@ -396,16 +400,19 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     .expect("authenticate shared key");
     assert_eq!(authenticated.entity_id, device_id);
     assert_eq!(authenticated.credential_id.to_string(), credential_id);
+    assert_eq!(authenticated.kind, atom::models::enums::CredentialKind::SharedKey);
 
+    // Tampering with the stored ciphertext must surface as an unrecoverable key
+    // rather than returning a wrong secret.
     sqlx::query(
         r#"UPDATE credentials
-           SET metadata = jsonb_set(metadata, '{shared_key}', to_jsonb('mismatched-key'::text))
+           SET secret_ciphertext = decode(md5(random()::text), 'hex')
            WHERE id = $1"#,
     )
     .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
     .execute(&pool)
     .await
-    .expect("corrupt shared key metadata");
+    .expect("corrupt shared key ciphertext");
 
     let lost_key = schema
         .execute(authed(format!(
@@ -421,7 +428,67 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     assert!(!lost_key.errors.is_empty());
     assert!(lost_key.errors[0]
         .message
-        .contains("could not retrieve the device key"));
+        .contains("could not retrieve the shared key"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn shared_key_works_for_non_device_machine_entities() {
+    let pool = common::pool().await;
+    let service_id = entity(&pool, "service").await;
+    let schema = build_schema(state(pool.clone()));
+
+    let created = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createSharedKey(entityId: "{service_id}", input: {{}}) {{
+                credentialId
+                key
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let created_json = created.data.into_json().expect("json data");
+    let credential_id = created_json["createSharedKey"]["credentialId"]
+        .as_str()
+        .expect("credential id")
+        .to_owned();
+    let key = created_json["createSharedKey"]["key"]
+        .as_str()
+        .expect("shared key")
+        .to_owned();
+
+    let revealed = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              revealSharedKey(entityId: "{service_id}", credentialId: "{credential_id}") {{
+                key
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(revealed.errors.is_empty(), "{:?}", revealed.errors);
+    assert_eq!(
+        revealed.data.into_json().expect("json data")["revealSharedKey"]["key"],
+        key
+    );
+
+    let authenticated = identity_service::authenticate_password_credential_in_tenant(
+        &pool,
+        &Config::for_tests(),
+        &service_id.to_string(),
+        &key,
+        None,
+    )
+    .await
+    .expect("authenticate shared key for service entity");
+    assert_eq!(authenticated.entity_id, service_id);
+    assert_eq!(authenticated.kind, atom::models::enums::CredentialKind::SharedKey);
 }
 
 #[tokio::test]

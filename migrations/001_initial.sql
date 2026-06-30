@@ -148,6 +148,13 @@ CREATE TABLE credentials (
     kind        TEXT        NOT NULL CHECK (kind IN ('password', 'api_key', 'certificate', 'shared_key')),
     identifier  TEXT,
     secret_hash TEXT,
+    -- Recoverable secrets (e.g. shared keys) are envelope-encrypted at rest; the
+    -- plaintext is never stored. secret_hash remains the auth verifier, these
+    -- columns are the reveal source. See src/crypto.rs and identity::service.
+    secret_ciphertext BYTEA,
+    secret_nonce      BYTEA,
+    secret_key_id     TEXT,
+    secret_enc_alg    TEXT,
     metadata    JSONB       NOT NULL DEFAULT '{}',
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
     expires_at  TIMESTAMPTZ,
@@ -167,7 +174,10 @@ CREATE INDEX idx_credentials_shared_key_status
     ON credentials(entity_id, status, expires_at)
     WHERE kind = 'shared_key';
 
-CREATE OR REPLACE FUNCTION enforce_shared_key_device_credential() RETURNS trigger AS $$
+-- Shared keys are retrievable machine secrets: allowed for any machine entity,
+-- forbidden for humans. The stable invariant enforced here is "shared_key =>
+-- entity is non-human", which holds as new machine kinds are added.
+CREATE OR REPLACE FUNCTION enforce_shared_key_non_human_credential() RETURNS trigger AS $$
 DECLARE
     entity_kind TEXT;
 BEGIN
@@ -181,8 +191,8 @@ BEGIN
      WHERE e.id = NEW.entity_id
      FOR UPDATE;
 
-    IF entity_kind IS DISTINCT FROM 'device' THEN
-        RAISE EXCEPTION 'shared_key credentials can only belong to device entities'
+    IF entity_kind = 'human' THEN
+        RAISE EXCEPTION 'shared_key credentials cannot belong to human entities'
             USING ERRCODE = '23514';
     END IF;
 
@@ -190,20 +200,20 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_credentials_shared_key_device_only
+CREATE TRIGGER trg_credentials_shared_key_non_human_only
     BEFORE INSERT OR UPDATE OF entity_id, kind ON credentials
-    FOR EACH ROW EXECUTE FUNCTION enforce_shared_key_device_credential();
+    FOR EACH ROW EXECUTE FUNCTION enforce_shared_key_non_human_credential();
 
-CREATE OR REPLACE FUNCTION prevent_non_device_entity_with_shared_key() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION prevent_human_entity_with_shared_key() RETURNS trigger AS $$
 BEGIN
-    IF NEW.kind <> 'device'
+    IF NEW.kind = 'human'
        AND EXISTS (
            SELECT 1
              FROM credentials c
             WHERE c.entity_id = NEW.id
               AND c.kind = 'shared_key'
        ) THEN
-        RAISE EXCEPTION 'entities with shared_key credentials must remain device entities'
+        RAISE EXCEPTION 'entities with shared_key credentials cannot become human entities'
             USING ERRCODE = '23514';
     END IF;
 
@@ -211,11 +221,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_entities_shared_key_device_only
+CREATE TRIGGER trg_entities_shared_key_non_human_only
     BEFORE UPDATE OF kind ON entities
     FOR EACH ROW
     WHEN (OLD.kind IS DISTINCT FROM NEW.kind)
-    EXECUTE FUNCTION prevent_non_device_entity_with_shared_key();
+    EXECUTE FUNCTION prevent_human_entity_with_shared_key();
 
 CREATE TABLE certificate_crl_state (
     issuer_fingerprint_sha256 TEXT PRIMARY KEY,
