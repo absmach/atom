@@ -4788,7 +4788,7 @@ pub async fn expiring_credentials(
     )
     .bind(days.to_string())
     .bind(params.entity_id)
-    .bind(params.kind.clone())
+    .bind(params.kind)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)

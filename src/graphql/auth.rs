@@ -50,11 +50,13 @@ impl AuthMutation {
             &state.pool,
             &state.config,
             &keys.primary,
-            &input.identifier,
-            &input.secret,
-            parse_optional_id(input.tenant_id, "tenantId")?,
-            input.tenant_alias.as_deref(),
-            credential_kind,
+            service::CredentialLoginRequest {
+                identifier: &input.identifier,
+                secret: &input.secret,
+                tenant_id: parse_optional_id(input.tenant_id, "tenantId")?,
+                tenant_alias: input.tenant_alias.as_deref(),
+                kind: credential_kind,
+            },
         )
         .await
         .map_err(gql_error)?;

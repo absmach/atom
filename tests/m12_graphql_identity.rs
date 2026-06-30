@@ -9,12 +9,12 @@ mod common;
 
 use async_graphql::Request;
 use atom::{
-    auth::AuthContext,
+    auth::{authenticate_token, AuthContext},
     config::Config,
     graphql::build_schema,
     identity::service as identity_service,
     keys::{ActiveKeys, LoadedKey},
-    models::enums::CredentialKind,
+    models::enums::{CredentialKind, CredentialStatus},
     state::AppState,
 };
 use sqlx::PgPool;
@@ -43,6 +43,14 @@ fn state(pool: PgPool) -> AppState {
 fn authed(query: impl Into<String>) -> Request {
     Request::new(query).data(AuthContext {
         entity_id: common::admin_id(),
+        tenant_id: None,
+        session_id: None,
+    })
+}
+
+fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
+    Request::new(query).data(AuthContext {
+        entity_id,
         tenant_id: None,
         session_id: None,
     })
@@ -257,6 +265,179 @@ async fn create_api_key_returns_secret_once_and_credentials_list_contains_it() {
             && credential["kind"] == "api_key"
             && credential["status"] == "active"
     }));
+}
+
+#[tokio::test]
+#[ignore]
+async fn personal_access_tokens_are_self_scoped_api_keys() {
+    let pool = common::pool().await;
+    let owner_id = entity(&pool, "human").await;
+    let other_id = entity(&pool, "human").await;
+    let auth_state = state(pool.clone());
+    let schema = build_schema(state(pool.clone()));
+    let name = format!("graphql-pat-{}", Uuid::new_v4());
+
+    let created = schema
+        .execute(authed_as(
+            owner_id,
+            format!(
+                r#"
+                mutation {{
+                  createPersonalAccessToken(input: {{
+                    name: "{name}",
+                    description: "CLI access",
+                    expiresAt: "2999-01-01T00:00:00Z"
+                  }}) {{
+                    credentialId
+                    token
+                    name
+                    description
+                    expiresAt
+                  }}
+                }}
+                "#
+            ),
+        ))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let created_json = created.data.into_json().expect("json data");
+    let pat = &created_json["createPersonalAccessToken"];
+    let credential_id = pat["credentialId"]
+        .as_str()
+        .expect("credential id")
+        .parse::<Uuid>()
+        .expect("credential uuid");
+    let token = pat["token"].as_str().expect("token").to_owned();
+    assert!(token.starts_with("atom_"));
+    assert_eq!(pat["name"], name);
+    assert_eq!(pat["description"], "CLI access");
+
+    let (kind, identifier, secret_hash, metadata, status): (
+        CredentialKind,
+        Option<String>,
+        String,
+        serde_json::Value,
+        CredentialStatus,
+    ) = sqlx::query_as(
+        "SELECT kind, identifier, secret_hash, metadata, status FROM credentials WHERE id = $1",
+    )
+    .bind(credential_id)
+    .fetch_one(&pool)
+    .await
+    .expect("credential row");
+    assert_eq!(kind, CredentialKind::ApiKey);
+    assert_eq!(status, CredentialStatus::Active);
+    assert!(identifier
+        .as_deref()
+        .is_some_and(|identifier| token.starts_with(identifier)));
+    assert_ne!(secret_hash, token);
+    assert_eq!(metadata["usage"], "personal_access_token");
+    assert_eq!(metadata["name"], name);
+    assert_eq!(metadata["description"], "CLI access");
+
+    let owner_listed = schema
+        .execute(authed_as(
+            owner_id,
+            r#"
+            {
+              personalAccessTokens {
+                items {
+                  credentialId
+                  name
+                  description
+                  identifier
+                  status
+                  expiresAt
+                  createdAt
+                }
+                total
+              }
+            }
+            "#,
+        ))
+        .await;
+    assert!(owner_listed.errors.is_empty(), "{:?}", owner_listed.errors);
+    let owner_json = owner_listed.data.into_json().expect("json data");
+    let owner_items = owner_json["personalAccessTokens"]["items"]
+        .as_array()
+        .expect("pat list");
+    let listed_pat = owner_items
+        .iter()
+        .find(|item| item["credentialId"] == credential_id.to_string())
+        .expect("listed token");
+    assert_eq!(listed_pat["name"], name);
+    assert_eq!(listed_pat["status"], "active");
+    assert!(!listed_pat
+        .as_object()
+        .expect("listed token object")
+        .contains_key("token"));
+
+    let other_listed = schema
+        .execute(authed_as(
+            other_id,
+            r#"
+            {
+              personalAccessTokens {
+                items { credentialId }
+                total
+              }
+            }
+            "#,
+        ))
+        .await;
+    assert!(other_listed.errors.is_empty(), "{:?}", other_listed.errors);
+    let other_json = other_listed.data.into_json().expect("json data");
+    assert_eq!(other_json["personalAccessTokens"]["total"], 0);
+
+    let authenticated = authenticate_token(&auth_state, &token)
+        .await
+        .expect("PAT authenticates as API key");
+    assert_eq!(authenticated.entity_id, owner_id);
+    assert!(authenticated.session_id.is_none());
+
+    let other_revoke = schema
+        .execute(authed_as(
+            other_id,
+            format!(
+                r#"
+                mutation {{
+                  revokePersonalAccessToken(credentialId: "{credential_id}")
+                }}
+                "#
+            ),
+        ))
+        .await;
+    assert!(!other_revoke.errors.is_empty());
+    assert!(other_revoke.errors[0]
+        .message
+        .contains("personal access token not found"));
+
+    let owner_revoke = schema
+        .execute(authed_as(
+            owner_id,
+            format!(
+                r#"
+                mutation {{
+                  revokePersonalAccessToken(credentialId: "{credential_id}")
+                }}
+                "#
+            ),
+        ))
+        .await;
+    assert!(owner_revoke.errors.is_empty(), "{:?}", owner_revoke.errors);
+    assert_eq!(
+        owner_revoke.data.into_json().expect("json data")["revokePersonalAccessToken"],
+        true
+    );
+
+    let revoked_status: CredentialStatus =
+        sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+            .bind(credential_id)
+            .fetch_one(&pool)
+            .await
+            .expect("credential status");
+    assert_eq!(revoked_status, CredentialStatus::Revoked);
+    assert!(authenticate_token(&auth_state, &token).await.is_err());
 }
 
 #[tokio::test]

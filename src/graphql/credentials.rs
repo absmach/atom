@@ -13,7 +13,9 @@ use super::{
     auth::{gql_error, require_auth, require_credential_management},
     types::{
         parse_id, parse_optional_timestamp, ApiKeyResponse, CreateApiKeyInput,
-        CreateSharedKeyInput, Credential, CredentialList, SharedKeyResponse,
+        CreatePersonalAccessTokenInput, CreateSharedKeyInput, Credential, CredentialList,
+        PersonalAccessToken, PersonalAccessTokenList, PersonalAccessTokenResponse,
+        SharedKeyResponse,
     },
 };
 
@@ -33,6 +35,19 @@ impl CredentialQuery {
         let total = credentials.len() as i64;
         Ok(CredentialList {
             items: credentials.into_iter().map(Credential::from).collect(),
+            total,
+        })
+    }
+
+    async fn personal_access_tokens(&self, ctx: &Context<'_>) -> Result<PersonalAccessTokenList> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let tokens = service::list_personal_access_tokens(&state.pool, auth.entity_id)
+            .await
+            .map_err(gql_error)?;
+        let total = tokens.len() as i64;
+        Ok(PersonalAccessTokenList {
+            items: tokens.into_iter().map(PersonalAccessToken::from).collect(),
             total,
         })
     }
@@ -113,6 +128,77 @@ impl CredentialMutation {
         )
         .await;
         Ok(response.into())
+    }
+
+    async fn create_personal_access_token(
+        &self,
+        ctx: &Context<'_>,
+        input: CreatePersonalAccessTokenInput,
+    ) -> Result<PersonalAccessTokenResponse> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let response = service::create_personal_access_token(
+            &state.pool,
+            auth.entity_id,
+            token_model::CreatePersonalAccessToken {
+                name: input.name,
+                description: input.description,
+                expires_at: parse_optional_timestamp(input.expires_at, "expiresAt")?,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: auth.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(response.credential_id),
+                event: "credential.create",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "entity_id": auth.entity_id,
+                    "kind": "api_key",
+                    "usage": "personal_access_token",
+                    "name": &response.name,
+                    "credential_id": response.credential_id
+                }),
+            },
+        )
+        .await;
+        Ok(response.into())
+    }
+
+    async fn revoke_personal_access_token(
+        &self,
+        ctx: &Context<'_>,
+        credential_id: ID,
+    ) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let credential_id = parse_id(credential_id, "credentialId")?;
+        service::revoke_personal_access_token(&state.pool, auth.entity_id, credential_id)
+            .await
+            .map_err(gql_error)?;
+        audit::write(
+            &state.pool,
+            audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: auth.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(credential_id),
+                event: "credential.revoke",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "kind": "api_key",
+                    "usage": "personal_access_token",
+                    "credential_id": credential_id
+                }),
+            },
+        )
+        .await;
+        Ok(true)
     }
 
     async fn create_shared_key(

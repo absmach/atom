@@ -755,6 +755,64 @@ impl SharedKeyResponse {
     }
 }
 
+pub struct PersonalAccessToken(pub token_model::PersonalAccessTokenSummary);
+
+#[Object]
+impl PersonalAccessToken {
+    async fn credential_id(&self) -> ID {
+        id(self.0.credential_id)
+    }
+
+    async fn name(&self) -> &str {
+        &self.0.name
+    }
+
+    async fn description(&self) -> Option<&str> {
+        self.0.description.as_deref()
+    }
+
+    async fn identifier(&self) -> Option<&str> {
+        self.0.identifier.as_deref()
+    }
+
+    async fn status(&self) -> &'static str {
+        credential_status_as_str(&self.0.status)
+    }
+
+    async fn expires_at(&self) -> Option<String> {
+        self.0.expires_at.map(timestamp)
+    }
+
+    async fn created_at(&self) -> String {
+        timestamp(self.0.created_at)
+    }
+}
+
+pub struct PersonalAccessTokenResponse(pub token_model::PersonalAccessTokenResponse);
+
+#[Object]
+impl PersonalAccessTokenResponse {
+    async fn credential_id(&self) -> ID {
+        id(self.0.credential_id)
+    }
+
+    async fn token(&self) -> &str {
+        &self.0.token
+    }
+
+    async fn name(&self) -> &str {
+        &self.0.name
+    }
+
+    async fn description(&self) -> Option<&str> {
+        self.0.description.as_deref()
+    }
+
+    async fn expires_at(&self) -> Option<String> {
+        self.0.expires_at.map(timestamp)
+    }
+}
+
 pub struct Ownership(pub entity_model::Ownership);
 
 #[Object]
@@ -1653,6 +1711,13 @@ pub struct CreateApiKeyInput {
 }
 
 #[derive(InputObject)]
+pub struct CreatePersonalAccessTokenInput {
+    pub name: String,
+    pub description: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+#[derive(InputObject)]
 pub struct CreateSharedKeyInput {
     pub expires_at: Option<String>,
     pub description: Option<String>,
@@ -1957,6 +2022,12 @@ pub struct CredentialList {
 }
 
 #[derive(Default)]
+pub struct PersonalAccessTokenList {
+    pub items: Vec<PersonalAccessToken>,
+    pub total: i64,
+}
+
+#[derive(Default)]
 pub struct RoleList {
     pub items: Vec<Role>,
     pub total: i64,
@@ -2211,6 +2282,17 @@ impl CredentialList {
     }
 }
 
+#[Object]
+impl PersonalAccessTokenList {
+    async fn items(&self) -> &[PersonalAccessToken] {
+        &self.items
+    }
+
+    async fn total(&self) -> i64 {
+        self.total
+    }
+}
+
 impl From<profile_model::Profile> for Profile {
     fn from(profile: profile_model::Profile) -> Self {
         Profile(profile)
@@ -2306,6 +2388,18 @@ impl From<token_model::ApiKeyResponse> for ApiKeyResponse {
 impl From<token_model::SharedKeyResponse> for SharedKeyResponse {
     fn from(response: token_model::SharedKeyResponse) -> Self {
         SharedKeyResponse(response)
+    }
+}
+
+impl From<token_model::PersonalAccessTokenSummary> for PersonalAccessToken {
+    fn from(token: token_model::PersonalAccessTokenSummary) -> Self {
+        PersonalAccessToken(token)
+    }
+}
+
+impl From<token_model::PersonalAccessTokenResponse> for PersonalAccessTokenResponse {
+    fn from(response: token_model::PersonalAccessTokenResponse) -> Self {
+        PersonalAccessTokenResponse(response)
     }
 }
 

@@ -130,11 +130,13 @@ pub async fn login(
                 &state.pool,
                 &state.config,
                 &keys.primary,
-                &req.identifier,
-                &req.secret,
-                req.tenant_id,
-                req.tenant_alias.as_deref(),
-                req.kind,
+                service::CredentialLoginRequest {
+                    identifier: &req.identifier,
+                    secret: &req.secret,
+                    tenant_id: req.tenant_id,
+                    tenant_alias: req.tenant_alias.as_deref(),
+                    kind: req.kind,
+                },
             )
             .await?;
             let cookie = auth_cookie(

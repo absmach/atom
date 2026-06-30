@@ -31,7 +31,10 @@ use crate::{
             LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
             SignupResponse,
         },
-        token::{ApiKeyResponse, CreateApiKey, CreateSharedKey, SharedKeyResponse},
+        token::{
+            ApiKeyResponse, CreateApiKey, CreatePersonalAccessToken, CreateSharedKey,
+            PersonalAccessTokenResponse, PersonalAccessTokenSummary, SharedKeyResponse,
+        },
     },
 };
 
@@ -51,6 +54,7 @@ pub fn verify_secret(secret: &[u8], hash: &str) -> bool {
 }
 
 const DEFAULT_MIN_PASSWORD_CHARS: usize = 12;
+const PERSONAL_ACCESS_TOKEN_USAGE: &str = "personal_access_token";
 
 #[derive(Debug, Clone)]
 pub struct CredentialAuthentication {
@@ -61,6 +65,15 @@ pub struct CredentialAuthentication {
     /// report the truth rather than the kind the client claimed.
     pub kind: CredentialKind,
     pub email_verified: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CredentialLoginRequest<'a> {
+    pub identifier: &'a str,
+    pub secret: &'a str,
+    pub tenant_id: Option<Uuid>,
+    pub tenant_alias: Option<&'a str>,
+    pub kind: CredentialKind,
 }
 
 pub fn validate_password_strength(password: &str) -> Result<(), AppError> {
@@ -102,11 +115,13 @@ pub async fn login_password_with_tenant(
         pool,
         cfg,
         primary_key,
-        identifier,
-        secret,
-        tenant_id,
-        tenant_alias,
-        CredentialKind::Password,
+        CredentialLoginRequest {
+            identifier,
+            secret,
+            tenant_id,
+            tenant_alias,
+            kind: CredentialKind::Password,
+        },
     )
     .await
 }
@@ -115,23 +130,9 @@ pub async fn login_credential_with_tenant(
     pool: &PgPool,
     cfg: &Config,
     primary_key: &LoadedKey,
-    identifier: &str,
-    secret: &str,
-    tenant_id: Option<Uuid>,
-    tenant_alias: Option<&str>,
-    requested_kind: CredentialKind,
+    request: CredentialLoginRequest<'_>,
 ) -> Result<LoginResponse, AppError> {
-    let result = do_login_credential(
-        pool,
-        cfg,
-        primary_key,
-        identifier,
-        secret,
-        tenant_id,
-        tenant_alias,
-        requested_kind,
-    )
-    .await;
+    let result = do_login_credential(pool, cfg, primary_key, request).await;
 
     let (entity_id_opt, tenant_id_opt, outcome, kind) = match &result {
         Ok((r, kind)) => {
@@ -164,7 +165,7 @@ pub async fn login_credential_with_tenant(
             event: "auth.login",
             outcome,
             details: serde_json::json!({
-                "identifier": identifier,
+                "identifier": request.identifier,
                 "credential_kind": kind,
             }),
         },
@@ -178,20 +179,17 @@ async fn do_login_credential(
     pool: &PgPool,
     cfg: &Config,
     primary_key: &LoadedKey,
-    identifier: &str,
-    secret: &str,
-    requested_tenant_id: Option<Uuid>,
-    tenant_alias: Option<&str>,
-    requested_kind: CredentialKind,
+    request: CredentialLoginRequest<'_>,
 ) -> Result<(LoginResponse, CredentialKind), AppError> {
-    let login_tenant_id = resolve_login_tenant(pool, requested_tenant_id, tenant_alias).await?;
+    let login_tenant_id =
+        resolve_login_tenant(pool, request.tenant_id, request.tenant_alias).await?;
     let authenticated = authenticate_credential_in_tenant(
         pool,
         cfg,
-        identifier,
-        secret,
+        request.identifier,
+        request.secret,
         login_tenant_id,
-        requested_kind,
+        request.kind,
     )
     .await?;
     let response = create_login_response(
@@ -2048,6 +2046,55 @@ pub async fn create_api_key(
     entity_id: Uuid,
     req: CreateApiKey,
 ) -> Result<ApiKeyResponse, AppError> {
+    let metadata = serde_json::json!({"description": req.description});
+    let (cred_id, key) =
+        create_api_key_credential(pool, entity_id, req.expires_at, metadata).await?;
+
+    Ok(ApiKeyResponse {
+        credential_id: cred_id,
+        key,
+        expires_at: req.expires_at,
+    })
+}
+
+pub async fn create_personal_access_token(
+    pool: &PgPool,
+    entity_id: Uuid,
+    req: CreatePersonalAccessToken,
+) -> Result<PersonalAccessTokenResponse, AppError> {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::bad_request(
+            "personal access token name is required",
+        ));
+    }
+    let description = req
+        .description
+        .map(|description| description.trim().to_string())
+        .filter(|description| !description.is_empty());
+    let metadata = serde_json::json!({
+        "usage": PERSONAL_ACCESS_TOKEN_USAGE,
+        "name": &name,
+        "description": &description,
+    });
+    let (cred_id, token) =
+        create_api_key_credential(pool, entity_id, req.expires_at, metadata).await?;
+
+    Ok(PersonalAccessTokenResponse {
+        credential_id: cred_id,
+        token,
+        name,
+        description,
+        expires_at: req.expires_at,
+    })
+}
+
+async fn create_api_key_credential(
+    pool: &PgPool,
+    entity_id: Uuid,
+    expires_at: Option<DateTime<Utc>>,
+    metadata: Value,
+) -> Result<(Uuid, String), AppError> {
     let cred_id = Uuid::new_v4();
 
     let mut secret_bytes = [0u8; 32];
@@ -2057,7 +2104,6 @@ pub async fn create_api_key(
     let key = make_api_key(cred_id, &secret_bytes);
     let key_prefix = key[..13].to_string();
 
-    let metadata = serde_json::json!({"description": req.description});
     let mut tx = pool.begin().await.map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
@@ -2077,18 +2123,87 @@ pub async fn create_api_key(
     .bind(CredentialKind::ApiKey)
     .bind(key_prefix)
     .bind(hash)
-    .bind(req.expires_at)
+    .bind(expires_at)
     .bind(metadata)
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
 
-    Ok(ApiKeyResponse {
-        credential_id: cred_id,
-        key,
-        expires_at: req.expires_at,
-    })
+    Ok((cred_id, key))
+}
+
+pub async fn list_personal_access_tokens(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Vec<PersonalAccessTokenSummary>, AppError> {
+    use sqlx::Row;
+
+    let rows = sqlx::query(
+        r#"SELECT id,
+                  COALESCE(NULLIF(metadata->>'name', ''), identifier, 'Personal access token') AS name,
+                  NULLIF(metadata->>'description', '') AS description,
+                  identifier,
+                  status,
+                  expires_at,
+                  created_at
+           FROM credentials
+           WHERE entity_id = $1
+             AND kind = $2
+             AND metadata->>'usage' = $3
+           ORDER BY created_at DESC"#,
+    )
+    .bind(entity_id)
+    .bind(CredentialKind::ApiKey)
+    .bind(PERSONAL_ACCESS_TOKEN_USAGE)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PersonalAccessTokenSummary {
+                credential_id: row.try_get("id").map_err(db_err)?,
+                name: row.try_get("name").map_err(db_err)?,
+                description: row.try_get("description").map_err(db_err)?,
+                identifier: row.try_get("identifier").map_err(db_err)?,
+                status: row.try_get("status").map_err(db_err)?,
+                expires_at: row.try_get("expires_at").map_err(db_err)?,
+                created_at: row.try_get("created_at").map_err(db_err)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()
+}
+
+pub async fn revoke_personal_access_token(
+    pool: &PgPool,
+    entity_id: Uuid,
+    cred_id: Uuid,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"UPDATE credentials
+           SET status = 'revoked',
+               metadata = metadata - 'revoked_at' - 'revocation_reason'
+                          || jsonb_build_object(
+                              'revoked_at', now(),
+                              'revocation_reason', 'manual'
+                          )
+           WHERE id = $1
+             AND entity_id = $2
+             AND kind = $3
+             AND metadata->>'usage' = $4"#,
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .bind(CredentialKind::ApiKey)
+    .bind(PERSONAL_ACCESS_TOKEN_USAGE)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found("personal access token not found"));
+    }
+    Ok(())
 }
 
 pub async fn create_shared_key(

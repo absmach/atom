@@ -200,7 +200,9 @@ impl AuthService for AtomAuth {
         let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
         let req = request.into_inner();
 
-        let credential_kind = parse_credential_auth_kind(&req.kind)?;
+        let credential_kind = parse_credential_auth_kind(&req.kind).ok_or_else(|| {
+            Status::invalid_argument("unsupported credential kind: expected password or shared_key")
+        })?;
 
         let requested_tenant_id =
             parse_optional_uuid(&req.tenant_id, "tenant_id").map_err(Status::from)?;
@@ -442,13 +444,11 @@ fn parse_alias_object_class(value: &str) -> Option<AliasObjectClass> {
     }
 }
 
-fn parse_credential_auth_kind(value: &str) -> Result<CredentialKind, Status> {
+fn parse_credential_auth_kind(value: &str) -> Option<CredentialKind> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "" | "password" => Ok(CredentialKind::Password),
-        "shared_key" => Ok(CredentialKind::SharedKey),
-        _ => Err(Status::invalid_argument(
-            "unsupported credential kind: expected password or shared_key",
-        )),
+        "" | "password" => Some(CredentialKind::Password),
+        "shared_key" => Some(CredentialKind::SharedKey),
+        _ => None,
     }
 }
 
