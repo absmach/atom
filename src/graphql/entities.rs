@@ -50,8 +50,10 @@ impl EntityQuery {
         let id = parse_id(id, "id")?;
         let entity = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
         // Object read decision via the PDP. `manage` implies `read`, so the caller
-        // may read the entity if they can read or manage it.
-        let allowed = auth.entity_id == id
+        // may read the entity if they can read or manage it. The self-read
+        // convenience is owner authority, so a scoped token still routes through
+        // the ceiling-aware PDP rather than reading its own identity unconditionally.
+        let allowed = (auth.entity_id == id && !auth.scoped)
             || engine::allows_any(
                 &state.pool,
                 auth.entity_id,

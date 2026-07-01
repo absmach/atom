@@ -2183,6 +2183,22 @@ async fn write_ceiling_limit(
             "each permission requires at least one action",
         ));
     }
+    // `object_type` must be the full namespaced value (`entity:device`), matching
+    // permission_block_scopes. A bare sub-kind (`device`) or a mismatched prefix
+    // silently matches nothing at eval, so reject it up front.
+    if permission.scope_mode == "object_type" {
+        let kind = permission.object_kind.as_deref().unwrap_or_default();
+        let valid = permission.object_type.as_deref().is_some_and(|ty| {
+            ty.strip_prefix(kind)
+                .and_then(|rest| rest.strip_prefix(':'))
+                .is_some_and(|sub| !sub.is_empty())
+        });
+        if !valid {
+            return Err(AppError::bad_request(
+                "object_type must be the full namespaced value matching object_kind, e.g. 'entity:device'",
+            ));
+        }
+    }
     let conditions = permission
         .conditions
         .clone()

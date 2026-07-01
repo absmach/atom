@@ -364,7 +364,9 @@ pub async fn get_entity(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let entity = repo::get_entity(&state.pool, id).await?;
-    if auth.entity_id != id {
+    // Self-read is an owner-authority convenience; a scoped token still runs the
+    // ceiling-aware gate rather than reading its own identity unconditionally.
+    if auth.entity_id != id || auth.scoped {
         require_read_access(&state.pool, &auth, entity.tenant_id, id).await?;
     }
     Ok(Json(entity))
@@ -560,6 +562,9 @@ pub async fn revoke_credential(
     auth: AuthContext,
     Path((entity_id, cred_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Credential lifecycle is unscoped-only: a scoped access token must not revoke
+    // credentials even when its ceiling grants `revoke` on the object.
+    auth.reject_scoped_credential_management()?;
     let tenant_id =
         if has_capability_in_scope(&state.pool, &auth, "revoke", Scope::Object(cred_id)).await? {
             credential_tenant_id(&state.pool, entity_id, cred_id).await?

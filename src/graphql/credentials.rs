@@ -332,6 +332,9 @@ impl CredentialMutation {
         credential_id: ID,
     ) -> Result<bool> {
         let auth = require_auth(ctx)?;
+        // Credential lifecycle is unscoped-only: a scoped access token must not
+        // revoke credentials even when its ceiling grants `revoke` on the object.
+        crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let credential_id = parse_id(credential_id, "credentialId")?;
