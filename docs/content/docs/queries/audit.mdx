@@ -69,7 +69,7 @@ Successful high-volume `authz.check`, `auth.login`, and gRPC credential-authenti
 | `auth.logout` | Session revocation | `{}` |
 | `entity.update` / `entity.enable` / `entity.disable` / `entity.delete` / `entity.restore` / `entity.purge` | Entity lifecycle changes | changed fields or status where relevant |
 | `resource.update` / `resource.delete` / `resource.restore` / `resource.purge` | Resource lifecycle changes | changed fields where relevant |
-| `credential.create` | Password or API key created | `kind`, optionally `credential_id` |
+| `credential.create` | Password or access-token credential created | `kind`, optionally `credential_id` |
 | `credential.revoke` | Credential revoked | `credential_id` |
 
 ## Use cases

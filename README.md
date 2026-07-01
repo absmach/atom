@@ -11,7 +11,7 @@ Built for the [Magistrala](https://github.com/absmach/magistrala) IoT platform, 
 ## What it does
 
 - **Identity** — CRUD for any principal type: humans, devices, services, workloads, applications. All are first-class *entities*; no special user class.
-- **Authentication** — password login (JWT), long-lived API keys, session management.
+- **Authentication** — password login (JWT), long-lived API keys, scoped access tokens, session management.
 - **Authorization** — actions, permission blocks, roles, role assignments, Direct Policies, and ABAC guardrails.
 - **Grouping** — Object Groups define where access applies; Principal Groups define who receives roles.
 - **Ownership** — parent/child relationships between entities.
@@ -27,6 +27,7 @@ This README is the quick start and orientation document. It should not duplicate
 - Access model source of truth: [product-docs/11-access-model-simplification.md](product-docs/11-access-model-simplification.md)
 - Magistrala integration source of truth: [product-docs/10-magistrala-on-atom.md](product-docs/10-magistrala-on-atom.md)
 - Certificate lifecycle source of truth: [product-docs/12-certificates.md](product-docs/12-certificates.md)
+- Scoped access token source of truth: [product-docs/13-access-tokens.md](product-docs/13-access-tokens.md)
 - Beginner/operator guide: [docs/content/docs/simple-words.mdx](docs/content/docs/simple-words.mdx)
 - Architecture diagrams: [docs/content/docs/architecture/index.mdx](docs/content/docs/architecture/index.mdx)
 - Certificate guide with flow diagram: [docs/content/docs/authentication/certificates.mdx](docs/content/docs/authentication/certificates.mdx)

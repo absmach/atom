@@ -165,7 +165,7 @@ Returns credentials that will expire within a specified number of days. Useful f
 |---|---|---|---|
 | `days` | int | 30 | Show credentials expiring within this many days |
 | `entity_id` | UUID | — | Filter by entity |
-| `kind` | `password` \| `api_key` \| `certificate` | — | Filter by credential kind |
+| `kind` | `password` \| `access_token` \| `certificate` | — | Filter by credential kind |
 | `limit` | int | 50 | Results per page (1-200) |
 | `offset` | int | 0 | Pagination offset |
 
@@ -179,7 +179,7 @@ Returns credentials that will expire within a specified number of days. Useful f
       "entity_id": "bbb-...",
       "entity_name": "sensor-01",
       "entity_kind": "device",
-      "kind": "api_key",
+      "kind": "access_token",
       "status": "active",
       "expires_at": "2026-05-10T00:00:00Z",
       "days_remaining": 16,
@@ -190,7 +190,7 @@ Returns credentials that will expire within a specified number of days. Useful f
       "entity_id": "ccc-...",
       "entity_name": "billing-service",
       "entity_kind": "service",
-      "kind": "api_key",
+      "kind": "access_token",
       "status": "active",
       "expires_at": "2026-04-28T00:00:00Z",
       "days_remaining": 4,

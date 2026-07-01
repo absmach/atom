@@ -52,7 +52,7 @@ Atom is a single Rust service backed by one Postgres database. It centralizes id
 | Part | Job |
 |---|---|
 | Identity | Stores entities such as users, devices, services, workloads, and applications. |
-| Credentials | Stores password hashes, API key hashes, and issued certificate records. |
+| Credentials | Stores password hashes, access-token hashes, scoped-token ceilings, and issued certificate records. |
 | Authorization | Answers live access questions using actions, permission blocks, roles, assignments, direct policies, groups, and conditions. |
 | Certificates | Issues certificates, signs CSRs, revokes certificates, serves CA chain/CRL/OCSP, and resolves runtime certificate identity. |
 | Audit | Records important security events without blocking the main request; successful high-volume authz/auth allows can stay in metrics/traces by policy. |

@@ -54,7 +54,7 @@ Atom stores security state in Postgres. All primary keys are UUIDs. Most objects
 |---|---|
 | `tenants` | Top boundary for a domain, customer, or workspace. |
 | `entities` | Principals such as humans, devices, services, workloads, and applications. |
-| `credentials` | Password hashes, API key hashes, and issued certificate records for entities. |
+| `credentials` | Password hashes, access-token hashes, scoped-token ceilings, and issued certificate records for entities. |
 | `sessions` | Revocable login sessions referenced by JWTs. |
 | `resources` | Protected objects such as channels, rules, reports, alarms, or application resources. |
 | `principal_groups` | Who-containers for entities that receive the same roles. |
@@ -88,10 +88,10 @@ Entities are the universal subject type. A user, device, service, workload, and 
 Credentials belong to entities:
 
 - password credentials store an argon2 hash;
-- API key credentials store an argon2 hash and a lookup identifier;
+- access-token credentials store an argon2 hash and a lookup identifier; unscoped rows are product API keys, while scoped rows carry a permission ceiling;
 - certificate credentials store issued certificate metadata and no private key.
 
-Plaintext passwords, API key secrets, and generated leaf private keys are never stored.
+Plaintext passwords, API key/access-token secrets, and generated leaf private keys are never stored.
 
 ## Disable, Delete, and Retention
 

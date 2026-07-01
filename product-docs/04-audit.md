@@ -80,7 +80,7 @@ GET /entities/:id/audit
       "outcome": "allow",
       "details": {
         "credential_id": "cr1-...",
-        "credential_kind": "api_key"
+        "credential_kind": "access_token"
       },
       "created_at": "2026-04-24T09:15:00Z"
     }
@@ -112,7 +112,7 @@ GET /entities/:id/audit
 | `authz.explain` | Every `POST /authz/explain` call | `action`, `resource_id`, `reason` |
 | `auth.login` | Login decision; successful allows require `ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED=true` | `credential_kind`, `session_id` (if successful) |
 | `auth.logout` | Session revocation via logout | `session_id` |
-| `credential.create` | Password or API key created | `credential_id`, `credential_kind` |
+| `credential.create` | Password or access-token credential created | `credential_id`, `credential_kind` |
 | `credential.revoke` | Credential revoked | `credential_id`, `credential_kind` |
 
 ---

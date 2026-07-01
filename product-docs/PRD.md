@@ -23,7 +23,7 @@ Atom provides three main product areas:
    - Principal Groups: collections of identities used for shared access;
    - resources: protected application objects such as channels;
    - roles: reusable permission sets;
-   - credentials: passwords, API keys, and Atom-issued certificates;
+   - credentials: passwords, API keys, scoped access tokens, and Atom-issued certificates;
    - ownerships: parent-child relationships between entities.
 
 2. **Authentication**
@@ -32,7 +32,7 @@ Atom provides three main product areas:
 
    - password login;
    - JWT sessions;
-   - API keys;
+   - API keys and scoped access tokens;
    - credential revocation;
    - session tracking;
    - JWKS for external JWT verification;
@@ -77,7 +77,7 @@ The current project needs a single PRD because product intent must not be spread
 
 1. Provide a compact identity and authorization service that is simple to deploy, operate, and reason about.
 2. Support humans, devices, services, workloads, and applications using one consistent entity model.
-3. Support password login, JWT sessions, API keys, and certificate credentials without changing the core entity model.
+3. Support password login, JWT sessions, API keys, scoped access tokens, and certificate credentials without changing the core entity model.
 4. Provide role-based authorization with assignments, optional ABAC conditions, trusted Direct Policies, and deny-overrides semantics.
 5. Make tenants first-class isolation boundaries, with Magistrala domains mapping directly to Atom tenants.
 6. Keep authorization online: every access decision is evaluated against current database state.
@@ -370,16 +370,32 @@ A credential belongs to an entity.
 Kinds:
 
 - `password`
-- `api_key`
+- `access_token`
 - `certificate`
+- `shared_key`
 
-Password and API key secrets are argon2-hashed. API keys use the format:
+Password and access-token secrets are argon2-hashed. The same bearer-token format is used for admin-created API keys and self-service scoped access tokens:
 
 ```text
 atom_<32-hex-credential-id>_<64-hex-secret>
 ```
 
-The plaintext API key is revealed once and must not be recoverable later.
+The credential ID is embedded for direct lookup. The plaintext token secret is revealed once and must not be recoverable later.
+
+Atom distinguishes two product uses of `access_token` credentials:
+
+- **API key**: an admin-created long-lived bearer credential for an entity. It is unscoped and authenticates as that entity with the entity's live database-backed grants.
+- **Scoped access token**: a self-service bearer credential created by the authenticated entity for CLI or API use. It is always scoped by a permission ceiling.
+
+Scoped access tokens do not embed permissions in the token string. The ceiling is stored in Atom and uses the same action and scope vocabulary as Permission Blocks: `platform`, `tenant`, `object_kind`, `object_type`, and `object`, with optional ABAC conditions. A scoped token's effective authority is:
+
+```text
+owner's live grants intersect token permission ceiling
+```
+
+The token can never exceed the owner's current grants. Revoking owner grants, revoking the credential, expiring the credential, deleting the owner entity, or deleting the ceiling takes effect on the next request. A scoped token with no ceiling rows must fail closed and permit nothing.
+
+Scoped tokens must not be usable to mint broader credentials, replace their own permissions, revoke peer tokens, or manage credentials. Broad authorized-listing surfaces that are not ceiling-aware must fail closed for scoped tokens; per-object authorization checks, bulk checks, and explain responses must apply the ceiling.
 
 Certificate credentials are first-class Atom credentials. Atom owns certificate issuance, CSR signing, renewal, revocation, entity-wide revocation, CA chain publication, CRL publication, OCSP responses, and runtime certificate identity lookup. Certificates are issued from operator-supplied CA files loaded at startup. Atom must not store CA certificates or CA private keys in Postgres. Issued leaf certificate PEM is stored on the certificate credential and may be retrieved by authorized callers. Generated leaf private keys are revealed once and must not be recoverable later. CSR-issued private keys are never known to Atom. Certificate fingerprints are computed over certificate DER, not PEM text.
 
@@ -966,8 +982,8 @@ Priority levels: "Must" items are required for general availability and ship acr
 |---|---|---|
 | AUTH-1 | The system must authenticate password credentials and return JWT sessions. | Must |
 | AUTH-2 | The system must support API key credentials for long-lived machine access. | Must |
-| AUTH-3 | API keys must embed the credential ID for direct lookup. | Must |
-| AUTH-4 | Plaintext API key secrets must be shown only once. | Must |
+| AUTH-3 | API keys and scoped access tokens must embed the credential ID for direct lookup. | Must |
+| AUTH-4 | Plaintext API key and scoped access-token secrets must be shown only once. | Must |
 | AUTH-5 | Credentials must be revocable. | Must |
 | AUTH-6 | Sessions must be stored and revocable. | Must |
 | AUTH-7 | JWT signing keys must support JWKS publication for external verifiers. | Should |
@@ -984,6 +1000,12 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AUTH-18 | CSR-issued certificates must always be non-CA client-auth leaf certificates regardless of requested CSR extensions. | Must |
 | AUTH-19 | OCSP responses must validate issuer hashes and return `unknown` for mismatched issuers. | Must |
 | AUTH-20 | CRL responses must be cached and regenerated only when revocation state changes or the CRL expires. | Must |
+| AUTH-21 | The system must support self-service scoped access tokens for the authenticated entity. | Must |
+| AUTH-22 | A scoped access token's effective authority must be the owner's live grants intersected with the token's permission ceiling. | Must |
+| AUTH-23 | Scoped token permission ceilings must use the same action and scope vocabulary as Permission Blocks, including `platform`, `tenant`, `object_kind`, `object_type`, and `object`. | Must |
+| AUTH-24 | A scoped token with an empty or deleted ceiling must fail closed and permit nothing. | Must |
+| AUTH-25 | Scoped tokens must not create, replace, revoke, or widen credentials or access tokens. | Must |
+| AUTH-26 | Scoped tokens must apply their ceiling to per-object checks, bulk checks, and explain; broad authorized-listing surfaces must fail closed until they become ceiling-aware. | Must |
 
 ### Tenants
 
@@ -1128,7 +1150,7 @@ Atom must expose these API categories:
 - Health: service health check.
 - Authentication: login, logout, session read, JWKS, signing key rotation.
 - Entities: entity CRUD and Principal Group membership views.
-- Credentials: password creation, API key creation, credential listing, credential revocation.
+- Credentials: password creation, API key creation, scoped access-token creation, credential listing, credential revocation.
 - Certificates: certificate issuance, CSR signing, renewal, revocation, entity-wide revocation, CA chain, CRL, OCSP, and runtime certificate identity lookup.
 - Tenants: tenant CRUD and lifecycle transitions.
 - Object Groups: boundary CRUD, hierarchy, and object containment management.
@@ -1159,6 +1181,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 11. [Building Magistrala on Atom](./10-magistrala-on-atom.md)
 12. [Atom access model](./11-access-model-simplification.md)
 13. [Atom certificates](./12-certificates.md)
+14. [Scoped access tokens](./13-access-tokens.md)
 
 ---
 
@@ -1180,6 +1203,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 - Management endpoints must require a manage-capable caller.
 - Authorization must be denied by default.
 - API keys must not be recoverable after creation.
+- Scoped access tokens must not be recoverable after creation, and their ceilings must fail closed.
 - Issued certificate private keys must not be recoverable after creation.
 
 ### Reliability
@@ -1194,6 +1218,7 @@ Detailed endpoint requirements are maintained in the linked product docs:
 - Authorization checks must avoid per-assignment Permission Block queries.
 - Role permission blocks and actions must be batch-loaded for authorization evaluation.
 - API key authentication must avoid full credential-table scans by using the embedded credential ID.
+- Scoped access-token authentication may load the permission ceiling once per request, but authorization decisions must not re-query the ceiling for every check in the same request.
 - CRL generation must be concurrency-safe across Atom replicas.
 - List endpoints must support pagination.
 
@@ -1213,7 +1238,7 @@ Atom is successful when:
 - Magistrala can model domains, users, clients, channels, Object Groups, Principal Groups, roles, and permissions without a separate auth database.
 - Runtime services can answer authorization decisions through Atom with deterministic deny-by-default behavior.
 - Operators can answer "why denied?", "who can access this?", and "what can this entity access?" without direct SQL.
-- Credential creation, certificate issuance, revocation, runtime certificate lookup, and audit inspection can be done through APIs.
+- Credential creation, least-privilege access-token creation, certificate issuance, revocation, runtime certificate lookup, and audit inspection can be done through APIs.
 - Tenants can represent Magistrala domain lifecycle states.
 - The service can be deployed with Postgres and a small set of environment variables.
 
@@ -1227,6 +1252,7 @@ Atom is successful when:
 - Password login
 - JWT sessions
 - API keys
+- Scoped access tokens
 - Resources
 - Actions
 - Roles
