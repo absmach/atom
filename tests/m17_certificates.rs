@@ -335,7 +335,7 @@ async fn graphql_entity_can_hold_password_and_certificate_credentials() {
         .await
         .unwrap();
 
-    let schema = build_schema(state(pool, cfg, Some(issuer)));
+    let schema = build_schema(state(pool.clone(), cfg, Some(issuer)));
 
     let password = schema
         .execute(authed(format!(
@@ -380,6 +380,22 @@ async fn graphql_entity_can_hold_password_and_certificate_credentials() {
     assert!(issued_json["issueCertificate"]["privateKeyPem"]
         .as_str()
         .is_some());
+
+    // Emitting a private key must leave a durable compliance record.
+    let issue_audit: serde_json::Value = sqlx::query_scalar(
+        "SELECT details FROM audit_logs WHERE event = 'certificate.issue' \
+         AND target_id = $1 AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("certificate.issue audit row");
+    assert_eq!(issue_audit["csr"], serde_json::json!(false));
+    assert_eq!(
+        issue_audit["credential_id"],
+        serde_json::json!(certificate_credential_id)
+    );
+    assert!(issue_audit["serial_number"].is_string());
 
     let listed = schema
         .execute(authed(format!(

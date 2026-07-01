@@ -997,6 +997,18 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
         key
     );
 
+    // Revealing secret material must leave a durable compliance record.
+    let reveal_audit: serde_json::Value = sqlx::query_scalar(
+        "SELECT details FROM audit_logs WHERE event = 'credential.reveal' \
+         AND target_id = $1 AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(device_id)
+    .fetch_one(&pool)
+    .await
+    .expect("credential.reveal audit row");
+    assert_eq!(reveal_audit["kind"], serde_json::json!("shared_key"));
+    assert_eq!(reveal_audit["credential_id"], serde_json::json!(credential_id));
+
     let password_kind_rejected = identity_service::authenticate_credential_in_tenant(
         &pool,
         &Config::for_tests(),
