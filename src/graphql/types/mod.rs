@@ -1757,6 +1757,11 @@ pub struct CreateAccessTokenInput {
     /// `manage` on the target; the ceiling is still capped by the *target's* live
     /// authority at evaluation time.
     pub subject_id: Option<ID>,
+    /// Whether the token is capped by a permission ceiling. Defaults to `true`.
+    /// `false` mints an *unscoped* token that carries the owner's full live grants
+    /// (no ceiling) and must be sent with an empty `permissions` list. Minting an
+    /// unscoped token requires credential-management authority over the owner.
+    pub scoped: Option<bool>,
 }
 
 #[derive(InputObject)]

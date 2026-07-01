@@ -173,6 +173,7 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
                     conditions: None,
                 }],
             },
+            true,
         )
         .await
         .is_err(),

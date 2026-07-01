@@ -493,6 +493,7 @@ async fn access_token_ceiling_intersects_owner_grants() {
                 conditions: None,
             }],
         },
+        true,
     )
     .await
     .expect("create access token");
@@ -1000,7 +1001,10 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     .await
     .expect("credential.reveal audit row");
     assert_eq!(reveal_audit["kind"], serde_json::json!("shared_key"));
-    assert_eq!(reveal_audit["credential_id"], serde_json::json!(credential_id));
+    assert_eq!(
+        reveal_audit["credential_id"],
+        serde_json::json!(credential_id)
+    );
 
     let password_kind_rejected = identity_service::authenticate_credential_in_tenant(
         &pool,
@@ -1354,5 +1358,85 @@ async fn delegated_access_token_mint_requires_manage_and_unscoped_caller() {
     assert!(
         !missing.errors.is_empty(),
         "delegated mint for a missing subject must fail"
+    );
+}
+
+/// The unscoped contract (`scoped: false`, empty `permissions`): the token carries
+/// the owner's full live grants with no ceiling — the provisioning path used by
+/// Magistrala service tokens. Admin (seeded platform `manage`) delegated-mints for
+/// a service entity; a ceiling is never written and the auth layer imposes no cap.
+/// Unscoped tokens may not carry permissions, and a scoped caller may not mint one.
+#[tokio::test]
+#[ignore]
+async fn unscoped_access_token_carries_owner_authority() {
+    use atom::authz::repo::CredentialCeiling;
+
+    let pool = common::pool().await;
+    let owner = entity(&pool, "service").await;
+    let app_state = state(pool.clone());
+    let schema = build_schema(state(pool.clone()));
+
+    let created = schema
+        .execute(authed(format!(
+            r#"mutation {{ createAccessToken(input: {{ name: "svc", subjectId: "{owner}", scoped: false, permissions: [] }}) {{ credentialId token }} }}"#
+        )))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let json = created.data.into_json().expect("json");
+    let cred_id = json["createAccessToken"]["credentialId"]
+        .as_str()
+        .expect("id")
+        .parse::<Uuid>()
+        .expect("uuid");
+    let token = json["createAccessToken"]["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    // Persisted unscoped, with zero ceiling rows.
+    let scoped: bool = sqlx::query_scalar("SELECT scoped FROM credentials WHERE id = $1")
+        .bind(cred_id)
+        .fetch_one(&pool)
+        .await
+        .expect("scoped");
+    assert!(!scoped, "token must persist as unscoped");
+    let ceiling_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_permission_limits WHERE credential_id = $1",
+    )
+    .bind(cred_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(ceiling_rows, 0, "unscoped token must have no ceiling rows");
+
+    // Auth layer imposes no ceiling — evaluation uses the owner's full live grants.
+    let ctx = authenticate_token(&app_state, &token).await.expect("auth");
+    assert_eq!(ctx.entity_id, owner);
+    assert!(!ctx.scoped);
+    assert!(ctx.ceiling.is_none());
+
+    // An unscoped request may not carry a ceiling.
+    let bad = schema
+        .execute(authed(format!(
+            r#"mutation {{ createAccessToken(input: {{ name: "bad", subjectId: "{owner}", scoped: false, permissions: [{{ actions: ["read"], scopeMode: "platform" }}] }}) {{ credentialId }} }}"#
+        )))
+        .await;
+    assert!(
+        !bad.errors.is_empty(),
+        "unscoped token must not carry permissions"
+    );
+
+    // A scoped caller may not mint an unscoped token (credential-management gate
+    // rejects scoped callers).
+    let scoped_caller = schema
+        .execute(authed_scoped(
+            owner,
+            CredentialCeiling { entries: vec![] },
+            r#"mutation { createAccessToken(input: { name: "esc", scoped: false, permissions: [] }) { credentialId } }"#,
+        ))
+        .await;
+    assert!(
+        !scoped_caller.errors.is_empty(),
+        "scoped caller must not mint an unscoped token"
     );
 }

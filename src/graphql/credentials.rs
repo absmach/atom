@@ -96,11 +96,16 @@ impl CredentialMutation {
     ) -> Result<AccessTokenResponse> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        // Resolve the token owner. Absent or self => self-service (a scoped token
-        // cannot mint, or it could build a broader sibling). A different subject =>
-        // delegated mint, allowed only for an unscoped caller holding `manage` on
-        // the target (require_credential_management enforces both). Either way the
-        // ceiling is capped by the owner's live grants at evaluation time.
+        let scoped = input.scoped.unwrap_or(true);
+        // Resolve the token owner. Absent or self => self-service. A different
+        // subject => delegated mint. Authorization:
+        //  - scoped self-mint: a scoped token could build a broader sibling, so
+        //    deny_scoped_token blocks it; any unscoped caller may self-mint (the
+        //    token can never exceed the caller's own live grants).
+        //  - unscoped mint, or any delegated mint: routed through the
+        //    credential-management gate (self OK, delegated needs `manage` on the
+        //    target, scoped callers always rejected). An unscoped token carries the
+        //    owner's full authority, so minting one is a credential-management act.
         let owner_id = input
             .subject_id
             .clone()
@@ -108,7 +113,7 @@ impl CredentialMutation {
             .transpose()?
             .unwrap_or(auth.entity_id);
         let delegated = owner_id != auth.entity_id;
-        if delegated {
+        if delegated || !scoped {
             require_credential_management(state, &auth, owner_id).await?;
         } else {
             crate::graphql::auth::deny_scoped_token(&auth)?;
@@ -127,6 +132,7 @@ impl CredentialMutation {
                 expires_at: parse_optional_timestamp(input.expires_at, "expiresAt")?,
                 permissions,
             },
+            scoped,
         )
         .await
         .map_err(gql_error)?;
@@ -142,7 +148,7 @@ impl CredentialMutation {
                 details: serde_json::json!({
                     "entity_id": owner_id,
                     "kind": "access_token",
-                    "scoped": true,
+                    "scoped": scoped,
                     "delegated": delegated,
                     "name": &response.name,
                     "credential_id": response.credential_id

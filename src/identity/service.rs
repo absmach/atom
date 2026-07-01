@@ -2044,14 +2044,23 @@ pub async fn create_access_token(
     pool: &PgPool,
     entity_id: Uuid,
     req: CreateAccessToken,
+    scoped: bool,
 ) -> Result<AccessTokenResponse, AppError> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::bad_request("access token name is required"));
     }
-    if req.permissions.is_empty() {
+    // A scoped token needs a non-empty ceiling (an empty ceiling is closed and
+    // permits nothing). An unscoped token carries the owner's full live grants and
+    // must not carry a ceiling, so its permission list must be empty.
+    if scoped && req.permissions.is_empty() {
         return Err(AppError::bad_request(
             "access token requires at least one permission",
+        ));
+    }
+    if !scoped && !req.permissions.is_empty() {
+        return Err(AppError::bad_request(
+            "unscoped access token must not carry permissions",
         ));
     }
     let description = req
@@ -2076,17 +2085,18 @@ pub async fn create_access_token(
             "active entity {entity_id} not found"
         )));
     }
-    // Self-service tokens are always scoped: their authority is capped by the
-    // ceiling, never the owner's full set.
+    // A scoped token's authority is capped by its ceiling; an unscoped token
+    // (`scoped = false`) authenticates with the owner's full live grants.
     sqlx::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, scoped, expires_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, true, $6, $7)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
     )
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
     .bind(key_prefix)
     .bind(hash)
+    .bind(scoped)
     .bind(req.expires_at)
     .bind(metadata)
     .execute(&mut *tx)

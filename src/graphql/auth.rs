@@ -253,7 +253,8 @@ pub(crate) async fn require_explain_access(pool: &sqlx::PgPool, auth: &AuthConte
 /// GraphQL-facing wrapper over [`AuthContext::reject_scoped_credential_management`]:
 /// a scoped access token can never mint or rewrite credentials (self-escalation).
 pub(crate) fn deny_scoped_token(auth: &AuthContext) -> Result<()> {
-    auth.reject_scoped_credential_management().map_err(gql_error)
+    auth.reject_scoped_credential_management()
+        .map_err(gql_error)
 }
 
 pub(crate) async fn require_credential_management(

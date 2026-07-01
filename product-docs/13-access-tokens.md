@@ -24,13 +24,14 @@ Atom has two product labels for bearer credentials backed by `credentials.kind =
 | API key | Credential administrator | Unscoped | Provisioned machine or service access with the owner's live grants |
 | Scoped access token | Token owner, or an administrator via delegation | Scoped by a permission ceiling | Personal, CLI, integration, service, and automation access that is narrower than the owner |
 
-> **Status (interim):** the dedicated unscoped **API-key creation** surface
-> (`createApiKey`) has been removed. Unscoped `access_token` credentials still
-> authenticate (bootstrap and pre-existing keys), but the only token-minting API is
-> now `createAccessToken`, which always produces a scoped token. Provisioned service
-> access is covered by **delegated minting** (below). A future "mirror owner" ceiling
-> preset will reproduce the unscoped, live-grant-tracking behaviour under the single
-> primitive.
+> **Status:** the dedicated `createApiKey` surface has been removed. Both labels are
+> now minted through the one `createAccessToken` mutation: the default produces a
+> scoped token; `scoped: false` (with an empty `permissions` list) produces an
+> **unscoped** API key that authenticates with the owner's full live grants. Minting
+> an unscoped token requires credential-management authority over the owner, so it is
+> typically a delegated admin operation. Unscoped remains necessary while owner-wide
+> listing surfaces (`authorizedObjectIds`) are not ceiling-aware; scoped tokens are
+> rejected there.
 
 Both use the same one-time-reveal token format:
 
