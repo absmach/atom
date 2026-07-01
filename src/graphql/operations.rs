@@ -121,7 +121,7 @@ impl OperationsQuery {
     async fn system_status(&self, ctx: &Context<'_>) -> Result<GqlSystemStatus> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
             .await
             .map_err(gql_error)?;
         let (_, axum::Json(status)) = health::readiness(state).await;
@@ -131,7 +131,7 @@ impl OperationsQuery {
     async fn signing_keys(&self, ctx: &Context<'_>) -> Result<Vec<GqlSigningKey>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, auth.entity_id, "read", Scope::Platform)
+        require_capability(&state.pool, &auth, "read", Scope::Platform)
             .await
             .map_err(gql_error)?;
         keys::list_metadata(&state.pool)
@@ -146,7 +146,7 @@ impl OperationsMutation {
     async fn rotate_signing_keys(&self, ctx: &Context<'_>) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, auth.entity_id, "rotate", Scope::Platform)
+        require_capability(&state.pool, &auth, "rotate", Scope::Platform)
             .await
             .map_err(gql_error)?;
         let new_keys = keys::rotate(&state.pool, &state.config.signing_keys)

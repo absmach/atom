@@ -914,7 +914,7 @@ function PermissionDraftRow({
               <Input
                 aria-label="Object type"
                 onChange={(e) => onChange({ objectType: e.target.value })}
-                placeholder="device"
+                placeholder="e.g. entity:device"
                 value={permission.objectType}
               />
             </div>
@@ -943,12 +943,9 @@ function permissionSummary(permission: AccessTokenPermission): string {
     target = `tenant ${permission.tenantId}`;
   } else if (permission.scopeMode === "object_kind" && permission.objectKind) {
     target = `kind ${permission.objectKind}`;
-  } else if (
-    permission.scopeMode === "object_type" &&
-    permission.objectKind &&
-    permission.objectType
-  ) {
-    target = `${permission.objectKind}:${permission.objectType}`;
+  } else if (permission.scopeMode === "object_type" && permission.objectType) {
+    // object_type is already namespaced (e.g. "entity:device").
+    target = permission.objectType;
   } else if (permission.scopeMode === "object" && permission.objectId) {
     target = `object ${permission.objectId}`;
   }

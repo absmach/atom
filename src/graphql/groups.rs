@@ -2,7 +2,7 @@ use async_graphql::{Context, Object, Result, ID};
 
 use crate::{
     audit,
-    auth::Scope,
+    auth::{AuthContext, Scope},
     authz::{engine, repo as authz_repo},
     error::AppError,
     identity::repo,
@@ -48,7 +48,7 @@ impl GroupQuery {
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         authorized_group_list(
             state,
-            auth.entity_id,
+            &auth,
             None,
             q,
             tenant_id,
@@ -82,7 +82,7 @@ impl GroupQuery {
         .map_err(gql_error)?
         .allowed
         {
-            require_read_access(&state.pool, auth.entity_id, group.tenant_id, id).await?;
+            require_read_access(&state.pool, &auth, group.tenant_id, id).await?;
         }
         Ok(group.into())
     }
@@ -94,7 +94,7 @@ impl GroupQuery {
         let group = repo::get_group(&state.pool, group_id)
             .await
             .map_err(gql_error)?;
-        require_read_access(&state.pool, auth.entity_id, group.tenant_id, group_id).await?;
+        require_read_access(&state.pool, &auth, group.tenant_id, group_id).await?;
         let members = repo::list_group_members(&state.pool, group_id)
             .await
             .map_err(gql_error)?;
@@ -108,7 +108,7 @@ impl GroupQuery {
         let entity = repo::get_entity(&state.pool, entity_id)
             .await
             .map_err(gql_error)?;
-        require_read_access(&state.pool, auth.entity_id, entity.tenant_id, entity_id).await?;
+        require_read_access(&state.pool, &auth, entity.tenant_id, entity_id).await?;
         let group_ids = repo::get_entity_groups(&state.pool, entity_id)
             .await
             .map_err(gql_error)?;
@@ -134,10 +134,10 @@ impl GroupQuery {
         // Reading the parent is a precondition for enumerating its children; the
         // per-child read decision is then made by authorized listing below, so
         // paging and totals reflect the actual authorized set.
-        require_read_access(&state.pool, auth.entity_id, group.tenant_id, parent_id).await?;
+        require_read_access(&state.pool, &auth, group.tenant_id, parent_id).await?;
         authorized_group_list(
             state,
-            auth.entity_id,
+            &auth,
             None,
             None,
             None,
@@ -167,7 +167,7 @@ impl GroupQuery {
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         authorized_group_list(
             state,
-            auth.entity_id,
+            &auth,
             Some("object".to_string()),
             q,
             tenant_id,
@@ -196,7 +196,7 @@ impl GroupQuery {
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         authorized_group_list(
             state,
-            auth.entity_id,
+            &auth,
             Some("principal".to_string()),
             q,
             tenant_id,
@@ -213,7 +213,7 @@ impl GroupQuery {
 #[allow(clippy::too_many_arguments)]
 async fn authorized_group_list(
     state: &AppState,
-    subject_id: uuid::Uuid,
+    auth: &AuthContext,
     group_type: Option<String>,
     q: Option<String>,
     tenant_id: Option<uuid::Uuid>,
@@ -225,9 +225,10 @@ async fn authorized_group_list(
 ) -> Result<GroupList> {
     let limit_value = limit.map(i64::from).unwrap_or(20);
     let offset_value = offset.map(i64::from).unwrap_or(0);
+    let subject_id = auth.entity_id;
 
     if deleted != DeletedFilter::Live {
-        require_any_capability(&state.pool, subject_id, &[("manage", Scope::Platform)]).await?;
+        require_any_capability(&state.pool, auth, &[("manage", Scope::Platform)]).await?;
         let list = repo::list_groups(
             &state.pool,
             ListGroups {
@@ -293,7 +294,7 @@ impl GroupMutation {
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
-                auth.entity_id,
+                &auth,
                 &[
                     ("manage", scope_for_tenant(tenant_id)),
                     ("write", scope_for_tenant(tenant_id)),
@@ -359,7 +360,7 @@ impl GroupMutation {
         let id = parse_id(id, "id")?;
         let result = async {
             let existing = repo::get_group(&state.pool, id).await?;
-            require_group_manage_app(&state.pool, auth.entity_id, id, existing.tenant_id).await?;
+            require_group_manage_app(&state.pool, &auth, id, existing.tenant_id).await?;
             repo::update_group(
                 &state.pool,
                 id,
@@ -409,7 +410,7 @@ impl GroupMutation {
         let parent_id = parse_id(parent_id, "parentId")?;
         let result = async {
             let group = repo::get_group(&state.pool, id).await?;
-            require_group_manage_app(&state.pool, auth.entity_id, id, group.tenant_id).await?;
+            require_group_manage_app(&state.pool, &auth, id, group.tenant_id).await?;
             repo::set_group_parent(&state.pool, id, parent_id).await
         }
         .await;
@@ -444,7 +445,7 @@ impl GroupMutation {
         let result = async {
             let group = repo::get_group(&state.pool, id).await?;
             let tenant_id = group.tenant_id;
-            require_group_manage_app(&state.pool, auth.entity_id, id, tenant_id).await?;
+            require_group_manage_app(&state.pool, &auth, id, tenant_id).await?;
             repo::remove_group_parent(&state.pool, id).await?;
             Ok(tenant_id)
         }
@@ -478,7 +479,7 @@ impl GroupMutation {
         let result = async {
             let existing = repo::get_group(&state.pool, id).await?;
             let tenant_id = existing.tenant_id;
-            require_group_manage_app(&state.pool, auth.entity_id, id, tenant_id).await?;
+            require_group_manage_app(&state.pool, &auth, id, tenant_id).await?;
             repo::delete_group(&state.pool, id, Some(auth.entity_id)).await?;
             Ok(tenant_id)
         }
@@ -503,7 +504,7 @@ impl GroupMutation {
     async fn restore_group(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
         repo::restore_group(&state.pool, id, Some(auth.entity_id))
             .await
@@ -530,7 +531,7 @@ impl GroupMutation {
     async fn purge_group(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, auth.entity_id, &[("manage", Scope::Platform)]).await?;
+        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
         let tenant_id = repo::purge_group(&state.pool, id)
             .await
@@ -566,7 +567,7 @@ impl GroupMutation {
             let tenant_id = group.tenant_id;
             crate::auth::require_any_capability(
                 &state.pool,
-                auth.entity_id,
+                &auth,
                 &[
                     ("manage", crate::auth::Scope::Object(group_id)),
                     ("manage", scope_for_tenant(tenant_id)),
@@ -606,7 +607,7 @@ impl GroupMutation {
             let tenant_id = group.tenant_id;
             crate::auth::require_any_capability(
                 &state.pool,
-                auth.entity_id,
+                &auth,
                 &[
                     ("manage", crate::auth::Scope::Object(group_id)),
                     ("manage", scope_for_tenant(tenant_id)),
@@ -646,7 +647,7 @@ impl GroupMutation {
         let status_detail = status.clone();
         let result = async {
             let group = repo::get_group(&state.pool, id).await?;
-            require_group_manage_app(&state.pool, auth.entity_id, id, group.tenant_id).await?;
+            require_group_manage_app(&state.pool, &auth, id, group.tenant_id).await?;
             repo::update_group(
                 &state.pool,
                 id,
@@ -685,13 +686,13 @@ fn group_status_event(status: &EntityStatus) -> &'static str {
 
 async fn require_group_manage_app(
     pool: &sqlx::PgPool,
-    actor_id: uuid::Uuid,
+    auth: &AuthContext,
     group_id: uuid::Uuid,
     tenant_id: Option<uuid::Uuid>,
 ) -> std::result::Result<(), AppError> {
     crate::auth::require_any_capability(
         pool,
-        actor_id,
+        auth,
         &[
             ("manage", Scope::Object(group_id)),
             ("manage", scope_for_tenant(tenant_id)),

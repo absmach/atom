@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    auth::{has_capability_in_scope, Scope},
+    auth::{has_capability_in_scope, AuthContext, Scope},
     certs::service,
     models::enums::AuditOutcome,
     state::AppState,
@@ -41,10 +41,10 @@ impl CertificateQuery {
         let entity_id = entity_id.map(|id| parse_id(id, "entityId")).transpose()?;
         let tenant_id = tenant_id.map(|id| parse_id(id, "tenantId")).transpose()?;
         let tenant_filter = if let Some(entity_id) = entity_id {
-            require_entity_credential_read(state, auth.entity_id, entity_id).await?;
+            require_entity_credential_read(state, &auth, entity_id).await?;
             None
         } else {
-            resolve_list_tenant_filter(state, auth.entity_id, auth.tenant_id, tenant_id).await?
+            resolve_list_tenant_filter(state, &auth, auth.tenant_id, tenant_id).await?
         };
         let certs = service::list_certificates(
             &state.pool,
@@ -86,7 +86,7 @@ impl CertificateQuery {
                 ))
             }
         };
-        require_certificate_read(state, auth.entity_id, &cert).await?;
+        require_certificate_read(state, &auth, &cert).await?;
         Ok(cert.into())
     }
 }
@@ -104,7 +104,7 @@ impl CertificateMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let issued = service::issue_certificate(
             &state.pool,
             &state.config,
@@ -147,7 +147,7 @@ impl CertificateMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let issued = service::issue_certificate_from_csr(
             &state.pool,
             &state.config,
@@ -190,7 +190,7 @@ impl CertificateMutation {
         let old = service::certificate_by_serial(&state.pool, &input.serial_number)
             .await
             .map_err(gql_error)?;
-        require_certificate_rotate(state, auth.entity_id, &old).await?;
+        require_certificate_rotate(state, &auth, &old).await?;
         let issued = service::renew_certificate(
             &state.pool,
             &state.config,
@@ -234,7 +234,7 @@ impl CertificateMutation {
         let cert = service::certificate_by_serial(&state.pool, &input.serial_number)
             .await
             .map_err(gql_error)?;
-        require_certificate_revoke(state, auth.entity_id, &cert).await?;
+        require_certificate_revoke(state, &auth, &cert).await?;
         let revoked = service::revoke_certificate(&state.pool, &input.serial_number, input.reason)
             .await
             .map_err(gql_error)?;
@@ -266,7 +266,7 @@ impl CertificateMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let count = service::revoke_entity_certificates(&state.pool, entity_id, reason)
             .await
             .map_err(gql_error)?;
@@ -426,7 +426,7 @@ impl From<service::CertificateRecord> for Certificate {
 
 async fn require_entity_credential_read(
     state: &AppState,
-    actor_id: Uuid,
+    auth: &AuthContext,
     entity_id: Uuid,
 ) -> Result<()> {
     let tenant_id = crate::certs::repo::entity_tenant_id(&state.pool, entity_id)
@@ -434,7 +434,7 @@ async fn require_entity_credential_read(
         .map_err(gql_error)?;
     require_any_capability(
         &state.pool,
-        actor_id,
+        auth,
         &[
             ("read", Scope::Object(entity_id)),
             ("manage", Scope::Object(entity_id)),
@@ -447,14 +447,14 @@ async fn require_entity_credential_read(
 
 async fn resolve_list_tenant_filter(
     state: &AppState,
-    actor_id: Uuid,
+    auth: &AuthContext,
     actor_tenant_id: Option<Uuid>,
     requested_tenant_id: Option<Uuid>,
 ) -> Result<Option<Uuid>> {
     if let Some(tenant_id) = requested_tenant_id {
         require_any_capability(
             &state.pool,
-            actor_id,
+            auth,
             &[
                 ("read", Scope::Tenant(tenant_id)),
                 ("manage", Scope::Tenant(tenant_id)),
@@ -464,10 +464,10 @@ async fn resolve_list_tenant_filter(
         return Ok(Some(tenant_id));
     }
 
-    if has_capability_in_scope(&state.pool, actor_id, "read", Scope::Platform)
+    if has_capability_in_scope(&state.pool, auth, "read", Scope::Platform)
         .await
         .map_err(gql_error)?
-        || has_capability_in_scope(&state.pool, actor_id, "manage", Scope::Platform)
+        || has_capability_in_scope(&state.pool, auth, "manage", Scope::Platform)
             .await
             .map_err(gql_error)?
     {
@@ -477,7 +477,7 @@ async fn resolve_list_tenant_filter(
     if let Some(tenant_id) = actor_tenant_id {
         require_any_capability(
             &state.pool,
-            actor_id,
+            auth,
             &[
                 ("read", Scope::Tenant(tenant_id)),
                 ("manage", Scope::Tenant(tenant_id)),
@@ -492,12 +492,12 @@ async fn resolve_list_tenant_filter(
 
 async fn require_certificate_read(
     state: &AppState,
-    actor_id: Uuid,
+    auth: &AuthContext,
     cert: &service::CertificateRecord,
 ) -> Result<()> {
     if has_capability_in_scope(
         &state.pool,
-        actor_id,
+        auth,
         "read",
         Scope::Object(cert.credential_id),
     )
@@ -505,7 +505,7 @@ async fn require_certificate_read(
     .map_err(gql_error)?
         || has_capability_in_scope(
             &state.pool,
-            actor_id,
+            auth,
             "manage",
             Scope::Object(cert.credential_id),
         )
@@ -514,17 +514,17 @@ async fn require_certificate_read(
     {
         return Ok(());
     }
-    require_entity_credential_read(state, actor_id, cert.entity_id).await
+    require_entity_credential_read(state, auth, cert.entity_id).await
 }
 
 async fn require_certificate_rotate(
     state: &AppState,
-    actor_id: Uuid,
+    auth: &AuthContext,
     cert: &service::CertificateRecord,
 ) -> Result<()> {
     if has_capability_in_scope(
         &state.pool,
-        actor_id,
+        auth,
         "rotate",
         Scope::Object(cert.credential_id),
     )
@@ -532,7 +532,7 @@ async fn require_certificate_rotate(
     .map_err(gql_error)?
         || has_capability_in_scope(
             &state.pool,
-            actor_id,
+            auth,
             "manage",
             Scope::Object(cert.credential_id),
         )
@@ -541,18 +541,18 @@ async fn require_certificate_rotate(
     {
         return Ok(());
     }
-    require_credential_management(state, actor_id, cert.entity_id).await?;
+    require_credential_management(state, auth, cert.entity_id).await?;
     Ok(())
 }
 
 async fn require_certificate_revoke(
     state: &AppState,
-    actor_id: Uuid,
+    auth: &AuthContext,
     cert: &service::CertificateRecord,
 ) -> Result<()> {
     if has_capability_in_scope(
         &state.pool,
-        actor_id,
+        auth,
         "revoke",
         Scope::Object(cert.credential_id),
     )
@@ -560,7 +560,7 @@ async fn require_certificate_revoke(
     .map_err(gql_error)?
         || has_capability_in_scope(
             &state.pool,
-            actor_id,
+            auth,
             "manage",
             Scope::Object(cert.credential_id),
         )
@@ -569,6 +569,6 @@ async fn require_certificate_revoke(
     {
         return Ok(());
     }
-    require_credential_management(state, actor_id, cert.entity_id).await?;
+    require_credential_management(state, auth, cert.entity_id).await?;
     Ok(())
 }

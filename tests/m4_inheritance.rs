@@ -146,7 +146,7 @@ async fn platform_gate_inherits_manage_into_any_tenant() {
     let t = tenant(&p).await;
 
     assert!(
-        has_capability_in_scope(&p, admin_id(), "manage", Scope::Tenant(t))
+        has_capability_in_scope(&p, &actx(admin_id()), "manage", Scope::Tenant(t))
             .await
             .expect("scope gate"),
         "seeded platform admin manage grant must inherit into tenant scope"
@@ -172,17 +172,17 @@ async fn tenant_policy_manage_does_not_leak_to_other_tenants_or_platform() {
     .await;
 
     assert!(
-        has_capability_in_scope(&p, actor, "policy.manage", Scope::Tenant(t1))
+        has_capability_in_scope(&p, &actx(actor), "policy.manage", Scope::Tenant(t1))
             .await
             .expect("own tenant")
     );
     assert!(
-        !has_capability_in_scope(&p, actor, "policy.manage", Scope::Tenant(t2))
+        !has_capability_in_scope(&p, &actx(actor), "policy.manage", Scope::Tenant(t2))
             .await
             .expect("other tenant")
     );
     assert!(
-        !has_capability_in_scope(&p, actor, "policy.manage", Scope::Platform)
+        !has_capability_in_scope(&p, &actx(actor), "policy.manage", Scope::Platform)
             .await
             .expect("platform")
     );
@@ -233,13 +233,17 @@ async fn manage_at_tenant_scope_does_not_satisfy_platform_lifecycle_gate() {
     .await;
 
     assert!(
-        !has_capability_in_scope(&p, actor, "manage", Scope::Platform)
+        !has_capability_in_scope(&p, &actx(actor), "manage", Scope::Platform)
             .await
             .expect("platform lifecycle gate")
     );
     assert!(
-        has_capability_in_scope(&p, actor, "manage", Scope::Tenant(t))
+        has_capability_in_scope(&p, &actx(actor), "manage", Scope::Tenant(t))
             .await
             .expect("tenant gate")
     );
+}
+
+fn actx(id: uuid::Uuid) -> atom::auth::AuthContext {
+    atom::auth::AuthContext { entity_id: id, ..Default::default() }
 }

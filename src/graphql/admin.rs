@@ -104,7 +104,7 @@ impl AdminQuery {
     ) -> Result<Vec<OrphanPolicy>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
             .await
             .map_err(gql_error)?;
         let policies = authz_repo::orphan_policies(
@@ -130,7 +130,7 @@ impl AdminQuery {
     ) -> Result<Vec<Credential>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, auth.entity_id, "manage", Scope::Platform)
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
             .await
             .map_err(gql_error)?;
         let credentials = authz_repo::expiring_credentials(
@@ -158,8 +158,8 @@ async fn audit_tenant_filter(
     auth: &AuthContext,
     requested_tenant_id: Option<Uuid>,
 ) -> std::result::Result<Option<Vec<Uuid>>, AppError> {
-    if has_capability_in_scope(pool, auth.entity_id, "read", Scope::Platform).await?
-        || has_capability_in_scope(pool, auth.entity_id, "manage", Scope::Platform).await?
+    if has_capability_in_scope(pool, &auth, "read", Scope::Platform).await?
+        || has_capability_in_scope(pool, &auth, "manage", Scope::Platform).await?
     {
         return Ok(None);
     }

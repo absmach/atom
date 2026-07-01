@@ -27,7 +27,7 @@ impl CredentialQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        require_credential_management(state, auth.entity_id, entity_id).await?;
+        require_credential_management(state, &auth, entity_id).await?;
         let credentials = service::list_credentials(&state.pool, entity_id)
             .await
             .map_err(gql_error)?;
@@ -66,7 +66,7 @@ impl CredentialMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let credential_id = service::create_password(&state.pool, entity_id, &password)
             .await
             .map_err(gql_error)?;
@@ -98,7 +98,7 @@ impl CredentialMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let response = service::create_api_key(
             &state.pool,
             entity_id,
@@ -250,7 +250,7 @@ impl CredentialMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let response = service::create_shared_key(
             &state.pool,
             &state.config.signing_keys,
@@ -292,7 +292,7 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let credential_id = parse_id(credential_id, "credentialId")?;
-        let tenant_id = require_credential_management(state, auth.entity_id, entity_id).await?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let response = service::reveal_shared_key(
             &state.pool,
             &state.config.signing_keys,
@@ -332,7 +332,7 @@ impl CredentialMutation {
         let credential_id = parse_id(credential_id, "credentialId")?;
         let tenant_id = if has_capability_in_scope(
             &state.pool,
-            auth.entity_id,
+            &auth,
             "revoke",
             Scope::Object(credential_id),
         )
@@ -341,7 +341,7 @@ impl CredentialMutation {
         {
             credential_tenant_id(&state.pool, entity_id, credential_id).await?
         } else {
-            require_credential_management(state, auth.entity_id, entity_id).await?
+            require_credential_management(state, &auth, entity_id).await?
         };
         service::revoke_credential(&state.pool, entity_id, credential_id)
             .await

@@ -33,7 +33,7 @@ pub async fn graphql_handler(
     headers: HeaderMap,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    let req = req.into_inner();
+    let mut req = req.into_inner();
     match token_from_headers(&headers) {
         Ok(Some((token, source))) => {
             if source == AuthTokenSource::Cookie {
@@ -45,12 +45,9 @@ pub async fn graphql_handler(
             }
             match authenticate_token(&state, token).await {
                 Ok(auth) => {
-                    // Install the access-token ceiling for the duration of execution
-                    // so every control-plane gate is capped without per-call threading.
-                    let req = req.data(auth.clone());
-                    return crate::auth::scope_request_ceiling(&auth, schema.execute(req))
-                        .await
-                        .into();
+                    // The access-token ceiling rides inside AuthContext and is
+                    // enforced explicitly by each gate; no request wrapper needed.
+                    req = req.data(auth);
                 }
                 Err(err) => return graphql_error(err.to_string()),
             }

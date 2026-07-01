@@ -201,7 +201,7 @@ async fn role_via_parent_group_satisfies_gate() {
     .expect("assign role to parent group");
 
     assert!(
-        has_capability_in_scope(&p, actor, "manage", Scope::Tenant(tenant_id))
+        has_capability_in_scope(&p, &actx(actor), "manage", Scope::Tenant(tenant_id))
             .await
             .expect("gate"),
         "a role on a parent group must satisfy the gate for a member of a child group"
@@ -234,7 +234,7 @@ async fn role_with_only_deny_block_does_not_satisfy_gate() {
     .expect("assign deny role");
 
     assert!(
-        !has_capability_in_scope(&p, actor, "manage", Scope::Tenant(tenant_id))
+        !has_capability_in_scope(&p, &actx(actor), "manage", Scope::Tenant(tenant_id))
             .await
             .expect("deny gate"),
         "a role holding only a deny block must not satisfy the gate for that action"
@@ -259,7 +259,7 @@ async fn role_with_only_deny_block_does_not_satisfy_gate() {
     .expect("assign allow role");
 
     assert!(
-        has_capability_in_scope(&p, allow_actor, "manage", Scope::Tenant(tenant_id))
+        has_capability_in_scope(&p, &actx(allow_actor), "manage", Scope::Tenant(tenant_id))
             .await
             .expect("allow gate"),
         "an allow block at the gate scope must satisfy the gate"
@@ -298,7 +298,7 @@ async fn conditional_allow_does_not_satisfy_gate() {
     assign_role_to_entity(&p, tenant_id, actor, role).await;
 
     assert!(
-        !has_capability_in_scope(&p, actor, "manage", Scope::Tenant(tenant_id))
+        !has_capability_in_scope(&p, &actx(actor), "manage", Scope::Tenant(tenant_id))
             .await
             .expect("conditional allow gate"),
         "a conditional allow must not satisfy the coarse gate"
@@ -326,7 +326,7 @@ async fn conditional_deny_blocks_gate() {
     assign_role_to_entity(&p, tenant_id, actor, deny_role).await;
 
     assert!(
-        !has_capability_in_scope(&p, actor, "manage", Scope::Tenant(tenant_id))
+        !has_capability_in_scope(&p, &actx(actor), "manage", Scope::Tenant(tenant_id))
             .await
             .expect("conditional deny gate"),
         "a conditional deny must block the coarse gate even with an allow present"
@@ -391,7 +391,7 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     .expect("insert direct policy");
 
     assert!(
-        !has_capability_in_scope(&p, actor, "read", Scope::Object(object_id))
+        !has_capability_in_scope(&p, &actx(actor), "read", Scope::Object(object_id))
             .await
             .expect("cross-tenant object gate"),
         "an object grant bounded to a different tenant must not satisfy the object gate"
@@ -405,7 +405,7 @@ async fn object_gate_honours_assignment_tenant_boundary() {
         .await
         .expect("rebind policy");
     assert!(
-        has_capability_in_scope(&p, actor, "read", Scope::Object(object_id))
+        has_capability_in_scope(&p, &actx(actor), "read", Scope::Object(object_id))
             .await
             .expect("same-tenant object gate"),
         "an object grant bounded to the object's tenant must satisfy the gate"
@@ -483,7 +483,7 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     }
 
     assert!(
-        require_read_access(&p, actor, Some(tenant_id), object_id)
+        require_read_access(&p, &actx(actor), Some(tenant_id), object_id)
             .await
             .is_err(),
         "an exact-object read deny must override the tenant-wide read allow"
@@ -496,7 +496,7 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
         .await
         .expect("drop deny policy");
     assert!(
-        require_read_access(&p, actor, Some(tenant_id), object_id)
+        require_read_access(&p, &actx(actor), Some(tenant_id), object_id)
             .await
             .is_ok(),
         "the tenant-wide read allow alone must satisfy the read gate"
@@ -507,4 +507,8 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
         .execute(&p)
         .await;
     cleanup(&p, tenant_id).await;
+}
+
+fn actx(id: uuid::Uuid) -> atom::auth::AuthContext {
+    atom::auth::AuthContext { entity_id: id, ..Default::default() }
 }

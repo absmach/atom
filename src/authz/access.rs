@@ -60,7 +60,7 @@ pub async fn require_authz_check_access(
     let scope = scope_for_tenant(tenant_id);
     require_any_capability(
         pool,
-        auth.entity_id,
+        auth,
         &[
             ("authz.check", scope),
             ("policy.manage", scope),

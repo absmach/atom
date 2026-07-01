@@ -105,18 +105,11 @@ impl AuthzService for AtomAuthz {
         let tenant_id = access::authz_request_tenant_id(&self.state.pool, &authz_req)
             .await
             .map_err(Status::from)?;
-        // A scoped access token's ceiling caps the caller's right to invoke check.
-        crate::auth::scope_request_ceiling(
-            &auth,
-            access::require_authz_check_access(
-                &self.state.pool,
-                &auth,
-                authz_req.subject_id,
-                tenant_id,
-            ),
-        )
-        .await
-        .map_err(Status::from)?;
+        // The caller's token ceiling caps its right to invoke check; enforced
+        // inside the gate via AuthContext.
+        access::require_authz_check_access(&self.state.pool, &auth, authz_req.subject_id, tenant_id)
+            .await
+            .map_err(Status::from)?;
 
         // Delegated check: caller's token ceiling gates the right to ask (above),
         // not the subject's decision.
@@ -221,7 +214,7 @@ impl AuthService for AtomAuth {
         .await
         .map_err(Status::from)?;
 
-        require_credential_auth_access(&self.state.pool, auth.entity_id, tenant_id).await?;
+        require_credential_auth_access(&self.state.pool, &auth, tenant_id).await?;
 
         let result = identity_service::authenticate_credential_in_tenant(
             &self.state.pool,
@@ -276,13 +269,13 @@ impl AuthService for AtomAuth {
 
 async fn require_credential_auth_access(
     pool: &sqlx::PgPool,
-    caller_id: Uuid,
+    auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), Status> {
     match tenant_id {
         Some(tenant_id) => require_any_capability(
             pool,
-            caller_id,
+            auth,
             &[
                 ("authz.check", Scope::Tenant(tenant_id)),
                 ("authz.check", Scope::Platform),
@@ -290,7 +283,7 @@ async fn require_credential_auth_access(
         )
         .await
         .map_err(Status::from),
-        None => require_any_capability(pool, caller_id, &[("authz.check", Scope::Platform)])
+        None => require_any_capability(pool, auth, &[("authz.check", Scope::Platform)])
             .await
             .map_err(Status::from),
     }
@@ -319,7 +312,7 @@ impl CertificateService for AtomCertificates {
         .map_err(Status::from)?;
         require_any_capability(
             &self.state.pool,
-            auth.entity_id,
+            &auth,
             &[
                 ("authz.check", scope_for_tenant(identity.tenant_id)),
                 ("authz.check", Scope::Platform),
@@ -352,7 +345,7 @@ impl CertificateService for AtomCertificates {
             .map_err(Status::from)?;
         require_any_capability(
             &self.state.pool,
-            auth.entity_id,
+            &auth,
             &[
                 ("manage", Scope::Object(entity_id)),
                 ("manage", scope_for_tenant(tenant_id)),

@@ -525,6 +525,31 @@ async fn access_token_ceiling_intersects_owner_grants() {
             .allowed
     );
 
+    // Control-plane gate path is capped too: a scoped token's AuthContext denies
+    // a manage gate its ceiling omits, even though the owner can manage.
+    let scoped_auth = atom::auth::AuthContext {
+        entity_id: owner_id,
+        scoped: true,
+        ceiling: Some(std::sync::Arc::new(ceiling.clone())),
+        ..Default::default()
+    };
+    assert!(atom::auth::has_capability_in_scope(
+        &pool,
+        &scoped_auth,
+        "read",
+        atom::auth::Scope::Object(object_id),
+    )
+    .await
+    .unwrap());
+    assert!(!atom::auth::has_capability_in_scope(
+        &pool,
+        &scoped_auth,
+        "manage",
+        atom::auth::Scope::Object(object_id),
+    )
+    .await
+    .unwrap());
+
     // Remove the owner's grant: the token's access disappears immediately.
     sqlx::query("DELETE FROM direct_policies WHERE subject_id = $1")
         .bind(owner_id)

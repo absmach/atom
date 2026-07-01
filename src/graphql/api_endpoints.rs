@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::{
     api_endpoints::repo as api_endpoint_repo,
-    auth::has_global_manage,
+    auth::{has_global_manage, AuthContext},
     error::AppError,
     models::api_endpoint::{
         CreateApiEndpoint, ListApiEndpointExecutions, ListApiEndpoints, UpdateApiEndpoint,
@@ -34,7 +34,7 @@ impl ApiEndpointQuery {
     ) -> Result<ApiEndpointList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_platform_manage(state, auth.entity_id).await?;
+        require_platform_manage(state, &auth).await?;
         let list = api_endpoint_repo::list_api_endpoints(
             &state.pool,
             ListApiEndpoints {
@@ -56,7 +56,7 @@ impl ApiEndpointQuery {
     async fn api_endpoint(&self, ctx: &Context<'_>, id: ID) -> Result<ApiEndpoint> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_platform_manage(state, auth.entity_id).await?;
+        require_platform_manage(state, &auth).await?;
         let endpoint = api_endpoint_repo::get_api_endpoint(&state.pool, parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
@@ -72,7 +72,7 @@ impl ApiEndpointQuery {
     ) -> Result<ApiEndpointExecutionList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_platform_manage(state, auth.entity_id).await?;
+        require_platform_manage(state, &auth).await?;
         let list = api_endpoint_repo::list_api_endpoint_executions(
             &state.pool,
             ListApiEndpointExecutions {
@@ -110,7 +110,7 @@ impl ApiEndpointMutation {
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
         let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
         let result = async {
-            require_platform_manage_app(state, auth.entity_id).await?;
+            require_platform_manage_app(state, &auth).await?;
             api_endpoint_repo::create_api_endpoint(
                 &state.pool,
                 CreateApiEndpoint {
@@ -161,7 +161,7 @@ impl ApiEndpointMutation {
         let endpoint_id = parse_id(id, "id")?;
         let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
         let result = async {
-            require_platform_manage_app(state, auth.entity_id).await?;
+            require_platform_manage_app(state, &auth).await?;
             api_endpoint_repo::update_api_endpoint(
                 &state.pool,
                 endpoint_id,
@@ -206,7 +206,7 @@ impl ApiEndpointMutation {
         let state = ctx.data::<AppState>()?;
         let endpoint_id = parse_id(id, "id")?;
         let result = async {
-            require_platform_manage_app(state, auth.entity_id).await?;
+            require_platform_manage_app(state, &auth).await?;
             api_endpoint_repo::enable_api_endpoint(&state.pool, endpoint_id, Some(auth.entity_id))
                 .await
         }
@@ -230,7 +230,7 @@ impl ApiEndpointMutation {
         let state = ctx.data::<AppState>()?;
         let endpoint_id = parse_id(id, "id")?;
         let result = async {
-            require_platform_manage_app(state, auth.entity_id).await?;
+            require_platform_manage_app(state, &auth).await?;
             api_endpoint_repo::disable_api_endpoint(&state.pool, endpoint_id, Some(auth.entity_id))
                 .await
         }
@@ -250,17 +250,17 @@ impl ApiEndpointMutation {
     }
 }
 
-async fn require_platform_manage(state: &AppState, entity_id: uuid::Uuid) -> Result<()> {
-    require_platform_manage_app(state, entity_id)
+async fn require_platform_manage(state: &AppState, auth: &AuthContext) -> Result<()> {
+    require_platform_manage_app(state, auth)
         .await
         .map_err(gql_error)
 }
 
 async fn require_platform_manage_app(
     state: &AppState,
-    entity_id: uuid::Uuid,
+    auth: &AuthContext,
 ) -> std::result::Result<(), AppError> {
-    if has_global_manage(&state.pool, entity_id).await? {
+    if has_global_manage(&state.pool, auth).await? {
         Ok(())
     } else {
         Err(AppError::Forbidden)

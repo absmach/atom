@@ -106,7 +106,7 @@ impl AuthzMutation {
     ) -> Result<AuthzExplainResponse> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_explain_access(&state.pool, auth.entity_id).await?;
+        require_explain_access(&state.pool, &auth).await?;
         let req = authz_request(input)?;
         let tenant_id = access::authz_request_tenant_id(&state.pool, &req)
             .await

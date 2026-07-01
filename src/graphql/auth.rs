@@ -187,7 +187,7 @@ pub(crate) fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {
 
 pub(crate) async fn require_any_capability(
     pool: &sqlx::PgPool,
-    entity_id: Uuid,
+    auth: &AuthContext,
     checks: &[(&str, Scope)],
 ) -> Result<()> {
     // Delegate to the single core gate. A previous sequential-OR copy here
@@ -195,7 +195,7 @@ pub(crate) async fn require_any_capability(
     // exact-object deny was bypassed by a later tenant-wide allow. The core gate
     // evaluates all scopes of an action together (cross-scope deny-override) and
     // enforces tenant boundaries and fail-closed conditions.
-    crate::auth::require_any_capability(pool, entity_id, checks)
+    crate::auth::require_any_capability(pool, auth, checks)
         .await
         .map_err(gql_error)
 }
@@ -205,65 +205,65 @@ pub(crate) async fn require_any_capability(
 
 pub(crate) async fn require_list_access(
     pool: &sqlx::PgPool,
-    entity_id: Uuid,
+    auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
-    crate::auth::require_list_access(pool, entity_id, tenant_id)
+    crate::auth::require_list_access(pool, auth, tenant_id)
         .await
         .map_err(gql_error)
 }
 
 pub(crate) async fn require_read_access(
     pool: &sqlx::PgPool,
-    entity_id: Uuid,
+    auth: &AuthContext,
     tenant_id: Option<Uuid>,
     object_id: Uuid,
 ) -> Result<()> {
-    crate::auth::require_read_access(pool, entity_id, tenant_id, object_id)
+    crate::auth::require_read_access(pool, auth, tenant_id, object_id)
         .await
         .map_err(gql_error)
 }
 
 pub(crate) async fn require_role_read(
     pool: &sqlx::PgPool,
-    entity_id: Uuid,
+    auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
-    crate::auth::require_role_read(pool, entity_id, tenant_id)
+    crate::auth::require_role_read(pool, auth, tenant_id)
         .await
         .map_err(gql_error)
 }
 
 pub(crate) async fn require_policy_read(
     pool: &sqlx::PgPool,
-    entity_id: Uuid,
+    auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
-    crate::auth::require_policy_read(pool, entity_id, tenant_id)
+    crate::auth::require_policy_read(pool, auth, tenant_id)
         .await
         .map_err(gql_error)
 }
 
-pub(crate) async fn require_explain_access(pool: &sqlx::PgPool, entity_id: Uuid) -> Result<()> {
-    crate::auth::require_explain_access(pool, entity_id)
+pub(crate) async fn require_explain_access(pool: &sqlx::PgPool, auth: &AuthContext) -> Result<()> {
+    crate::auth::require_explain_access(pool, auth)
         .await
         .map_err(gql_error)
 }
 
 pub(crate) async fn require_credential_management(
     state: &AppState,
-    actor_id: Uuid,
+    auth: &AuthContext,
     target_entity_id: Uuid,
 ) -> Result<Option<Uuid>> {
     let target = repo::get_entity(&state.pool, target_entity_id)
         .await
         .map_err(gql_error)?;
-    if actor_id == target_entity_id {
+    if auth.entity_id == target_entity_id {
         return Ok(target.tenant_id);
     }
     if has_capability_in_scope(
         &state.pool,
-        actor_id,
+        auth,
         "manage",
         Scope::Object(target_entity_id),
     )
@@ -274,7 +274,7 @@ pub(crate) async fn require_credential_management(
     }
     require_capability(
         &state.pool,
-        actor_id,
+        auth,
         "manage",
         scope_for_tenant(target.tenant_id),
     )

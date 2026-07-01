@@ -84,7 +84,7 @@ pub async fn custom_endpoint(
 
     if let Err(err) = require_any_capability(
         &state.pool,
-        caller.entity_id,
+        &caller,
         &[
             ("execute", Scope::Object(endpoint.id)),
             ("manage", Scope::Object(endpoint.id)),

@@ -829,7 +829,9 @@ SELECT
         WHEN l.scope_mode = 'platform' THEN NULL
         WHEN l.scope_mode = 'tenant' THEN l.tenant_id::text
         WHEN l.scope_mode = 'object_kind' THEN l.object_kind
-        WHEN l.scope_mode = 'object_type' THEN l.object_kind || ':' || l.object_type
+        -- object_type stores the full namespaced value (e.g. 'entity:device'),
+        -- matching permission_block_scopes; passed through, not reconstructed.
+        WHEN l.scope_mode = 'object_type' THEN l.object_type
         WHEN l.scope_mode = 'object' THEN l.object_id::text
     END AS scope_ref
 FROM credential_permission_limits l;

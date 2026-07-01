@@ -34,7 +34,7 @@ impl ProfileQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_list_access(&state.pool, auth.entity_id, tenant_id).await?;
+        require_list_access(&state.pool, &auth, tenant_id).await?;
         let list = profile_repo::list_profiles(
             &state.pool,
             ListProfiles {
@@ -63,7 +63,7 @@ impl ProfileQuery {
         let profile = profile_repo::get_profile(&state.pool, id)
             .await
             .map_err(gql_error)?;
-        require_read_access(&state.pool, auth.entity_id, profile.tenant_id, id).await?;
+        require_read_access(&state.pool, &auth, profile.tenant_id, id).await?;
         Ok(profile.into())
     }
 
@@ -78,7 +78,7 @@ impl ProfileQuery {
         let profile = profile_repo::get_profile(&state.pool, profile_id)
             .await
             .map_err(gql_error)?;
-        require_read_access(&state.pool, auth.entity_id, profile.tenant_id, profile_id).await?;
+        require_read_access(&state.pool, &auth, profile.tenant_id, profile_id).await?;
         let versions = profile_repo::list_profile_versions(&state.pool, profile_id)
             .await
             .map_err(gql_error)?;
@@ -102,7 +102,7 @@ impl ProfileMutation {
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
-                auth.entity_id,
+                &auth,
                 &[
                     ("manage", scope_for_tenant(tenant_id)),
                     ("write", scope_for_tenant(tenant_id)),
@@ -155,7 +155,7 @@ impl ProfileMutation {
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
-                auth.entity_id,
+                &auth,
                 &[
                     ("manage", scope_for_tenant(profile.tenant_id)),
                     ("write", scope_for_tenant(profile.tenant_id)),
@@ -208,7 +208,7 @@ impl ProfileMutation {
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
-                auth.entity_id,
+                &auth,
                 &[
                     ("manage", scope_for_tenant(existing.tenant_id)),
                     ("write", scope_for_tenant(existing.tenant_id)),
