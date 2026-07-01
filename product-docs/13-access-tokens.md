@@ -82,6 +82,18 @@ The following operations require an unscoped session or unscoped credential:
 
 This is stricter than checking whether the owner has `manage` on `credential`; the token itself is not allowed to exercise credential-management authority.
 
+### Delegated minting
+
+`createAccessToken` accepts an optional `subjectId`. Omitted or equal to the
+caller, it is self-service (the caller mints for itself). A different `subjectId`
+is a *delegated* mint and requires an unscoped caller with `manage` on the target
+subject (or its tenant) — the same gate as any other credential-management
+operation, so a scoped token can never mint delegated tokens.
+
+The ceiling is never validated against the target's grants at mint time. Effective
+access stays `target live authority intersect ceiling`, evaluated on every request,
+so a delegated token can never exceed the target even if the ceiling names more.
+
 ---
 
 ## GraphQL Surface
@@ -207,4 +219,7 @@ Operators should treat scoped tokens as live credentials:
 - Refresh tokens for scoped access tokens.
 - Token introspection that returns embedded permission claims.
 - Ceiling-aware authorized-listing pagination.
-- Delegation where one user mints a token for another subject.
+- Admin lifecycle parity for delegated tokens: `accessTokens`,
+  `replaceAccessTokenPermissions`, and `revokeAccessToken` are owner-scoped, so a
+  delegated token is listed/replaced only by its owner. Revoke it as an admin via
+  `revokeCredential` (`manage` on the target).

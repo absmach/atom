@@ -1775,6 +1775,11 @@ pub struct CreateAccessTokenInput {
     pub description: Option<String>,
     pub expires_at: Option<String>,
     pub permissions: Vec<AccessTokenPermissionInput>,
+    /// Mint the token for another subject (delegated). Omitted or equal to the
+    /// caller = self-service. A different subject requires an unscoped caller with
+    /// `manage` on the target; the ceiling is still capped by the *target's* live
+    /// authority at evaluation time.
+    pub subject_id: Option<ID>,
 }
 
 #[derive(InputObject)]

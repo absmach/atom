@@ -135,9 +135,24 @@ impl CredentialMutation {
         input: CreateAccessTokenInput,
     ) -> Result<AccessTokenResponse> {
         let auth = require_auth(ctx)?;
-        // A scoped token cannot mint tokens (would let it create a broader sibling).
-        crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
+        // Resolve the token owner. Absent or self => self-service (a scoped token
+        // cannot mint, or it could build a broader sibling). A different subject =>
+        // delegated mint, allowed only for an unscoped caller holding `manage` on
+        // the target (require_credential_management enforces both). Either way the
+        // ceiling is capped by the owner's live grants at evaluation time.
+        let owner_id = input
+            .subject_id
+            .clone()
+            .map(|id| parse_id(id, "subjectId"))
+            .transpose()?
+            .unwrap_or(auth.entity_id);
+        let delegated = owner_id != auth.entity_id;
+        if delegated {
+            require_credential_management(state, &auth, owner_id).await?;
+        } else {
+            crate::graphql::auth::deny_scoped_token(&auth)?;
+        }
         let permissions = input
             .permissions
             .into_iter()
@@ -145,7 +160,7 @@ impl CredentialMutation {
             .collect::<Result<Vec<_>>>()?;
         let response = service::create_access_token(
             &state.pool,
-            auth.entity_id,
+            owner_id,
             token_model::CreateAccessToken {
                 name: input.name,
                 description: input.description,
@@ -165,9 +180,10 @@ impl CredentialMutation {
                 event: "credential.create",
                 outcome: AuditOutcome::Allow,
                 details: serde_json::json!({
-                    "entity_id": auth.entity_id,
+                    "entity_id": owner_id,
                     "kind": "access_token",
                     "scoped": true,
+                    "delegated": delegated,
                     "name": &response.name,
                     "credential_id": response.credential_id
                 }),

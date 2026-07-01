@@ -1262,3 +1262,104 @@ async fn add_and_remove_ownership() {
         true
     );
 }
+
+/// Delegated minting: `createAccessToken(subjectId:)` lets an unscoped caller with
+/// `manage` on the target mint a token *owned by the target*. A caller without
+/// manage, and a scoped caller (even one holding manage), are both refused; a
+/// missing target is not found. The ceiling is never validated against the
+/// target's grants here — it is capped at evaluation time.
+#[tokio::test]
+#[ignore]
+async fn delegated_access_token_mint_requires_manage_and_unscoped_caller() {
+    use atom::authz::repo::CredentialCeiling;
+
+    let pool = common::pool().await;
+    let manager = entity(&pool, "human").await;
+    let target = entity(&pool, "service").await;
+    let outsider = entity(&pool, "human").await;
+    let object = entity(&pool, "device").await;
+    let schema = build_schema(state(pool.clone()));
+
+    // `manager` holds manage on the target so it may manage the target's credentials.
+    let block_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')",
+    )
+    .bind(block_id)
+    .bind(target)
+    .execute(&pool)
+    .await
+    .expect("block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'manage'",
+    )
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("block action");
+    sqlx::query(
+        "INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)",
+    )
+    .bind(manager)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("policy");
+
+    let mint_query = |subject: Uuid, name: &str| {
+        format!(
+            r#"mutation {{ createAccessToken(input: {{ name: "{name}", subjectId: "{subject}", permissions: [{{ actions: ["read"], scopeMode: "object", objectId: "{object}" }}] }}) {{ credentialId }} }}"#
+        )
+    };
+
+    // Manager mints a token owned by the target.
+    let ok = schema
+        .execute(authed_as(manager, mint_query(target, "svc-token")))
+        .await;
+    assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+    let cred_id = ok.data.into_json().expect("json")["createAccessToken"]["credentialId"]
+        .as_str()
+        .expect("id")
+        .parse::<Uuid>()
+        .expect("uuid");
+    // Credential is owned by the target, and scoped.
+    let (owner, scoped): (Uuid, bool) =
+        sqlx::query_as("SELECT entity_id, scoped FROM credentials WHERE id = $1")
+            .bind(cred_id)
+            .fetch_one(&pool)
+            .await
+            .expect("credential");
+    assert_eq!(owner, target, "delegated token must be owned by the target");
+    assert!(scoped);
+
+    // A caller without manage on the target is forbidden.
+    let denied = schema
+        .execute(authed_as(outsider, mint_query(target, "nope")))
+        .await;
+    assert!(
+        !denied.errors.is_empty(),
+        "caller without manage must not mint for another subject"
+    );
+
+    // A scoped caller is refused even though it holds manage on the target.
+    let scoped_denied = schema
+        .execute(authed_scoped(
+            manager,
+            CredentialCeiling { entries: vec![] },
+            mint_query(target, "scoped-nope"),
+        ))
+        .await;
+    assert!(
+        !scoped_denied.errors.is_empty(),
+        "scoped caller must not mint delegated tokens"
+    );
+
+    // A missing target is not found.
+    let missing = schema
+        .execute(authed_as(manager, mint_query(Uuid::new_v4(), "ghost")))
+        .await;
+    assert!(
+        !missing.errors.is_empty(),
+        "delegated mint for a missing subject must fail"
+    );
+}
