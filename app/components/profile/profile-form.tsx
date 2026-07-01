@@ -184,6 +184,9 @@ type ScopeMode = (typeof SCOPE_MODES)[number];
 // A permission row in the create form, edited as raw strings before being
 // translated into a GraphQL AccessTokenPermissionInput on submit.
 type PermissionDraft = {
+  // Stable client-only key so React can track editable rows across reorders and
+  // removals; never sent to the API (see buildPermissionInputs).
+  id: string;
   actions: string;
   scopeMode: ScopeMode;
   tenantId: string;
@@ -194,6 +197,7 @@ type PermissionDraft = {
 
 function emptyPermissionDraft(): PermissionDraft {
   return {
+    id: crypto.randomUUID(),
     actions: "",
     scopeMode: "object_kind",
     tenantId: "",
@@ -210,6 +214,7 @@ function draftsFromPermissions(
     return [emptyPermissionDraft()];
   }
   return permissions.map((permission) => ({
+    id: crypto.randomUUID(),
     actions: permission.actions.join(", "),
     scopeMode: (SCOPE_MODES.includes(permission.scopeMode as ScopeMode)
       ? permission.scopeMode
@@ -632,9 +637,9 @@ function AccessTokenSection() {
       <CardHeader>
         <CardTitle>Access Tokens</CardTitle>
         <CardDescription>
-          Create scoped tokens for command-line and API access. A token can never
-          exceed your own permissions, and is further limited to the permissions
-          you grant it below.
+          Create scoped tokens for command-line and API access. A token can
+          never exceed your own permissions, and is further limited to the
+          permissions you grant it below.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -720,7 +725,7 @@ function AccessTokenSection() {
               </div>
               {permissions.map((permission, index) => (
                 <PermissionDraftRow
-                  key={index}
+                  key={permission.id}
                   permission={permission}
                   canRemove={permissions.length > 1}
                   onChange={(patch) => updatePermission(index, patch)}
@@ -817,7 +822,8 @@ function buildPermissionInputs(drafts: PermissionDraft[]) {
       input.tenantId = draft.tenantId.trim();
     }
     if (
-      (draft.scopeMode === "object_kind" || draft.scopeMode === "object_type") &&
+      (draft.scopeMode === "object_kind" ||
+        draft.scopeMode === "object_type") &&
       draft.objectKind.trim()
     ) {
       input.objectKind = draft.objectKind.trim();
@@ -874,12 +880,7 @@ function PermissionDraftRow({
           </select>
         </div>
         {canRemove ? (
-          <Button
-            onClick={onRemove}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
+          <Button onClick={onRemove} size="sm" type="button" variant="ghost">
             <Trash2 data-icon="inline-start" />
             Remove
           </Button>
@@ -1004,7 +1005,10 @@ function AccessTokenRow({
         {token.permissions.length > 0 ? (
           <ul className="space-y-0.5 text-xs text-muted-foreground">
             {token.permissions.map((permission, index) => (
-              <li key={index} className="font-mono">
+              <li
+                key={`${permissionSummary(permission)}-${index}`}
+                className="font-mono"
+              >
                 {permissionSummary(permission)}
               </li>
             ))}
@@ -1030,7 +1034,7 @@ function AccessTokenRow({
           <div className="mt-3 grid gap-2">
             {drafts.map((permission, index) => (
               <PermissionDraftRow
-                key={index}
+                key={permission.id}
                 permission={permission}
                 canRemove={drafts.length > 1}
                 onChange={(patch) => updateDraft(index, patch)}
@@ -1056,9 +1060,7 @@ function AccessTokenRow({
                 size="sm"
                 type="button"
               >
-                {replacePending ? (
-                  <Loader2 className="animate-spin" />
-                ) : null}
+                {replacePending ? <Loader2 className="animate-spin" /> : null}
                 Save permissions
               </Button>
               <Button
@@ -1124,9 +1126,7 @@ function AccessTokenReveal({
       <KeyRound className="size-4" />
       <AlertDescription>
         <div className="grid gap-3">
-          <div className="font-medium">
-            Access token created — copy it now
-          </div>
+          <div className="font-medium">Access token created — copy it now</div>
           <code className="block break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
             {token.token}
           </code>

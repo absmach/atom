@@ -120,7 +120,7 @@ impl AuthzMutation {
         let tenant_id = access::authz_request_tenant_id(&state.pool, &req)
             .await
             .map_err(gql_error)?;
-        let response = engine::explain(&state.pool, &req)
+        let response = engine::explain(&state.pool, &req, auth.ceiling_for(req.subject_id))
             .await
             .map_err(gql_error)?;
         audit_authz_explain(&state.pool, auth.entity_id, &req, &response, tenant_id).await;

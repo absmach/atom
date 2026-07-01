@@ -359,6 +359,20 @@ impl AuthContext {
             None
         }
     }
+
+    /// Fail closed on owner-wide authorized-listing surfaces that are not yet
+    /// ceiling-aware. A scoped access token must not receive the owner's full
+    /// authorized set (which ignores the token's ceiling); callers should use the
+    /// per-object `authz.check`, which returns the token-limited answer. `Ok` for
+    /// unscoped/JWT auth.
+    pub fn reject_scoped_listing(&self) -> Result<(), AppError> {
+        if self.scoped {
+            return Err(AppError::bad_request(
+                "scoped access tokens cannot list authorized objects; use authzCheck per object",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Whether a scoped token's `ceiling` permits `action_id` at `scopes`. `None`

@@ -507,7 +507,11 @@ fn deny_reason(grant: &repo::EffectiveGrant) -> String {
     }
 }
 
-pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainResponse, AppError> {
+pub async fn explain(
+    pool: &PgPool,
+    req: &AuthzRequest,
+    ceiling: Option<&repo::CredentialCeiling>,
+) -> Result<AuthzExplainResponse, AppError> {
     let ctx = match load_decision_context(pool, req).await? {
         DecisionContext::Denied(denied) => {
             return Ok(AuthzExplainResponse {
@@ -587,6 +591,22 @@ pub async fn explain(pool: &PgPool, req: &AuthzRequest) -> Result<AuthzExplainRe
     }
 
     if let Some(matched_binding) = allow_match {
+        // Access-token ceiling: the owner's policy allows, but a scoped token
+        // confers only what its ceiling also permits. Fail closed and drop the
+        // matched binding so the explanation cannot claim access outside the cap.
+        if let Some(ceiling) = ceiling {
+            if !ceiling_permits(ceiling, &target, &capability_ids, &eval_ctx) {
+                return Ok(AuthzExplainResponse {
+                    allowed: false,
+                    reason: "denied by access token permission ceiling".to_string(),
+                    subject: Some(subject),
+                    resource: Some(resource),
+                    capability: Some(capability),
+                    matched_binding: None,
+                    evaluated_bindings: evaluated,
+                });
+            }
+        }
         Ok(AuthzExplainResponse {
             allowed: true,
             reason: "allowed".to_string(),

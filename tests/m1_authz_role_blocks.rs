@@ -285,7 +285,7 @@ async fn role_linked_conditional_allow_block_honours_conditions() {
     // explain must reach the same decision as evaluate for both cases: both go
     // through the single canonical grant expansion and the shared matcher, so a
     // disagreement would mean explain has drifted from the real decision.
-    let explained_unmet = atom::authz::engine::explain(&p, &deny_req)
+    let explained_unmet = atom::authz::engine::explain(&p, &deny_req, None)
         .await
         .expect("explain unmet");
     assert!(
@@ -293,7 +293,7 @@ async fn role_linked_conditional_allow_block_honours_conditions() {
         "explain must agree with evaluate (deny when condition unmet): {}",
         explained_unmet.reason
     );
-    let explained_met = atom::authz::engine::explain(&p, &allow_req)
+    let explained_met = atom::authz::engine::explain(&p, &allow_req, None)
         .await
         .expect("explain met");
     assert!(
@@ -351,6 +351,7 @@ async fn explain_binding_carries_assignment_and_block_ids() {
             object_id: None,
             context: json!({}),
         },
+        None,
     )
     .await
     .expect("explain");

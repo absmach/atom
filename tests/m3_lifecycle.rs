@@ -235,7 +235,7 @@ async fn explain_surfaces_lifecycle_reason_too() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::explain(&p, &req)
+    let resp = atom::authz::engine::explain(&p, &req, None)
         .await
         .expect("explain");
     assert!(!resp.allowed);

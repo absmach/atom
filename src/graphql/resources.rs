@@ -34,6 +34,7 @@ impl ResourceQuery {
     ) -> Result<Vec<String>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
+        auth.reject_scoped_listing().map_err(gql_error)?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
 
         authz_repo::authorized_resource_kinds(&state.pool, auth.entity_id, tenant_id)
@@ -88,6 +89,7 @@ impl ResourceQuery {
             });
         }
 
+        auth.reject_scoped_listing().map_err(gql_error)?;
         let object_type = kind.as_deref().map(|kind| {
             if kind.contains(':') {
                 kind.to_string()

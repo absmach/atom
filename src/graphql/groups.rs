@@ -250,6 +250,7 @@ async fn authorized_group_list(
         });
     }
 
+    auth.reject_scoped_listing().map_err(gql_error)?;
     let authorized = authz_repo::authorized_object_ids(
         &state.pool,
         AuthorizedObjectIdsQuery {

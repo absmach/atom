@@ -716,17 +716,57 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
         "scoped token self-check must reflect the ceiling, not owner authority"
     );
 
-    // authorizedObjectIds is not ceiling-aware yet → fails closed for scoped tokens.
-    let list = schema
-        .execute(authed_scoped(
-            owner,
-            ceiling,
-            format!(
-                r#"{{ authorizedObjectIds(input: {{ subjectId: "{owner}", action: "read", objectKind: "entity" }}) {{ ids }} }}"#
-            ),
-        ))
-        .await;
-    assert!(!list.errors.is_empty(), "scoped token must not bulk-list");
+    // authzExplain must apply the ceiling too (engine level: the GraphQL surface
+    // gates explain behind platform-manage, which a narrow ceiling cannot pass).
+    // The owner holds manage, but the read-only ceiling denies it and no matched
+    // binding leaks — otherwise a scoped caller gets a misleading "allowed".
+    let explain_manage = atom::authz::engine::explain(
+        &pool,
+        &atom::models::policy::AuthzRequest {
+            subject_id: owner,
+            action: "manage".into(),
+            resource_id: None,
+            object_kind: Some("entity".into()),
+            object_id: Some(object),
+            context: serde_json::Value::Null,
+        },
+        Some(&ceiling),
+    )
+    .await
+    .expect("explain");
+    assert!(
+        !explain_manage.allowed,
+        "explain must apply the scoped-token ceiling"
+    );
+    assert_eq!(
+        explain_manage.reason,
+        "denied by access token permission ceiling"
+    );
+    assert!(
+        explain_manage.matched_binding.is_none(),
+        "capped explain must not expose a matched binding"
+    );
+
+    // Owner-wide authorized-listing surfaces are not ceiling-aware yet → they
+    // fail closed for scoped tokens rather than leak the owner's broader set.
+    for query in [
+        format!(
+            r#"{{ authorizedObjectIds(input: {{ subjectId: "{owner}", action: "read", objectKind: "entity" }}) {{ ids }} }}"#
+        ),
+        r#"{ entities { total } }"#.to_string(),
+        r#"{ resources { total } }"#.to_string(),
+        r#"{ resourceKinds }"#.to_string(),
+        r#"{ groups { total } }"#.to_string(),
+        r#"{ tenants { total } }"#.to_string(),
+    ] {
+        let listed = schema
+            .execute(authed_scoped(owner, ceiling.clone(), query.clone()))
+            .await;
+        assert!(
+            !listed.errors.is_empty(),
+            "scoped token must not bulk-list via: {query}"
+        );
+    }
 }
 
 #[tokio::test]

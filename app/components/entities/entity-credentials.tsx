@@ -158,11 +158,7 @@ type Credential = {
   createdAt: string;
 };
 
-type CredentialKind =
-  | "password"
-  | "api_key"
-  | "shared_key"
-  | "certificate";
+type CredentialKind = "password" | "api_key" | "shared_key" | "certificate";
 
 type AddCredentialState =
   | { kind: "password"; password: string; confirm: string }

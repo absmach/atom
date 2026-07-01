@@ -166,7 +166,11 @@ describe("ProfileForm access tokens", () => {
     );
 
     // The create form also has an Actions field; the editor's is the last one.
-    const actions = screen.getAllByLabelText("Actions").at(-1)!;
+    const actionsFields = screen.getAllByLabelText("Actions");
+    const actions = actionsFields[actionsFields.length - 1];
+    if (!actions) {
+      throw new Error("expected an Actions field in the permission editor");
+    }
     await user.clear(actions);
     await user.type(actions, "manage");
     await user.click(screen.getByRole("button", { name: "Save permissions" }));
