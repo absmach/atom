@@ -36,10 +36,7 @@ async fn require_credential_management(
     auth: &AuthContext,
     target_entity_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    // Scoped access tokens can never manage credentials (self-escalation guard).
-    if auth.scoped {
-        return Err(AppError::Forbidden);
-    }
+    auth.reject_scoped_credential_management()?;
     let target = repo::get_entity(&state.pool, target_entity_id).await?;
     if has_capability_in_scope(&state.pool, auth, "manage", Scope::Object(target_entity_id)).await?
     {

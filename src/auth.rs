@@ -373,6 +373,17 @@ impl AuthContext {
         }
         Ok(())
     }
+
+    /// Credential management (minting or rewriting credentials) is never available
+    /// to a scoped access token, even for its own entity — otherwise a
+    /// least-privilege token could mint or widen a sibling credential and
+    /// self-escalate. `Ok` for unscoped/JWT auth.
+    pub fn reject_scoped_credential_management(&self) -> Result<(), AppError> {
+        if self.scoped {
+            return Err(AppError::Forbidden);
+        }
+        Ok(())
+    }
 }
 
 /// Whether a scoped token's `ceiling` permits `action_id` at `scopes`. `None`
@@ -657,15 +668,6 @@ async fn action_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>, Ap
         .fetch_optional(pool)
         .await
         .map_err(db_err)
-}
-
-pub async fn has_capability_at_scope(
-    pool: &PgPool,
-    auth: &AuthContext,
-    capability_name: &str,
-    scope: Scope,
-) -> Result<bool, AppError> {
-    has_capability_in_scope(pool, auth, capability_name, scope).await
 }
 
 pub async fn require_any_capability(

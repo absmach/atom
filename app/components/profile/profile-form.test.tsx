@@ -73,6 +73,20 @@ describe("ProfileForm access tokens", () => {
   });
 
   beforeEach(() => {
+    // Radix Select relies on pointer-capture and layout APIs jsdom omits.
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    Element.prototype.hasPointerCapture ??= () => false;
+    Element.prototype.setPointerCapture ??= () => {};
+    Element.prototype.releasePointerCapture ??= () => {};
+    Element.prototype.scrollIntoView ??= () => {};
+
     mocks.graphqlClient.mockReset();
     mocks.graphqlClient.mockImplementation(async ({ query }) => {
       if (query.includes("ProfileEntity")) return profileResponse;
@@ -116,7 +130,8 @@ describe("ProfileForm access tokens", () => {
     await user.type(screen.getByLabelText("Name"), "CI runner");
     await user.type(screen.getByLabelText("Description"), "Build scripts");
     await user.type(screen.getByLabelText("Actions"), "read");
-    await user.type(screen.getByLabelText("Object kind"), "entity");
+    await user.click(screen.getByLabelText("Object kind"));
+    await user.click(screen.getByRole("option", { name: "entity" }));
     await user.click(screen.getByRole("button", { name: "Create token" }));
 
     expect(

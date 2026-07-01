@@ -31,6 +31,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { graphqlClient } from "@/lib/graphql/client";
 import { Action } from "@/lib/utils";
@@ -180,6 +187,16 @@ const SCOPE_MODES = [
   "object",
 ] as const;
 type ScopeMode = (typeof SCOPE_MODES)[number];
+
+// Object kinds a token permission can be scoped to (the coarse kinds the PDP
+// understands). `object_type` narrows further via a namespaced free-text value.
+const OBJECT_KINDS = [
+  "entity",
+  "resource",
+  "group",
+  "tenant",
+  "credential",
+] as const;
 
 // A permission row in the create form, edited as raw strings before being
 // translated into a GraphQL AccessTokenPermissionInput on submit.
@@ -864,20 +881,23 @@ function PermissionDraftRow({
         </div>
         <div className="grid gap-1">
           <Label>Scope</Label>
-          <select
-            aria-label="Scope"
-            className="h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-sm"
-            onChange={(e) =>
-              onChange({ scopeMode: e.target.value as ScopeMode })
+          <Select
+            onValueChange={(value) =>
+              onChange({ scopeMode: value as ScopeMode })
             }
             value={permission.scopeMode}
           >
-            {SCOPE_MODES.map((mode) => (
-              <option key={mode} value={mode}>
-                {mode}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label="Scope" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SCOPE_MODES.map((mode) => (
+                <SelectItem key={mode} value={mode}>
+                  {mode}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         {canRemove ? (
           <Button onClick={onRemove} size="sm" type="button" variant="ghost">
@@ -902,12 +922,21 @@ function PermissionDraftRow({
         <div className="grid gap-2 sm:grid-cols-2">
           <div className="grid gap-1">
             <Label>Object kind</Label>
-            <Input
-              aria-label="Object kind"
-              onChange={(e) => onChange({ objectKind: e.target.value })}
-              placeholder="entity"
-              value={permission.objectKind}
-            />
+            <Select
+              onValueChange={(value) => onChange({ objectKind: value })}
+              value={permission.objectKind || undefined}
+            >
+              <SelectTrigger aria-label="Object kind" className="w-full">
+                <SelectValue placeholder="Select kind" />
+              </SelectTrigger>
+              <SelectContent>
+                {OBJECT_KINDS.map((kind) => (
+                  <SelectItem key={kind} value={kind}>
+                    {kind}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           {permission.scopeMode === "object_type" ? (
             <div className="grid gap-1">
