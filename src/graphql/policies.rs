@@ -57,8 +57,7 @@ impl PolicyQuery {
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         let deleted = parse_deleted_filter(deleted);
         if deleted != DeletedFilter::Live {
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         } else {
             require_role_read(&state.pool, &auth, tenant_id).await?;
         }
@@ -549,13 +548,7 @@ impl PolicyMutation {
                 .collect()
         });
         let result = async {
-            require_capability(
-                &state.pool,
-                &auth,
-                "policy.manage",
-                Scope::Platform,
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::create_capability(
                 &state.pool,
                 CreateCapability {
@@ -592,13 +585,7 @@ impl PolicyMutation {
         let object_kind = input.object_kind;
         let object_type = input.object_type;
         let result = async {
-            require_capability(
-                &state.pool,
-                &auth,
-                "policy.manage",
-                Scope::Platform,
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::add_capability_applicability(
                 &state.pool,
                 action_id,
@@ -633,13 +620,7 @@ impl PolicyMutation {
         let object_kind = input.object_kind;
         let object_type = input.object_type;
         let result = async {
-            require_capability(
-                &state.pool,
-                &auth,
-                "policy.manage",
-                Scope::Platform,
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::remove_capability_applicability(
                 &state.pool,
                 action_id,
@@ -740,13 +721,7 @@ impl PolicyMutation {
                 .collect()
         });
         let result = async {
-            require_capability(
-                &state.pool,
-                &auth,
-                "policy.manage",
-                Scope::Platform,
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::update_capability(
                 &state.pool,
                 action_id,
@@ -778,13 +753,7 @@ impl PolicyMutation {
         let state = ctx.data::<AppState>()?;
         let action_id = parse_id(id, "id")?;
         let result = async {
-            require_capability(
-                &state.pool,
-                &auth,
-                "policy.manage",
-                Scope::Platform,
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::delete_capability(&state.pool, action_id).await
         }
         .await;

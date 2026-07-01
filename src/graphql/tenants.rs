@@ -64,8 +64,7 @@ impl TenantQuery {
             offset: offset.map(i64::from).unwrap_or(0),
         };
         let list = if deleted != DeletedFilter::Live {
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
             tenant_repo::list_tenants(&state.pool, params)
                 .await
                 .map_err(gql_error)?
@@ -221,8 +220,13 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_tenant_read_access(state, auth.entity_id, tenant_id, auth.ceiling_for(auth.entity_id))
-            .await?;
+        require_tenant_read_access(
+            state,
+            auth.entity_id,
+            tenant_id,
+            auth.ceiling_for(auth.entity_id),
+        )
+        .await?;
         let roles =
             tenant_repo::list_tenant_role_assignments(&state.pool, tenant_id, auth.entity_id)
                 .await
@@ -365,8 +369,7 @@ impl TenantMutation {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(id, "id")?;
         let result = async {
-            crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform)
-                .await?;
+            crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
             tenant_repo::soft_delete_tenant(&state.pool, tenant_id, Some(auth.entity_id)).await
         }
         .await;
@@ -660,8 +663,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
     let event = tenant_status_event(&status);
     let status_detail = status.clone();
     let result = async {
-        crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform)
-            .await?;
+        crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
         tenant_repo::change_tenant_status(&state.pool, tenant_id, status, Some(auth.entity_id))
             .await
     }

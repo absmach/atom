@@ -336,7 +336,7 @@ async fn service_context_creation_requires_super_admin() {
                 entity_id: ordinary_entity_id,
                 tenant_id: None,
                 session_id: None,
-        ..Default::default()
+                ..Default::default()
             }),
         )
         .await;

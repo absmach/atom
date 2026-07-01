@@ -107,15 +107,24 @@ impl AuthzService for AtomAuthz {
             .map_err(Status::from)?;
         // The caller's token ceiling caps its right to invoke check; enforced
         // inside the gate via AuthContext.
-        access::require_authz_check_access(&self.state.pool, &auth, authz_req.subject_id, tenant_id)
-            .await
-            .map_err(Status::from)?;
+        access::require_authz_check_access(
+            &self.state.pool,
+            &auth,
+            authz_req.subject_id,
+            tenant_id,
+        )
+        .await
+        .map_err(Status::from)?;
 
-        // Delegated check: caller's token ceiling gates the right to ask (above),
-        // not the subject's decision.
-        let resp = engine::evaluate(&self.state.pool, &authz_req, None)
-            .await
-            .map_err(Status::from)?;
+        // Self-check via a scoped token returns the token-limited answer; a
+        // delegated check about another subject is unaffected (ceiling_for → None).
+        let resp = engine::evaluate(
+            &self.state.pool,
+            &authz_req,
+            auth.ceiling_for(authz_req.subject_id),
+        )
+        .await
+        .map_err(Status::from)?;
         let (target_kind, target_id) = authz_request_target(&authz_req);
         audit::write_hot_path(
             &self.state.pool,

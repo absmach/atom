@@ -510,5 +510,8 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
 }
 
 fn actx(id: uuid::Uuid) -> atom::auth::AuthContext {
-    atom::auth::AuthContext { entity_id: id, ..Default::default() }
+    atom::auth::AuthContext {
+        entity_id: id,
+        ..Default::default()
+    }
 }

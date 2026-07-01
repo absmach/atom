@@ -58,6 +58,21 @@ fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
     })
 }
 
+fn authed_scoped(
+    entity_id: Uuid,
+    ceiling: atom::authz::repo::CredentialCeiling,
+    query: impl Into<String>,
+) -> Request {
+    Request::new(query).data(AuthContext {
+        entity_id,
+        tenant_id: None,
+        session_id: None,
+        credential_id: Some(Uuid::new_v4()),
+        scoped: true,
+        ceiling: Some(std::sync::Arc::new(ceiling)),
+    })
+}
+
 async fn entity(pool: &PgPool, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
@@ -562,6 +577,156 @@ async fn access_token_ceiling_intersects_owner_grants() {
             .unwrap()
             .allowed
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
+    use atom::authz::repo as authz_repo;
+
+    let pool = common::pool().await;
+    let owner = entity(&pool, "human").await;
+    let object = entity(&pool, "device").await;
+    let schema = build_schema(state(pool.clone()));
+
+    // Owner holds read+manage on the object.
+    let block_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')",
+    )
+    .bind(block_id)
+    .bind(object)
+    .execute(&pool)
+    .await
+    .expect("block");
+    for action in ["read", "manage"] {
+        sqlx::query(
+            "INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = $2",
+        )
+        .bind(block_id)
+        .bind(action)
+        .execute(&pool)
+        .await
+        .expect("block action");
+    }
+    sqlx::query(
+        "INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)",
+    )
+    .bind(owner)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("policy");
+
+    // Owner mints a read-only access token for itself (unscoped session).
+    let created = schema
+        .execute(authed_as(
+            owner,
+            format!(
+                r#"mutation {{ createAccessToken(input: {{ name: "ro", permissions: [{{ actions: ["read"], scopeMode: "object", objectId: "{object}" }}] }}) {{ credentialId }} }}"#
+            ),
+        ))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let cred_id = created.data.into_json().expect("json")["createAccessToken"]["credentialId"]
+        .as_str()
+        .expect("id")
+        .parse::<Uuid>()
+        .expect("uuid");
+    let ceiling = authz_repo::load_credential_ceiling(&pool, cred_id)
+        .await
+        .expect("ceiling");
+
+    // Finding 1: a scoped token cannot mint, widen, or revoke tokens.
+    let mint = schema
+        .execute(authed_scoped(
+            owner,
+            ceiling.clone(),
+            format!(
+                r#"mutation {{ createAccessToken(input: {{ name: "wider", permissions: [{{ actions: ["manage"], scopeMode: "object", objectId: "{object}" }}] }}) {{ credentialId }} }}"#
+            ),
+        ))
+        .await;
+    assert!(!mint.errors.is_empty(), "scoped token must not mint tokens");
+    let widen = schema
+        .execute(authed_scoped(
+            owner,
+            ceiling.clone(),
+            format!(
+                r#"mutation {{ replaceAccessTokenPermissions(credentialId: "{cred_id}", permissions: [{{ actions: ["manage"], scopeMode: "object", objectId: "{object}" }}]) }}"#
+            ),
+        ))
+        .await;
+    assert!(
+        !widen.errors.is_empty(),
+        "scoped token must not widen ceilings"
+    );
+    // Ceiling rows unchanged (still read-only).
+    let actions: Vec<String> = sqlx::query_scalar(
+        "SELECT a.name FROM credential_permission_limits l JOIN credential_permission_limit_actions la ON la.limit_id = l.id JOIN actions a ON a.id = la.action_id WHERE l.credential_id = $1",
+    )
+    .bind(cred_id)
+    .fetch_all(&pool)
+    .await
+    .expect("actions");
+    assert_eq!(actions, vec!["read".to_string()]);
+    // Scoped token cannot mint a plain API key for itself either.
+    let apikey = schema
+        .execute(authed_scoped(
+            owner,
+            ceiling.clone(),
+            format!(r#"mutation {{ createApiKey(entityId: "{owner}", input: {{}}) {{ credentialId }} }}"#),
+        ))
+        .await;
+    assert!(
+        !apikey.errors.is_empty(),
+        "scoped token must not mint API keys"
+    );
+
+    // Finding 2: self authzCheck via the scoped token returns the token-limited
+    // answer — read allowed, manage denied — despite the owner holding manage.
+    let read = schema
+        .execute(authed_scoped(
+            owner,
+            ceiling.clone(),
+            format!(
+                r#"mutation {{ authzCheck(input: {{ subjectId: "{owner}", action: "read", objectKind: "entity", objectId: "{object}" }}) {{ allowed }} }}"#
+            ),
+        ))
+        .await;
+    assert!(read.errors.is_empty(), "{:?}", read.errors);
+    assert_eq!(
+        read.data.into_json().expect("json")["authzCheck"]["allowed"],
+        true
+    );
+
+    let manage = schema
+        .execute(authed_scoped(
+            owner,
+            ceiling.clone(),
+            format!(
+                r#"mutation {{ authzCheck(input: {{ subjectId: "{owner}", action: "manage", objectKind: "entity", objectId: "{object}" }}) {{ allowed }} }}"#
+            ),
+        ))
+        .await;
+    assert!(manage.errors.is_empty(), "{:?}", manage.errors);
+    assert_eq!(
+        manage.data.into_json().expect("json")["authzCheck"]["allowed"],
+        false,
+        "scoped token self-check must reflect the ceiling, not owner authority"
+    );
+
+    // authorizedObjectIds is not ceiling-aware yet → fails closed for scoped tokens.
+    let list = schema
+        .execute(authed_scoped(
+            owner,
+            ceiling,
+            format!(
+                r#"{{ authorizedObjectIds(input: {{ subjectId: "{owner}", action: "read", objectKind: "entity" }}) {{ ids }} }}"#
+            ),
+        ))
+        .await;
+    assert!(!list.errors.is_empty(), "scoped token must not bulk-list");
 }
 
 #[tokio::test]

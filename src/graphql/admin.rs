@@ -158,8 +158,8 @@ async fn audit_tenant_filter(
     auth: &AuthContext,
     requested_tenant_id: Option<Uuid>,
 ) -> std::result::Result<Option<Vec<Uuid>>, AppError> {
-    if has_capability_in_scope(pool, &auth, "read", Scope::Platform).await?
-        || has_capability_in_scope(pool, &auth, "manage", Scope::Platform).await?
+    if has_capability_in_scope(pool, auth, "read", Scope::Platform).await?
+        || has_capability_in_scope(pool, auth, "manage", Scope::Platform).await?
     {
         return Ok(None);
     }

@@ -495,14 +495,9 @@ async fn require_certificate_read(
     auth: &AuthContext,
     cert: &service::CertificateRecord,
 ) -> Result<()> {
-    if has_capability_in_scope(
-        &state.pool,
-        auth,
-        "read",
-        Scope::Object(cert.credential_id),
-    )
-    .await
-    .map_err(gql_error)?
+    if has_capability_in_scope(&state.pool, auth, "read", Scope::Object(cert.credential_id))
+        .await
+        .map_err(gql_error)?
         || has_capability_in_scope(
             &state.pool,
             auth,

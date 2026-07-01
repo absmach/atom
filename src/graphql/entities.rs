@@ -95,8 +95,7 @@ impl EntityQuery {
         let offset = offset.map(i64::from).unwrap_or(0);
 
         if deleted != DeletedFilter::Live {
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
             let list = repo::list_entities(
                 &state.pool,
                 entity_model::ListEntities {

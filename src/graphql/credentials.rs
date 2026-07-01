@@ -135,6 +135,8 @@ impl CredentialMutation {
         input: CreateAccessTokenInput,
     ) -> Result<AccessTokenResponse> {
         let auth = require_auth(ctx)?;
+        // A scoped token cannot mint tokens (would let it create a broader sibling).
+        crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
         let permissions = input
             .permissions
@@ -182,6 +184,8 @@ impl CredentialMutation {
         permissions: Vec<AccessTokenPermissionInput>,
     ) -> Result<bool> {
         let auth = require_auth(ctx)?;
+        // A scoped token cannot widen its own (or any) ceiling.
+        crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
         let credential_id = parse_id(credential_id, "credentialId")?;
         let permissions = permissions
@@ -217,6 +221,7 @@ impl CredentialMutation {
 
     async fn revoke_access_token(&self, ctx: &Context<'_>, credential_id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
+        crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
         let credential_id = parse_id(credential_id, "credentialId")?;
         service::revoke_access_token(&state.pool, auth.entity_id, credential_id)
@@ -330,19 +335,15 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let credential_id = parse_id(credential_id, "credentialId")?;
-        let tenant_id = if has_capability_in_scope(
-            &state.pool,
-            &auth,
-            "revoke",
-            Scope::Object(credential_id),
-        )
-        .await
-        .map_err(gql_error)?
-        {
-            credential_tenant_id(&state.pool, entity_id, credential_id).await?
-        } else {
-            require_credential_management(state, &auth, entity_id).await?
-        };
+        let tenant_id =
+            if has_capability_in_scope(&state.pool, &auth, "revoke", Scope::Object(credential_id))
+                .await
+                .map_err(gql_error)?
+            {
+                credential_tenant_id(&state.pool, entity_id, credential_id).await?
+            } else {
+                require_credential_management(state, &auth, entity_id).await?
+            };
         service::revoke_credential(&state.pool, entity_id, credential_id)
             .await
             .map_err(gql_error)?;

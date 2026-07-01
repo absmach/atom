@@ -250,25 +250,31 @@ pub(crate) async fn require_explain_access(pool: &sqlx::PgPool, auth: &AuthConte
         .map_err(gql_error)
 }
 
+/// Credential management (minting/rewriting credentials) is never available to a
+/// scoped access token, even for its own entity — otherwise a least-privilege
+/// token could mint or widen a sibling credential and self-escalate.
+pub(crate) fn deny_scoped_token(auth: &AuthContext) -> Result<()> {
+    if auth.scoped {
+        return Err(gql_error(crate::error::AppError::Forbidden));
+    }
+    Ok(())
+}
+
 pub(crate) async fn require_credential_management(
     state: &AppState,
     auth: &AuthContext,
     target_entity_id: Uuid,
 ) -> Result<Option<Uuid>> {
+    deny_scoped_token(auth)?;
     let target = repo::get_entity(&state.pool, target_entity_id)
         .await
         .map_err(gql_error)?;
     if auth.entity_id == target_entity_id {
         return Ok(target.tenant_id);
     }
-    if has_capability_in_scope(
-        &state.pool,
-        auth,
-        "manage",
-        Scope::Object(target_entity_id),
-    )
-    .await
-    .map_err(gql_error)?
+    if has_capability_in_scope(&state.pool, auth, "manage", Scope::Object(target_entity_id))
+        .await
+        .map_err(gql_error)?
     {
         return Ok(target.tenant_id);
     }

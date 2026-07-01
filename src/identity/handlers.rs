@@ -36,14 +36,12 @@ async fn require_credential_management(
     auth: &AuthContext,
     target_entity_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
+    // Scoped access tokens can never manage credentials (self-escalation guard).
+    if auth.scoped {
+        return Err(AppError::Forbidden);
+    }
     let target = repo::get_entity(&state.pool, target_entity_id).await?;
-    if has_capability_in_scope(
-        &state.pool,
-        auth,
-        "manage",
-        Scope::Object(target_entity_id),
-    )
-    .await?
+    if has_capability_in_scope(&state.pool, auth, "manage", Scope::Object(target_entity_id)).await?
     {
         return Ok(target.tenant_id);
     }
@@ -314,13 +312,7 @@ pub async fn get_session(
     let session = repo::get_session(&state.pool, id).await?;
     if session.entity_id != auth.entity_id {
         let entity = repo::get_entity(&state.pool, session.entity_id).await?;
-        require_read_access(
-            &state.pool,
-            &auth,
-            entity.tenant_id,
-            session.entity_id,
-        )
-        .await?;
+        require_read_access(&state.pool, &auth, entity.tenant_id, session.entity_id).await?;
     }
     Ok(Json(session))
 }
@@ -571,18 +563,12 @@ pub async fn revoke_credential(
     auth: AuthContext,
     Path((entity_id, cred_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, AppError> {
-    let tenant_id = if has_capability_in_scope(
-        &state.pool,
-        &auth,
-        "revoke",
-        Scope::Object(cred_id),
-    )
-    .await?
-    {
-        credential_tenant_id(&state.pool, entity_id, cred_id).await?
-    } else {
-        require_credential_management(&state, &auth, entity_id).await?
-    };
+    let tenant_id =
+        if has_capability_in_scope(&state.pool, &auth, "revoke", Scope::Object(cred_id)).await? {
+            credential_tenant_id(&state.pool, entity_id, cred_id).await?
+        } else {
+            require_credential_management(&state, &auth, entity_id).await?
+        };
     service::revoke_credential(&state.pool, entity_id, cred_id).await?;
     audit::write(
         &state.pool,

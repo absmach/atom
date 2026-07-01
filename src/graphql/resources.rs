@@ -65,8 +65,7 @@ impl ResourceQuery {
         let include_descendants = include_descendants.unwrap_or(false);
 
         if deleted != DeletedFilter::Live {
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
             let list = authz_repo::list_resources(
                 &state.pool,
                 ListResources {

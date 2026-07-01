@@ -352,10 +352,7 @@ impl AuthContext {
     /// acting on its own behalf. Returns `None` for unscoped/JWT auth and for
     /// decisions about a *different* subject (delegated `authz.check`), where the
     /// caller's token must not alter the subject's decision.
-    pub fn ceiling_for(
-        &self,
-        subject_id: Uuid,
-    ) -> Option<&crate::authz::repo::CredentialCeiling> {
+    pub fn ceiling_for(&self, subject_id: Uuid) -> Option<&crate::authz::repo::CredentialCeiling> {
         if self.scoped && subject_id == self.entity_id {
             self.ceiling.as_deref()
         } else {

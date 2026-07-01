@@ -245,5 +245,8 @@ async fn manage_at_tenant_scope_does_not_satisfy_platform_lifecycle_gate() {
 }
 
 fn actx(id: uuid::Uuid) -> atom::auth::AuthContext {
-    atom::auth::AuthContext { entity_id: id, ..Default::default() }
+    atom::auth::AuthContext {
+        entity_id: id,
+        ..Default::default()
+    }
 }
