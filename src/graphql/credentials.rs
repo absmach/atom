@@ -13,8 +13,8 @@ use super::{
     auth::{gql_error, require_auth, require_credential_management},
     types::{
         parse_id, parse_optional_timestamp, AccessToken, AccessTokenList,
-        AccessTokenPermissionInput, AccessTokenResponse, ApiKeyResponse, CreateAccessTokenInput,
-        CreateApiKeyInput, CreateSharedKeyInput, Credential, CredentialList, SharedKeyResponse,
+        AccessTokenPermissionInput, AccessTokenResponse, CreateAccessTokenInput,
+        CreateSharedKeyInput, Credential, CredentialList, SharedKeyResponse,
     },
 };
 
@@ -87,46 +87,6 @@ impl CredentialMutation {
         )
         .await;
         Ok(true)
-    }
-
-    async fn create_api_key(
-        &self,
-        ctx: &Context<'_>,
-        entity_id: ID,
-        input: CreateApiKeyInput,
-    ) -> Result<ApiKeyResponse> {
-        let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
-        let entity_id = parse_id(entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let response = service::create_api_key(
-            &state.pool,
-            entity_id,
-            token_model::CreateApiKey {
-                expires_at: parse_optional_timestamp(input.expires_at, "expiresAt")?,
-                description: input.description,
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: Some("credential"),
-                target_id: Some(response.credential_id),
-                event: "credential.create",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "entity_id": entity_id,
-                    "kind": "access_token",
-                    "credential_id": response.credential_id
-                }),
-            },
-        )
-        .await;
-        Ok(response.into())
     }
 
     async fn create_access_token(

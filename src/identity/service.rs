@@ -33,8 +33,7 @@ use crate::{
         },
         token::{
             AccessTokenPermission, AccessTokenPermissionSummary, AccessTokenResponse,
-            AccessTokenSummary, ApiKeyResponse, CreateAccessToken, CreateApiKey, CreateSharedKey,
-            SharedKeyResponse,
+            AccessTokenSummary, CreateAccessToken, CreateSharedKey, SharedKeyResponse,
         },
     },
 };
@@ -2041,22 +2040,6 @@ fn validate_machine_secret(secret: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-pub async fn create_api_key(
-    pool: &PgPool,
-    entity_id: Uuid,
-    req: CreateApiKey,
-) -> Result<ApiKeyResponse, AppError> {
-    let metadata = serde_json::json!({"description": req.description});
-    let (cred_id, key) =
-        create_api_key_credential(pool, entity_id, req.expires_at, metadata).await?;
-
-    Ok(ApiKeyResponse {
-        credential_id: cred_id,
-        key,
-        expires_at: req.expires_at,
-    })
-}
-
 pub async fn create_access_token(
     pool: &PgPool,
     entity_id: Uuid,
@@ -2245,50 +2228,6 @@ async fn write_ceiling_limit(
         .map_err(db_err)?;
     }
     Ok(())
-}
-
-async fn create_api_key_credential(
-    pool: &PgPool,
-    entity_id: Uuid,
-    expires_at: Option<DateTime<Utc>>,
-    metadata: Value,
-) -> Result<(Uuid, String), AppError> {
-    let cred_id = Uuid::new_v4();
-
-    let mut secret_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut secret_bytes);
-    let hash = hash_secret(&secret_bytes)?;
-
-    let key = make_api_key(cred_id, &secret_bytes);
-    let key_prefix = key[..13].to_string();
-
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    if super::repo::lock_active_entity(&mut tx, entity_id)
-        .await?
-        .is_none()
-    {
-        return Err(AppError::not_found(format!(
-            "active entity {entity_id} not found"
-        )));
-    }
-
-    sqlx::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, expires_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-    )
-    .bind(cred_id)
-    .bind(entity_id)
-    .bind(CredentialKind::AccessToken)
-    .bind(key_prefix)
-    .bind(hash)
-    .bind(expires_at)
-    .bind(metadata)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
-
-    Ok((cred_id, key))
 }
 
 pub async fn list_access_tokens(

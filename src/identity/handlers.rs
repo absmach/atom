@@ -24,7 +24,6 @@ use crate::{
             PasswordResetConfirmRequest, PasswordResetRequest, PublicAuthConfigResponse,
             ResendVerificationRequest, SignupRequest, VerifyEmailQuery,
         },
-        token::CreateApiKey,
     },
     state::AppState,
 };
@@ -517,34 +516,6 @@ pub async fn create_password(
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn create_api_key(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Path(entity_id): Path<Uuid>,
-    Json(req): Json<CreateApiKey>,
-) -> Result<impl IntoResponse, AppError> {
-    let tenant_id = require_credential_management(&state, &auth, entity_id).await?;
-    let resp = service::create_api_key(&state.pool, entity_id, req).await?;
-    audit::write(
-        &state.pool,
-        audit::AuditEvent {
-            actor_entity_id: Some(auth.entity_id),
-            tenant_id,
-            target_kind: Some("credential"),
-            target_id: Some(resp.credential_id),
-            event: "credential.create",
-            outcome: AuditOutcome::Allow,
-            details: serde_json::json!({
-                "entity_id": entity_id,
-                "kind": "access_token",
-                "credential_id": resp.credential_id
-            }),
-        },
-    )
-    .await;
-    Ok((StatusCode::CREATED, Json(resp)))
 }
 
 pub async fn list_credentials(

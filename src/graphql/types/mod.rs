@@ -721,23 +721,6 @@ impl Credential {
     }
 }
 
-pub struct ApiKeyResponse(pub token_model::ApiKeyResponse);
-
-#[Object]
-impl ApiKeyResponse {
-    async fn credential_id(&self) -> ID {
-        id(self.0.credential_id)
-    }
-
-    async fn key(&self) -> &str {
-        &self.0.key
-    }
-
-    async fn expires_at(&self) -> Option<String> {
-        self.0.expires_at.map(timestamp)
-    }
-}
-
 pub struct SharedKeyResponse(pub token_model::SharedKeyResponse);
 
 #[Object]
@@ -1764,12 +1747,6 @@ pub struct UpdateGroupInput {
 }
 
 #[derive(InputObject)]
-pub struct CreateApiKeyInput {
-    pub expires_at: Option<String>,
-    pub description: Option<String>,
-}
-
-#[derive(InputObject)]
 pub struct CreateAccessTokenInput {
     pub name: String,
     pub description: Option<String>,
@@ -2452,12 +2429,6 @@ impl From<identity_service::CredentialSummary> for Credential {
             expires_at: credential.expires_at,
             created_at: credential.created_at,
         })
-    }
-}
-
-impl From<token_model::ApiKeyResponse> for ApiKeyResponse {
-    fn from(response: token_model::ApiKeyResponse) -> Self {
-        ApiKeyResponse(response)
     }
 }
 

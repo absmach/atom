@@ -225,20 +225,25 @@ async fn add_and_remove_group_member() {
 
 #[tokio::test]
 #[ignore]
-async fn create_api_key_returns_secret_once_and_credentials_list_contains_it() {
+async fn create_access_token_returns_secret_once_and_credentials_list_contains_it() {
     let pool = common::pool().await;
     let entity_id = entity(&pool, "service").await;
     let schema = build_schema(state(pool));
 
+    // Admin mints a token for the service entity (delegated) — admin holds global
+    // manage, so this is the sole credential-provisioning path now that the
+    // dedicated API-key surface is gone.
     let created = schema
         .execute(authed(format!(
             r#"
             mutation {{
-              createApiKey(entityId: "{entity_id}", input: {{
-                description: "GraphQL API key"
+              createAccessToken(input: {{
+                name: "GraphQL provisioning token"
+                subjectId: "{entity_id}"
+                permissions: [{{ actions: ["read"], scopeMode: "platform" }}]
               }}) {{
                 credentialId
-                key
+                token
                 expiresAt
               }}
             }}
@@ -246,14 +251,14 @@ async fn create_api_key_returns_secret_once_and_credentials_list_contains_it() {
         )))
         .await;
     assert!(created.errors.is_empty(), "{:?}", created.errors);
-    let api_key = &created.data.into_json().expect("json data")["createApiKey"];
+    let api_key = &created.data.into_json().expect("json data")["createAccessToken"];
     let credential_id = api_key["credentialId"]
         .as_str()
         .expect("credential id")
         .to_owned();
-    assert!(api_key["key"]
+    assert!(api_key["token"]
         .as_str()
-        .is_some_and(|key| key.starts_with("atom_")));
+        .is_some_and(|token| token.starts_with("atom_")));
 
     let listed = schema
         .execute(authed(format!(
@@ -670,18 +675,6 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
     .await
     .expect("actions");
     assert_eq!(actions, vec!["read".to_string()]);
-    // Scoped token cannot mint a plain API key for itself either.
-    let apikey = schema
-        .execute(authed_scoped(
-            owner,
-            ceiling.clone(),
-            format!(r#"mutation {{ createApiKey(entityId: "{owner}", input: {{}}) {{ credentialId }} }}"#),
-        ))
-        .await;
-    assert!(
-        !apikey.errors.is_empty(),
-        "scoped token must not mint API keys"
-    );
 
     // Finding 2: self authzCheck via the scoped token returns the token-limited
     // answer — read allowed, manage denied — despite the owner holding manage.

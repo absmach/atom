@@ -265,7 +265,6 @@ mod tests {
             "addGroupMember",
             "removeGroupMember",
             "createPassword",
-            "createApiKey",
             "createAccessToken",
             "replaceAccessTokenPermissions",
             "revokeAccessToken",

@@ -5,20 +5,6 @@ use uuid::Uuid;
 
 use super::enums::CredentialStatus;
 
-/// Response after creating an API key — secret shown once, never again
-#[derive(Debug, Serialize)]
-pub struct ApiKeyResponse {
-    pub credential_id: Uuid,
-    pub key: String,
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateApiKey {
-    pub expires_at: Option<DateTime<Utc>>,
-    pub description: Option<String>,
-}
-
 /// One allow-list entry of an access token's permission ceiling. Mirrors a
 /// permission block's scope shape; v1 supports the directly-matchable scope modes.
 #[derive(Debug, Clone, Deserialize)]

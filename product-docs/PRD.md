@@ -384,8 +384,8 @@ The credential ID is embedded for direct lookup. The plaintext token secret is r
 
 Atom distinguishes two product uses of `access_token` credentials:
 
-- **API key**: an admin-created long-lived bearer credential for an entity. It is unscoped and authenticates as that entity with the entity's live database-backed grants.
-- **Scoped access token**: a self-service bearer credential created by the authenticated entity for CLI or API use. It is always scoped by a permission ceiling.
+- **API key**: an unscoped long-lived bearer credential for an entity. It authenticates as that entity with the entity's live database-backed grants. *Interim status:* the dedicated `createApiKey` mutation has been removed; unscoped keys still authenticate but are no longer minted through the API. The single minting surface is `createAccessToken` (see [Scoped Access Tokens](./13-access-tokens.md)).
+- **Scoped access token**: a bearer credential created by the authenticated entity for its own CLI or API use, or minted by an administrator for another subject (delegated). It is always scoped by a permission ceiling.
 
 Scoped access tokens do not embed permissions in the token string. The ceiling is stored in Atom and uses the same action and scope vocabulary as Permission Blocks: `platform`, `tenant`, `object_kind`, `object_type`, and `object`, with optional ABAC conditions. A scoped token's effective authority is:
 

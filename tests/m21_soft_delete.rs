@@ -19,7 +19,7 @@ use atom::{
         role::{ListRoles, UpdateRole},
         session::PasswordResetConfirmRequest,
         tenant::{CreateTenantInvitation, ListTenants},
-        token::CreateApiKey,
+        token::{AccessTokenPermission, CreateAccessToken},
     },
 };
 use uuid::Uuid;
@@ -156,17 +156,27 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
         "deleted entity must not receive a new password"
     );
     assert!(
-        service::create_api_key(
+        service::create_access_token(
             &pool,
             id,
-            CreateApiKey {
-                expires_at: None,
+            CreateAccessToken {
+                name: "replacement".into(),
                 description: None,
+                expires_at: None,
+                permissions: vec![AccessTokenPermission {
+                    actions: vec!["read".into()],
+                    scope_mode: "platform".into(),
+                    tenant_id: None,
+                    object_kind: None,
+                    object_type: None,
+                    object_id: None,
+                    conditions: None,
+                }],
             },
         )
         .await
         .is_err(),
-        "deleted entity must not receive a new API key"
+        "deleted entity must not receive a new access token"
     );
     assert!(
         atom::certs::repo::entity_tenant_id(&pool, id)

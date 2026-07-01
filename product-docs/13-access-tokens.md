@@ -22,7 +22,15 @@ Atom has two product labels for bearer credentials backed by `credentials.kind =
 | Product label | Creator | Scope | Intended use |
 |---|---|---|---|
 | API key | Credential administrator | Unscoped | Provisioned machine or service access with the owner's live grants |
-| Scoped access token | Token owner | Scoped by a permission ceiling | Personal, CLI, integration, and automation access that is narrower than the owner |
+| Scoped access token | Token owner, or an administrator via delegation | Scoped by a permission ceiling | Personal, CLI, integration, service, and automation access that is narrower than the owner |
+
+> **Status (interim):** the dedicated unscoped **API-key creation** surface
+> (`createApiKey`) has been removed. Unscoped `access_token` credentials still
+> authenticate (bootstrap and pre-existing keys), but the only token-minting API is
+> now `createAccessToken`, which always produces a scoped token. Provisioned service
+> access is covered by **delegated minting** (below). A future "mirror owner" ceiling
+> preset will reproduce the unscoped, live-grant-tracking behaviour under the single
+> primitive.
 
 Both use the same one-time-reveal token format:
 
@@ -158,6 +166,33 @@ Example variables:
 }
 ```
 
+Mint a token for a service (delegated — requires an unscoped caller with `manage`
+on the target subject). `subjectId` sets the token owner; omit it for self-service:
+
+```json
+{
+  "input": {
+    "name": "ingest-svc token",
+    "subjectId": "<service-entity-id>",
+    "permissions": [
+      { "actions": ["read"], "scopeMode": "object", "objectId": "<channel-id>" }
+    ]
+  }
+}
+```
+
+Conditional (ABAC) ceiling entry — evaluated where a full object decision exists;
+coarse control-plane gates fail closed on conditional entries:
+
+```json
+{
+  "actions": ["read"],
+  "scopeMode": "object_kind",
+  "objectKind": "resource",
+  "conditions": { "context.region": "eu" }
+}
+```
+
 Replace the ceiling:
 
 ```graphql
@@ -184,15 +219,17 @@ mutation RevokeAccessToken($credentialId: ID!) {
 
 ## Scope Input Rules
 
-| `scopeMode` | Required field | Example |
-|---|---|---|
-| `platform` | none | all platform-scoped objects |
-| `tenant` | `tenantId` | one tenant UUID |
-| `object_kind` | `objectKind` | `resource` |
-| `object_type` | `objectKind`, `objectType` | `entity`, `entity:device` |
-| `object` | `objectId` | one protected object UUID |
+| `scopeMode` | Required field | Optional | Example |
+|---|---|---|---|
+| `platform` | none | — | all platform-scoped objects |
+| `tenant` | `tenantId` | — | one tenant UUID |
+| `object_kind` | `objectKind` | `tenantId` | `resource` |
+| `object_type` | `objectKind`, `objectType` | `tenantId` | `entity:device` |
+| `object` | `objectId` | — | one protected object UUID |
 
-`objectType` must be the full namespaced value (`entity:device`, `resource:channel`), not the bare sub-kind.
+`objectType` must be the full namespaced value (`entity:device`, `resource:channel`), not the bare sub-kind; a mismatched or bare value is rejected at creation.
+
+When `tenantId` is set on an `object_kind` / `object_type` entry, matches are confined to that tenant; omit it for a tenant-agnostic ceiling. At least one permission is required — an empty ceiling is closed and permits nothing.
 
 ---
 
