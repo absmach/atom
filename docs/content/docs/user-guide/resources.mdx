@@ -1,0 +1,70 @@
+---
+title: Resources
+description: Protected objects evaluated by Atom's online PDP.
+---
+
+**Resources** (`/resources`) are the objects that [entities](/user-guide/entities) act on —
+channels, invoices, documents, rules, or any other protected object your platform models.
+Every resource has a **Kind** (a free-text namespace like `invoice` or `channel`) and,
+optionally, a namespaced **Object type** used elsewhere as `resource:<kind>` when scoping
+permission blocks.
+
+## Resources table
+
+Columns: **Name**, **Alias**, **Kind**, **Tenant**, **Owner**, **Created**, **Updated**.
+
+![Resources list, empty](/img/user-guide/resources/resources-list-empty.png)
+
+## Create a resource
+
+Click **+ Create**.
+
+![Create button highlighted on the resources list](/img/user-guide/resources/resources-list-create-highlight.png)
+
+Fields:
+
+- **Kind** (required) — free text, for example `invoice` or `channel`.
+- **Name** — the resource's display name.
+- **Alias** — optional short identifier.
+- **Tenant** — defaults to **— none —** (platform scope); pick a tenant to scope it.
+- **Owner entity** — optionally set an owning entity (used for ownership/parent-child
+  relationships, not authorization directly).
+- **Attributes JSON** — free-form metadata, defaults to `{}`.
+
+![Create resource dialog filled in](/img/user-guide/resources/resources-create-dialog.png)
+
+Click **Create resource**.
+
+## Row actions
+
+- **Inspect** — view details.
+- **Edit** — change name, alias, tenant, owner, or attributes.
+- **Delete** — remove the resource.
+
+## Inspect
+
+Shows **ID** (with copy button), **Name**, **Kind**, **Tenant**, **Created**, and
+**Attributes**, plus an **Authorization debugger** shortcut — **Check authorization** —
+that opens [Authorization](/user-guide/authorization) with this resource pre-filled as the
+target object (`?targetKind=resource&targetId=<id>`).
+
+![Resource inspect view](/img/user-guide/resources/resource-inspect.png)
+
+## Copying a resource ID
+
+You'll frequently need a resource's ID when scoping a [permission
+block](/user-guide/permission-blocks) to *Exact object*. Click **Inspect** on the resource's
+row, then the copy icon next to **ID**.
+
+## How resources connect to access control
+
+A resource only becomes protected once two other pieces exist:
+
+1. An [Action Applicability](/user-guide/actions) row telling Atom which actions (`read`,
+   `write`, `publish`, ...) are valid for this resource's kind or object type.
+2. A [Permission Block](/user-guide/permission-blocks) whose scope references this resource
+   (directly by ID, by kind, by object type, or via an object group it belongs to) and whose
+   **Actions** list includes the action being checked.
+
+Without both, an [Authorization](/user-guide/authorization) check against this resource
+always returns **Denied** with reason `no matching allow policy`.

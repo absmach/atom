@@ -1,0 +1,108 @@
+---
+title: Permission Blocks
+description: Reusable scope, effect, action, and condition sets — the core building block of Atom's access model.
+---
+
+**Permission Blocks** (`/permission-blocks`) are Atom's central authorization primitive: a
+named combination of *where* (scope), *what* (actions), *allow or deny* (effect), and
+optionally *under what conditions* (ABAC). [Roles](/user-guide/roles) attach one or more
+permission blocks to make them assignable; [Direct Policies](/user-guide/direct-policies)
+attach a single permission block straight to one subject. See
+[Access Control](/access-control) for the full conceptual model.
+
+## Permission Blocks table
+
+Columns: **Tenant**, **Scope**, **Object kind**, **Object type**, **Object ID**, **Group**,
+**Effect**, **Actions**, **Created**, **Updated**. Atom seeds four platform/tenant-admin
+blocks (visible under `Platform` tenant scope and the `acme-corp`-style tenant-admin blocks
+created when a tenant is provisioned).
+
+![Permission Blocks list](/img/user-guide/permission-blocks/permission-blocks-list-populated.png)
+
+## Create a permission block
+
+Click **+ Create**.
+
+![Create button highlighted on the permission blocks list](/img/user-guide/permission-blocks/permission-blocks-list-create-highlight.png)
+
+This is a 5-step wizard: **Boundary**, **Scope**, **Actions**, **Conditions**, **Review**.
+
+### Step 1 — Boundary
+
+- **Tenant boundary** — **Platform** (visible everywhere) or a specific tenant. Non-platform
+  blocks must belong to one tenant.
+- **Effect** — `allow` or `deny`. A matching `deny` always overrides a matching `allow` —
+  Atom is deny-by-default and deny-overrides-allow.
+
+![Boundary step](/img/user-guide/permission-blocks/pb-wizard-step1-boundary.png)
+
+### Step 2 — Scope
+
+**Scope mode** determines what the block applies to. All nine modes:
+
+| Scope mode | Applies to |
+| --- | --- |
+| Tenant itself | The selected tenant/domain object. |
+| All objects of a kind | Every object of a kind (for example every resource) in the tenant. |
+| All objects of a type | Every object of a specific type (for example every `resource:channel`) in the tenant. |
+| Exact object | One specific entity, resource, group, tenant, role, or policy, by ID. |
+| Object group itself | The [object group](/user-guide/groups) record, not its contents. |
+| Direct objects in object group | Entities/resources directly inside the group. |
+| Objects in subgroups | Entities/resources inside child or deeper groups only. |
+| Direct child object groups | Immediate child groups themselves. |
+| Descendant object groups | Child or deeper group records themselves. |
+
+![Scope mode dropdown options](/img/user-guide/permission-blocks/pb-wizard-step2-scope-options.png)
+
+Picking **Exact object** reveals **Object kind** (Entity, Resource, Object group, Tenant,
+Role, Policy, Credential, Audit log, or Signing key) and, for most kinds, an **Object type**
+free-text field (namespaced, e.g. `resource:invoice`) plus the **Exact object ID** (paste the
+target's UUID — see each object's **Inspect** view to copy it).
+
+![Scope step filled in for an exact resource](/img/user-guide/permission-blocks/pb-wizard-step2-scope-filled.png)
+
+### Step 3 — Actions
+
+Check every action this block should grant (or deny). The list is filtered to actions with an
+[Action Applicability](/user-guide/actions) row matching the object kind/type you selected in
+Step 2 — if an action you expect is missing, add its applicability row first.
+
+![Actions step](/img/user-guide/permission-blocks/pb-wizard-step3-actions.png)
+
+### Step 4 — Conditions
+
+Optional ABAC conditions as a JSON object. Leave `{}` for an unconditional grant. See
+[ABAC](/access-control/abac) for the condition schema.
+
+![Conditions step](/img/user-guide/permission-blocks/pb-wizard-step4-conditions.png)
+
+### Step 5 — Review
+
+A summary of every field before you commit: **TENANT_ID**, **SCOPE_MODE**, **OBJECT_KIND**,
+**OBJECT_TYPE**, **OBJECT_ID**, **GROUP_ID**, **EFFECT**, **ACTIONS**, **CONDITIONS**.
+
+![Review step](/img/user-guide/permission-blocks/pb-wizard-step5-review.png)
+
+Click **Create permission block**.
+
+## Row actions
+
+- **Inspect** — view the full record.
+- **Delete** — remove the block. Any role or direct policy still referencing it will lose
+  that grant.
+
+## Inspect
+
+Shows every field from the wizard as read-only fields, plus the resolved **ACTIONS** array
+with each action's own ID.
+
+![Permission block inspect view](/img/user-guide/permission-blocks/permission-block-inspect.png)
+
+## Where permission blocks are used
+
+- [Roles](/user-guide/roles) attach one or more permission blocks, so a single role can carry
+  several distinct grants.
+- [Direct Policies](/user-guide/direct-policies) attach exactly one permission block to
+  exactly one subject — a narrower, more auditable shortcut than assigning a full role.
+- The [Authorization](/user-guide/authorization) debugger's decision explanation shows the
+  exact permission block(s) that were matched or skipped for a given request.

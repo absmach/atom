@@ -1,0 +1,75 @@
+---
+title: Direct Policies
+description: Advanced subject-to-permission-block grants — a shortcut around roles for one-off access.
+---
+
+**Direct Policies** (`/policies`) bind a single [permission block](/user-guide/permission-blocks)
+straight to a single subject (an entity or a group), bypassing [roles](/user-guide/roles)
+entirely. Atom's UI labels this section "advanced" — normal administration should prefer
+assigning roles, and reserve direct policies for exceptions that don't warrant a reusable
+role.
+
+## Direct Policies table
+
+Columns: **Tenant**, **Subject kind**, **Subject**, **Permission block**, **Created**.
+
+![Direct Policies list, empty](/img/user-guide/direct-policies/direct-policies-list-empty.png)
+
+## Create a direct policy
+
+Click **+ Create**.
+
+![Create button highlighted on the direct policies list](/img/user-guide/direct-policies/direct-policies-list-create-highlight.png)
+
+This is a 4-step wizard: **Tenant**, **Subject**, **Permission block**, **Review**.
+
+### Step 1 — Tenant
+
+- **Tenant boundary** — **Platform** or a specific tenant. The tenant must match both the
+  subject and the permission block for tenant-scoped policies.
+
+![Tenant step](/img/user-guide/direct-policies/dp-wizard-step1-tenant.png)
+
+### Step 2 — Subject
+
+- **Subject kind** — currently `Entity`.
+- **Subject** — a searchable dropdown of entities, scoped to the tenant chosen in Step 1.
+
+![Subject step](/img/user-guide/direct-policies/dp-wizard-step2-subject.png)
+
+### Step 3 — Permission block
+
+Pick from existing blocks, summarized the same way as in the [Roles](/user-guide/roles)
+wizard (scope and actions inline in the option label).
+
+![Permission block step](/img/user-guide/direct-policies/dp-wizard-step3-permblock.png)
+
+### Step 4 — Review
+
+Confirms **Tenant**, **Subject**, and **Permission block** (with its actions) before you
+commit.
+
+![Review step](/img/user-guide/direct-policies/dp-wizard-step4-review.png)
+
+Click **Create policy**.
+
+## Row actions
+
+- **Inspect** — view the resolved grant.
+- **Edit** — change the subject or permission block.
+- **Delete** — revoke the grant immediately.
+
+## Inspect
+
+Shows a plain-language **Summary** ("Directly grants `resource <id>` to `billing-service
+(service)`"), plus **ID**, **Tenant**, **Subject**, **Permission block** (with its effect and
+actions), and **Created**.
+
+![Direct policy inspect view](/img/user-guide/direct-policies/direct-policy-inspect.png)
+
+## Verifying a direct policy
+
+After creating a policy, confirm it behaves as expected in [Authorization](/user-guide/authorization) —
+set **Who** to the subject you granted, **Can do** to one of the block's actions, and the
+**Target** to the scoped object. The decision explanation will cite the block **VIA** "Direct
+assignment or policy" when a direct policy (rather than an inherited role) is what matched.
