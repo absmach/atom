@@ -5,8 +5,7 @@ description: Top-level boundaries for entities, resources, groups, roles, and as
 
 **Tenants** (`/tenants`) are Atom's top-level isolation boundary. Every entity, resource,
 group, role, and permission block can either live at the platform level (visible everywhere)
-or be scoped to exactly one tenant. If your platform integrates with Magistrala, a Magistrala
-domain maps directly to an Atom tenant — see [Magistrala On Atom](/magistrala-on-atom).
+or be scoped to exactly one tenant.
 
 ## Tenants table
 
@@ -25,8 +24,8 @@ Click **+ Create** in the top-right corner.
 Fields:
 
 - **Name** (required) — the tenant's display name.
-- **Alias** — a short, URL/reference-friendly identifier. Unlike a Magistrala channel or
-  domain route, this can be edited later.
+- **Alias** — a short, URL/reference-friendly identifier. Unlike some other Atom records
+  where an alias-like field is fixed at creation, a tenant's alias can be edited later.
 - **Tags** — press **Enter** after each tag to add it.
 - **Attributes JSON** — free-form JSON metadata, defaults to `{}`.
 
