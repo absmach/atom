@@ -96,7 +96,7 @@ async fn bind(
 }
 
 async fn check(pool: &sqlx::PgPool, subject_id: Uuid, action: &str, resource_id: Uuid) -> bool {
-    atom::authz::engine::evaluate(
+    atom::authz::engine::evaluate_with_ceiling(
         pool,
         &AuthzRequest {
             subject_id,

@@ -4192,6 +4192,20 @@ async fn authorized_entity_ids(
                grants AS (
                    SELECT * FROM subject_effective_grants($1)
                ),
+               -- Unconditional ceiling entries of the caller's scoped access
+               -- token (empty result when the param is NULL / token unscoped).
+               -- Conditional entries are excluded: like the coarse gates, a
+               -- listing has no per-request context to evaluate them, so they
+               -- fail closed here and per-object authzCheck remains the path
+               -- that can honour them.
+               ceiling AS (
+                   SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id
+                   FROM credential_permission_limits l
+                   JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
+                   JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+                   WHERE l.credential_id = $12::uuid
+                     AND l.conditions = '{}'::jsonb
+               ),
                caps AS (
                    SELECT a.id AS capability_id, aa.object_type
                    FROM actions a
@@ -4256,6 +4270,18 @@ async fn authorized_entity_ids(
                                                  c.id, c.tenant_id, c.parent_group_id,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
+                   AND ($12::uuid IS NULL OR EXISTS (
+                       SELECT 1 FROM ceiling cl
+                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = cl.action_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
+                         )
+                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'entity', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
+                   ))
                )
                SELECT id, COUNT(*) OVER() AS total
                FROM authorized
@@ -4278,6 +4304,7 @@ async fn authorized_entity_ids(
         .bind(params.include_descendants)
         .bind(limit)
         .bind(offset)
+        .bind(params.ceiling_credential_id)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -4303,6 +4330,7 @@ pub async fn authorized_resource_kinds(
     pool: &PgPool,
     subject_id: Uuid,
     tenant_id: Option<Uuid>,
+    ceiling_credential_id: Option<Uuid>,
 ) -> Result<Vec<String>, AppError> {
     use sqlx::Row;
 
@@ -4323,6 +4351,7 @@ pub async fn authorized_resource_kinds(
             include_descendants: false,
             limit: 500,
             offset: 0,
+            ceiling_credential_id,
         },
         AuthorizedResourceProjection::Kinds,
     )
@@ -4370,6 +4399,20 @@ async fn authorized_resource_rows(
                ),
                grants AS (
                    SELECT * FROM subject_effective_grants($1)
+               ),
+               -- Unconditional ceiling entries of the caller's scoped access
+               -- token (empty result when the param is NULL / token unscoped).
+               -- Conditional entries are excluded: like the coarse gates, a
+               -- listing has no per-request context to evaluate them, so they
+               -- fail closed here and per-object authzCheck remains the path
+               -- that can honour them.
+               ceiling AS (
+                   SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id
+                   FROM credential_permission_limits l
+                   JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
+                   JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+                   WHERE l.credential_id = $11::uuid
+                     AND l.conditions = '{}'::jsonb
                ),
                caps AS (
                    SELECT a.id AS capability_id, aa.object_type
@@ -4434,6 +4477,18 @@ async fn authorized_resource_rows(
                                                  c.id, c.tenant_id, c.parent_group_id,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
+                   AND ($11::uuid IS NULL OR EXISTS (
+                       SELECT 1 FROM ceiling cl
+                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = cl.action_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
+                         )
+                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'resource', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
+                   ))
                )
                __SELECT__"#
         .replace("__SELECT__", select_clause);
@@ -4449,6 +4504,7 @@ async fn authorized_resource_rows(
         .bind(attributes_contains)
         .bind(limit)
         .bind(offset)
+        .bind(params.ceiling_credential_id)
         .fetch_all(pool)
         .await
         .map_err(db_err)
@@ -4482,6 +4538,20 @@ async fn authorized_group_ids(
                ),
                grants AS (
                    SELECT * FROM subject_effective_grants($1)
+               ),
+               -- Unconditional ceiling entries of the caller's scoped access
+               -- token (empty result when the param is NULL / token unscoped).
+               -- Conditional entries are excluded: like the coarse gates, a
+               -- listing has no per-request context to evaluate them, so they
+               -- fail closed here and per-object authzCheck remains the path
+               -- that can honour them.
+               ceiling AS (
+                   SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id
+                   FROM credential_permission_limits l
+                   JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
+                   JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+                   WHERE l.credential_id = $11::uuid
+                     AND l.conditions = '{}'::jsonb
                ),
                caps AS (
                    SELECT a.id AS capability_id, aa.object_type
@@ -4546,6 +4616,18 @@ async fn authorized_group_ids(
                                                  c.id, c.tenant_id, c.parent_group_id,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
+                   AND ($11::uuid IS NULL OR EXISTS (
+                       SELECT 1 FROM ceiling cl
+                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = cl.action_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
+                         )
+                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'group', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
+                   ))
                )
                SELECT id, COUNT(*) OVER() AS total
                FROM authorized
@@ -4563,6 +4645,7 @@ async fn authorized_group_ids(
         .bind(status)
         .bind(limit)
         .bind(offset)
+        .bind(params.ceiling_credential_id)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;

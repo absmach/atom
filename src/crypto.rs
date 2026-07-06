@@ -76,6 +76,16 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     hmac::sign(&key, data).as_ref().to_vec()
 }
 
+/// Constant-time check that `data`'s keyed digest equals `expected`. Used as the
+/// verifier for high-entropy machine secrets (access tokens), where a memory-hard
+/// KDF adds cost but no security: the secret is 32 random bytes, so offline
+/// guessing is infeasible and the KEK keying already prevents verification
+/// against a leaked digest alone.
+pub fn hmac_sha256_verify(key: &[u8], data: &[u8], expected: &[u8]) -> bool {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    hmac::verify(&key, data, expected).is_ok()
+}
+
 fn aead_key(key: &[u8]) -> Result<LessSafeKey, AppError> {
     let unbound = UnboundKey::new(&AES_256_GCM, key)
         .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid aead key")))?;

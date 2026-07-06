@@ -274,6 +274,7 @@ async fn authorized(
             include_descendants: false,
             limit: 100,
             offset: 0,
+            ceiling_credential_id: None,
         },
     )
     .await
@@ -354,6 +355,7 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
             include_descendants: false,
             limit: 100,
             offset: 0,
+            ceiling_credential_id: None,
         },
     )
     .await
@@ -484,6 +486,7 @@ async fn authorized_resource_attributes_contains_filters_before_limit_and_author
             include_descendants: false,
             limit: 1,
             offset: 0,
+            ceiling_credential_id: None,
         },
     )
     .await
@@ -519,9 +522,10 @@ async fn authorized_resource_kinds_include_custom_readable_kinds_only() {
         assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
     }
 
-    let kinds = atom::authz::repo::authorized_resource_kinds(&pool, subject_id, Some(tenant_id))
-        .await
-        .expect("authorized resource kinds");
+    let kinds =
+        atom::authz::repo::authorized_resource_kinds(&pool, subject_id, Some(tenant_id), None)
+            .await
+            .expect("authorized resource kinds");
 
     assert_eq!(kinds, vec!["channel", "custom_stream"]);
 }
@@ -911,6 +915,7 @@ async fn authorized_groups(
             include_descendants: false,
             limit,
             offset: 0,
+            ceiling_credential_id: None,
         },
     )
     .await

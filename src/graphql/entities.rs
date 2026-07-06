@@ -56,11 +56,11 @@ impl EntityQuery {
         let allowed = (auth.entity_id == id && !auth.scoped)
             || engine::allows_any(
                 &state.pool,
+                &auth,
                 auth.entity_id,
                 "entity",
                 id,
                 &["read", "manage"],
-                auth.ceiling_for(auth.entity_id),
             )
             .await
             .map_err(gql_error)?;
@@ -121,7 +121,6 @@ impl EntityQuery {
             });
         }
 
-        auth.reject_scoped_listing().map_err(gql_error)?;
         let authorized = authz_repo::authorized_object_ids(
             &state.pool,
             AuthorizedObjectIdsQuery {
@@ -139,6 +138,7 @@ impl EntityQuery {
                 include_descendants: include_descendants.unwrap_or(false),
                 limit,
                 offset,
+                ceiling_credential_id: auth.ceiling_credential_for(auth.entity_id),
             },
         )
         .await

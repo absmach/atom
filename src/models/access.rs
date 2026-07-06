@@ -108,6 +108,14 @@ pub struct AuthorizedObjectIdsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    /// When the caller authenticated with a scoped access token and is listing
+    /// its own authorized set, the token's credential id. The listing SQL then
+    /// intersects the owner's grants with the token's unconditional ceiling
+    /// entries (conditional entries fail closed, as in the coarse gates), so a
+    /// scoped token never receives objects outside its ceiling. Internal
+    /// plumbing — never taken from request input.
+    #[serde(skip)]
+    pub ceiling_credential_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]

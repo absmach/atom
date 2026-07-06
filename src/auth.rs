@@ -55,6 +55,15 @@ pub struct AuthContext {
     /// The loaded permission ceiling for a scoped access token; `None` for
     /// unscoped tokens and JWT/session auth (no cap).
     pub ceiling: Option<std::sync::Arc<crate::authz::repo::CredentialCeiling>>,
+    /// Request-scoped cache of this entity's canonical grant expansion, filled
+    /// on first use by [`AuthContext::effective_grants`]. Shared by clones, so
+    /// every gate and PDP check in one request runs the expansion once. Public
+    /// only so `..Default::default()` construction keeps working; always go
+    /// through `effective_grants`.
+    #[doc(hidden)]
+    pub grants_cache: std::sync::Arc<
+        tokio::sync::OnceCell<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>>,
+    >,
 }
 
 /// Extractor that requires the authenticated entity to hold a `manage` policy
@@ -260,6 +269,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     let row = sqlx::query(
         r#"SELECT c.entity_id,
                   c.secret_hash,
+                  c.secret_lookup_hash,
                   c.status,
                   c.expires_at,
                   c.scoped,
@@ -281,6 +291,40 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         sqlx::Error::RowNotFound => AppError::unauthorized("api key not found"),
         other => AppError::Database(other),
     })?;
+
+    // Verify the secret before any state checks, so a caller holding only a
+    // credential ID cannot learn the token's revoked/expired status.
+    //
+    // Verifier: keyed HMAC digest when present (tokens minted with a KEK);
+    // argon2 hash otherwise. See create_access_token for the rationale.
+    let lookup_hash: Option<Vec<u8>> = row.try_get("secret_lookup_hash").unwrap_or(None);
+    let verified = match lookup_hash {
+        Some(stored) => {
+            let kek = state
+                .config
+                .signing_keys
+                .key_encryption_key
+                .as_ref()
+                .ok_or_else(|| AppError::unauthorized("invalid api key"))?;
+            crate::crypto::hmac_sha256_verify(kek.expose(), &secret_bytes, &stored)
+        }
+        None => {
+            let hash: Option<String> = row.try_get("secret_hash").unwrap_or(None);
+            let hash = hash.ok_or_else(|| AppError::unauthorized("invalid credential"))?;
+            use argon2::{
+                password_hash::{PasswordHash, PasswordVerifier},
+                Argon2,
+            };
+            let parsed = PasswordHash::new(&hash)
+                .map_err(|_| AppError::unauthorized("invalid credential"))?;
+            Argon2::default()
+                .verify_password(&secret_bytes, &parsed)
+                .is_ok()
+        }
+    };
+    if !verified {
+        return Err(AppError::unauthorized("invalid api key"));
+    }
 
     let status: CredentialStatus = row.try_get("status").map_err(db_err)?;
     if status != CredentialStatus::Active {
@@ -309,19 +353,6 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         }
     }
 
-    let hash: Option<String> = row.try_get("secret_hash").unwrap_or(None);
-    let hash = hash.ok_or_else(|| AppError::unauthorized("invalid credential"))?;
-
-    use argon2::{
-        password_hash::{PasswordHash, PasswordVerifier},
-        Argon2,
-    };
-    let parsed =
-        PasswordHash::new(&hash).map_err(|_| AppError::unauthorized("invalid credential"))?;
-    Argon2::default()
-        .verify_password(&secret_bytes, &parsed)
-        .map_err(|_| AppError::unauthorized("invalid api key"))?;
-
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
 
     let tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
@@ -344,10 +375,31 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         credential_id: Some(cred_id),
         scoped,
         ceiling,
+        ..Default::default()
     })
 }
 
 impl AuthContext {
+    /// The authenticated entity's canonical grant expansion, computed once per
+    /// request and reused by every gate and self-subject PDP check. Reading a
+    /// cached copy means policy writes land on the *next* request — the same
+    /// granularity the product documents for revocation ("denied on the next
+    /// request"), never a wider one.
+    pub async fn effective_grants(
+        &self,
+        pool: &PgPool,
+    ) -> Result<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>, AppError> {
+        let grants = self
+            .grants_cache
+            .get_or_try_init(|| async {
+                crate::authz::repo::effective_grants_for_subject(pool, self.entity_id)
+                    .await
+                    .map(std::sync::Arc::new)
+            })
+            .await?;
+        Ok(grants.clone())
+    }
+
     /// The permission ceiling to apply when `subject_id` is the token owner
     /// acting on its own behalf. Returns `None` for unscoped/JWT auth and for
     /// decisions about a *different* subject (delegated `authz.check`), where the
@@ -360,11 +412,21 @@ impl AuthContext {
         }
     }
 
-    /// Fail closed on owner-wide authorized-listing surfaces that are not yet
-    /// ceiling-aware. A scoped access token must not receive the owner's full
-    /// authorized set (which ignores the token's ceiling); callers should use the
-    /// per-object `authz.check`, which returns the token-limited answer. `Ok` for
-    /// unscoped/JWT auth.
+    /// The credential whose ceiling must filter an authorized listing when the
+    /// listed subject is the token owner itself. `None` for unscoped/JWT auth
+    /// and for delegated listings about another subject (the caller's ceiling
+    /// caps its right to *invoke* the listing via the gates, not the other
+    /// subject's answer — same rule as `ceiling_for`). Passed into the listing
+    /// SQL, which intersects the owner's grants with the token's unconditional
+    /// ceiling entries.
+    pub fn ceiling_credential_for(&self, subject_id: Uuid) -> Option<Uuid> {
+        self.ceiling_for(subject_id).and(self.credential_id)
+    }
+
+    /// Fail closed on the remaining owner-wide visibility surfaces that are not
+    /// ceiling-aware (tenant visibility listing). The object listings
+    /// (`authorizedObjectIds`, entity/resource/group lists) are ceiling-aware
+    /// via [`AuthContext::ceiling_credential_for`] and no longer use this.
     pub fn reject_scoped_listing(&self) -> Result<(), AppError> {
         if self.scoped {
             return Err(AppError::bad_request(
@@ -526,7 +588,7 @@ pub async fn has_capability_in_scope(
     let Some(action_id) = action_id_by_name(pool, capability_name).await? else {
         return Ok(false);
     };
-    let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
+    let grants = auth.effective_grants(pool).await?;
     let gate_tenant = gate_tenant_context(pool, scope).await?;
     let scopes = [(scope, gate_tenant)];
     // A scoped access token can never exceed its ceiling, even when the owner's
@@ -685,7 +747,7 @@ pub async fn require_any_capability(
     // Load the subject's grants and resolve the candidate action names once,
     // then evaluate the candidates in memory instead of firing one expansion
     // query per candidate.
-    let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
+    let grants = auth.effective_grants(pool).await?;
     let names: Vec<&str> = checks.iter().map(|(name, _)| *name).collect();
     let action_ids = action_ids_by_name(pool, &names).await?;
     let mut tenant_active: std::collections::HashMap<Uuid, bool> = std::collections::HashMap::new();

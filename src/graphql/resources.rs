@@ -34,12 +34,16 @@ impl ResourceQuery {
     ) -> Result<Vec<String>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        auth.reject_scoped_listing().map_err(gql_error)?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
 
-        authz_repo::authorized_resource_kinds(&state.pool, auth.entity_id, tenant_id)
-            .await
-            .map_err(gql_error)
+        authz_repo::authorized_resource_kinds(
+            &state.pool,
+            auth.entity_id,
+            tenant_id,
+            auth.ceiling_credential_for(auth.entity_id),
+        )
+        .await
+        .map_err(gql_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -89,7 +93,6 @@ impl ResourceQuery {
             });
         }
 
-        auth.reject_scoped_listing().map_err(gql_error)?;
         let object_type = kind.as_deref().map(|kind| {
             if kind.contains(':') {
                 kind.to_string()
@@ -114,6 +117,7 @@ impl ResourceQuery {
                 include_descendants,
                 limit,
                 offset,
+                ceiling_credential_id: auth.ceiling_credential_for(auth.entity_id),
             },
         )
         .await
@@ -139,11 +143,11 @@ impl ResourceQuery {
         // may read the resource if they can read or manage it.
         if !engine::allows_any(
             &state.pool,
+            &auth,
             auth.entity_id,
             "resource",
             id,
             &["read", "manage"],
-            auth.ceiling_for(auth.entity_id),
         )
         .await
         .map_err(gql_error)?

@@ -29,9 +29,9 @@ Atom has two product labels for bearer credentials backed by `credentials.kind =
 > scoped token; `scoped: false` (with an empty `permissions` list) produces an
 > **unscoped** API key that authenticates with the owner's full live grants. Minting
 > an unscoped token requires credential-management authority over the owner, so it is
-> typically a delegated admin operation. Unscoped remains necessary while owner-wide
-> listing surfaces (`authorizedObjectIds`) are not ceiling-aware; scoped tokens are
-> rejected there.
+> typically a delegated admin operation. Unscoped is for consumers that genuinely
+> need the owner's full authority (authorized listing is ceiling-aware, so scoped
+> tokens can list; only tenant visibility listing still requires unscoped).
 
 Both use the same one-time-reveal token format:
 
@@ -39,7 +39,7 @@ Both use the same one-time-reveal token format:
 atom_<32-hex-credential-id>_<64-hex-secret>
 ```
 
-The credential ID is embedded for direct lookup. The secret is argon2-hashed; plaintext is never stored and cannot be recovered.
+The credential ID is embedded for direct lookup. The secret verifier is an HMAC-SHA256 digest keyed with the deployment KEK (`ATOM_KEY_ENCRYPTION_KEY`), compared in constant time — the secret is 32 random bytes, so a memory-hard KDF adds per-request cost without security, while the keyed digest keeps a DB-only leak unverifiable offline. Without a KEK the verifier falls back to argon2. Plaintext is never stored and cannot be recovered.
 
 ---
 
@@ -74,7 +74,7 @@ Scoped tokens are evaluated in the same PDP path as normal requests.
 - Owner-policy `deny` still overrides allow.
 - Conditional ceiling entries are evaluated where a full object decision exists. Coarse control-plane gates that do not have enough object context must fail closed unless the ceiling contains an unconditional matching allow.
 
-Scoped tokens cannot call broad authorized-listing surfaces that are not ceiling-aware. They must use per-object `authzCheck` or direct object reads. This avoids leaking the owner's full authorized set while ceiling-aware SQL listing and pagination are deferred.
+Authorized listing (`authorizedObjectIds` and the entity/resource/group list surfaces) is ceiling-aware: a scoped token listing its own set receives `owner live grants ∩ ceiling` with correct pagination and totals, computed in the same SQL that filters the owner's grants. Conditional ceiling entries fail closed in listings (no per-request context there, matching the coarse gates); per-object `authzCheck` remains the surface that evaluates them. Tenant visibility listing (`tenants`) is not ceiling-aware and still fails closed for scoped tokens.
 
 ---
 
@@ -230,7 +230,7 @@ mutation RevokeAccessToken($credentialId: ID!) {
 
 `objectType` must be the full namespaced value (`entity:device`, `resource:channel`), not the bare sub-kind; a mismatched or bare value is rejected at creation.
 
-When `tenantId` is set on an `object_kind` / `object_type` entry, matches are confined to that tenant; omit it for a tenant-agnostic ceiling. At least one permission is required — an empty ceiling is closed and permits nothing.
+When `tenantId` is set on an `object_kind` / `object_type` entry, matches are confined to that tenant; omit it for a tenant-agnostic ceiling. `tenantId` is rejected on `platform` and `object` entries (the object mode already pins one UUID). At least one permission is required — an empty ceiling is closed and permits nothing — and a token carries at most **100** permission entries: the ceiling is loaded on every authenticated request and matched linearly per check, so the cap keeps that per-request cost flat (least-privilege tokens should be far narrower anyway).
 
 ---
 
@@ -241,6 +241,8 @@ Access-token lifecycle changes are credential lifecycle events:
 - create: `credential.create`
 - permission replacement: `credential.update`
 - revoke: `credential.revoke`
+
+**Freshness:** revocation, expiry, ceiling replacement, and owner policy changes take effect on the *next request* — that is the documented granularity. Within one in-flight request, decisions use the ceiling loaded at authentication and the owner grants loaded at the first authorization check (one canonical expansion per request). Any future caching layer must be budgeted against this stance explicitly; today the answer is "no cross-request caching, freshness = one request".
 
 Operators should treat scoped tokens as live credentials:
 
@@ -256,7 +258,6 @@ Operators should treat scoped tokens as live credentials:
 - OAuth authorization-code or device-code grants.
 - Refresh tokens for scoped access tokens.
 - Token introspection that returns embedded permission claims.
-- Ceiling-aware authorized-listing pagination.
 - Admin lifecycle parity for delegated tokens: `accessTokens`,
   `replaceAccessTokenPermissions`, and `revokeAccessToken` are owner-scoped, so a
   delegated token is listed/replaced only by its owner. Revoke it as an admin via

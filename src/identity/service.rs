@@ -2040,8 +2040,15 @@ fn validate_machine_secret(secret: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Ceiling entries are loaded in full on every authenticated request and matched
+/// linearly per authorization check, so an unbounded ceiling is a per-request
+/// cost. Least-privilege tokens should be narrow anyway; this cap keeps the
+/// worst case flat.
+pub const MAX_ACCESS_TOKEN_PERMISSIONS: usize = 100;
+
 pub async fn create_access_token(
     pool: &PgPool,
+    signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     req: CreateAccessToken,
     scoped: bool,
@@ -2049,6 +2056,11 @@ pub async fn create_access_token(
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::bad_request("access token name is required"));
+    }
+    if req.permissions.len() > MAX_ACCESS_TOKEN_PERMISSIONS {
+        return Err(AppError::bad_request(format!(
+            "access token supports at most {MAX_ACCESS_TOKEN_PERMISSIONS} permissions"
+        )));
     }
     // A scoped token needs a non-empty ceiling (an empty ceiling is closed and
     // permits nothing). An unscoped token carries the owner's full live grants and
@@ -2071,7 +2083,15 @@ pub async fn create_access_token(
     let cred_id = Uuid::new_v4();
     let mut secret_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut secret_bytes);
-    let hash = hash_secret(&secret_bytes)?;
+    // Verifier: keyed HMAC-SHA256 under the deployment KEK, matching the
+    // shared-key lookup digest. The secret is 32 random bytes, so a memory-hard
+    // KDF adds per-request CPU without adding security; the KEK keying means a
+    // DB-only leak cannot verify guesses offline. Argon2 remains the fallback
+    // for deployments without a KEK (and for tokens minted before this change).
+    let (secret_hash, secret_lookup_hash) = match signing_keys.key_encryption_key.as_ref() {
+        Some(kek) => (None, Some(crypto::hmac_sha256(kek.expose(), &secret_bytes))),
+        None => (Some(hash_secret(&secret_bytes)?), None),
+    };
     let token = make_api_key(cred_id, &secret_bytes);
     let key_prefix = token[..13].to_string();
     let metadata = serde_json::json!({ "name": &name, "description": &description });
@@ -2088,14 +2108,15 @@ pub async fn create_access_token(
     // A scoped token's authority is capped by its ceiling; an unscoped token
     // (`scoped = false`) authenticates with the owner's full live grants.
     sqlx::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, scoped, expires_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, secret_lookup_hash, scoped, expires_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
     )
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
     .bind(key_prefix)
-    .bind(hash)
+    .bind(secret_hash)
+    .bind(secret_lookup_hash)
     .bind(scoped)
     .bind(req.expires_at)
     .bind(metadata)
@@ -2128,6 +2149,11 @@ pub async fn replace_access_token_permissions(
         return Err(AppError::bad_request(
             "access token requires at least one permission",
         ));
+    }
+    if permissions.len() > MAX_ACCESS_TOKEN_PERMISSIONS {
+        return Err(AppError::bad_request(format!(
+            "access token supports at most {MAX_ACCESS_TOKEN_PERMISSIONS} permissions"
+        )));
     }
     let mut tx = pool.begin().await.map_err(db_err)?;
     let scoped: Option<bool> = sqlx::query_scalar(
@@ -2191,6 +2217,15 @@ async fn write_ceiling_limit(
                 "object_type must be the full namespaced value matching object_kind, e.g. 'entity:device'",
             ));
         }
+    }
+    // `platform` and `object` modes take no tenant restriction (the object mode
+    // pins one UUID already); a stray tenant_id would silently narrow the entry.
+    if matches!(permission.scope_mode.as_str(), "platform" | "object")
+        && permission.tenant_id.is_some()
+    {
+        return Err(AppError::bad_request(
+            "tenant_id is not supported for platform or object scope modes",
+        ));
     }
     let conditions = permission
         .conditions

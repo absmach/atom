@@ -160,9 +160,11 @@ CREATE TABLE credentials (
     secret_nonce      BYTEA,
     secret_key_id     TEXT,
     secret_enc_alg    TEXT,
-    -- HMAC-SHA256 lookup digest for indexed shared-key authentication. The
-    -- digest is keyed with ATOM_KEY_ENCRYPTION_KEY, so a DB-only leak does not
-    -- enable cheap enumeration of arbitrary operator-supplied keys.
+    -- HMAC-SHA256 digest keyed with ATOM_KEY_ENCRYPTION_KEY. For shared keys it
+    -- is the indexed lookup digest; for access tokens it is the verifier itself
+    -- (the secret is 32 random bytes, so a slow KDF adds cost, not security; the
+    -- keyed digest means a DB-only leak cannot verify guesses offline). Access
+    -- tokens without a deployment KEK fall back to an argon2 secret_hash.
     secret_lookup_hash BYTEA,
     metadata    JSONB       NOT NULL DEFAULT '{}',
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
@@ -804,7 +806,7 @@ CREATE TABLE credential_permission_limits (
         OR (scope_mode = 'tenant' AND tenant_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL)
         OR (scope_mode = 'object_kind' AND object_kind IS NOT NULL AND object_id IS NULL AND object_type IS NULL)
         OR (scope_mode = 'object_type' AND object_kind IS NOT NULL AND object_type IS NOT NULL AND object_id IS NULL)
-        OR (scope_mode = 'object' AND object_id IS NOT NULL)
+        OR (scope_mode = 'object' AND object_id IS NOT NULL AND tenant_id IS NULL)
     )
 );
 CREATE INDEX idx_credential_permission_limits_credential

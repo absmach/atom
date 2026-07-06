@@ -63,13 +63,25 @@ fn authed_scoped(
     ceiling: atom::authz::repo::CredentialCeiling,
     query: impl Into<String>,
 ) -> Request {
+    authed_scoped_with_credential(entity_id, Uuid::new_v4(), ceiling, query)
+}
+
+/// Like `authed_scoped`, but with the real credential id — required by the
+/// ceiling-aware listing surfaces, which re-read the ceiling rows by credential.
+fn authed_scoped_with_credential(
+    entity_id: Uuid,
+    credential_id: Uuid,
+    ceiling: atom::authz::repo::CredentialCeiling,
+    query: impl Into<String>,
+) -> Request {
     Request::new(query).data(AuthContext {
         entity_id,
         tenant_id: None,
         session_id: None,
-        credential_id: Some(Uuid::new_v4()),
+        credential_id: Some(credential_id),
         scoped: true,
         ceiling: Some(std::sync::Arc::new(ceiling)),
+        ..Default::default()
     })
 }
 
@@ -478,6 +490,7 @@ async fn access_token_ceiling_intersects_owner_grants() {
     // A read-only access token for the owner.
     let token = identity_service::create_access_token(
         &pool,
+        &Default::default(),
         owner_id,
         atom::models::token::CreateAccessToken {
             name: "reader".into(),
@@ -520,13 +533,13 @@ async fn access_token_ceiling_intersects_owner_grants() {
 
     // Owner alone can do both.
     assert!(
-        engine::evaluate(&pool, &read_req, None)
+        engine::evaluate_with_ceiling(&pool, &read_req, None)
             .await
             .unwrap()
             .allowed
     );
     assert!(
-        engine::evaluate(&pool, &manage_req, None)
+        engine::evaluate_with_ceiling(&pool, &manage_req, None)
             .await
             .unwrap()
             .allowed
@@ -534,13 +547,13 @@ async fn access_token_ceiling_intersects_owner_grants() {
 
     // Through the read-only token: read allowed, manage denied by the ceiling.
     assert!(
-        engine::evaluate(&pool, &read_req, Some(&ceiling))
+        engine::evaluate_with_ceiling(&pool, &read_req, Some(&ceiling))
             .await
             .unwrap()
             .allowed
     );
     assert!(
-        !engine::evaluate(&pool, &manage_req, Some(&ceiling))
+        !engine::evaluate_with_ceiling(&pool, &manage_req, Some(&ceiling))
             .await
             .unwrap()
             .allowed
@@ -578,7 +591,7 @@ async fn access_token_ceiling_intersects_owner_grants() {
         .await
         .expect("delete policy");
     assert!(
-        !engine::evaluate(&pool, &read_req, Some(&ceiling))
+        !engine::evaluate_with_ceiling(&pool, &read_req, Some(&ceiling))
             .await
             .unwrap()
             .allowed
@@ -623,6 +636,34 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
     .execute(&pool)
     .await
     .expect("policy");
+
+    // A second readable object outside the token ceiling: the owner's authorized
+    // set is {object, second_object}, the ceiling covers only {object}.
+    let second_object = entity(&pool, "device").await;
+    let second_block_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')",
+    )
+    .bind(second_block_id)
+    .bind(second_object)
+    .execute(&pool)
+    .await
+    .expect("second block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'",
+    )
+    .bind(second_block_id)
+    .execute(&pool)
+    .await
+    .expect("second block action");
+    sqlx::query(
+        "INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)",
+    )
+    .bind(owner)
+    .bind(second_block_id)
+    .execute(&pool)
+    .await
+    .expect("second policy");
 
     // Owner mints a read-only access token for itself (unscoped session).
     let created = schema
@@ -714,6 +755,12 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
     // gates explain behind platform-manage, which a narrow ceiling cannot pass).
     // The owner holds manage, but the read-only ceiling denies it and no matched
     // binding leaks — otherwise a scoped caller gets a misleading "allowed".
+    let scoped_owner_auth = atom::auth::AuthContext {
+        entity_id: owner,
+        scoped: true,
+        ceiling: Some(std::sync::Arc::new(ceiling.clone())),
+        ..Default::default()
+    };
     let explain_manage = atom::authz::engine::explain(
         &pool,
         &atom::models::policy::AuthzRequest {
@@ -724,7 +771,7 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
             object_id: Some(object),
             context: serde_json::Value::Null,
         },
-        Some(&ceiling),
+        &scoped_owner_auth,
     )
     .await
     .expect("explain");
@@ -741,26 +788,103 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
         "capped explain must not expose a matched binding"
     );
 
-    // Owner-wide authorized-listing surfaces are not ceiling-aware yet → they
-    // fail closed for scoped tokens rather than leak the owner's broader set.
-    for query in [
-        format!(
-            r#"{{ authorizedObjectIds(input: {{ subjectId: "{owner}", action: "read", objectKind: "entity" }}) {{ ids }} }}"#
-        ),
-        r#"{ entities { total } }"#.to_string(),
-        r#"{ resources { total } }"#.to_string(),
-        r#"{ resourceKinds }"#.to_string(),
-        r#"{ groups { total } }"#.to_string(),
-        r#"{ tenants { total } }"#.to_string(),
+    // Authorized listing is ceiling-aware: the session sees the owner's full
+    // set, the scoped token sees only what its ceiling covers.
+    let session_listed = schema
+        .execute(authed_as(
+            owner,
+            format!(
+                r#"{{ authorizedObjectIds(input: {{ subjectId: "{owner}", action: "read", objectKind: "entity" }}) {{ ids total }} }}"#
+            ),
+        ))
+        .await;
+    assert!(
+        session_listed.errors.is_empty(),
+        "{:?}",
+        session_listed.errors
+    );
+    let session_json = session_listed.data.into_json().expect("json");
+    assert_eq!(
+        session_json["authorizedObjectIds"]["total"], 2,
+        "owner session must list both readable objects"
+    );
+
+    let scoped_listed = schema
+        .execute(authed_scoped_with_credential(
+            owner,
+            cred_id,
+            ceiling.clone(),
+            format!(
+                r#"{{ authorizedObjectIds(input: {{ subjectId: "{owner}", action: "read", objectKind: "entity" }}) {{ ids total }} }}"#
+            ),
+        ))
+        .await;
+    assert!(
+        scoped_listed.errors.is_empty(),
+        "{:?}",
+        scoped_listed.errors
+    );
+    let scoped_json = scoped_listed.data.into_json().expect("json");
+    assert_eq!(
+        scoped_json["authorizedObjectIds"]["ids"],
+        serde_json::json!([object.to_string()]),
+        "scoped token listing must be capped to the ceiling"
+    );
+
+    // The generic entity listing applies the same cap.
+    let scoped_entities = schema
+        .execute(authed_scoped_with_credential(
+            owner,
+            cred_id,
+            ceiling.clone(),
+            r#"{ entities { total } }"#,
+        ))
+        .await;
+    assert!(
+        scoped_entities.errors.is_empty(),
+        "{:?}",
+        scoped_entities.errors
+    );
+    assert_eq!(
+        scoped_entities.data.into_json().expect("json")["entities"]["total"],
+        1,
+        "entity listing through a scoped token must be ceiling-capped"
+    );
+
+    // Surfaces outside the ceiling return empty sets, not errors.
+    for (query, path) in [
+        (r#"{ resources { total } }"#, "resources"),
+        (r#"{ groups { total } }"#, "groups"),
     ] {
         let listed = schema
-            .execute(authed_scoped(owner, ceiling.clone(), query.clone()))
+            .execute(authed_scoped_with_credential(
+                owner,
+                cred_id,
+                ceiling.clone(),
+                query,
+            ))
             .await;
-        assert!(
-            !listed.errors.is_empty(),
-            "scoped token must not bulk-list via: {query}"
+        assert!(listed.errors.is_empty(), "{query}: {:?}", listed.errors);
+        assert_eq!(
+            listed.data.into_json().expect("json")[path]["total"],
+            0,
+            "{path} must be empty under an entity-only ceiling"
         );
     }
+
+    // Tenant visibility listing is not ceiling-aware; it still fails closed.
+    let tenants = schema
+        .execute(authed_scoped_with_credential(
+            owner,
+            cred_id,
+            ceiling.clone(),
+            r#"{ tenants { total } }"#,
+        ))
+        .await;
+    assert!(
+        !tenants.errors.is_empty(),
+        "scoped token must not list tenant visibility"
+    );
 }
 
 #[tokio::test]
@@ -1439,4 +1563,81 @@ async fn unscoped_access_token_carries_owner_authority() {
         !scoped_caller.errors.is_empty(),
         "scoped caller must not mint an unscoped token"
     );
+}
+
+/// Access tokens minted without a deployment KEK fall back to the argon2
+/// verifier (no `secret_lookup_hash`); authentication must still work — and a
+/// KEK-minted token must carry the keyed HMAC digest instead of an argon2 hash.
+#[tokio::test]
+#[ignore]
+async fn access_token_verifier_hmac_and_argon2_fallback() {
+    let pool = common::pool().await;
+    let owner = entity(&pool, "service").await;
+    let app_state = state(pool.clone());
+
+    let request = || atom::models::token::CreateAccessToken {
+        name: "verifier".into(),
+        description: None,
+        expires_at: None,
+        permissions: vec![],
+    };
+
+    // No KEK at mint time → argon2 fallback row; still authenticates.
+    let fallback = identity_service::create_access_token(
+        &pool,
+        &atom::config::SigningKeyConfig::default(),
+        owner,
+        request(),
+        false,
+    )
+    .await
+    .expect("mint without KEK");
+    let (hash, lookup): (Option<String>, Option<Vec<u8>>) =
+        sqlx::query_as("SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1")
+            .bind(fallback.credential_id)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+    assert!(hash.is_some(), "no-KEK mint must store an argon2 hash");
+    assert!(
+        lookup.is_none(),
+        "no-KEK mint must not store a keyed digest"
+    );
+    let ctx = authenticate_token(&app_state, &fallback.token)
+        .await
+        .expect("argon2 fallback token authenticates");
+    assert_eq!(ctx.entity_id, owner);
+
+    // KEK present at mint time → keyed HMAC digest, no argon2 hash.
+    let hmac_minted = identity_service::create_access_token(
+        &pool,
+        &app_state.config.signing_keys,
+        owner,
+        request(),
+        false,
+    )
+    .await
+    .expect("mint with KEK");
+    let (hash, lookup): (Option<String>, Option<Vec<u8>>) =
+        sqlx::query_as("SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1")
+            .bind(hmac_minted.credential_id)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+    assert!(hash.is_none(), "KEK mint must not store an argon2 hash");
+    assert!(lookup.is_some(), "KEK mint must store the keyed digest");
+    let ctx = authenticate_token(&app_state, &hmac_minted.token)
+        .await
+        .expect("hmac token authenticates");
+    assert_eq!(ctx.entity_id, owner);
+
+    // Wrong secret with a valid credential id is rejected without leaking state.
+    let mut forged = hmac_minted.token.clone();
+    let flipped = if forged.ends_with('0') { "1" } else { "0" };
+    forged.truncate(forged.len() - 1);
+    forged.push_str(flipped);
+    let err = authenticate_token(&app_state, &forged)
+        .await
+        .expect_err("forged secret must fail");
+    assert!(format!("{err:?}").contains("invalid api key"));
 }

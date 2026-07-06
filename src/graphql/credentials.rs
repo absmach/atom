@@ -125,6 +125,7 @@ impl CredentialMutation {
             .collect::<Result<Vec<_>>>()?;
         let response = service::create_access_token(
             &state.pool,
+            &state.config.signing_keys,
             owner_id,
             token_model::CreateAccessToken {
                 name: input.name,
