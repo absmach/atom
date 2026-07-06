@@ -322,6 +322,16 @@ async fn role_capability_addition_rejects_device_via_parent_group() {
 
     // An absolute deny for device `manage` at tenant scope — the scope a role
     // assignment edge carries, which is what `validate_role_capability` reads.
+    // The rule is global (no tenant), so clear any copy left by a previous run
+    // against the same database before inserting (idx_aar_unique_rule).
+    sqlx::query(
+        "DELETE FROM action_assignment_rules
+         WHERE tenant_id IS NULL AND entity_kind = 'device'
+           AND action_name = 'manage' AND object_kind = 'tenant' AND object_type IS NULL",
+    )
+    .execute(&p)
+    .await
+    .expect("clear stale rule");
     sqlx::query(
         "INSERT INTO action_assignment_rules
             (entity_kind, action_name, object_kind, object_type, decision, is_absolute)
@@ -391,6 +401,15 @@ async fn role_capability_addition_rejects_device_via_parent_group() {
         err.to_string().contains("guardrail rejected"),
         "expected guardrail rejection, got: {err}"
     );
+
+    // The rule is global and absolute; don't leak it into later suites.
+    let _ = sqlx::query(
+        "DELETE FROM action_assignment_rules
+         WHERE tenant_id IS NULL AND entity_kind = 'device'
+           AND action_name = 'manage' AND object_kind = 'tenant' AND object_type IS NULL",
+    )
+    .execute(&p)
+    .await;
 }
 
 /// Two-connection race: a block-link mutation that adds a prohibited block to a

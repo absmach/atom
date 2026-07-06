@@ -73,10 +73,14 @@ impl TenantQuery {
                 .await
                 .map_err(gql_error)?
         } else {
-            auth.reject_scoped_listing().map_err(gql_error)?;
-            tenant_repo::list_tenants_for_entity(&state.pool, auth.entity_id, params)
-                .await
-                .map_err(gql_error)?
+            tenant_repo::list_tenants_for_entity(
+                &state.pool,
+                auth.entity_id,
+                auth.ceiling_credential_for(auth.entity_id),
+                params,
+            )
+            .await
+            .map_err(gql_error)?
         };
 
         Ok(TenantList {

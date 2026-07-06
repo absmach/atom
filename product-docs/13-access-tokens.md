@@ -30,8 +30,8 @@ Atom has two product labels for bearer credentials backed by `credentials.kind =
 > **unscoped** API key that authenticates with the owner's full live grants. Minting
 > an unscoped token requires credential-management authority over the owner, so it is
 > typically a delegated admin operation. Unscoped is for consumers that genuinely
-> need the owner's full authority (authorized listing is ceiling-aware, so scoped
-> tokens can list; only tenant visibility listing still requires unscoped).
+> need the owner's full authority; every listing surface is ceiling-aware, so
+> least-privilege scoped tokens are the default choice.
 
 Both use the same one-time-reveal token format:
 
@@ -74,7 +74,7 @@ Scoped tokens are evaluated in the same PDP path as normal requests.
 - Owner-policy `deny` still overrides allow.
 - Conditional ceiling entries are evaluated where a full object decision exists. Coarse control-plane gates that do not have enough object context must fail closed unless the ceiling contains an unconditional matching allow.
 
-Authorized listing (`authorizedObjectIds` and the entity/resource/group list surfaces) is ceiling-aware: a scoped token listing its own set receives `owner live grants ∩ ceiling` with correct pagination and totals, computed in the same SQL that filters the owner's grants. Conditional ceiling entries fail closed in listings (no per-request context there, matching the coarse gates); per-object `authzCheck` remains the surface that evaluates them. Tenant visibility listing (`tenants`) is not ceiling-aware and still fails closed for scoped tokens.
+Authorized listing (`authorizedObjectIds`, the entity/resource/group list surfaces, and tenant visibility) is ceiling-aware: a scoped token listing its own set receives `owner live grants ∩ ceiling` with correct pagination and totals, computed in the same SQL that filters the owner's grants. Conditional ceiling entries fail closed in listings (no per-request context there, matching the coarse gates); per-object `authzCheck` remains the surface that evaluates them.
 
 ---
 

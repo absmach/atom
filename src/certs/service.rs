@@ -598,7 +598,7 @@ pub async fn generate_crl(
         }
     }
 
-    let revoked = repo::revoked_certificates(pool).await?;
+    let revoked = repo::revoked_certificates(pool, &loaded.issuer_fingerprint_sha256).await?;
     let revoked_certs = revoked
         .into_iter()
         .map(|cert| {

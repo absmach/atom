@@ -423,19 +423,6 @@ impl AuthContext {
         self.ceiling_for(subject_id).and(self.credential_id)
     }
 
-    /// Fail closed on the remaining owner-wide visibility surfaces that are not
-    /// ceiling-aware (tenant visibility listing). The object listings
-    /// (`authorizedObjectIds`, entity/resource/group lists) are ceiling-aware
-    /// via [`AuthContext::ceiling_credential_for`] and no longer use this.
-    pub fn reject_scoped_listing(&self) -> Result<(), AppError> {
-        if self.scoped {
-            return Err(AppError::bad_request(
-                "scoped access tokens cannot list authorized objects; use authzCheck per object",
-            ));
-        }
-        Ok(())
-    }
-
     /// Credential management (minting or rewriting credentials) is never available
     /// to a scoped access token, even for its own entity — otherwise a
     /// least-privilege token could mint or widen a sibling credential and

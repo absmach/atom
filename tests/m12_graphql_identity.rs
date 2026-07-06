@@ -872,7 +872,8 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
         );
     }
 
-    // Tenant visibility listing is not ceiling-aware; it still fails closed.
+    // Tenant visibility is ceiling-aware too: an entity-only ceiling yields an
+    // empty tenant list, not an error.
     let tenants = schema
         .execute(authed_scoped_with_credential(
             owner,
@@ -881,9 +882,11 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
             r#"{ tenants { total } }"#,
         ))
         .await;
-    assert!(
-        !tenants.errors.is_empty(),
-        "scoped token must not list tenant visibility"
+    assert!(tenants.errors.is_empty(), "{:?}", tenants.errors);
+    assert_eq!(
+        tenants.data.into_json().expect("json")["tenants"]["total"],
+        0,
+        "tenant visibility must be empty under an entity-only ceiling"
     );
 }
 

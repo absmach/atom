@@ -331,6 +331,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 pub async fn list_tenants_for_entity(
     pool: &PgPool,
     entity_id: Uuid,
+    ceiling_credential_id: Option<Uuid>,
     params: ListTenants,
 ) -> Result<TenantList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -354,11 +355,23 @@ pub async fn list_tenants_for_entity(
     // inside the canonical expansion. Deny-override is per-action (a manage deny
     // must not hide a read-visible tenant) and the assignment tenant boundary is
     // honoured.
+    // The scoped-token ceiling joins the same shape as the object listings:
+    // unconditional entries only (no request context here, matching the coarse
+    // gates), applied per action inside the visibility filter so the caller
+    // sees `owner visibility ∩ ceiling`.
     const CTES: &str = r#"WITH grants AS (
             SELECT * FROM subject_effective_grants($1)
         ),
         access_caps AS (
             SELECT id FROM actions WHERE name = ANY($6::text[])
+        ),
+        ceiling AS (
+            SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id
+            FROM credential_permission_limits l
+            JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
+            JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+            WHERE l.credential_id = $10::uuid
+              AND l.conditions = '{}'::jsonb
         )"#;
     // A grant covers tenant object `t` when it grants the action `c.id`, its
     // assignment boundary admits `t`, and its scope matches the tenant under the
@@ -381,6 +394,13 @@ pub async fn list_tenants_for_entity(
                 WHERE g.effect = 'deny'
                   AND {scope_match}
             )
+            AND ($10::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM ceiling cl
+                WHERE cl.action_id = c.id
+                  AND (cl.tenant_id IS NULL OR cl.tenant_id = t.id)
+                  AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'tenant', 'tenant',
+                                          t.id, t.id, NULL, '{{}}'::uuid[])
+            ))
         )"#
     );
     // Lifecycle predicate mirrors the PDP, which denies any read on a tenant that
@@ -413,6 +433,7 @@ pub async fn list_tenants_for_entity(
     .bind(limit)
     .bind(offset)
     .bind(deleted)
+    .bind(ceiling_credential_id)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -429,6 +450,7 @@ pub async fn list_tenants_for_entity(
     .bind(0_i64)
     .bind(0_i64)
     .bind(deleted)
+    .bind(ceiling_credential_id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
