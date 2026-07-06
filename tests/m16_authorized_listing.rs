@@ -42,6 +42,18 @@ async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str, name: &st
     id
 }
 
+async fn make_global_entity(pool: &sqlx::PgPool, kind: &str, name: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
+        .bind(id)
+        .bind(kind)
+        .bind(format!("{name}-{id}"))
+        .execute(pool)
+        .await
+        .expect("insert global entity");
+    id
+}
+
 async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str, name: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
@@ -267,6 +279,95 @@ async fn authorized(
     .await
     .expect("authorized listing")
     .ids
+}
+
+#[tokio::test]
+#[ignore]
+async fn platform_object_type_scope_lists_entities_across_tenants() {
+    let pool = common::pool().await;
+    let tenant_a = make_tenant(&pool, "m16-platform-device-a").await;
+    let tenant_b = make_tenant(&pool, "m16-platform-device-b").await;
+    let subject_id = make_global_entity(&pool, "service", "device-reader").await;
+    let device_a = make_entity(&pool, tenant_a, "device", "device-a").await;
+    let device_b = make_entity(&pool, tenant_b, "device", "device-b").await;
+    let human = make_entity(&pool, tenant_a, "human", "human").await;
+    let read_id = action_id(&pool, "read").await;
+
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(format!("platform-device-reader-{role_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert platform role");
+
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks
+           (scope_mode, object_kind, object_type, effect)
+           VALUES ('object_type', 'entity', 'entity:device', 'allow')
+           RETURNING id"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert platform object_type block");
+
+    sqlx::query(
+        "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+    )
+    .bind(role_id)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("link platform role block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("link read action");
+    sqlx::query(
+        r#"INSERT INTO role_assignments (subject_kind, subject_id, role_id)
+           VALUES ('entity', $1, $2)"#,
+    )
+    .bind(subject_id)
+    .bind(role_id)
+    .execute(&pool)
+    .await
+    .expect("assign platform role");
+
+    let ids = atom::authz::repo::authorized_object_ids(
+        &pool,
+        AuthorizedObjectIdsQuery {
+            subject_id,
+            action: "read".to_string(),
+            object_kind: "entity".to_string(),
+            object_type: Some("entity:device".to_string()),
+            tenant_id: None,
+            q: None,
+            attributes_contains: None,
+            profile_id: None,
+            entity_status: None,
+            group_type: None,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 100,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("authorized platform listing")
+    .ids;
+
+    assert!(
+        ids.contains(&device_a) && ids.contains(&device_b),
+        "platform object_type grant must list matching devices across tenants, got: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&human),
+        "platform entity:device grant must not list human entities, got: {ids:?}"
+    );
 }
 
 #[tokio::test]

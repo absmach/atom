@@ -44,6 +44,13 @@ function createMutationVariables() {
   return call?.[0].variables;
 }
 
+function actionsQueryVariables() {
+  const call = mocks.graphqlClient.mock.calls.find(([arg]) =>
+    String(arg.query).includes("query ActionAssignmentRuleFormActions"),
+  );
+  return call?.[0].variables;
+}
+
 describe("ActionAssignmentRuleCreateForm", () => {
   afterEach(() => {
     cleanup();
@@ -127,6 +134,28 @@ describe("ActionAssignmentRuleCreateForm", () => {
           isAbsolute: false,
         },
       });
+    });
+  });
+
+  it("shows global scope and loads global actions in global context", async () => {
+    renderForm({ id: GLOBAL_TENANT, name: "Global" });
+
+    expect(screen.getByText("Scope")).toBeInTheDocument();
+    expect(screen.getByText("Platform")).toBeInTheDocument();
+    expect(screen.getByText("Global")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(actionsQueryVariables()).toEqual({ tenantId: null });
+    });
+  });
+
+  it("shows tenant scope and loads tenant actions in tenant context", async () => {
+    renderForm({ id: "tenant-1", name: "Tenant 1" });
+
+    expect(screen.getByText("Scope")).toBeInTheDocument();
+    expect(screen.getByText("Tenant")).toBeInTheDocument();
+    expect(screen.getByText("Tenant 1")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(actionsQueryVariables()).toEqual({ tenantId: "tenant-1" });
     });
   });
 

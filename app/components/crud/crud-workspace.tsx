@@ -1,9 +1,10 @@
-import { Database } from "lucide-react";
+import { Database, ShieldX } from "lucide-react";
 import { cookies } from "next/headers";
 
 import { CrudTable } from "@/components/crud/crud-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { type CrudFilter, requireResource } from "@/lib/crud/resources";
+import { isForbiddenError } from "@/lib/graphql/client";
 import { graphqlServer } from "@/lib/graphql/server";
 import { GLOBAL_TENANT, TENANT_COOKIE } from "@/lib/tenant/context";
 
@@ -66,6 +67,7 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
   let total = resource.sampleRows.length;
   let source: "graphql" | "scaffold" = "scaffold";
   let fetchError: Error | null = null;
+  let accessDenied = false;
 
   if (resource.listQuery) {
     const variables: Record<string, unknown> = { limit, offset };
@@ -105,8 +107,9 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
     } catch (err) {
       fetchError =
         err instanceof Error ? err : new Error("Data request failed");
-      rows = resource.sampleRows;
-      total = resource.sampleRows.length;
+      accessDenied = isForbiddenError(err);
+      rows = accessDenied ? [] : resource.sampleRows;
+      total = accessDenied ? 0 : resource.sampleRows.length;
     }
   }
   const { error: filterFetchError, filters } = await filterResultPromise;
@@ -132,7 +135,15 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
         </p>
       </div>
 
-      {fetchError ? (
+      {accessDenied ? (
+        <Alert variant="destructive">
+          <ShieldX className="size-4" />
+          <AlertTitle>Access denied</AlertTitle>
+          <AlertDescription>
+            This session does not have permission to read {resource.title}.
+          </AlertDescription>
+        </Alert>
+      ) : fetchError ? (
         <Alert variant="destructive">
           <Database className="size-4" />
           <AlertTitle>Backend unavailable or operation failed</AlertTitle>
@@ -150,16 +161,18 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
         </Alert>
       ) : null}
 
-      <CrudTable
-        filters={filters}
-        limit={limit}
-        page={page}
-        resourceKey={resourceKey}
-        rows={rows}
-        showDeletedColumns={showDeletedColumns}
-        source={source}
-        total={total}
-      />
+      {accessDenied ? null : (
+        <CrudTable
+          filters={filters}
+          limit={limit}
+          page={page}
+          resourceKey={resourceKey}
+          rows={rows}
+          showDeletedColumns={showDeletedColumns}
+          source={source}
+          total={total}
+        />
+      )}
     </section>
   );
 }

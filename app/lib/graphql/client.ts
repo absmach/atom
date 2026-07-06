@@ -13,6 +13,23 @@ export class AtomGraphqlError extends Error {
   }
 }
 
+export function isForbiddenError(error: unknown) {
+  if (error instanceof AtomGraphqlError) {
+    return error.errors.some((entry) => isForbiddenMessage(entry.message));
+  }
+  if (error instanceof Error) {
+    return isForbiddenMessage(error.message);
+  }
+  return false;
+}
+
+function isForbiddenMessage(message: string) {
+  return message
+    .split(";")
+    .map((part) => part.trim().toLowerCase())
+    .some((part) => part === "forbidden");
+}
+
 export type GraphqlRequest = {
   query: string;
   variables?: Record<string, unknown>;

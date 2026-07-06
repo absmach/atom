@@ -134,6 +134,13 @@ const SCOPE_MODES = [
 type ScopeMode = (typeof SCOPE_MODES)[number]["value"];
 type Effect = "allow" | "deny";
 
+const PLATFORM_SCOPE_MODES = new Set<ScopeMode>([
+  "platform",
+  "object_kind",
+  "object_type",
+  "object",
+]);
+
 type TenantOption = { id: string; name: string };
 type ObjectGroupOption = { id: string; name: string; tenantId?: string | null };
 type ActionOption = { id: string; name: string; description?: string | null };
@@ -174,11 +181,20 @@ export function PermissionBlockCreateForm({
 
   React.useEffect(() => {
     if (!isTenantScoped) return;
-    setDraft((prev) => ({
-      ...prev,
-      tenantId: selection.id,
-      scopeMode: prev.scopeMode === "platform" ? "tenant" : prev.scopeMode,
-    }));
+    setDraft((prev) => {
+      const scopeMode = scopeModeAllowedForBoundary(
+        prev.scopeMode,
+        selection.id,
+      )
+        ? prev.scopeMode
+        : defaultScopeModeForBoundary(selection.id);
+      return {
+        ...prev,
+        tenantId: selection.id,
+        scopeMode,
+        groupId: needsGroup(scopeMode) ? prev.groupId : "",
+      };
+    });
   }, [isTenantScoped, selection.id]);
 
   const tenantsQ = useQuery({
@@ -304,18 +320,22 @@ export function PermissionBlockCreateForm({
             <Select
               value={draft.tenantId || TENANT_NONE}
               onValueChange={(value) =>
-                setDraft((prev) => ({
-                  ...prev,
-                  tenantId: value === TENANT_NONE ? "" : value,
-                  scopeMode:
-                    value === TENANT_NONE && prev.scopeMode !== "platform"
-                      ? "platform"
-                      : value !== TENANT_NONE && prev.scopeMode === "platform"
-                        ? "tenant"
-                        : prev.scopeMode,
-                  groupId: "",
-                  actionIds: [],
-                }))
+                setDraft((prev) => {
+                  const tenantId = value === TENANT_NONE ? "" : value;
+                  const scopeMode = scopeModeAllowedForBoundary(
+                    prev.scopeMode,
+                    tenantId,
+                  )
+                    ? prev.scopeMode
+                    : defaultScopeModeForBoundary(tenantId);
+                  return {
+                    ...prev,
+                    tenantId,
+                    scopeMode,
+                    groupId: needsGroup(scopeMode) ? prev.groupId : "",
+                    actionIds: [],
+                  };
+                })
               }
             >
               <SelectTrigger>
@@ -331,7 +351,8 @@ export function PermissionBlockCreateForm({
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Non-platform permission blocks must belong to one tenant.
+              Tenant and object group scopes require a tenant. Filtered object
+              scopes can be platform-wide.
             </p>
           </Field>
 
@@ -368,9 +389,7 @@ export function PermissionBlockCreateForm({
               </SelectTrigger>
               <SelectContent>
                 {SCOPE_MODES.filter((mode) =>
-                  draft.tenantId
-                    ? mode.value !== "platform"
-                    : mode.value === "platform",
+                  scopeModeAllowedForBoundary(mode.value, draft.tenantId),
                 ).map((mode) => (
                   <SelectItem key={mode.value} value={mode.value}>
                     <span className="grid gap-0.5">
@@ -379,7 +398,7 @@ export function PermissionBlockCreateForm({
                         data-description=""
                         className="text-muted-foreground text-xs"
                       >
-                        {mode.description}
+                        {scopeModeDescription(mode, Boolean(draft.tenantId))}
                       </span>
                     </span>
                   </SelectItem>
@@ -696,6 +715,37 @@ function resetScopeFields(draft: Draft, scopeMode: ScopeMode): Draft {
   };
 }
 
+function scopeModeAllowedForBoundary(scopeMode: ScopeMode, tenantId: string) {
+  return tenantId
+    ? scopeMode !== "platform"
+    : PLATFORM_SCOPE_MODES.has(scopeMode);
+}
+
+function defaultScopeModeForBoundary(tenantId: string): ScopeMode {
+  return tenantId ? "tenant" : "platform";
+}
+
+function scopeModeDescription(
+  mode: (typeof SCOPE_MODES)[number],
+  hasTenantBoundary: boolean,
+) {
+  if (mode.value === "object_kind") {
+    return hasTenantBoundary
+      ? "Example: every resource in the selected tenant."
+      : "Example: every resource across the platform.";
+  }
+  if (mode.value === "object_type") {
+    return hasTenantBoundary
+      ? "Example: every channel resource in the selected tenant."
+      : "Example: every channel resource across the platform.";
+  }
+  return mode.description;
+}
+
+function requiresTenantBoundary(scopeMode: ScopeMode) {
+  return scopeMode === "tenant" || needsGroup(scopeMode);
+}
+
 function needsObjectKind(scopeMode: ScopeMode) {
   return [
     "object_kind",
@@ -765,7 +815,7 @@ function actionFilterForScope(draft: Draft) {
 }
 
 function stepError(step: number, draft: Draft) {
-  if (step >= 0 && draft.scopeMode !== "platform" && !draft.tenantId) {
+  if (step >= 0 && requiresTenantBoundary(draft.scopeMode) && !draft.tenantId) {
     return "Tenant boundary is required for this scope";
   }
   if (step >= 1) {

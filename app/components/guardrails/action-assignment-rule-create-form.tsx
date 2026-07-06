@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { z } from "zod";
 import { useTenant } from "@/components/app-shell/tenant-provider";
 import { RequiredFormLabel } from "@/components/forms/required-form-label";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Form,
@@ -31,8 +32,8 @@ import { graphqlClient } from "@/lib/graphql/client";
 import { tenantQueryValue } from "@/lib/tenant/context";
 
 const ACTIONS_QUERY = `
-  query ActionAssignmentRuleFormActions {
-    actions(limit: 500, offset: 0) { items { id name description } }
+  query ActionAssignmentRuleFormActions($tenantId: ID) {
+    actions(tenantId: $tenantId, limit: 500, offset: 0) { items { id name description } }
   }
 `;
 
@@ -93,11 +94,14 @@ export function ActionAssignmentRuleCreateForm({
 }) {
   const { selection } = useTenant();
   const tenantId = tenantQueryValue(selection);
+  const scopeKind = tenantId ? "Tenant" : "Platform";
+  const scopeName = tenantId ? selection.name : "Global";
   const actionsQuery = useQuery({
-    queryKey: ["action-assignment-rule-form-actions"],
+    queryKey: ["action-assignment-rule-form-actions", tenantId ?? "global"],
     queryFn: ({ signal }) =>
       graphqlClient<{ actions: { items: ActionOption[] } }>({
         query: ACTIONS_QUERY,
+        variables: { tenantId },
         signal,
       }),
     staleTime: 60_000,
@@ -152,6 +156,18 @@ export function ActionAssignmentRuleCreateForm({
         className="grid gap-4"
         onSubmit={form.handleSubmit((values) => save.mutate(values))}
       >
+        <div className="rounded-lg border bg-muted/30 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">Scope</div>
+              <div className="truncate text-sm text-muted-foreground">
+                {scopeName}
+              </div>
+            </div>
+            <Badge variant="secondary">{scopeKind}</Badge>
+          </div>
+        </div>
+
         <FormField
           control={form.control}
           name="entityKind"

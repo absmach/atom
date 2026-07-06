@@ -205,6 +205,38 @@ Examples:
 - tenant lifecycle manager: create tenants through `create` on `tenant`, and update, freeze, and delete tenants through `manage` on `tenant`;
 - cross-tenant service role: allow trusted services to operate across tenants.
 
+Cross-tenant service roles should prefer filtered Permission Blocks such as `object_kind`, `object_type`, or exact `object` with `tenant_id = null` when they need platform-wide access to a specific object class. For example, a service that reads every device across the platform should use `object_kind = entity` plus `object_type = entity:device`, not a broad platform `read` grant.
+
+Example platform service role:
+
+```text
+subject:
+  kind = service
+  tenant_id = null
+
+role:
+  tenant_id = null
+
+role_assignment:
+  tenant_id = null
+
+permission_block:
+  tenant_id = null
+  scope_mode = object_type
+  object_kind = entity
+  object_type = entity:device
+  actions = [read]
+```
+
+This lets the service read devices across active tenants without granting `read` over tenants, roles, policies, credentials, audit logs, signing keys, or unrelated entity subtypes.
+
+Risks:
+
+- `tenant_id = null` filtered scopes are still platform-level grants and must be created only by platform administrators.
+- `object_kind = entity` is broader than `object_type = entity:device`; use the narrowest scope that satisfies the service.
+- A platform filtered deny applies across every tenant for the matching kind/type/object.
+- Platform filtered scopes do not include Object Group scopes. Object Group scopes remain tenant-bound.
+
 Normal tenant users must not create tenant-free roles. Tenant-free roles require platform-level administration.
 
 ### Tenant Administration Role
@@ -1041,7 +1073,7 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AZ-7 | The PDP must evaluate Principal Group role assignments inherited through membership. | Must |
 | AZ-8 | The PDP must evaluate Permission Blocks and their actions through both role assignments and Direct Policies. | Must |
 | AZ-9 | The PDP must evaluate one effective-permission shape built from role assignments and Direct Policies. | Must |
-| AZ-10 | The PDP must support Permission Block scopes for platform, tenant, object kind, object type, exact object, and Object Group containment. | Must |
+| AZ-10 | The PDP must support Permission Block scopes for platform, tenant, object kind, object type, exact object, and Object Group containment. `object_kind`, `object_type`, and exact `object` scopes may be platform-wide when `tenant_id = null`; Object Group scopes remain tenant-bound. | Must |
 | AZ-11 | The PDP must support ABAC conditions against top-level fields, attributes, and request context. | Must |
 | AZ-12 | A matching deny must override any allow. | Must |
 | AZ-13 | No matching allow must return denied. | Must |
@@ -1069,7 +1101,7 @@ Priority levels: "Must" items are required for general availability and ship acr
 | AM-8 | The system must support ownership relationships between entities. | Should |
 | AM-9 | Role assignments must store tenant ownership directly, with `null` reserved for platform/system assignments. | Must |
 | AM-10 | Tenant admins must be able to manage role assignments owned by their tenant. | Must |
-| AM-11 | Tenant-owned role assignments must not grant access outside their tenant unless the assigned role is a platform/system role. | Must |
+| AM-11 | Tenant-owned role assignments must not grant access outside their tenant. Platform/system assignments use `tenant_id = null` and target global platform subjects. | Must |
 
 ### Action Assignment Guardrails
 

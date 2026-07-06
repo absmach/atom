@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { AtomGraphqlError, graphqlClient } from "@/lib/graphql/client";
+import {
+  AtomGraphqlError,
+  graphqlClient,
+  isForbiddenError,
+} from "@/lib/graphql/client";
 
 describe("graphqlClient", () => {
   it("returns data for successful GraphQL responses", async () => {
@@ -24,5 +28,22 @@ describe("graphqlClient", () => {
     await expect(
       graphqlClient({ query: "{ entities { total } }" }),
     ).rejects.toBeInstanceOf(AtomGraphqlError);
+  });
+
+  it("detects forbidden GraphQL errors", () => {
+    expect(
+      isForbiddenError(new AtomGraphqlError([{ message: "forbidden" }])),
+    ).toBe(true);
+    expect(
+      isForbiddenError(
+        new AtomGraphqlError([
+          { message: "forbidden" },
+          { message: "forbidden" },
+        ]),
+      ),
+    ).toBe(true);
+    expect(
+      isForbiddenError(new AtomGraphqlError([{ message: "denied" }])),
+    ).toBe(false);
   });
 });

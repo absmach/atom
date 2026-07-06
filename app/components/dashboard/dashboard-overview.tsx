@@ -15,6 +15,7 @@ import {
   Server,
   ShieldAlert,
   ShieldCheck,
+  ShieldX,
   Users,
 } from "lucide-react";
 import Link from "next/link";
@@ -35,7 +36,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { graphqlClient } from "@/lib/graphql/client";
+import { graphqlClient, isForbiddenError } from "@/lib/graphql/client";
 import { GLOBAL_TENANT } from "@/lib/tenant/context";
 
 type Count = {
@@ -46,7 +47,7 @@ type CountWithItems<T> = Count & {
   items: T[];
 };
 
-type SummaryResponse = {
+type CoreSummaryResponse = {
   tenants: Count;
   tenantsActive: Count;
   tenantsInactive: Count;
@@ -54,13 +55,16 @@ type SummaryResponse = {
   entities: Count;
   entitiesActive: Count;
   entitiesInactive: Count;
-  profiles: Count;
-  profilesActive: Count;
-  profilesDisabled: Count;
   groups: Count;
   groupsActive: Count;
   groupsInactive: Count;
   resources: Count;
+};
+
+type ControlPlaneSummaryResponse = {
+  profiles: Count;
+  profilesActive: Count;
+  profilesDisabled: Count;
   policies: Count;
   roles: Count;
   auditLogs: Count;
@@ -115,8 +119,8 @@ type ProductionPostureResponse = {
   authzDenied: Count;
 };
 
-const SUMMARY_QUERY = `
-  query DashboardSummary {
+const CORE_SUMMARY_QUERY = `
+  query DashboardCoreSummary {
     tenants(limit: 1, offset: 0) { total }
     tenantsActive: tenants(status: active, limit: 1, offset: 0) { total }
     tenantsInactive: tenants(status: inactive, limit: 1, offset: 0) { total }
@@ -124,13 +128,18 @@ const SUMMARY_QUERY = `
     entities(limit: 1, offset: 0) { total }
     entitiesActive: entities(status: active, limit: 1, offset: 0) { total }
     entitiesInactive: entities(status: inactive, limit: 1, offset: 0) { total }
-    profiles(limit: 1, offset: 0) { total }
-    profilesActive: profiles(status: "active", limit: 1, offset: 0) { total }
-    profilesDisabled: profiles(status: "disabled", limit: 1, offset: 0) { total }
     groups(limit: 1, offset: 0) { total }
     groupsActive: groups(status: active, limit: 1, offset: 0) { total }
     groupsInactive: groups(status: inactive, limit: 1, offset: 0) { total }
     resources(limit: 1, offset: 0) { total }
+  }
+`;
+
+const CONTROL_PLANE_SUMMARY_QUERY = `
+  query DashboardControlPlaneSummary {
+    profiles(limit: 1, offset: 0) { total }
+    profilesActive: profiles(status: "active", limit: 1, offset: 0) { total }
+    profilesDisabled: profiles(status: "disabled", limit: 1, offset: 0) { total }
     policies: directPolicies(limit: 1, offset: 0) { total }
     roles(limit: 1, offset: 0) { total }
     auditLogs(limit: 1, offset: 0) { total }
@@ -299,14 +308,25 @@ function SummaryCards() {
   const { selection } = useTenant();
   const isGlobal = selection.id === GLOBAL_TENANT;
 
-  const query = useQuery({
-    queryKey: ["dashboard", "summary"],
+  const coreQuery = useQuery({
+    queryKey: ["dashboard", "core-summary"],
     queryFn: ({ signal }) =>
-      graphqlClient<SummaryResponse>({ query: SUMMARY_QUERY, signal }),
+      graphqlClient<CoreSummaryResponse>({
+        query: CORE_SUMMARY_QUERY,
+        signal,
+      }),
+  });
+  const controlPlaneQuery = useQuery({
+    queryKey: ["dashboard", "control-plane-summary"],
+    queryFn: ({ signal }) =>
+      graphqlClient<ControlPlaneSummaryResponse>({
+        query: CONTROL_PLANE_SUMMARY_QUERY,
+        signal,
+      }),
   });
 
-  if (query.isLoading) {
-    const skeletonCount = isGlobal ? 8 : 7;
+  if (coreQuery.isLoading) {
+    const skeletonCount = isGlobal ? 4 : 3;
     return (
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {SUMMARY_SKELETONS.slice(0, skeletonCount).map((id) => (
@@ -324,52 +344,67 @@ function SummaryCards() {
     );
   }
 
-  if (query.error) {
+  if (coreQuery.error) {
     return (
-      <WidgetError error={query.error} title="Summary data is unavailable" />
+      <WidgetError
+        error={coreQuery.error}
+        title="Summary data is unavailable"
+      />
     );
   }
 
-  const cards = buildSummaryCards(query.data, isGlobal);
+  const cards = buildSummaryCards(
+    coreQuery.data,
+    isGlobal,
+    controlPlaneQuery.data,
+  );
 
   return (
-    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {cards.map((card) => (
-        <Link key={card.label} href={card.href}>
-          <Card className="h-full transition-colors hover:bg-accent/50">
-            <CardHeader className="pb-2">
-              <CardDescription className="flex items-center justify-between gap-2">
-                <span>{card.label}</span>
-                <card.icon className="size-4 text-muted-foreground" />
-              </CardDescription>
-              <CardTitle className="text-2xl tabular-nums">
-                {formatNumber(card.value)}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="text-sm text-muted-foreground">
-              {card.status ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {card.status.map((s) => (
-                    <span
-                      key={s.label}
-                      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium tabular-nums ${
-                        s.label === "active"
-                          ? "bg-green-500/15 text-green-700 dark:text-green-400"
-                          : "bg-red-500/15 text-red-700 dark:text-red-400"
-                      }`}
-                    >
-                      {formatNumber(s.value)} {s.label}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                card.description
-              )}
-            </CardContent>
-          </Card>
-        </Link>
-      ))}
-    </section>
+    <div className="grid gap-3">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {cards.map((card) => (
+          <Link key={card.label} href={card.href}>
+            <Card className="h-full transition-colors hover:bg-accent/50">
+              <CardHeader className="pb-2">
+                <CardDescription className="flex items-center justify-between gap-2">
+                  <span>{card.label}</span>
+                  <card.icon className="size-4 text-muted-foreground" />
+                </CardDescription>
+                <CardTitle className="text-2xl tabular-nums">
+                  {formatNumber(card.value)}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">
+                {card.status ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {card.status.map((s) => (
+                      <span
+                        key={s.label}
+                        className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium tabular-nums ${
+                          s.label === "active"
+                            ? "bg-green-500/15 text-green-700 dark:text-green-400"
+                            : "bg-red-500/15 text-red-700 dark:text-red-400"
+                        }`}
+                      >
+                        {formatNumber(s.value)} {s.label}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  card.description
+                )}
+              </CardContent>
+            </Card>
+          </Link>
+        ))}
+      </section>
+      {controlPlaneQuery.error ? (
+        <WidgetError
+          error={controlPlaneQuery.error}
+          title="Control-plane summary is unavailable"
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -564,6 +599,12 @@ function WidgetSkeleton({
 }
 
 function WidgetError({ error, title }: { error: Error; title: string }) {
+  if (isForbiddenError(error)) {
+    return (
+      <AccessDeniedAlert description="This session does not have permission to read this dashboard data." />
+    );
+  }
+
   return (
     <Alert variant="destructive">
       <AlertTriangle />
@@ -574,11 +615,27 @@ function WidgetError({ error, title }: { error: Error; title: string }) {
 }
 
 function InlineError({ error }: { error: Error }) {
+  if (isForbiddenError(error)) {
+    return (
+      <AccessDeniedAlert description="This session does not have permission to read this widget." />
+    );
+  }
+
   return (
     <Alert variant="destructive">
       <AlertTriangle />
       <AlertTitle>Widget failed to load</AlertTitle>
       <AlertDescription>{error.message}</AlertDescription>
+    </Alert>
+  );
+}
+
+function AccessDeniedAlert({ description }: { description: string }) {
+  return (
+    <Alert variant="destructive">
+      <ShieldX />
+      <AlertTitle>Access denied</AlertTitle>
+      <AlertDescription>{description}</AlertDescription>
     </Alert>
   );
 }
@@ -593,8 +650,9 @@ type CardDef = {
 };
 
 function buildSummaryCards(
-  data: SummaryResponse | undefined,
+  data: CoreSummaryResponse | undefined,
   isGlobal: boolean,
+  controlPlane: ControlPlaneSummaryResponse | undefined,
 ): CardDef[] {
   const cards: CardDef[] = [];
 
@@ -626,17 +684,6 @@ function buildSummaryCards(
       description: null,
     },
     {
-      label: "Profiles",
-      value: data?.profiles.total ?? 0,
-      href: "/profiles",
-      icon: Braces,
-      status: [
-        { label: "active", value: data?.profilesActive.total ?? 0 },
-        { label: "inactive", value: data?.profilesDisabled.total ?? 0 },
-      ],
-      description: null,
-    },
-    {
       label: "Groups",
       value: data?.groups.total ?? 0,
       href: "/groups",
@@ -655,31 +702,47 @@ function buildSummaryCards(
       status: null,
       description: "Protected objects visible to this session.",
     },
-    {
-      label: "Direct Policies",
-      value: data?.policies.total ?? 0,
-      href: "/policies",
-      icon: GitBranch,
-      status: null,
-      description: "Allow and deny bindings across scopes.",
-    },
-    {
-      label: "Roles",
-      value: data?.roles.total ?? 0,
-      href: "/roles",
-      icon: ShieldCheck,
-      status: null,
-      description: "Named collections of permission blocks.",
-    },
-    {
-      label: "Audit Events",
-      value: data?.auditLogs.total ?? 0,
-      href: "/audit",
-      icon: ScrollText,
-      status: null,
-      description: "Total events visible to this session.",
-    },
   );
+
+  if (controlPlane) {
+    cards.push(
+      {
+        label: "Profiles",
+        value: controlPlane.profiles.total,
+        href: "/profiles",
+        icon: Braces,
+        status: [
+          { label: "active", value: controlPlane.profilesActive.total },
+          { label: "inactive", value: controlPlane.profilesDisabled.total },
+        ],
+        description: null,
+      },
+      {
+        label: "Direct Policies",
+        value: controlPlane.policies.total,
+        href: "/policies",
+        icon: GitBranch,
+        status: null,
+        description: "Allow and deny bindings across scopes.",
+      },
+      {
+        label: "Roles",
+        value: controlPlane.roles.total,
+        href: "/roles",
+        icon: ShieldCheck,
+        status: null,
+        description: "Named collections of permission blocks.",
+      },
+      {
+        label: "Audit Events",
+        value: controlPlane.auditLogs.total,
+        href: "/audit",
+        icon: ScrollText,
+        status: null,
+        description: "Total events visible to this session.",
+      },
+    );
+  }
 
   return cards;
 }
