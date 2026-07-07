@@ -83,8 +83,8 @@ const CREATE_PASSWORD_MUTATION = `
 `;
 
 const ACCESS_TOKENS_QUERY = `
-  query ProfileAccessTokens {
-    accessTokens {
+  query ProfileAccessTokens($status: String) {
+    accessTokens(status: $status) {
       items {
         credentialId
         name
@@ -558,11 +558,18 @@ function AccessTokenSection() {
     defaultValues: { name: "", description: "", expiresAt: "" },
   });
 
+  const [statusFilter, setStatusFilter] = React.useState<
+    "all" | "active" | "revoked"
+  >("active");
+
   const { data, error, isLoading } = useQuery({
-    queryKey: ["profile-access-tokens"],
+    queryKey: ["profile-access-tokens", statusFilter],
     queryFn: ({ signal }) =>
       graphqlClient<AccessTokensData>({
         query: ACCESS_TOKENS_QUERY,
+        variables: {
+          status: statusFilter === "all" ? null : statusFilter,
+        },
         signal,
       }),
     staleTime: 15_000,
@@ -767,6 +774,28 @@ function AccessTokenSection() {
             </div>
           </form>
         </Form>
+
+        <div className="flex items-center justify-end">
+          <Select
+            onValueChange={(value) =>
+              setStatusFilter(value as "all" | "active" | "revoked")
+            }
+            value={statusFilter}
+          >
+            <SelectTrigger
+              aria-label="Token status filter"
+              className="w-32"
+              size="sm"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="revoked">Revoked</SelectItem>
+              <SelectItem value="all">All</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
         <div className="rounded-md border">
           {isLoading ? (

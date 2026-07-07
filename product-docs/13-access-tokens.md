@@ -109,11 +109,20 @@ so a delegated token can never exceed the target even if the ceiling names more.
 
 ## GraphQL Surface
 
-Access tokens are managed through the authenticated profile surface:
+Access tokens are managed through the authenticated profile surface. The
+listing defaults to the caller's own tokens; every argument is optional:
+
+- `subjectId` — list another subject's tokens (*delegated* listing). Gated
+  exactly like delegated minting: an unscoped caller with `manage` on the
+  target subject or its tenant. This is how the administrator who provisions a
+  service token inspects its ceiling and usage afterwards.
+- `status` — `active` or `revoked`; omitted lists both.
+- `limit` / `offset` — pagination (limit 1–100, default 100); `total` is the
+  full filtered count.
 
 ```graphql
 query AccessTokens {
-  accessTokens {
+  accessTokens(status: "active", limit: 50, offset: 0) {
     items {
       credentialId
       name
@@ -219,6 +228,12 @@ mutation RevokeAccessToken($credentialId: ID!) {
 }
 ```
 
+`replaceAccessTokenPermissions` and `revokeAccessToken` operate on the caller's
+own tokens, or — for an unscoped caller holding `manage` on the token's owner
+(or its tenant) — on tokens the caller administers (*delegated* lifecycle,
+same gate as delegated minting). A scoped token is always refused; the audit
+row is stamped with the owner's tenant and carries `delegated: true`.
+
 ---
 
 ## Scope Input Rules
@@ -245,6 +260,12 @@ Access-token lifecycle changes are credential lifecycle events:
 - permission replacement: `credential.update`
 - revoke: `credential.revoke`
 
+Audit rows are stamped with the **token owner's tenant** (not the caller's), so
+a delegated operation by a platform administrator is visible in the owner
+tenant's audit trail; delegated operations carry `delegated: true` in the
+event details. `expiresAt` must be in the future — a token that would be born
+expired is rejected at creation.
+
 **Freshness:** revocation, expiry, ceiling replacement, and owner policy changes take effect on the *next request* — that is the documented granularity. Within one in-flight request, decisions use the ceiling loaded at authentication and the owner grants loaded at the first authorization check (one canonical expansion per request). Any future caching layer must be budgeted against this stance explicitly; today the answer is "no cross-request caching, freshness = one request".
 
 Operators should treat scoped tokens as live credentials:
@@ -263,7 +284,4 @@ Operators should treat scoped tokens as live credentials:
 - OAuth authorization-code or device-code grants.
 - Refresh tokens for scoped access tokens.
 - Token introspection that returns embedded permission claims.
-- Admin lifecycle parity for delegated tokens: `accessTokens`,
-  `replaceAccessTokenPermissions`, and `revokeAccessToken` are owner-scoped, so a
-  delegated token is listed/replaced only by its owner. Revoke it as an admin via
-  `revokeCredential` (`manage` on the target).
+- Token rotation (`rotateAccessToken`) — revoke + re-mint today.

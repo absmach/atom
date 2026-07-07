@@ -38,8 +38,8 @@ use crate::{
 // Access-token lifecycle moved to `identity::access_tokens`; re-exported so
 // callers keep the one `service::` entry point for identity operations.
 pub use super::access_tokens::{
-    create_access_token, list_access_tokens, replace_access_token_permissions, revoke_access_token,
-    MAX_ACCESS_TOKEN_PERMISSIONS,
+    access_token_owner, create_access_token, list_access_tokens, replace_access_token_permissions,
+    revoke_access_token, ListAccessTokens, MAX_ACCESS_TOKEN_PERMISSIONS,
 };
 
 pub fn hash_secret(secret: &[u8]) -> Result<String, AppError> {

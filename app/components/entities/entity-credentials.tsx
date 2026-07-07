@@ -46,12 +46,33 @@ const CREATE_PASSWORD_MUTATION = `
   }
 `;
 
-const CREATE_API_KEY_MUTATION = `
-  mutation CreateApiKey($entityId: ID!, $input: CreateApiKeyInput!) {
-    createApiKey(entityId: $entityId, input: $input) {
+const CREATE_ACCESS_TOKEN_MUTATION = `
+  mutation CreateEntityAccessToken($input: CreateAccessTokenInput!) {
+    createAccessToken(input: $input) {
       credentialId
-      key
+      token
       expiresAt
+    }
+  }
+`;
+
+const ENTITY_ACCESS_TOKENS_QUERY = `
+  query EntityAccessTokens($subjectId: ID!) {
+    accessTokens(subjectId: $subjectId, limit: 100) {
+      items {
+        credentialId
+        name
+        scoped
+        permissions {
+          actions
+          scopeMode
+          tenantId
+          objectKind
+          objectType
+          objectId
+        }
+        lastUsedAt
+      }
     }
   }
 `;
@@ -160,9 +181,26 @@ type Credential = {
 
 type CredentialKind = "password" | "api_key" | "shared_key" | "certificate";
 
+type TokenPermission = {
+  actions: string[];
+  scopeMode: string;
+  tenantId: string | null;
+  objectKind: string | null;
+  objectType: string | null;
+  objectId: string | null;
+};
+
+type EntityAccessToken = {
+  credentialId: string;
+  name: string;
+  scoped: boolean;
+  permissions: TokenPermission[];
+  lastUsedAt: string | null;
+};
+
 type AddCredentialState =
   | { kind: "password"; password: string; confirm: string }
-  | { kind: "api_key"; description: string; expiresAt: string }
+  | { kind: "api_key"; name: string; description: string; expiresAt: string }
   | {
       kind: "shared_key";
       description: string;
@@ -180,7 +218,7 @@ type AddCredentialState =
 
 type ApiKeyResult = {
   credentialId: string;
-  key: string;
+  token: string;
   expiresAt: string | null;
 };
 
@@ -242,6 +280,27 @@ export function EntityCredentials({
     staleTime: 15_000,
   });
 
+  // Delegated access-token detail (ceiling + last use) for the tokens in the
+  // credentials list; requires the same manage authority as this whole panel.
+  const tokensQuery = useQuery({
+    enabled: Boolean(entityId),
+    queryKey: ["entity-access-tokens", entityId],
+    queryFn: ({ signal }) =>
+      graphqlClient<{ accessTokens: { items: EntityAccessToken[] } }>({
+        query: ENTITY_ACCESS_TOKENS_QUERY,
+        variables: { subjectId: entityId },
+        signal,
+      }),
+    staleTime: 15_000,
+  });
+  const tokenDetails = React.useMemo(() => {
+    const byId = new Map<string, EntityAccessToken>();
+    for (const token of tokensQuery.data?.accessTokens?.items ?? []) {
+      byId.set(token.credentialId, token);
+    }
+    return byId;
+  }, [tokensQuery.data]);
+
   const createPassword = useMutation({
     mutationFn: async (password: string) =>
       graphqlClient({
@@ -256,16 +315,30 @@ export function EntityCredentials({
     onError: (err) => toast.error(err.message),
   });
 
+  // An "API key" is an unscoped access token minted for this entity
+  // (delegated `createAccessToken` with `scoped: false`).
   const createApiKey = useMutation({
-    mutationFn: async (input: { description?: string; expiresAt?: string }) =>
-      graphqlClient<{ createApiKey: ApiKeyResult }>({
-        query: CREATE_API_KEY_MUTATION,
-        variables: { entityId, input },
+    mutationFn: async (input: {
+      name: string;
+      description?: string;
+      expiresAt?: string;
+    }) =>
+      graphqlClient<{ createAccessToken: ApiKeyResult }>({
+        query: CREATE_ACCESS_TOKEN_MUTATION,
+        variables: {
+          input: {
+            ...input,
+            subjectId: entityId,
+            scoped: false,
+            permissions: [],
+          },
+        },
       }),
     onSuccess: (data) => {
-      setCreatedApiKey(data.createApiKey);
+      setCreatedApiKey(data.createAccessToken);
       setActiveForm(null);
       void refetch();
+      void tokensQuery.refetch();
     },
     onError: (err) => toast.error(err.message),
   });
@@ -309,6 +382,7 @@ export function EntityCredentials({
     onSuccess: () => {
       toast.success("Credential revoked");
       void refetch();
+      void tokensQuery.refetch();
     },
     onError: (err) => toast.error(err.message),
   });
@@ -410,7 +484,12 @@ export function EntityCredentials({
       }
       createPassword.mutate(form.password);
     } else if (form.kind === "api_key") {
-      const input: { description?: string; expiresAt?: string } = {};
+      if (!form.name.trim()) {
+        toast.error("Name is required.");
+        return;
+      }
+      const input: { name: string; description?: string; expiresAt?: string } =
+        { name: form.name.trim() };
       if (form.description.trim()) input.description = form.description.trim();
       if (form.expiresAt.trim()) input.expiresAt = form.expiresAt.trim();
       createApiKey.mutate(input);
@@ -586,6 +665,22 @@ export function EntityCredentials({
               </>
             ) : form.kind === "api_key" ? (
               <>
+                <div className="grid gap-2">
+                  <Label htmlFor="cred-name">Name</Label>
+                  <Input
+                    id="cred-name"
+                    onChange={(e) =>
+                      setForm((prev) =>
+                        prev.kind === "api_key"
+                          ? { ...prev, name: e.target.value }
+                          : prev,
+                      )
+                    }
+                    placeholder="e.g. fluxmq-auth"
+                    required
+                    value={form.name}
+                  />
+                </div>
                 <div className="grid gap-2">
                   <Label htmlFor="cred-description">Description</Label>
                   <Input
@@ -796,6 +891,7 @@ export function EntityCredentials({
           {credentials.map((cred) => (
             <CredentialRow
               cred={cred}
+              token={tokenDetails.get(cred.id)}
               key={cred.id}
               onRevoke={() => {
                 if (
@@ -841,6 +937,7 @@ export function EntityCredentials({
 
 function CredentialRow({
   cred,
+  token,
   onRevoke,
   onRenew,
   onDownload,
@@ -851,6 +948,7 @@ function CredentialRow({
   revealing,
 }: {
   cred: Credential;
+  token?: EntityAccessToken;
   onRevoke: () => void;
   onRenew?: () => void;
   onDownload?: () => void;
@@ -867,14 +965,27 @@ function CredentialRow({
         <div className="grid min-w-0 gap-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">
-              {credentialKindLabel(cred.kind)}
+              {token ? token.name : credentialKindLabel(cred.kind)}
             </span>
             <StatusBadge value={cred.status} />
+            {token?.scoped ? <Badge variant="outline">scoped</Badge> : null}
           </div>
           {cred.identifier ? (
             <div className="font-mono text-xs text-muted-foreground truncate">
               {cred.identifier}
             </div>
+          ) : null}
+          {token && token.permissions.length > 0 ? (
+            <ul className="space-y-0.5 text-xs text-muted-foreground">
+              {token.permissions.map((permission, index) => (
+                <li
+                  key={`${tokenPermissionSummary(permission)}-${index}`}
+                  className="font-mono"
+                >
+                  {tokenPermissionSummary(permission)}
+                </li>
+              ))}
+            </ul>
           ) : null}
           <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
             <span>
@@ -888,6 +999,17 @@ function CredentialRow({
                   action={Action.Expired}
                   time={cred.expiresAt}
                 />
+              </span>
+            ) : null}
+            {token ? (
+              <span>
+                {token.lastUsedAt ? (
+                  <>
+                    Last used <DisplayTimeCell time={token.lastUsedAt} />
+                  </>
+                ) : (
+                  "Never used"
+                )}
               </span>
             ) : null}
           </div>
@@ -985,7 +1107,7 @@ function newCredentialForm(kind: CredentialKind): AddCredentialState {
     case "password":
       return { kind: "password", password: "", confirm: "" };
     case "api_key":
-      return { kind: "api_key", description: "", expiresAt: "" };
+      return { kind: "api_key", name: "", description: "", expiresAt: "" };
     case "shared_key":
       return {
         kind: "shared_key",
@@ -1028,7 +1150,7 @@ function ApiKeyRevealBanner({
   const [copied, setCopied] = React.useState(false);
 
   async function copy() {
-    await navigator.clipboard.writeText(apiKey.key);
+    await navigator.clipboard.writeText(apiKey.token);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   }
@@ -1048,7 +1170,7 @@ function ApiKeyRevealBanner({
       </p>
       <div className="mb-3 flex gap-2">
         <code className="min-w-0 flex-1 break-all rounded bg-yellow-100 px-2 py-1 font-mono text-xs text-yellow-900 dark:bg-yellow-900 dark:text-yellow-100">
-          {apiKey.key}
+          {apiKey.token}
         </code>
         <Button onClick={copy} size="sm" variant="outline">
           {copied ? "Copied!" : "Copy"}
@@ -1162,6 +1284,20 @@ function CertificateRevealBanner({
       </Button>
     </div>
   );
+}
+
+function tokenPermissionSummary(permission: TokenPermission) {
+  const scope =
+    permission.scopeMode === "platform"
+      ? "platform"
+      : permission.scopeMode === "tenant"
+        ? `tenant ${permission.tenantId ?? ""}`
+        : permission.scopeMode === "object"
+          ? `object ${permission.objectId ?? ""}`
+          : permission.scopeMode === "object_type"
+            ? (permission.objectType ?? "")
+            : (permission.objectKind ?? "");
+  return `${permission.actions.join(", ")} · ${scope}`;
 }
 
 function splitList(value: string) {

@@ -420,7 +420,8 @@ async fn access_tokens_are_self_scoped_with_permission_ceiling() {
     assert_eq!(authenticated.entity_id, owner_id);
     assert!(authenticated.session_id.is_none());
 
-    // Revoke is owner-only.
+    // A caller without credential-management authority over the owner cannot
+    // revoke (delegated revoke requires `manage` on the owner or its tenant).
     let other_revoke = schema
         .execute(authed_as(
             other_id,
@@ -428,9 +429,6 @@ async fn access_tokens_are_self_scoped_with_permission_ceiling() {
         ))
         .await;
     assert!(!other_revoke.errors.is_empty());
-    assert!(other_revoke.errors[0]
-        .message
-        .contains("access token not found"));
 
     let owner_revoke = schema
         .execute(authed_as(
@@ -918,7 +916,8 @@ async fn replace_access_token_permissions_is_owner_only_and_non_empty() {
         .expect("credential id")
         .to_owned();
 
-    // A different entity cannot edit it.
+    // A different entity without credential-management authority over the
+    // owner cannot edit it (delegated replace requires `manage` on the owner).
     let other = schema
         .execute(authed_as(
             other_id,
@@ -935,7 +934,6 @@ async fn replace_access_token_permissions_is_owner_only_and_non_empty() {
         ))
         .await;
     assert!(!other.errors.is_empty());
-    assert!(other.errors[0].message.contains("access token not found"));
 
     // Empty permissions are rejected.
     let empty = schema
@@ -1852,5 +1850,205 @@ async fn access_token_authentication_stamps_last_used_at() {
     assert!(
         item["lastUsedAt"].is_string(),
         "lastUsedAt must be surfaced in the listing"
+    );
+}
+
+/// Admin lifecycle parity for delegated tokens: the unscoped admin who holds
+/// `manage` on the owner can list the owner's tokens (ceiling included),
+/// replace the ceiling, and revoke — while an unrelated caller and a scoped
+/// caller are refused. Audit rows carry `delegated: true`.
+#[tokio::test]
+#[ignore]
+async fn admin_lists_and_manages_delegated_tokens() {
+    use atom::authz::repo::CredentialCeiling;
+
+    let pool = common::pool().await;
+    let owner = entity(&pool, "service").await;
+    let outsider = entity(&pool, "human").await;
+    let schema = build_schema(state(pool.clone()));
+
+    // Admin (seeded platform manage) delegated-mints a scoped token.
+    let created = schema
+        .execute(authed(format!(
+            r#"mutation {{ createAccessToken(input: {{ name: "svc", subjectId: "{owner}", permissions: [{{ actions: ["read"], scopeMode: "object_kind", objectKind: "resource" }}] }}) {{ credentialId }} }}"#
+        )))
+        .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let cred_id = created.data.into_json().expect("json")["createAccessToken"]["credentialId"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    // Delegated listing returns the token with its ceiling.
+    let list_query = format!(
+        r#"query {{ accessTokens(subjectId: "{owner}") {{ items {{ credentialId name scoped permissions {{ actions scopeMode objectKind }} }} total }} }}"#
+    );
+    let listed = schema.execute(authed(list_query.clone())).await;
+    assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+    let json = listed.data.into_json().expect("json");
+    let item = json["accessTokens"]["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|t| t["credentialId"] == cred_id.as_str())
+        .cloned()
+        .expect("delegated token listed for the admin");
+    assert_eq!(item["scoped"], true);
+    assert_eq!(item["permissions"][0]["objectKind"], "resource");
+
+    // An unrelated caller and a scoped caller are refused.
+    let denied = schema
+        .execute(authed_as(outsider, list_query.clone()))
+        .await;
+    assert!(
+        !denied.errors.is_empty(),
+        "caller without manage must not list another subject's tokens"
+    );
+    let scoped_denied = schema
+        .execute(authed_scoped(
+            common::admin_id(),
+            CredentialCeiling { entries: vec![] },
+            list_query,
+        ))
+        .await;
+    assert!(
+        !scoped_denied.errors.is_empty(),
+        "a scoped caller must not list another subject's tokens"
+    );
+
+    // Admin replaces the delegated token's ceiling.
+    let replace_mutation = format!(
+        r#"mutation {{ replaceAccessTokenPermissions(credentialId: "{cred_id}", permissions: [{{ actions: ["read"], scopeMode: "platform" }}]) }}"#,
+    );
+    let replaced = schema.execute(authed(replace_mutation.clone())).await;
+    assert!(replaced.errors.is_empty(), "{:?}", replaced.errors);
+    let scope_modes: Vec<String> = sqlx::query_scalar(
+        "SELECT scope_mode FROM credential_permission_limits WHERE credential_id = $1",
+    )
+    .bind(cred_id.parse::<Uuid>().expect("uuid"))
+    .fetch_all(&pool)
+    .await
+    .expect("limits");
+    assert_eq!(scope_modes, vec!["platform".to_string()]);
+
+    // An unrelated caller cannot replace or revoke it.
+    let outsider_replace = schema.execute(authed_as(outsider, replace_mutation)).await;
+    assert!(
+        !outsider_replace.errors.is_empty(),
+        "caller without manage must not replace another subject's ceiling"
+    );
+    let outsider_revoke = schema
+        .execute(authed_as(
+            outsider,
+            format!(r#"mutation {{ revokeAccessToken(credentialId: "{cred_id}") }}"#),
+        ))
+        .await;
+    assert!(
+        !outsider_revoke.errors.is_empty(),
+        "caller without manage must not revoke another subject's token"
+    );
+
+    // Admin revokes it; the audit row is delegated and stamped for the owner.
+    let revoked = schema
+        .execute(authed(format!(
+            r#"mutation {{ revokeAccessToken(credentialId: "{cred_id}") }}"#
+        )))
+        .await;
+    assert!(revoked.errors.is_empty(), "{:?}", revoked.errors);
+    let status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+        .bind(cred_id.parse::<Uuid>().expect("uuid"))
+        .fetch_one(&pool)
+        .await
+        .expect("credential");
+    assert_eq!(status, "revoked");
+    let delegated: serde_json::Value = sqlx::query_scalar(
+        r#"SELECT details FROM audit_logs
+           WHERE target_id = $1 AND event = 'credential.revoke'
+           ORDER BY created_at DESC LIMIT 1"#,
+    )
+    .bind(cred_id.parse::<Uuid>().expect("uuid"))
+    .fetch_one(&pool)
+    .await
+    .expect("audit row");
+    assert_eq!(delegated["delegated"], true);
+}
+
+/// The token listing filters by status and paginates with a full filtered
+/// `total`, so revoked tokens do not pile into the default view forever.
+#[tokio::test]
+#[ignore]
+async fn access_tokens_listing_filters_and_paginates() {
+    let pool = common::pool().await;
+    let owner = entity(&pool, "service").await;
+    let app_state = state(pool.clone());
+    let schema = build_schema(state(pool.clone()));
+
+    let mut cred_ids = Vec::new();
+    for name in ["one", "two", "three"] {
+        let minted = identity_service::create_access_token(
+            &pool,
+            &app_state.config.signing_keys,
+            owner,
+            atom::models::token::CreateAccessToken {
+                name: name.into(),
+                description: None,
+                expires_at: None,
+                permissions: vec![],
+            },
+            false,
+        )
+        .await
+        .expect("mint");
+        cred_ids.push(minted.credential_id);
+    }
+    identity_service::revoke_access_token(&pool, owner, cred_ids[0])
+        .await
+        .expect("revoke");
+
+    let list = |args: &str| {
+        let query =
+            format!(r#"query {{ accessTokens{args} {{ items {{ credentialId }} total }} }}"#);
+        schema.execute(authed_as(owner, query))
+    };
+
+    let active = list(r#"(status: "active")"#).await;
+    assert!(active.errors.is_empty(), "{:?}", active.errors);
+    let json = active.data.into_json().expect("json");
+    assert_eq!(json["accessTokens"]["total"], 2);
+    assert_eq!(
+        json["accessTokens"]["items"]
+            .as_array()
+            .expect("items")
+            .len(),
+        2
+    );
+
+    let revoked = list(r#"(status: "revoked")"#).await;
+    let json = revoked.data.into_json().expect("json");
+    assert_eq!(json["accessTokens"]["total"], 1);
+    assert_eq!(
+        json["accessTokens"]["items"][0]["credentialId"],
+        cred_ids[0].to_string().as_str()
+    );
+
+    let all = list("").await;
+    let json = all.data.into_json().expect("json");
+    assert_eq!(json["accessTokens"]["total"], 3);
+
+    let page = list("(limit: 1, offset: 1)").await;
+    let json = page.data.into_json().expect("json");
+    assert_eq!(json["accessTokens"]["total"], 3, "total spans all pages");
+    assert_eq!(
+        json["accessTokens"]["items"]
+            .as_array()
+            .expect("items")
+            .len(),
+        1
+    );
+
+    let invalid = list(r#"(status: "nonsense")"#).await;
+    assert!(
+        !invalid.errors.is_empty(),
+        "an unknown status filter must be rejected"
     );
 }

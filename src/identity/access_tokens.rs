@@ -15,7 +15,7 @@ use crate::{
     crypto,
     error::{db_err, AppError},
     models::{
-        enums::CredentialKind,
+        enums::{CredentialKind, CredentialStatus},
         token::{
             AccessTokenPermission, AccessTokenPermissionSummary, AccessTokenResponse,
             AccessTokenSummary, CreateAccessToken,
@@ -131,7 +131,10 @@ pub async fn create_access_token(
     })
 }
 
-/// Owner-only replacement of a scoped access token's permission ceiling.
+/// Replace a scoped access token's permission ceiling. `entity_id` must be the
+/// token's owner (the row filter enforces it); the GraphQL layer authorizes the
+/// caller — owner self-service or a delegated admin via the
+/// credential-management gate — before resolving the owner id passed here.
 pub async fn replace_access_token_permissions(
     pool: &PgPool,
     entity_id: Uuid,
@@ -300,12 +303,23 @@ async fn write_ceiling_limit(
     Ok(())
 }
 
+/// Filters and paging for the token listing. `status = None` lists all tokens.
+#[derive(Debug, Default)]
+pub struct ListAccessTokens {
+    pub status: Option<CredentialStatus>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 pub async fn list_access_tokens(
     pool: &PgPool,
     entity_id: Uuid,
-) -> Result<Vec<AccessTokenSummary>, AppError> {
+    params: ListAccessTokens,
+) -> Result<(Vec<AccessTokenSummary>, i64), AppError> {
     use sqlx::Row;
 
+    let limit = params.limit.clamp(1, 100);
+    let offset = params.offset.max(0);
     let rows = sqlx::query(
         r#"SELECT id,
                   COALESCE(NULLIF(metadata->>'name', ''), identifier, 'Access token') AS name,
@@ -315,25 +329,36 @@ pub async fn list_access_tokens(
                   scoped,
                   expires_at,
                   last_used_at,
-                  created_at
+                  created_at,
+                  COUNT(*) OVER() AS total
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
-           ORDER BY created_at DESC"#,
+             AND ($3::text IS NULL OR status = $3::text)
+           ORDER BY created_at DESC
+           LIMIT $4 OFFSET $5"#,
     )
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
+    .bind(params.status)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
+    let mut total = 0;
     let credential_ids: Vec<Uuid> = rows
         .iter()
-        .map(|row| row.try_get("id").map_err(db_err))
+        .map(|row| {
+            total = row.try_get("total").map_err(db_err)?;
+            row.try_get("id").map_err(db_err)
+        })
         .collect::<Result<Vec<_>, AppError>>()?;
     let mut permissions = load_access_token_permissions(pool, &credential_ids).await?;
 
-    rows.into_iter()
+    let items = rows
+        .into_iter()
         .map(|row| {
             let credential_id: Uuid = row.try_get("id").map_err(db_err)?;
             Ok(AccessTokenSummary {
@@ -349,7 +374,21 @@ pub async fn list_access_tokens(
                 created_at: row.try_get("created_at").map_err(db_err)?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok((items, total))
+}
+
+/// The owner (entity id) of an access-token credential; `NotFound` when the id
+/// does not exist or is not an access token. Used by the GraphQL layer to route
+/// owner vs delegated (admin) lifecycle operations.
+pub async fn access_token_owner(pool: &PgPool, cred_id: Uuid) -> Result<Uuid, AppError> {
+    sqlx::query_scalar(r#"SELECT entity_id FROM credentials WHERE id = $1 AND kind = $2"#)
+        .bind(cred_id)
+        .bind(CredentialKind::AccessToken)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| AppError::not_found("access token not found"))
 }
 
 /// Render token ceilings for display: one entry per limit row with its action

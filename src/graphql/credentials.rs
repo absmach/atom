@@ -38,13 +38,39 @@ impl CredentialQuery {
         })
     }
 
-    async fn access_tokens(&self, ctx: &Context<'_>) -> Result<AccessTokenList> {
+    /// The caller's own tokens by default. `subjectId` names another owner —
+    /// a *delegated* listing gated exactly like delegated minting (unscoped
+    /// caller with `manage` on the target or its tenant), so the admin who
+    /// provisions a service token can inspect its ceiling and usage afterwards.
+    async fn access_tokens(
+        &self,
+        ctx: &Context<'_>,
+        subject_id: Option<ID>,
+        status: Option<String>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<AccessTokenList> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let tokens = service::list_access_tokens(&state.pool, auth.entity_id)
-            .await
-            .map_err(gql_error)?;
-        let total = tokens.len() as i64;
+        let owner_id = subject_id
+            .map(|id| parse_id(id, "subjectId"))
+            .transpose()?
+            .unwrap_or(auth.entity_id);
+        if owner_id != auth.entity_id {
+            require_credential_management(state, &auth, owner_id).await?;
+        }
+        let status = parse_credential_status(status.as_deref())?;
+        let (tokens, total) = service::list_access_tokens(
+            &state.pool,
+            owner_id,
+            service::ListAccessTokens {
+                status,
+                limit: limit.map(i64::from).unwrap_or(100),
+                offset: offset.map(i64::from).unwrap_or(0),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
         Ok(AccessTokenList {
             items: tokens.into_iter().map(AccessToken::from).collect(),
             total,
@@ -175,13 +201,15 @@ impl CredentialMutation {
         crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
         let credential_id = parse_id(credential_id, "credentialId")?;
+        let (owner_id, delegated, audit_tenant_id) =
+            resolve_token_lifecycle_target(state, &auth, credential_id).await?;
         let permissions = permissions
             .into_iter()
             .map(permission_input_into_model)
             .collect::<Result<Vec<_>>>()?;
         service::replace_access_token_permissions(
             &state.pool,
-            auth.entity_id,
+            owner_id,
             credential_id,
             permissions,
         )
@@ -191,13 +219,15 @@ impl CredentialMutation {
             &state.pool,
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: auth.tenant_id,
+                tenant_id: audit_tenant_id,
                 target_kind: Some("credential"),
                 target_id: Some(credential_id),
                 event: "credential.update",
                 outcome: AuditOutcome::Allow,
                 details: serde_json::json!({
+                    "entity_id": owner_id,
                     "kind": "access_token",
+                    "delegated": delegated,
                     "credential_id": credential_id
                 }),
             },
@@ -211,20 +241,24 @@ impl CredentialMutation {
         crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
         let credential_id = parse_id(credential_id, "credentialId")?;
-        service::revoke_access_token(&state.pool, auth.entity_id, credential_id)
+        let (owner_id, delegated, audit_tenant_id) =
+            resolve_token_lifecycle_target(state, &auth, credential_id).await?;
+        service::revoke_access_token(&state.pool, owner_id, credential_id)
             .await
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: auth.tenant_id,
+                tenant_id: audit_tenant_id,
                 target_kind: Some("credential"),
                 target_id: Some(credential_id),
                 event: "credential.revoke",
                 outcome: AuditOutcome::Allow,
                 details: serde_json::json!({
+                    "entity_id": owner_id,
                     "kind": "access_token",
+                    "delegated": delegated,
                     "credential_id": credential_id
                 }),
             },
@@ -351,6 +385,41 @@ impl CredentialMutation {
         )
         .await;
         Ok(true)
+    }
+}
+
+/// Resolve who a token-lifecycle mutation acts on and how it is authorized.
+/// Owner acting on its own token passes with just the scoped-caller guard (the
+/// resolver applies it before calling this); a different caller is a *delegated*
+/// operation and must pass the credential-management gate for the owner — the
+/// same gate as delegated minting. Returns (owner, delegated, audit tenant):
+/// audit rows are stamped with the owner's tenant so the event lands in that
+/// tenant's trail.
+async fn resolve_token_lifecycle_target(
+    state: &AppState,
+    auth: &crate::auth::AuthContext,
+    credential_id: Uuid,
+) -> Result<(Uuid, bool, Option<Uuid>)> {
+    let owner_id = service::access_token_owner(&state.pool, credential_id)
+        .await
+        .map_err(gql_error)?;
+    if owner_id == auth.entity_id {
+        return Ok((owner_id, false, auth.tenant_id));
+    }
+    let tenant_id = require_credential_management(state, auth, owner_id).await?;
+    Ok((owner_id, true, tenant_id))
+}
+
+fn parse_credential_status(
+    status: Option<&str>,
+) -> Result<Option<crate::models::enums::CredentialStatus>> {
+    match status {
+        None => Ok(None),
+        Some("active") => Ok(Some(crate::models::enums::CredentialStatus::Active)),
+        Some("revoked") => Ok(Some(crate::models::enums::CredentialStatus::Revoked)),
+        Some(other) => Err(gql_error(crate::error::AppError::bad_request(format!(
+            "invalid status filter: {other} (expected 'active' or 'revoked')"
+        )))),
     }
 }
 
