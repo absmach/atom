@@ -41,6 +41,8 @@ atom_<32-hex-credential-id>_<64-hex-secret>
 
 The credential ID is embedded for direct lookup. The secret verifier is an HMAC-SHA256 digest keyed with the deployment KEK (`ATOM_KEY_ENCRYPTION_KEY`), compared in constant time — the secret is 32 random bytes, so a memory-hard KDF adds per-request cost without security, while the keyed digest keeps a DB-only leak unverifiable offline. Without a KEK the verifier falls back to argon2. Plaintext is never stored and cannot be recovered.
 
+Tokens minted before a KEK was configured upgrade automatically: on the first successful argon2 verification with a KEK present, the stored verifier is swapped to the keyed digest. The reverse is fail-closed — removing or changing the deployment KEK makes every HMAC-verified token unverifiable (authentication is denied); those tokens must be re-minted.
+
 ---
 
 ## Permission Ceiling
@@ -129,6 +131,7 @@ query AccessTokens {
         conditions
       }
       expiresAt
+      lastUsedAt
       createdAt
     }
     total
@@ -247,7 +250,9 @@ Access-token lifecycle changes are credential lifecycle events:
 Operators should treat scoped tokens as live credentials:
 
 - set expirations for temporary automation;
-- revoke unused tokens;
+- revoke unused tokens — `lastUsedAt` in the token listing shows the last
+  successful authentication, stamped at a five-minute granularity (`null` =
+  never used);
 - inspect token permissions before debugging an authorization failure;
 - prefer exact-object or object-type scopes over platform scopes for CLI tokens.
 

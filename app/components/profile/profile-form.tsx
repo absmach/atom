@@ -101,6 +101,7 @@ const ACCESS_TOKENS_QUERY = `
           objectId
         }
         expiresAt
+        lastUsedAt
         createdAt
       }
       total
@@ -164,6 +165,7 @@ type AccessToken = {
   scoped: boolean;
   permissions: AccessTokenPermission[];
   expiresAt: string | null;
+  lastUsedAt: string | null;
   createdAt: string;
 };
 
@@ -1055,6 +1057,15 @@ function AccessTokenRow({
               <DisplayTimeCell action={Action.Expired} time={token.expiresAt} />
             ) : (
               "No expiry"
+            )}
+          </span>
+          <span>
+            {token.lastUsedAt ? (
+              <>
+                Last used <DisplayTimeCell time={token.lastUsedAt} />
+              </>
+            ) : (
+              "Never used"
             )}
           </span>
         </div>

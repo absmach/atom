@@ -328,7 +328,23 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     Ok(TenantList { items, total })
 }
 
+/// Ceiling-aware tenant visibility listing for request-path callers. The
+/// scoped-token ceiling is derived from the caller's `AuthContext`
+/// (`ceiling_credential_for`), never passed by hand — same rule as
+/// `engine::evaluate` and `authz::repo::authorized_object_ids`.
 pub async fn list_tenants_for_entity(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    entity_id: Uuid,
+    params: ListTenants,
+) -> Result<TenantList, AppError> {
+    let ceiling_credential_id = auth.ceiling_credential_for(entity_id);
+    list_tenants_for_entity_with_ceiling(pool, entity_id, ceiling_credential_id, params).await
+}
+
+/// Low-level visibility listing taking an explicit ceiling credential. For
+/// tests; production code must call [`list_tenants_for_entity`].
+pub async fn list_tenants_for_entity_with_ceiling(
     pool: &PgPool,
     entity_id: Uuid,
     ceiling_credential_id: Option<Uuid>,
@@ -355,24 +371,18 @@ pub async fn list_tenants_for_entity(
     // inside the canonical expansion. Deny-override is per-action (a manage deny
     // must not hide a read-visible tenant) and the assignment tenant boundary is
     // honoured.
-    // The scoped-token ceiling joins the same shape as the object listings:
-    // unconditional entries only (no request context here, matching the coarse
-    // gates), applied per action inside the visibility filter so the caller
-    // sees `owner visibility ∩ ceiling`.
-    const CTES: &str = r#"WITH grants AS (
+    // The scoped-token ceiling joins the same shape as the object listings
+    // (shared `ceiling_cte`, unconditional entries only — no request context
+    // here, matching the coarse gates), applied per action inside the
+    // visibility filter so the caller sees `owner visibility ∩ ceiling`.
+    let ctes: String = r#"WITH grants AS (
             SELECT * FROM subject_effective_grants($1)
         ),
         access_caps AS (
             SELECT id FROM actions WHERE name = ANY($6::text[])
         ),
-        ceiling AS (
-            SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id
-            FROM credential_permission_limits l
-            JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
-            JOIN credential_permission_limit_actions la ON la.limit_id = l.id
-            WHERE l.credential_id = $10::uuid
-              AND l.conditions = '{}'::jsonb
-        )"#;
+        __CEILING_CTE__"#
+        .replace("__CEILING_CTE__", &crate::authz::repo::ceiling_cte("$10"));
     // A grant covers tenant object `t` when it grants the action `c.id`, its
     // assignment boundary admits `t`, and its scope matches the tenant under the
     // shared predicate. A tenant has no parent/ancestor groups and is its own
@@ -421,7 +431,7 @@ pub async fn list_tenants_for_entity(
                   OR ($9::text = 'deleted' AND t.deleted_at IS NOT NULL))"#;
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
-        "{CTES} SELECT {TENANT_COLS} FROM tenants t \
+        "{ctes} SELECT {TENANT_COLS} FROM tenants t \
          WHERE {base_filter} {auth_filter} ORDER BY t.created_at DESC LIMIT $7 OFFSET $8"
     ))
     .bind(entity_id)
@@ -439,7 +449,7 @@ pub async fn list_tenants_for_entity(
     .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(&format!(
-        "{CTES} SELECT COUNT(*) FROM tenants t WHERE {base_filter} {auth_filter}"
+        "{ctes} SELECT COUNT(*) FROM tenants t WHERE {base_filter} {auth_filter}"
     ))
     .bind(entity_id)
     .bind(name)

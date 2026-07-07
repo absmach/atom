@@ -1612,7 +1612,7 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
         .expect("policy");
 
     let lists_target = || async {
-        atom::authz::repo::authorized_object_ids(
+        atom::authz::repo::authorized_object_ids_with_ceiling(
             &pool,
             AuthorizedObjectIdsQuery {
                 subject_id: subject,
@@ -1629,8 +1629,8 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
                 include_descendants: false,
                 limit: 500,
                 offset: 0,
-                ceiling_credential_id: None,
             },
+            None,
         )
         .await
         .expect("listing")
@@ -1702,7 +1702,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
         .expect("policy");
 
     let lists_target = || async {
-        atom::authz::repo::authorized_object_ids(
+        atom::authz::repo::authorized_object_ids_with_ceiling(
             &pool,
             AuthorizedObjectIdsQuery {
                 subject_id: subject,
@@ -1719,8 +1719,8 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
                 include_descendants: false,
                 limit: 500,
                 offset: 0,
-                ceiling_credential_id: None,
             },
+            None,
         )
         .await
         .expect("listing")

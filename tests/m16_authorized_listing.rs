@@ -257,7 +257,7 @@ async fn authorized(
     object_type: Option<&str>,
     tenant_id: Uuid,
 ) -> Vec<Uuid> {
-    atom::authz::repo::authorized_object_ids(
+    atom::authz::repo::authorized_object_ids_with_ceiling(
         pool,
         AuthorizedObjectIdsQuery {
             subject_id,
@@ -274,8 +274,8 @@ async fn authorized(
             include_descendants: false,
             limit: 100,
             offset: 0,
-            ceiling_credential_id: None,
         },
+        None,
     )
     .await
     .expect("authorized listing")
@@ -338,7 +338,7 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
     .await
     .expect("assign platform role");
 
-    let ids = atom::authz::repo::authorized_object_ids(
+    let ids = atom::authz::repo::authorized_object_ids_with_ceiling(
         &pool,
         AuthorizedObjectIdsQuery {
             subject_id,
@@ -355,8 +355,8 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
             include_descendants: false,
             limit: 100,
             offset: 0,
-            ceiling_credential_id: None,
         },
+        None,
     )
     .await
     .expect("authorized platform listing")
@@ -469,7 +469,7 @@ async fn authorized_resource_attributes_contains_filters_before_limit_and_author
     grant_resource_read(&pool, tenant_id, subject_id, authorized_match, read_id).await;
     grant_resource_read(&pool, tenant_id, subject_id, authorized_nonmatch, read_id).await;
 
-    let response = atom::authz::repo::authorized_object_ids(
+    let response = atom::authz::repo::authorized_object_ids_with_ceiling(
         &pool,
         AuthorizedObjectIdsQuery {
             subject_id,
@@ -486,8 +486,8 @@ async fn authorized_resource_attributes_contains_filters_before_limit_and_author
             include_descendants: false,
             limit: 1,
             offset: 0,
-            ceiling_credential_id: None,
         },
+        None,
     )
     .await
     .expect("authorized resource attributes listing");
@@ -522,10 +522,14 @@ async fn authorized_resource_kinds_include_custom_readable_kinds_only() {
         assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
     }
 
-    let kinds =
-        atom::authz::repo::authorized_resource_kinds(&pool, subject_id, Some(tenant_id), None)
-            .await
-            .expect("authorized resource kinds");
+    let kinds = atom::authz::repo::authorized_resource_kinds_with_ceiling(
+        &pool,
+        subject_id,
+        Some(tenant_id),
+        None,
+    )
+    .await
+    .expect("authorized resource kinds");
 
     assert_eq!(kinds, vec!["channel", "custom_stream"]);
 }
@@ -898,7 +902,7 @@ async fn authorized_groups(
     parent_group_id: Option<Uuid>,
     limit: i64,
 ) -> atom::models::access::AuthorizedObjectIdsResponse {
-    atom::authz::repo::authorized_object_ids(
+    atom::authz::repo::authorized_object_ids_with_ceiling(
         pool,
         AuthorizedObjectIdsQuery {
             subject_id,
@@ -915,8 +919,8 @@ async fn authorized_groups(
             include_descendants: false,
             limit,
             offset: 0,
-            ceiling_credential_id: None,
         },
+        None,
     )
     .await
     .expect("authorized group listing")

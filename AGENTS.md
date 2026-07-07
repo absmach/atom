@@ -42,6 +42,8 @@ src/
   │  mod.rs
   │  handlers.rs       — Axum handlers for auth + identity endpoints
   │  service.rs        — business logic; writes auth.login audit events
+  │  access_tokens.rs  — access-token lifecycle (mint/replace/list/revoke),
+  │                       re-exported through service::; verification in auth.rs
   │  repo.rs           — sqlx queries
   authz/
      mod.rs

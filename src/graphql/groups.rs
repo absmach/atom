@@ -252,6 +252,7 @@ async fn authorized_group_list(
 
     let authorized = authz_repo::authorized_object_ids(
         &state.pool,
+        auth,
         AuthorizedObjectIdsQuery {
             subject_id,
             action: "read".to_string(),
@@ -267,7 +268,6 @@ async fn authorized_group_list(
             include_descendants: false,
             limit: limit_value,
             offset: offset_value,
-            ceiling_credential_id: auth.ceiling_credential_for(subject_id),
         },
     )
     .await

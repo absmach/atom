@@ -44,6 +44,7 @@ impl AuthzQuery {
         // `authzCheck` semantics.
         let response = authz_repo::authorized_object_ids(
             &state.pool,
+            &auth,
             AuthorizedObjectIdsQuery {
                 subject_id,
                 action: input.action,
@@ -59,7 +60,6 @@ impl AuthzQuery {
                 include_descendants: false,
                 limit: input.limit.map(i64::from).unwrap_or(100),
                 offset: input.offset.map(i64::from).unwrap_or(0),
-                ceiling_credential_id: auth.ceiling_credential_for(subject_id),
             },
         )
         .await

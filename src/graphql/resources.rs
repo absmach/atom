@@ -36,14 +36,9 @@ impl ResourceQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
 
-        authz_repo::authorized_resource_kinds(
-            &state.pool,
-            auth.entity_id,
-            tenant_id,
-            auth.ceiling_credential_for(auth.entity_id),
-        )
-        .await
-        .map_err(gql_error)
+        authz_repo::authorized_resource_kinds(&state.pool, &auth, auth.entity_id, tenant_id)
+            .await
+            .map_err(gql_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -102,6 +97,7 @@ impl ResourceQuery {
         });
         let authorized = authz_repo::authorized_object_ids(
             &state.pool,
+            &auth,
             AuthorizedObjectIdsQuery {
                 subject_id: auth.entity_id,
                 action: "read".to_string(),
@@ -117,7 +113,6 @@ impl ResourceQuery {
                 include_descendants,
                 limit,
                 offset,
-                ceiling_credential_id: auth.ceiling_credential_for(auth.entity_id),
             },
         )
         .await

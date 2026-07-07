@@ -126,7 +126,7 @@ async fn read_role(pool: &sqlx::PgPool, tenant_id: Uuid, effect: &str) -> Uuid {
 }
 
 async fn visible_tenant_ids(pool: &sqlx::PgPool, entity_id: Uuid) -> Vec<Uuid> {
-    atom::tenants::repo::list_tenants_for_entity(
+    atom::tenants::repo::list_tenants_for_entity_with_ceiling(
         pool,
         entity_id,
         None,
@@ -614,7 +614,7 @@ async fn ceiling_visible_tenant_ids(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Vec<Uuid> {
-    atom::tenants::repo::list_tenants_for_entity(
+    atom::tenants::repo::list_tenants_for_entity_with_ceiling(
         pool,
         entity_id,
         Some(credential_id),

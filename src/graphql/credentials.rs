@@ -113,11 +113,15 @@ impl CredentialMutation {
             .transpose()?
             .unwrap_or(auth.entity_id);
         let delegated = owner_id != auth.entity_id;
-        if delegated || !scoped {
-            require_credential_management(state, &auth, owner_id).await?;
+        // Audit rows are stamped with the token owner's tenant so the event is
+        // visible in that tenant's audit trail (a delegated mint may cross
+        // tenants); the credential-management gate already resolves it.
+        let audit_tenant_id = if delegated || !scoped {
+            require_credential_management(state, &auth, owner_id).await?
         } else {
             crate::graphql::auth::deny_scoped_token(&auth)?;
-        }
+            auth.tenant_id
+        };
         let permissions = input
             .permissions
             .into_iter()
@@ -141,7 +145,7 @@ impl CredentialMutation {
             &state.pool,
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: auth.tenant_id,
+                tenant_id: audit_tenant_id,
                 target_kind: Some("credential"),
                 target_id: Some(response.credential_id),
                 event: "credential.create",

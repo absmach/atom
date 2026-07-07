@@ -123,6 +123,7 @@ impl EntityQuery {
 
         let authorized = authz_repo::authorized_object_ids(
             &state.pool,
+            &auth,
             AuthorizedObjectIdsQuery {
                 subject_id: auth.entity_id,
                 action: "read".to_string(),
@@ -138,7 +139,6 @@ impl EntityQuery {
                 include_descendants: include_descendants.unwrap_or(false),
                 limit,
                 offset,
-                ceiling_credential_id: auth.ceiling_credential_for(auth.entity_id),
             },
         )
         .await

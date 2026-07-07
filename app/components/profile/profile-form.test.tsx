@@ -60,6 +60,7 @@ const tokensResponse = {
           },
         ],
         expiresAt: null,
+        lastUsedAt: "2026-06-06T00:00:00Z",
         createdAt: "2026-06-05T00:00:00Z",
       },
     ],

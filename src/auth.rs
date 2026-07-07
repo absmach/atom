@@ -298,6 +298,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     // Verifier: keyed HMAC digest when present (tokens minted with a KEK);
     // argon2 hash otherwise. See create_access_token for the rationale.
     let lookup_hash: Option<Vec<u8>> = row.try_get("secret_lookup_hash").unwrap_or(None);
+    let had_lookup_hash = lookup_hash.is_some();
     let verified = match lookup_hash {
         Some(stored) => {
             let kek = state
@@ -356,6 +357,50 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
 
     let tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
+
+    // Opportunistic verifier upgrade: a token minted without a KEK verifies via
+    // argon2, paying the KDF on every request. Once a KEK is configured, swap to
+    // the keyed digest on first successful use. Best-effort — a failed upgrade
+    // must never fail an otherwise-valid authentication.
+    if !had_lookup_hash {
+        if let Some(kek) = state.config.signing_keys.key_encryption_key.as_ref() {
+            let digest = crate::crypto::hmac_sha256(kek.expose(), &secret_bytes);
+            if let Err(err) = sqlx::query(
+                "UPDATE credentials SET secret_lookup_hash = $1, secret_hash = NULL WHERE id = $2",
+            )
+            .bind(digest)
+            .bind(cred_id)
+            .execute(&state.pool)
+            .await
+            {
+                tracing::warn!(
+                    credential_id = %cred_id,
+                    error = %err,
+                    "access-token verifier upgrade failed"
+                );
+            }
+        }
+    }
+
+    // Usage stamp for the token listing ("revoke unused tokens"), throttled to
+    // one write per credential per five minutes so the auth hot path stays
+    // read-mostly. Best-effort: a failed stamp never fails authentication.
+    if let Err(err) = sqlx::query(
+        r#"UPDATE credentials
+           SET last_used_at = now()
+           WHERE id = $1
+             AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')"#,
+    )
+    .bind(cred_id)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(
+            credential_id = %cred_id,
+            error = %err,
+            "access-token usage stamp failed"
+        );
+    }
 
     // Scoped access tokens carry a permission ceiling loaded here once per request
     // and intersected with the owner's live grants at every authorization point.

@@ -1644,3 +1644,213 @@ async fn access_token_verifier_hmac_and_argon2_fallback() {
         .expect_err("forged secret must fail");
     assert!(format!("{err:?}").contains("invalid api key"));
 }
+
+/// A token whose `expiresAt` is already in the past would be born dead; creation
+/// must reject it up front instead of minting a credential that can never
+/// authenticate.
+#[tokio::test]
+#[ignore]
+async fn create_access_token_rejects_past_expiry() {
+    let pool = common::pool().await;
+    let schema = build_schema(state(pool.clone()));
+
+    let resp = schema
+        .execute(authed(
+            r#"mutation { createAccessToken(input: { name: "dead", expiresAt: "2020-01-01T00:00:00Z", permissions: [{ actions: ["read"], scopeMode: "platform" }] }) { credentialId } }"#,
+        ))
+        .await;
+    assert!(!resp.errors.is_empty(), "past expiry must be rejected");
+    assert!(
+        resp.errors[0].message.contains("future"),
+        "unexpected error: {}",
+        resp.errors[0].message
+    );
+}
+
+/// A delegated mint is audited under the token owner's tenant, so the event is
+/// visible in that tenant's audit trail even when the minting admin is
+/// platform-scoped (NULL tenant).
+#[tokio::test]
+#[ignore]
+async fn delegated_mint_audit_row_carries_owner_tenant() {
+    let pool = common::pool().await;
+    let tenant_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+        .bind(tenant_id)
+        .bind(format!("audit-tenant-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("tenant");
+    let owner = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, status, tenant_id) VALUES ($1, 'service', $2, 'active', $3)",
+    )
+    .bind(owner)
+    .bind(format!("audit-owner-{owner}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("entity");
+    let schema = build_schema(state(pool.clone()));
+
+    let resp = schema
+        .execute(authed(format!(
+            r#"mutation {{ createAccessToken(input: {{ name: "svc", subjectId: "{owner}", permissions: [{{ actions: ["read"], scopeMode: "tenant", tenantId: "{tenant_id}" }}] }}) {{ credentialId }} }}"#
+        )))
+        .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    let cred_id = resp.data.into_json().expect("json")["createAccessToken"]["credentialId"]
+        .as_str()
+        .expect("id")
+        .parse::<Uuid>()
+        .expect("uuid");
+
+    let audit_tenant: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT tenant_id FROM audit_logs
+           WHERE target_id = $1 AND event = 'credential.create'
+           ORDER BY created_at DESC LIMIT 1"#,
+    )
+    .bind(cred_id)
+    .fetch_one(&pool)
+    .await
+    .expect("audit row");
+    assert_eq!(
+        audit_tenant,
+        Some(tenant_id),
+        "delegated mint must be audited under the owner's tenant"
+    );
+}
+
+/// A token minted without a KEK (argon2 verifier) upgrades to the keyed HMAC
+/// digest on its first successful authentication once a KEK is configured, and
+/// the upgraded row keeps authenticating.
+#[tokio::test]
+#[ignore]
+async fn argon2_access_token_upgrades_to_hmac_on_use() {
+    let pool = common::pool().await;
+    let owner = entity(&pool, "service").await;
+    // `Config::for_tests()` carries a deterministic KEK.
+    let app_state = state(pool.clone());
+
+    let minted = identity_service::create_access_token(
+        &pool,
+        &atom::config::SigningKeyConfig::default(),
+        owner,
+        atom::models::token::CreateAccessToken {
+            name: "upgrade".into(),
+            description: None,
+            expires_at: None,
+            permissions: vec![],
+        },
+        false,
+    )
+    .await
+    .expect("mint without KEK");
+
+    let ctx = authenticate_token(&app_state, &minted.token)
+        .await
+        .expect("argon2 token authenticates");
+    assert_eq!(ctx.entity_id, owner);
+
+    let (hash, lookup): (Option<String>, Option<Vec<u8>>) =
+        sqlx::query_as("SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1")
+            .bind(minted.credential_id)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+    assert!(
+        lookup.is_some(),
+        "first use with a KEK must store the keyed digest"
+    );
+    assert!(
+        hash.is_none(),
+        "the argon2 hash must be dropped after the upgrade"
+    );
+
+    let ctx = authenticate_token(&app_state, &minted.token)
+        .await
+        .expect("upgraded token authenticates");
+    assert_eq!(ctx.entity_id, owner);
+}
+
+/// Successful bearer authentication stamps `last_used_at` (surfaced as
+/// `lastUsedAt` in the owner's token listing); a repeat inside the five-minute
+/// throttle window must not advance the stamp.
+#[tokio::test]
+#[ignore]
+async fn access_token_authentication_stamps_last_used_at() {
+    let pool = common::pool().await;
+    let owner = entity(&pool, "service").await;
+    let app_state = state(pool.clone());
+
+    let minted = identity_service::create_access_token(
+        &pool,
+        &app_state.config.signing_keys,
+        owner,
+        atom::models::token::CreateAccessToken {
+            name: "usage".into(),
+            description: None,
+            expires_at: None,
+            permissions: vec![],
+        },
+        false,
+    )
+    .await
+    .expect("mint");
+
+    let last_used = |pool: PgPool, id: Uuid| async move {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT last_used_at FROM credentials WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("credential row")
+    };
+
+    assert!(
+        last_used(pool.clone(), minted.credential_id)
+            .await
+            .is_none(),
+        "an unused token has no usage stamp"
+    );
+
+    authenticate_token(&app_state, &minted.token)
+        .await
+        .expect("authenticate");
+    let stamped = last_used(pool.clone(), minted.credential_id)
+        .await
+        .expect("first use must stamp last_used_at");
+
+    authenticate_token(&app_state, &minted.token)
+        .await
+        .expect("authenticate again");
+    let second = last_used(pool.clone(), minted.credential_id).await;
+    assert_eq!(
+        second,
+        Some(stamped),
+        "a repeat within the throttle window must not advance the stamp"
+    );
+
+    // The owner-facing listing surfaces the stamp.
+    let schema = build_schema(state(pool.clone()));
+    let listed = schema
+        .execute(authed_as(
+            owner,
+            "query { accessTokens { items { credentialId lastUsedAt } } }",
+        ))
+        .await;
+    assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+    let json = listed.data.into_json().expect("json");
+    let item = json["accessTokens"]["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|t| t["credentialId"] == minted.credential_id.to_string().as_str())
+        .cloned()
+        .expect("token listed");
+    assert!(
+        item["lastUsedAt"].is_string(),
+        "lastUsedAt must be surfaced in the listing"
+    );
+}
