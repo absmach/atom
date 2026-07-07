@@ -169,6 +169,10 @@ CREATE TABLE credentials (
     metadata    JSONB       NOT NULL DEFAULT '{}',
     status      TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
     expires_at  TIMESTAMPTZ,
+    -- Access-token usage tracking. Stamped on successful bearer authentication,
+    -- throttled in the application to at most one write per credential per five
+    -- minutes, so owners can spot unused tokens before revoking them.
+    last_used_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -617,11 +621,14 @@ CREATE TABLE permission_blocks (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT permission_blocks_conditions_is_object
         CHECK (jsonb_typeof(conditions) = 'object'),
-    CHECK (
+    -- object_kind / object_type entries may omit tenant_id: a NULL tenant is a
+    -- platform-wide (tenant-agnostic) kind/type scope, a set tenant confines
+    -- matches to that tenant.
+    CONSTRAINT permission_blocks_scope_shape CHECK (
         (scope_mode = 'platform' AND tenant_id IS NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
         OR (scope_mode = 'tenant' AND tenant_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL AND group_id IS NULL)
-        OR (scope_mode = 'object_kind' AND tenant_id IS NOT NULL AND object_kind IS NOT NULL AND object_id IS NULL AND object_type IS NULL AND group_id IS NULL)
-        OR (scope_mode = 'object_type' AND tenant_id IS NOT NULL AND object_kind IS NOT NULL AND object_type IS NOT NULL AND object_id IS NULL AND group_id IS NULL)
+        OR (scope_mode = 'object_kind' AND object_kind IS NOT NULL AND object_id IS NULL AND object_type IS NULL AND group_id IS NULL)
+        OR (scope_mode = 'object_type' AND object_kind IS NOT NULL AND object_type IS NOT NULL AND object_id IS NULL AND group_id IS NULL)
         OR (scope_mode = 'object' AND object_id IS NOT NULL AND group_id IS NULL)
         OR (scope_mode = 'group' AND tenant_id IS NOT NULL AND group_id IS NOT NULL AND object_id IS NULL AND object_kind IS NULL AND object_type IS NULL)
         OR (scope_mode IN ('group_direct_objects', 'group_descendant_objects') AND tenant_id IS NOT NULL AND group_id IS NOT NULL AND object_kind IN ('entity', 'resource') AND object_id IS NULL)
