@@ -76,7 +76,7 @@ impl GroupQuery {
                 object_id: Some(id),
                 context: serde_json::Value::Null,
             },
-            auth.ceiling_for(auth.entity_id),
+            &auth,
         )
         .await
         .map_err(gql_error)?
@@ -250,9 +250,9 @@ async fn authorized_group_list(
         });
     }
 
-    auth.reject_scoped_listing().map_err(gql_error)?;
     let authorized = authz_repo::authorized_object_ids(
         &state.pool,
+        auth,
         AuthorizedObjectIdsQuery {
             subject_id,
             action: "read".to_string(),

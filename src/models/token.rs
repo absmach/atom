@@ -40,6 +40,9 @@ pub struct AccessTokenSummary {
     pub scoped: bool,
     pub permissions: Vec<AccessTokenPermissionSummary>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Last successful authentication with this token, stamped at a five-minute
+    /// granularity. `None` = never used.
+    pub last_used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 

@@ -158,7 +158,7 @@ async fn creator_can_immediately_manage_own_tenant_but_not_another_tenant() {
     let tenant_id = create_tenant(&p, creator).await;
     let other_tenant_id = create_tenant(&p, human(&p).await).await;
 
-    let own = atom::authz::engine::evaluate(
+    let own = atom::authz::engine::evaluate_with_ceiling(
         &p,
         &AuthzRequest {
             subject_id: creator,
@@ -174,7 +174,7 @@ async fn creator_can_immediately_manage_own_tenant_but_not_another_tenant() {
     .expect("own tenant authz");
     assert!(own.allowed, "own tenant should allow: {}", own.reason);
 
-    let other = atom::authz::engine::evaluate(
+    let other = atom::authz::engine::evaluate_with_ceiling(
         &p,
         &AuthzRequest {
             subject_id: creator,

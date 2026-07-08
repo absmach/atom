@@ -73,8 +73,7 @@ impl TenantQuery {
                 .await
                 .map_err(gql_error)?
         } else {
-            auth.reject_scoped_listing().map_err(gql_error)?;
-            tenant_repo::list_tenants_for_entity(&state.pool, auth.entity_id, params)
+            tenant_repo::list_tenants_for_entity(&state.pool, &auth, auth.entity_id, params)
                 .await
                 .map_err(gql_error)?
         };
@@ -89,8 +88,7 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        require_tenant_read_access(state, auth.entity_id, id, auth.ceiling_for(auth.entity_id))
-            .await?;
+        require_tenant_read_access(state, &auth, id).await?;
         let tenant = tenant_repo::get_tenant(&state.pool, id)
             .await
             .map_err(gql_error)?;
@@ -221,13 +219,7 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_tenant_read_access(
-            state,
-            auth.entity_id,
-            tenant_id,
-            auth.ceiling_for(auth.entity_id),
-        )
-        .await?;
+        require_tenant_read_access(state, &auth, tenant_id).await?;
         let roles =
             tenant_repo::list_tenant_role_assignments(&state.pool, tenant_id, auth.entity_id)
                 .await
@@ -694,17 +686,16 @@ fn tenant_status_event(status: &TenantStatus) -> &'static str {
 
 async fn require_tenant_read_access(
     state: &AppState,
-    entity_id: uuid::Uuid,
+    auth: &AuthContext,
     tenant_id: uuid::Uuid,
-    ceiling: Option<&crate::authz::repo::CredentialCeiling>,
 ) -> Result<()> {
     if engine::allows_any(
         &state.pool,
-        entity_id,
+        auth,
+        auth.entity_id,
         "tenant",
         tenant_id,
         &["read", "manage"],
-        ceiling,
     )
     .await
     .map_err(gql_error)?

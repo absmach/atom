@@ -23,6 +23,13 @@ use common::pool;
 use serde_json::json;
 use uuid::Uuid;
 
+fn actx(id: Uuid) -> atom::auth::AuthContext {
+    atom::auth::AuthContext {
+        entity_id: id,
+        ..Default::default()
+    }
+}
+
 async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
@@ -119,9 +126,10 @@ async fn read_role(pool: &sqlx::PgPool, tenant_id: Uuid, effect: &str) -> Uuid {
 }
 
 async fn visible_tenant_ids(pool: &sqlx::PgPool, entity_id: Uuid) -> Vec<Uuid> {
-    atom::tenants::repo::list_tenants_for_entity(
+    atom::tenants::repo::list_tenants_for_entity_with_ceiling(
         pool,
         entity_id,
+        None,
         ListTenants {
             q: None,
             name: None,
@@ -172,13 +180,13 @@ async fn active_membership_lists_and_reads_tenant() {
         "an active tenant membership must list the tenant"
     );
     assert!(
-        atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
+        atom::authz::engine::allows_any(&p, &actx(caller), caller, "tenant", target, &["read"])
             .await
             .expect("tenant read check"),
         "an active tenant membership must authorize tenant read"
     );
     assert!(
-        !atom::authz::engine::allows_any(&p, caller, "resource", channel, &["read"], None)
+        !atom::authz::engine::allows_any(&p, &actx(caller), caller, "resource", channel, &["read"])
             .await
             .expect("resource read check"),
         "tenant membership read must not authorize reading resources inside the tenant"
@@ -201,9 +209,16 @@ async fn inactive_membership_statuses_do_not_list_tenant() {
             "a {status} tenant membership must not list the tenant"
         );
         assert!(
-            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
-                .await
-                .expect("tenant read check"),
+            !atom::authz::engine::allows_any(
+                &p,
+                &actx(caller),
+                caller,
+                "tenant",
+                target,
+                &["read"]
+            )
+            .await
+            .expect("tenant read check"),
             "a {status} tenant membership must not authorize tenant read"
         );
     }
@@ -236,7 +251,7 @@ async fn explicit_tenant_read_deny_overrides_membership_visibility() {
         "an explicit read deny must hide a membership-visible tenant"
     );
     assert!(
-        !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
+        !atom::authz::engine::allows_any(&p, &actx(caller), caller, "tenant", target, &["read"])
             .await
             .expect("tenant read check"),
         "an explicit read deny must override membership tenant read"
@@ -272,9 +287,16 @@ async fn membership_does_not_list_non_active_tenant() {
             "a {status} tenant must not appear through membership"
         );
         assert!(
-            !atom::authz::engine::allows_any(&p, caller, "tenant", target, &["read"], None)
-                .await
-                .expect("tenant read check"),
+            !atom::authz::engine::allows_any(
+                &p,
+                &actx(caller),
+                caller,
+                "tenant",
+                target,
+                &["read"]
+            )
+            .await
+            .expect("tenant read check"),
             "a {status} tenant must not be readable through membership"
         );
     }
@@ -585,4 +607,96 @@ async fn non_active_tenant_hidden_from_scoped_listing() {
             "a {status} tenant must not appear in the scoped listing"
         );
     }
+}
+
+async fn ceiling_visible_tenant_ids(
+    pool: &sqlx::PgPool,
+    entity_id: Uuid,
+    credential_id: Uuid,
+) -> Vec<Uuid> {
+    atom::tenants::repo::list_tenants_for_entity_with_ceiling(
+        pool,
+        entity_id,
+        Some(credential_id),
+        ListTenants {
+            q: None,
+            name: None,
+            alias: None,
+            status: None,
+            deleted: DeletedFilter::Live,
+            limit: 100,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("list tenants under ceiling")
+    .items
+    .into_iter()
+    .map(|t| t.id)
+    .collect()
+}
+
+/// Tenant visibility is ceiling-aware: a scoped access token whose ceiling
+/// covers one tenant sees only that tenant, while the owner's session sees all
+/// tenants its memberships/grants make visible. A conditional ceiling entry
+/// fails closed in the listing, like the coarse gates.
+#[tokio::test]
+#[ignore]
+async fn tenant_visibility_is_capped_by_access_token_ceiling() {
+    let p = pool().await;
+    let tenant_a = make_tenant(&p).await;
+    let tenant_b = make_tenant(&p).await;
+    let caller = make_human(&p, None).await;
+    add_membership(&p, tenant_a, caller, "active").await;
+    add_membership(&p, tenant_b, caller, "active").await;
+
+    let unscoped = visible_tenant_ids(&p, caller).await;
+    assert!(unscoped.contains(&tenant_a) && unscoped.contains(&tenant_b));
+
+    // Scoped credential whose ceiling covers only tenant_a (tenant scope mode).
+    let cred_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, scoped) VALUES ($1, $2, 'access_token', true)",
+    )
+    .bind(cred_id)
+    .bind(caller)
+    .execute(&p)
+    .await
+    .expect("credential");
+    let limit_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO credential_permission_limits (id, credential_id, scope_mode, tenant_id) VALUES ($1, $2, 'tenant', $3)",
+    )
+    .bind(limit_id)
+    .bind(cred_id)
+    .bind(tenant_a)
+    .execute(&p)
+    .await
+    .expect("limit");
+    sqlx::query(
+        "INSERT INTO credential_permission_limit_actions (limit_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'",
+    )
+    .bind(limit_id)
+    .execute(&p)
+    .await
+    .expect("limit action");
+
+    let capped = ceiling_visible_tenant_ids(&p, caller, cred_id).await;
+    assert!(capped.contains(&tenant_a), "ceiling covers tenant_a");
+    assert!(
+        !capped.contains(&tenant_b),
+        "tenant outside the ceiling must be hidden"
+    );
+
+    // A conditional ceiling entry cannot satisfy the listing (fail closed).
+    sqlx::query("UPDATE credential_permission_limits SET conditions = '{\"context.mfa\": true}'::jsonb WHERE id = $1")
+        .bind(limit_id)
+        .execute(&p)
+        .await
+        .expect("make conditional");
+    let conditional = ceiling_visible_tenant_ids(&p, caller, cred_id).await;
+    assert!(
+        !conditional.contains(&tenant_a),
+        "conditional ceiling entry must fail closed in listings"
+    );
 }

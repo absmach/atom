@@ -811,6 +811,10 @@ impl AccessToken {
         self.0.expires_at.map(timestamp)
     }
 
+    async fn last_used_at(&self) -> Option<String> {
+        self.0.last_used_at.map(timestamp)
+    }
+
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
     }

@@ -217,7 +217,7 @@ struct ReadyContext {
     object: ProtectedObject,
     capability: ExplainCapability,
     capability_ids: std::collections::HashSet<Uuid>,
-    grants: Vec<repo::EffectiveGrant>,
+    grants: std::sync::Arc<Vec<repo::EffectiveGrant>>,
     eval_ctx: Value,
 }
 
@@ -259,6 +259,7 @@ fn denied(
 async fn load_decision_context(
     pool: &PgPool,
     req: &AuthzRequest,
+    cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
 ) -> Result<DecisionContext, AppError> {
     let Some(entity) = repo::load_authz_subject(pool, req.subject_id).await? else {
         return Ok(denied(AuthzResponse::deny("subject not found"), None, None));
@@ -340,7 +341,14 @@ async fn load_decision_context(
     // Single canonical grant expansion: direct policies and role-linked blocks,
     // group membership already resolved recursively, each grant carrying its own
     // scope/effect/conditions. One match loop replaces the direct/role split.
-    let grants = repo::effective_grants_for_subject(pool, req.subject_id).await?;
+    // Reuse the caller's freshly loaded grants when supplied so one PDP
+    // evaluation does not expand the same self-subject twice.
+    let grants = match cached_grants {
+        Some(grants) => grants,
+        None => {
+            std::sync::Arc::new(repo::effective_grants_for_subject(pool, req.subject_id).await?)
+        }
+    };
 
     Ok(DecisionContext::Ready(Box::new(ReadyContext {
         subject,
@@ -370,13 +378,42 @@ fn scope_target<'a>(
     }
 }
 
+/// PDP entry point for request-path callers. The access-token ceiling is derived
+/// here from the caller's `AuthContext` (`ceiling_for`), never passed by hand, so
+/// a call site cannot forget to apply it. The caller's freshly loaded grants are
+/// reused when the checked subject is the caller itself.
 pub async fn evaluate(
+    pool: &PgPool,
+    req: &AuthzRequest,
+    auth: &crate::auth::AuthContext,
+) -> Result<AuthzResponse, AppError> {
+    let cached_grants = if req.subject_id == auth.entity_id {
+        Some(auth.effective_grants(pool).await?)
+    } else {
+        None
+    };
+    evaluate_prepared(pool, req, auth.ceiling_for(req.subject_id), cached_grants).await
+}
+
+/// Low-level PDP entry taking an explicit ceiling. For unit/parity tests and the
+/// engine's own internals; production code must call [`evaluate`], which derives
+/// the ceiling from the authenticated context.
+pub async fn evaluate_with_ceiling(
     pool: &PgPool,
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
 ) -> Result<AuthzResponse, AppError> {
+    evaluate_prepared(pool, req, ceiling, None).await
+}
+
+async fn evaluate_prepared(
+    pool: &PgPool,
+    req: &AuthzRequest,
+    ceiling: Option<&repo::CredentialCeiling>,
+    cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
+) -> Result<AuthzResponse, AppError> {
     let start = std::time::Instant::now();
-    let result = evaluate_inner(pool, req, ceiling).await;
+    let result = evaluate_inner(pool, req, ceiling, cached_grants).await;
     if let Ok(response) = &result {
         crate::metrics::record_decision(start.elapsed(), response.allowed);
     }
@@ -387,8 +424,9 @@ async fn evaluate_inner(
     pool: &PgPool,
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
+    cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
 ) -> Result<AuthzResponse, AppError> {
-    let ctx = match load_decision_context(pool, req).await? {
+    let ctx = match load_decision_context(pool, req, cached_grants).await? {
         DecisionContext::Denied(denied) => return Ok(denied.response),
         DecisionContext::Ready(ctx) => ctx,
     };
@@ -398,7 +436,7 @@ async fn evaluate_inner(
     let target = scope_target(&ctx.object, &object_id_str, object_tenant_id_str.as_deref());
 
     let mut has_allow = false;
-    for grant in &ctx.grants {
+    for grant in ctx.grants.iter() {
         if match_grant(grant, &target, &ctx.capability_ids, &ctx.eval_ctx).is_some() {
             continue;
         }
@@ -447,11 +485,11 @@ fn ceiling_permits(
 /// coarse control-plane gate.
 pub async fn allows_any(
     pool: &PgPool,
+    auth: &crate::auth::AuthContext,
     subject_id: Uuid,
     object_kind: &str,
     object_id: Uuid,
     actions: &[&str],
-    ceiling: Option<&repo::CredentialCeiling>,
 ) -> Result<bool, AppError> {
     for action in actions {
         let resp = evaluate(
@@ -464,7 +502,7 @@ pub async fn allows_any(
                 object_id: Some(object_id),
                 context: Value::Null,
             },
-            ceiling,
+            auth,
         )
         .await?;
         if resp.allowed {
@@ -507,12 +545,20 @@ fn deny_reason(grant: &repo::EffectiveGrant) -> String {
     }
 }
 
+/// PDP explain for request-path callers. Like [`evaluate`], the access-token
+/// ceiling comes from the caller's `AuthContext`, never a hand-passed parameter.
 pub async fn explain(
     pool: &PgPool,
     req: &AuthzRequest,
-    ceiling: Option<&repo::CredentialCeiling>,
+    auth: &crate::auth::AuthContext,
 ) -> Result<AuthzExplainResponse, AppError> {
-    let ctx = match load_decision_context(pool, req).await? {
+    let cached_grants = if req.subject_id == auth.entity_id {
+        Some(auth.effective_grants(pool).await?)
+    } else {
+        None
+    };
+    let ceiling = auth.ceiling_for(req.subject_id);
+    let ctx = match load_decision_context(pool, req, cached_grants).await? {
         DecisionContext::Denied(denied) => {
             return Ok(AuthzExplainResponse {
                 allowed: false,
@@ -542,7 +588,7 @@ pub async fn explain(
     let mut evaluated = Vec::new();
     let mut allow_match = None;
 
-    for grant in &grants {
+    for grant in grants.iter() {
         let (result, skip_reason) = match match_grant(grant, &target, &capability_ids, &eval_ctx) {
             None => ("matched".to_string(), None),
             Some(reason) => ("skipped".to_string(), Some(reason.to_string())),
@@ -1850,7 +1896,9 @@ mod db_tests {
             object_id: Some(t.id),
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
+        let resp = evaluate_with_ceiling(&pool, &req, None)
+            .await
+            .expect("evaluate");
         assert!(resp.allowed, "admin should be allowed: {}", resp.reason);
 
         let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
@@ -1895,7 +1943,9 @@ mod db_tests {
             object_id: Some(t.id),
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
+        let resp = evaluate_with_ceiling(&pool, &req, None)
+            .await
+            .expect("evaluate");
         assert!(!resp.allowed);
 
         let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
@@ -1960,7 +2010,9 @@ mod db_tests {
             object_id: None,
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
+        let resp = evaluate_with_ceiling(&pool, &req, None)
+            .await
+            .expect("evaluate");
         assert!(resp.allowed, "legacy form must still work: {}", resp.reason);
 
         let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
@@ -2104,7 +2156,9 @@ mod db_tests {
             object_id: Some(t.id),
             context: json!({}),
         };
-        let resp = evaluate(&pool, &req, None).await.expect("evaluate");
+        let resp = evaluate_with_ceiling(&pool, &req, None)
+            .await
+            .expect("evaluate");
         assert!(!resp.allowed);
         assert_eq!(resp.reason, "tenant is deleted");
         let details = resp.details.expect("M3 must surface lifecycle details");

@@ -187,7 +187,15 @@ pub async fn active_entity_certificates(
     .map_err(AppError::Database)
 }
 
-pub async fn revoked_certificates(pool: &PgPool) -> Result<Vec<CertificateCredential>, AppError> {
+/// Revoked certificates issued by one issuer, for that issuer's CRL. A CRL is
+/// signed by its issuer and covers only certificates the issuer signed, so the
+/// filter is a correctness requirement, not an optimisation — and it also keeps
+/// certificate rows created outside the issuance path (no full metadata, e.g.
+/// externally provisioned or test fixtures) from breaking CRL generation.
+pub async fn revoked_certificates(
+    pool: &PgPool,
+    issuer_fingerprint_sha256: &str,
+) -> Result<Vec<CertificateCredential>, AppError> {
     sqlx::query_as::<_, CertificateCredential>(
         r#"
         SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
@@ -195,9 +203,11 @@ pub async fn revoked_certificates(pool: &PgPool) -> Result<Vec<CertificateCreden
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
         WHERE c.kind = 'certificate' AND c.status = 'revoked'
+          AND c.metadata->>'issuer_fingerprint_sha256' = $1
         ORDER BY c.created_at ASC
         "#,
     )
+    .bind(issuer_fingerprint_sha256)
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)

@@ -54,8 +54,39 @@ const credentialsResponse = {
         expiresAt: "2026-06-06T00:00:00Z",
         createdAt: "2026-06-05T00:00:00Z",
       },
+      {
+        id: "token-1",
+        kind: "access_token",
+        status: "active",
+        identifier: "atom_abcdef12",
+        expiresAt: null,
+        createdAt: "2026-06-05T00:00:00Z",
+      },
     ],
-    total: 3,
+    total: 4,
+  },
+};
+
+const accessTokensResponse = {
+  accessTokens: {
+    items: [
+      {
+        credentialId: "token-1",
+        name: "ingest-svc token",
+        scoped: true,
+        permissions: [
+          {
+            actions: ["read"],
+            scopeMode: "object_kind",
+            tenantId: null,
+            objectKind: "resource",
+            objectType: null,
+            objectId: null,
+          },
+        ],
+        lastUsedAt: null,
+      },
+    ],
   },
 };
 
@@ -66,7 +97,11 @@ describe("EntityCredentials", () => {
 
   beforeEach(() => {
     mocks.graphqlClient.mockReset();
-    mocks.graphqlClient.mockResolvedValue(credentialsResponse);
+    mocks.graphqlClient.mockImplementation(async ({ query }) => {
+      if (query.includes("EntityAccessTokens")) return accessTokensResponse;
+      if (query.includes("EntityCredentials")) return credentialsResponse;
+      return {};
+    });
   });
 
   it("shows existing password, shared key, and certificate credentials together", async () => {
@@ -91,6 +126,15 @@ describe("EntityCredentials", () => {
     expect(
       screen.getByRole("button", { name: "Reveal shared key" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows delegated access-token details from the token listing", async () => {
+    renderEntityCredentials();
+
+    expect(await screen.findByText("ingest-svc token")).toBeInTheDocument();
+    expect(screen.getByText("scoped")).toBeInTheDocument();
+    expect(screen.getByText("read · resource")).toBeInTheDocument();
+    expect(screen.getByText("Never used")).toBeInTheDocument();
   });
 
   it("hides the shared key action for human entities", async () => {

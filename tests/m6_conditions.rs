@@ -102,7 +102,7 @@ async fn check(
     resource_id: Uuid,
     context: serde_json::Value,
 ) -> bool {
-    atom::authz::engine::evaluate(
+    atom::authz::engine::evaluate_with_ceiling(
         pool,
         &AuthzRequest {
             subject_id,

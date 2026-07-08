@@ -83,8 +83,8 @@ const CREATE_PASSWORD_MUTATION = `
 `;
 
 const ACCESS_TOKENS_QUERY = `
-  query ProfileAccessTokens {
-    accessTokens {
+  query ProfileAccessTokens($status: String) {
+    accessTokens(status: $status) {
       items {
         credentialId
         name
@@ -101,6 +101,7 @@ const ACCESS_TOKENS_QUERY = `
           objectId
         }
         expiresAt
+        lastUsedAt
         createdAt
       }
       total
@@ -164,6 +165,7 @@ type AccessToken = {
   scoped: boolean;
   permissions: AccessTokenPermission[];
   expiresAt: string | null;
+  lastUsedAt: string | null;
   createdAt: string;
 };
 
@@ -556,11 +558,18 @@ function AccessTokenSection() {
     defaultValues: { name: "", description: "", expiresAt: "" },
   });
 
+  const [statusFilter, setStatusFilter] = React.useState<
+    "all" | "active" | "revoked"
+  >("active");
+
   const { data, error, isLoading } = useQuery({
-    queryKey: ["profile-access-tokens"],
+    queryKey: ["profile-access-tokens", statusFilter],
     queryFn: ({ signal }) =>
       graphqlClient<AccessTokensData>({
         query: ACCESS_TOKENS_QUERY,
+        variables: {
+          status: statusFilter === "all" ? null : statusFilter,
+        },
         signal,
       }),
     staleTime: 15_000,
@@ -766,6 +775,28 @@ function AccessTokenSection() {
           </form>
         </Form>
 
+        <div className="flex items-center justify-end">
+          <Select
+            onValueChange={(value) =>
+              setStatusFilter(value as "all" | "active" | "revoked")
+            }
+            value={statusFilter}
+          >
+            <SelectTrigger
+              aria-label="Token status filter"
+              className="w-32"
+              size="sm"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="revoked">Revoked</SelectItem>
+              <SelectItem value="all">All</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
         <div className="rounded-md border">
           {isLoading ? (
             <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
@@ -835,14 +866,22 @@ function buildPermissionInputs(drafts: PermissionDraft[]) {
       actions,
       scopeMode: draft.scopeMode,
     };
+    if (draft.scopeMode === "tenant" && !draft.tenantId.trim()) {
+      throw new Error("Tenant ID is required for tenant scope");
+    }
+    if (needsObjectKind(draft.scopeMode) && !draft.objectKind.trim()) {
+      throw new Error(`Object kind is required for ${draft.scopeMode} scope`);
+    }
+    if (draft.scopeMode === "object_type" && !draft.objectType.trim()) {
+      throw new Error("Object type is required for object_type scope");
+    }
+    if (draft.scopeMode === "object" && !draft.objectId.trim()) {
+      throw new Error("Object ID is required for object scope");
+    }
     if (draft.scopeMode === "tenant" && draft.tenantId.trim()) {
       input.tenantId = draft.tenantId.trim();
     }
-    if (
-      (draft.scopeMode === "object_kind" ||
-        draft.scopeMode === "object_type") &&
-      draft.objectKind.trim()
-    ) {
+    if (needsObjectKind(draft.scopeMode) && draft.objectKind.trim()) {
       input.objectKind = draft.objectKind.trim();
     }
     if (draft.scopeMode === "object_type" && draft.objectType.trim()) {
@@ -854,6 +893,10 @@ function buildPermissionInputs(drafts: PermissionDraft[]) {
     inputs.push(input);
   }
   return inputs;
+}
+
+function needsObjectKind(scopeMode: ScopeMode) {
+  return ["object_kind", "object_type", "object"].includes(scopeMode);
 }
 
 function PermissionDraftRow({
@@ -917,8 +960,7 @@ function PermissionDraftRow({
           />
         </div>
       ) : null}
-      {permission.scopeMode === "object_kind" ||
-      permission.scopeMode === "object_type" ? (
+      {needsObjectKind(permission.scopeMode) ? (
         <div className="grid gap-2 sm:grid-cols-2">
           <div className="grid gap-1">
             <Label>Object kind</Label>
@@ -977,7 +1019,9 @@ function permissionSummary(permission: AccessTokenPermission): string {
     // object_type is already namespaced (e.g. "entity:device").
     target = permission.objectType;
   } else if (permission.scopeMode === "object" && permission.objectId) {
-    target = `object ${permission.objectId}`;
+    target = permission.objectKind
+      ? `${permission.objectKind} object ${permission.objectId}`
+      : `object ${permission.objectId}`;
   }
   return `${actions} on ${target}`;
 }
@@ -1055,6 +1099,15 @@ function AccessTokenRow({
               <DisplayTimeCell action={Action.Expired} time={token.expiresAt} />
             ) : (
               "No expiry"
+            )}
+          </span>
+          <span>
+            {token.lastUsedAt ? (
+              <>
+                Last used <DisplayTimeCell time={token.lastUsedAt} />
+              </>
+            ) : (
+              "Never used"
             )}
           </span>
         </div>

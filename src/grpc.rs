@@ -117,14 +117,11 @@ impl AuthzService for AtomAuthz {
         .map_err(Status::from)?;
 
         // Self-check via a scoped token returns the token-limited answer; a
-        // delegated check about another subject is unaffected (ceiling_for → None).
-        let resp = engine::evaluate(
-            &self.state.pool,
-            &authz_req,
-            auth.ceiling_for(authz_req.subject_id),
-        )
-        .await
-        .map_err(Status::from)?;
+        // delegated check about another subject is unaffected — the engine
+        // derives the ceiling from the caller's context.
+        let resp = engine::evaluate(&self.state.pool, &authz_req, &auth)
+            .await
+            .map_err(Status::from)?;
         let (target_kind, target_id) = authz_request_target(&authz_req);
         audit::write_hot_path(
             &self.state.pool,

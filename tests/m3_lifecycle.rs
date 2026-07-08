@@ -78,7 +78,7 @@ async fn inactive_tenant_denies_with_lifecycle_reason() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req, None)
+    let resp = atom::authz::engine::evaluate_with_ceiling(&p, &req, None)
         .await
         .expect("eval");
     assert!(!resp.allowed);
@@ -108,7 +108,7 @@ async fn frozen_tenant_denies_with_lifecycle_reason() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req, None)
+    let resp = atom::authz::engine::evaluate_with_ceiling(&p, &req, None)
         .await
         .expect("eval");
     assert!(!resp.allowed);
@@ -136,7 +136,7 @@ async fn deleted_tenant_denies_with_lifecycle_reason() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req, None)
+    let resp = atom::authz::engine::evaluate_with_ceiling(&p, &req, None)
         .await
         .expect("eval");
     assert!(!resp.allowed);
@@ -167,7 +167,7 @@ async fn frozen_tenant_blocks_authz_on_objects_inside_it() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req, None)
+    let resp = atom::authz::engine::evaluate_with_ceiling(&p, &req, None)
         .await
         .expect("eval");
     assert!(!resp.allowed);
@@ -205,7 +205,7 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
         object_id: None,
         context: json!({}),
     };
-    let resp = atom::authz::engine::evaluate(&p, &req, None)
+    let resp = atom::authz::engine::evaluate_with_ceiling(&p, &req, None)
         .await
         .expect("eval");
     assert!(
@@ -235,7 +235,7 @@ async fn explain_surfaces_lifecycle_reason_too() {
         object_id: Some(t),
         context: json!({}),
     };
-    let resp = atom::authz::engine::explain(&p, &req, None)
+    let resp = atom::authz::engine::explain(&p, &req, &Default::default())
         .await
         .expect("explain");
     assert!(!resp.allowed);

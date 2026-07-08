@@ -38,16 +38,13 @@ impl AuthzQuery {
         access::require_authz_check_access(&state.pool, &auth, subject_id, tenant_id)
             .await
             .map_err(gql_error)?;
-        // Ceiling-aware bulk listing (owner ∩ ceiling with correct pagination) is a
-        // follow-up; until then a scoped token must not receive the owner's full
-        // list. Per-object authzCheck already returns the token-limited answer.
-        if auth.ceiling_for(subject_id).is_some() {
-            return Err(gql_error(crate::error::AppError::bad_request(
-                "scoped access tokens cannot list authorized objects; use authzCheck per object",
-            )));
-        }
+        // A scoped token listing its own authorized set gets the ceiling-filtered
+        // answer (owner ∩ unconditional ceiling entries) straight from the SQL; a
+        // delegated listing about another subject is unaffected, mirroring
+        // `authzCheck` semantics.
         let response = authz_repo::authorized_object_ids(
             &state.pool,
+            &auth,
             AuthorizedObjectIdsQuery {
                 subject_id,
                 action: input.action,
@@ -91,9 +88,9 @@ impl AuthzMutation {
             .await
             .map_err(gql_error)?;
         // Self-check via a scoped token returns the token-limited answer (owner ∩
-        // ceiling); a delegated check about another subject is unaffected
-        // (`ceiling_for` yields None when subject != caller).
-        let response = engine::evaluate(&state.pool, &req, auth.ceiling_for(req.subject_id))
+        // ceiling); a delegated check about another subject is unaffected — the
+        // engine derives the ceiling from the caller's context.
+        let response = engine::evaluate(&state.pool, &req, &auth)
             .await
             .map_err(gql_error)?;
         audit_authz_check(
@@ -120,7 +117,7 @@ impl AuthzMutation {
         let tenant_id = access::authz_request_tenant_id(&state.pool, &req)
             .await
             .map_err(gql_error)?;
-        let response = engine::explain(&state.pool, &req, auth.ceiling_for(req.subject_id))
+        let response = engine::explain(&state.pool, &req, &auth)
             .await
             .map_err(gql_error)?;
         audit_authz_explain(&state.pool, auth.entity_id, &req, &response, tenant_id).await;
@@ -148,7 +145,7 @@ impl AuthzMutation {
             access::require_authz_check_access(&state.pool, &auth, req.subject_id, tenant_id)
                 .await
                 .map_err(gql_error)?;
-            let response = engine::evaluate(&state.pool, &req, auth.ceiling_for(req.subject_id))
+            let response = engine::evaluate(&state.pool, &req, &auth)
                 .await
                 .map_err(gql_error)?;
             audit_authz_check(

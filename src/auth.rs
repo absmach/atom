@@ -260,6 +260,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     let row = sqlx::query(
         r#"SELECT c.entity_id,
                   c.secret_hash,
+                  c.secret_lookup_hash,
                   c.status,
                   c.expires_at,
                   c.scoped,
@@ -281,6 +282,41 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         sqlx::Error::RowNotFound => AppError::unauthorized("api key not found"),
         other => AppError::Database(other),
     })?;
+
+    // Verify the secret before any state checks, so a caller holding only a
+    // credential ID cannot learn the token's revoked/expired status.
+    //
+    // Verifier: keyed HMAC digest when present (tokens minted with a KEK);
+    // argon2 hash otherwise. See create_access_token for the rationale.
+    let lookup_hash: Option<Vec<u8>> = row.try_get("secret_lookup_hash").unwrap_or(None);
+    let had_lookup_hash = lookup_hash.is_some();
+    let verified = match lookup_hash {
+        Some(stored) => {
+            let kek = state
+                .config
+                .signing_keys
+                .key_encryption_key
+                .as_ref()
+                .ok_or_else(|| AppError::unauthorized("invalid api key"))?;
+            crate::crypto::hmac_sha256_verify(kek.expose(), &secret_bytes, &stored)
+        }
+        None => {
+            let hash: Option<String> = row.try_get("secret_hash").unwrap_or(None);
+            let hash = hash.ok_or_else(|| AppError::unauthorized("invalid credential"))?;
+            use argon2::{
+                password_hash::{PasswordHash, PasswordVerifier},
+                Argon2,
+            };
+            let parsed = PasswordHash::new(&hash)
+                .map_err(|_| AppError::unauthorized("invalid credential"))?;
+            Argon2::default()
+                .verify_password(&secret_bytes, &parsed)
+                .is_ok()
+        }
+    };
+    if !verified {
+        return Err(AppError::unauthorized("invalid api key"));
+    }
 
     let status: CredentialStatus = row.try_get("status").map_err(db_err)?;
     if status != CredentialStatus::Active {
@@ -309,22 +345,53 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         }
     }
 
-    let hash: Option<String> = row.try_get("secret_hash").unwrap_or(None);
-    let hash = hash.ok_or_else(|| AppError::unauthorized("invalid credential"))?;
-
-    use argon2::{
-        password_hash::{PasswordHash, PasswordVerifier},
-        Argon2,
-    };
-    let parsed =
-        PasswordHash::new(&hash).map_err(|_| AppError::unauthorized("invalid credential"))?;
-    Argon2::default()
-        .verify_password(&secret_bytes, &parsed)
-        .map_err(|_| AppError::unauthorized("invalid api key"))?;
-
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
 
     let tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
+
+    // Opportunistic verifier upgrade: a token minted without a KEK verifies via
+    // argon2, paying the KDF on every request. Once a KEK is configured, swap to
+    // the keyed digest on first successful use. Best-effort — a failed upgrade
+    // must never fail an otherwise-valid authentication.
+    if !had_lookup_hash {
+        if let Some(kek) = state.config.signing_keys.key_encryption_key.as_ref() {
+            let digest = crate::crypto::hmac_sha256(kek.expose(), &secret_bytes);
+            if let Err(err) = sqlx::query(
+                "UPDATE credentials SET secret_lookup_hash = $1, secret_hash = NULL WHERE id = $2",
+            )
+            .bind(digest)
+            .bind(cred_id)
+            .execute(&state.pool)
+            .await
+            {
+                tracing::warn!(
+                    credential_id = %cred_id,
+                    error = %err,
+                    "access-token verifier upgrade failed"
+                );
+            }
+        }
+    }
+
+    // Usage stamp for the token listing ("revoke unused tokens"), throttled to
+    // one write per credential per five minutes so the auth hot path stays
+    // read-mostly. Best-effort: a failed stamp never fails authentication.
+    if let Err(err) = sqlx::query(
+        r#"UPDATE credentials
+           SET last_used_at = now()
+           WHERE id = $1
+             AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')"#,
+    )
+    .bind(cred_id)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(
+            credential_id = %cred_id,
+            error = %err,
+            "access-token usage stamp failed"
+        );
+    }
 
     // Scoped access tokens carry a permission ceiling loaded here once per request
     // and intersected with the owner's live grants at every authorization point.
@@ -348,6 +415,19 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
 }
 
 impl AuthContext {
+    /// Load the authenticated entity's canonical grant expansion for one
+    /// authorization decision. This deliberately hits the DB on each gate/PDP
+    /// entry so policy writes take effect for the next check, even inside a
+    /// multi-field GraphQL request.
+    pub async fn effective_grants(
+        &self,
+        pool: &PgPool,
+    ) -> Result<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>, AppError> {
+        crate::authz::repo::effective_grants_for_subject(pool, self.entity_id)
+            .await
+            .map(std::sync::Arc::new)
+    }
+
     /// The permission ceiling to apply when `subject_id` is the token owner
     /// acting on its own behalf. Returns `None` for unscoped/JWT auth and for
     /// decisions about a *different* subject (delegated `authz.check`), where the
@@ -360,18 +440,15 @@ impl AuthContext {
         }
     }
 
-    /// Fail closed on owner-wide authorized-listing surfaces that are not yet
-    /// ceiling-aware. A scoped access token must not receive the owner's full
-    /// authorized set (which ignores the token's ceiling); callers should use the
-    /// per-object `authz.check`, which returns the token-limited answer. `Ok` for
-    /// unscoped/JWT auth.
-    pub fn reject_scoped_listing(&self) -> Result<(), AppError> {
-        if self.scoped {
-            return Err(AppError::bad_request(
-                "scoped access tokens cannot list authorized objects; use authzCheck per object",
-            ));
-        }
-        Ok(())
+    /// The credential whose ceiling must filter an authorized listing when the
+    /// listed subject is the token owner itself. `None` for unscoped/JWT auth
+    /// and for delegated listings about another subject (the caller's ceiling
+    /// caps its right to *invoke* the listing via the gates, not the other
+    /// subject's answer — same rule as `ceiling_for`). Passed into the listing
+    /// SQL, which intersects the owner's grants with the token's unconditional
+    /// ceiling entries.
+    pub fn ceiling_credential_for(&self, subject_id: Uuid) -> Option<Uuid> {
+        self.ceiling_for(subject_id).and(self.credential_id)
     }
 
     /// Credential management (minting or rewriting credentials) is never available
@@ -526,7 +603,7 @@ pub async fn has_capability_in_scope(
     let Some(action_id) = action_id_by_name(pool, capability_name).await? else {
         return Ok(false);
     };
-    let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
+    let grants = auth.effective_grants(pool).await?;
     let gate_tenant = gate_tenant_context(pool, scope).await?;
     let scopes = [(scope, gate_tenant)];
     // A scoped access token can never exceed its ceiling, even when the owner's
@@ -685,7 +762,7 @@ pub async fn require_any_capability(
     // Load the subject's grants and resolve the candidate action names once,
     // then evaluate the candidates in memory instead of firing one expansion
     // query per candidate.
-    let grants = crate::authz::repo::effective_grants_for_subject(pool, entity_id).await?;
+    let grants = auth.effective_grants(pool).await?;
     let names: Vec<&str> = checks.iter().map(|(name, _)| *name).collect();
     let action_ids = action_ids_by_name(pool, &names).await?;
     let mut tenant_active: std::collections::HashMap<Uuid, bool> = std::collections::HashMap::new();

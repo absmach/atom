@@ -6,10 +6,19 @@ import { ProfileForm } from "@/components/profile/profile-form";
 
 const mocks = vi.hoisted(() => ({
   graphqlClient: vi.fn(),
+  toastError: vi.fn(),
+  toastSuccess: vi.fn(),
 }));
 
 vi.mock("@/lib/graphql/client", () => ({
   graphqlClient: mocks.graphqlClient,
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: mocks.toastError,
+    success: mocks.toastSuccess,
+  },
 }));
 
 function renderProfileForm() {
@@ -60,6 +69,44 @@ const tokensResponse = {
           },
         ],
         expiresAt: null,
+        lastUsedAt: "2026-06-06T00:00:00Z",
+        createdAt: "2026-06-05T00:00:00Z",
+      },
+    ],
+    total: 1,
+  },
+};
+
+const objectTokensResponse = {
+  accessTokens: {
+    items: [
+      {
+        credentialId: "tok-object",
+        name: "Object CLI",
+        description: "Exact object scripts",
+        identifier: "atom_object12",
+        status: "active",
+        scoped: true,
+        permissions: [
+          {
+            actions: ["read"],
+            scopeMode: "object",
+            tenantId: null,
+            objectKind: "resource",
+            objectType: null,
+            objectId: "resource-1",
+          },
+          {
+            actions: ["manage"],
+            scopeMode: "object",
+            tenantId: null,
+            objectKind: null,
+            objectType: null,
+            objectId: "legacy-1",
+          },
+        ],
+        expiresAt: null,
+        lastUsedAt: null,
         createdAt: "2026-06-05T00:00:00Z",
       },
     ],
@@ -88,6 +135,8 @@ describe("ProfileForm access tokens", () => {
     Element.prototype.scrollIntoView ??= () => {};
 
     mocks.graphqlClient.mockReset();
+    mocks.toastError.mockReset();
+    mocks.toastSuccess.mockReset();
     mocks.graphqlClient.mockImplementation(async ({ query }) => {
       if (query.includes("ProfileEntity")) return profileResponse;
       if (query.includes("ProfileAccessTokens")) return tokensResponse;
@@ -122,6 +171,22 @@ describe("ProfileForm access tokens", () => {
     expect(screen.getByText("read on kind entity")).toBeInTheDocument();
   });
 
+  it("renders exact-object permission summaries with object kind when present", async () => {
+    mocks.graphqlClient.mockImplementation(async ({ query }) => {
+      if (query.includes("ProfileEntity")) return profileResponse;
+      if (query.includes("ProfileAccessTokens")) return objectTokensResponse;
+      return {};
+    });
+
+    renderProfileForm();
+
+    expect(await screen.findByText("Object CLI")).toBeInTheDocument();
+    expect(
+      screen.getByText("read on resource object resource-1"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("manage on object legacy-1")).toBeInTheDocument();
+  });
+
   it("creates a token with permissions and without an entity id", async () => {
     const user = userEvent.setup();
     renderProfileForm();
@@ -153,6 +218,89 @@ describe("ProfileForm access tokens", () => {
         }),
       ).toBe(true);
     });
+  });
+
+  it("creates an exact-object token permission with object kind and object id", async () => {
+    const user = userEvent.setup();
+    renderProfileForm();
+
+    await screen.findByText("Access Tokens");
+    await user.type(screen.getByLabelText("Name"), "Resource token");
+    await user.type(screen.getByLabelText("Actions"), "read");
+    await user.click(screen.getByLabelText("Scope"));
+    await user.click(screen.getByRole("option", { name: "object" }));
+    await user.click(screen.getByLabelText("Object kind"));
+    await user.click(screen.getByRole("option", { name: "resource" }));
+    await user.type(screen.getByLabelText("Object ID"), "resource-1");
+    await user.click(screen.getByRole("button", { name: "Create token" }));
+
+    expect(
+      await screen.findByText("atom_created_access_token"),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        mocks.graphqlClient.mock.calls.some(([request]) => {
+          if (!request.query.includes("CreateAccessToken")) return false;
+          const input = request.variables.input;
+          return (
+            input.name === "Resource token" &&
+            input.permissions[0].scopeMode === "object" &&
+            input.permissions[0].objectKind === "resource" &&
+            input.permissions[0].objectId === "resource-1" &&
+            input.permissions[0].objectType === undefined
+          );
+        }),
+      ).toBe(true);
+    });
+  });
+
+  it("blocks exact-object token creation without object kind", async () => {
+    const user = userEvent.setup();
+    renderProfileForm();
+
+    await screen.findByText("Access Tokens");
+    await user.type(screen.getByLabelText("Name"), "missing kind");
+    await user.type(screen.getByLabelText("Actions"), "read");
+    await user.click(screen.getByLabelText("Scope"));
+    await user.click(screen.getByRole("option", { name: "object" }));
+    await user.type(screen.getByLabelText("Object ID"), "resource-1");
+    await user.click(screen.getByRole("button", { name: "Create token" }));
+
+    await waitFor(() => {
+      expect(mocks.toastError).toHaveBeenCalledWith(
+        "Object kind is required for object scope",
+      );
+    });
+    expect(
+      mocks.graphqlClient.mock.calls.some(([request]) =>
+        request.query.includes("CreateAccessToken"),
+      ),
+    ).toBe(false);
+  });
+
+  it("blocks exact-object token creation without object id", async () => {
+    const user = userEvent.setup();
+    renderProfileForm();
+
+    await screen.findByText("Access Tokens");
+    await user.type(screen.getByLabelText("Name"), "missing id");
+    await user.type(screen.getByLabelText("Actions"), "read");
+    await user.click(screen.getByLabelText("Scope"));
+    await user.click(screen.getByRole("option", { name: "object" }));
+    await user.click(screen.getByLabelText("Object kind"));
+    await user.click(screen.getByRole("option", { name: "resource" }));
+    await user.click(screen.getByRole("button", { name: "Create token" }));
+
+    await waitFor(() => {
+      expect(mocks.toastError).toHaveBeenCalledWith(
+        "Object ID is required for object scope",
+      );
+    });
+    expect(
+      mocks.graphqlClient.mock.calls.some(([request]) =>
+        request.query.includes("CreateAccessToken"),
+      ),
+    ).toBe(false);
   });
 
   it("blocks creation when no permission action is given", async () => {
@@ -199,6 +347,42 @@ describe("ProfileForm access tokens", () => {
           return (
             request.variables.credentialId === "tok-1" &&
             request.variables.permissions[0].actions[0] === "manage"
+          );
+        }),
+      ).toBe(true);
+    });
+  });
+
+  it("replaces an exact-object token permission with object kind and object id", async () => {
+    const user = userEvent.setup();
+    renderProfileForm();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Edit permissions" }),
+    );
+
+    const scopeFields = screen.getAllByLabelText("Scope");
+    const editorScope = scopeFields[scopeFields.length - 1];
+    if (!editorScope) {
+      throw new Error("expected a Scope field in the permission editor");
+    }
+    await user.click(editorScope);
+    await user.click(screen.getByRole("option", { name: "object" }));
+    await user.type(screen.getByLabelText("Object ID"), "entity-1");
+    await user.click(screen.getByRole("button", { name: "Save permissions" }));
+
+    await waitFor(() => {
+      expect(
+        mocks.graphqlClient.mock.calls.some(([request]) => {
+          if (!request.query.includes("ReplaceAccessTokenPermissions")) {
+            return false;
+          }
+          const permission = request.variables.permissions[0];
+          return (
+            request.variables.credentialId === "tok-1" &&
+            permission.scopeMode === "object" &&
+            permission.objectKind === "entity" &&
+            permission.objectId === "entity-1"
           );
         }),
       ).toBe(true);

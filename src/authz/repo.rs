@@ -4159,14 +4159,56 @@ pub async fn object_tenant_id_by_id(
     .transpose()
 }
 
+/// SQL CTE selecting the unconditional ceiling entries of the caller's scoped
+/// access token (empty result when the bound credential id is NULL / the token
+/// is unscoped). Conditional entries are excluded: like the coarse gates, a
+/// listing has no per-request context to evaluate them, so they fail closed
+/// here and per-object authzCheck remains the path that can honour them.
+///
+/// Single source for every ceiling-aware listing (entity/resource/group and
+/// tenant visibility) — splice via [`ceiling_cte`] so the fail-closed rule
+/// cannot drift between readers.
+const CEILING_CTE: &str = r#"ceiling AS (
+                   SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id
+                   FROM credential_permission_limits l
+                   JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
+                   JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+                   WHERE l.credential_id = __CEILING_PARAM__::uuid
+                     AND l.conditions = '{}'::jsonb
+               )"#;
+
+/// Render [`CEILING_CTE`] with the bind position that carries the scoped
+/// token's credential id (e.g. `"$12"`).
+pub(crate) fn ceiling_cte(param: &str) -> String {
+    CEILING_CTE.replace("__CEILING_PARAM__", param)
+}
+
+/// Ceiling-aware listing entry point for request-path callers. The scoped-token
+/// ceiling is derived here from the caller's `AuthContext`
+/// (`ceiling_credential_for`), never passed by hand, so a call site cannot
+/// forget to apply it — the same rule as `engine::evaluate`. A delegated
+/// listing about another subject is unaffected (the derivation yields `None`).
 pub async fn authorized_object_ids(
     pool: &PgPool,
+    auth: &crate::auth::AuthContext,
     params: AuthorizedObjectIdsQuery,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
+    let ceiling_credential_id = auth.ceiling_credential_for(params.subject_id);
+    authorized_object_ids_with_ceiling(pool, params, ceiling_credential_id).await
+}
+
+/// Low-level listing taking an explicit ceiling credential. For tests;
+/// production code must call [`authorized_object_ids`], which derives the
+/// ceiling from the authenticated context.
+pub async fn authorized_object_ids_with_ceiling(
+    pool: &PgPool,
+    params: AuthorizedObjectIdsQuery,
+    ceiling_credential_id: Option<Uuid>,
+) -> Result<AuthorizedObjectIdsResponse, AppError> {
     match params.object_kind.as_str() {
-        "entity" => authorized_entity_ids(pool, params).await,
-        "resource" => authorized_resource_ids(pool, params).await,
-        "group" => authorized_group_ids(pool, params).await,
+        "entity" => authorized_entity_ids(pool, params, ceiling_credential_id).await,
+        "resource" => authorized_resource_ids(pool, params, ceiling_credential_id).await,
+        "group" => authorized_group_ids(pool, params, ceiling_credential_id).await,
         other => Err(AppError::bad_request(format!(
             "authorized object listing does not support object kind '{other}'"
         ))),
@@ -4176,6 +4218,7 @@ pub async fn authorized_object_ids(
 async fn authorized_entity_ids(
     pool: &PgPool,
     params: AuthorizedObjectIdsQuery,
+    ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
@@ -4192,6 +4235,7 @@ async fn authorized_entity_ids(
                grants AS (
                    SELECT * FROM subject_effective_grants($1)
                ),
+               __CEILING_CTE__,
                caps AS (
                    SELECT a.id AS capability_id, aa.object_type
                    FROM actions a
@@ -4256,13 +4300,26 @@ async fn authorized_entity_ids(
                                                  c.id, c.tenant_id, c.parent_group_id,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
+                   AND ($12::uuid IS NULL OR EXISTS (
+                       SELECT 1 FROM ceiling cl
+                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = cl.action_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
+                         )
+                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'entity', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
+                   ))
                )
                SELECT id, COUNT(*) OVER() AS total
                FROM authorized
                ORDER BY created_at DESC
-               LIMIT $10 OFFSET $11"#;
+               LIMIT $10 OFFSET $11"#
+        .replace("__CEILING_CTE__", &ceiling_cte("$12"));
 
-    let rows = sqlx::query(sql)
+    let rows = sqlx::query(&sql)
         .bind(params.subject_id)
         .bind(params.action)
         .bind(params.tenant_id)
@@ -4278,6 +4335,7 @@ async fn authorized_entity_ids(
         .bind(params.include_descendants)
         .bind(limit)
         .bind(offset)
+        .bind(ceiling_credential_id)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -4294,15 +4352,37 @@ enum AuthorizedResourceProjection {
 async fn authorized_resource_ids(
     pool: &PgPool,
     params: AuthorizedObjectIdsQuery,
+    ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
-    let rows = authorized_resource_rows(pool, params, AuthorizedResourceProjection::Ids).await?;
+    let rows = authorized_resource_rows(
+        pool,
+        params,
+        ceiling_credential_id,
+        AuthorizedResourceProjection::Ids,
+    )
+    .await?;
     rows_to_authorized_object_ids(rows)
 }
 
+/// Ceiling-aware kind listing for request-path callers; the ceiling is derived
+/// from the caller's `AuthContext`, same as [`authorized_object_ids`].
 pub async fn authorized_resource_kinds(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    subject_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<Vec<String>, AppError> {
+    let ceiling_credential_id = auth.ceiling_credential_for(subject_id);
+    authorized_resource_kinds_with_ceiling(pool, subject_id, tenant_id, ceiling_credential_id).await
+}
+
+/// Low-level kind listing taking an explicit ceiling credential. For tests;
+/// production code must call [`authorized_resource_kinds`].
+pub async fn authorized_resource_kinds_with_ceiling(
     pool: &PgPool,
     subject_id: Uuid,
     tenant_id: Option<Uuid>,
+    ceiling_credential_id: Option<Uuid>,
 ) -> Result<Vec<String>, AppError> {
     use sqlx::Row;
 
@@ -4324,6 +4404,7 @@ pub async fn authorized_resource_kinds(
             limit: 500,
             offset: 0,
         },
+        ceiling_credential_id,
         AuthorizedResourceProjection::Kinds,
     )
     .await?;
@@ -4336,6 +4417,7 @@ pub async fn authorized_resource_kinds(
 async fn authorized_resource_rows(
     pool: &PgPool,
     params: AuthorizedObjectIdsQuery,
+    ceiling_credential_id: Option<Uuid>,
     projection: AuthorizedResourceProjection,
 ) -> Result<Vec<sqlx::postgres::PgRow>, AppError> {
     let limit = match projection {
@@ -4371,6 +4453,7 @@ async fn authorized_resource_rows(
                grants AS (
                    SELECT * FROM subject_effective_grants($1)
                ),
+               __CEILING_CTE__,
                caps AS (
                    SELECT a.id AS capability_id, aa.object_type
                    FROM actions a
@@ -4434,9 +4517,22 @@ async fn authorized_resource_rows(
                                                  c.id, c.tenant_id, c.parent_group_id,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
+                   AND ($11::uuid IS NULL OR EXISTS (
+                       SELECT 1 FROM ceiling cl
+                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = cl.action_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
+                         )
+                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'resource', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
+                   ))
                )
                __SELECT__"#
-        .replace("__SELECT__", select_clause);
+        .replace("__SELECT__", select_clause)
+        .replace("__CEILING_CTE__", &ceiling_cte("$11"));
 
     sqlx::query(&sql)
         .bind(params.subject_id)
@@ -4449,6 +4545,7 @@ async fn authorized_resource_rows(
         .bind(attributes_contains)
         .bind(limit)
         .bind(offset)
+        .bind(ceiling_credential_id)
         .fetch_all(pool)
         .await
         .map_err(db_err)
@@ -4457,6 +4554,7 @@ async fn authorized_resource_rows(
 async fn authorized_group_ids(
     pool: &PgPool,
     params: AuthorizedObjectIdsQuery,
+    ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
@@ -4483,6 +4581,7 @@ async fn authorized_group_ids(
                grants AS (
                    SELECT * FROM subject_effective_grants($1)
                ),
+               __CEILING_CTE__,
                caps AS (
                    SELECT a.id AS capability_id, aa.object_type
                    FROM actions a
@@ -4546,13 +4645,26 @@ async fn authorized_group_ids(
                                                  c.id, c.tenant_id, c.parent_group_id,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
+                   AND ($11::uuid IS NULL OR EXISTS (
+                       SELECT 1 FROM ceiling cl
+                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
+                         AND EXISTS (
+                             SELECT 1 FROM caps mc
+                             WHERE mc.capability_id = cl.action_id
+                               AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
+                         )
+                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'group', c.sub_kind,
+                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
+                   ))
                )
                SELECT id, COUNT(*) OVER() AS total
                FROM authorized
                ORDER BY created_at DESC
-               LIMIT $9 OFFSET $10"#;
+               LIMIT $9 OFFSET $10"#
+        .replace("__CEILING_CTE__", &ceiling_cte("$11"));
 
-    let rows = sqlx::query(sql)
+    let rows = sqlx::query(&sql)
         .bind(params.subject_id)
         .bind(params.action)
         .bind(params.tenant_id)
@@ -4563,6 +4675,7 @@ async fn authorized_group_ids(
         .bind(status)
         .bind(limit)
         .bind(offset)
+        .bind(ceiling_credential_id)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;

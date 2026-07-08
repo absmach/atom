@@ -158,6 +158,7 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
     assert!(
         service::create_access_token(
             &pool,
+            &Default::default(),
             id,
             CreateAccessToken {
                 name: "replacement".into(),
@@ -975,7 +976,7 @@ async fn soft_deleted_role_stops_granting_in_the_pdp() {
         context: serde_json::Value::Null,
     };
 
-    let before = atom::authz::engine::evaluate(&pool, &req, None)
+    let before = atom::authz::engine::evaluate_with_ceiling(&pool, &req, None)
         .await
         .expect("evaluate before");
     assert!(before.allowed, "role should grant read before deletion");
@@ -984,7 +985,7 @@ async fn soft_deleted_role_stops_granting_in_the_pdp() {
         .await
         .expect("delete role");
 
-    let after = atom::authz::engine::evaluate(&pool, &req, None)
+    let after = atom::authz::engine::evaluate_with_ceiling(&pool, &req, None)
         .await
         .expect("evaluate after");
     assert!(
@@ -1611,7 +1612,7 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
         .expect("policy");
 
     let lists_target = || async {
-        atom::authz::repo::authorized_object_ids(
+        atom::authz::repo::authorized_object_ids_with_ceiling(
             &pool,
             AuthorizedObjectIdsQuery {
                 subject_id: subject,
@@ -1629,6 +1630,7 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
                 limit: 500,
                 offset: 0,
             },
+            None,
         )
         .await
         .expect("listing")
@@ -1700,7 +1702,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
         .expect("policy");
 
     let lists_target = || async {
-        atom::authz::repo::authorized_object_ids(
+        atom::authz::repo::authorized_object_ids_with_ceiling(
             &pool,
             AuthorizedObjectIdsQuery {
                 subject_id: subject,
@@ -1718,6 +1720,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
                 limit: 500,
                 offset: 0,
             },
+            None,
         )
         .await
         .expect("listing")
@@ -1769,7 +1772,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
         "deleted_at must keep listings closed even if status is active"
     );
 
-    let decision = atom::authz::engine::evaluate(
+    let decision = atom::authz::engine::evaluate_with_ceiling(
         &pool,
         &AuthzRequest {
             subject_id: subject,
