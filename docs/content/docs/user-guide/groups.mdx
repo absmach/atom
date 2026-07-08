@@ -3,17 +3,25 @@ title: Groups
 description: Object Groups define where access applies; Principal Groups collect identities that receive assignments.
 ---
 
-**Groups** (`/groups`) come in two flavors, distinguished by **Group type**:
+**Groups** (`/groups`) come in two flavors, distinguished by **Group type**. The difference is
+whether the group is used as an access boundary or as an access recipient:
 
-- **Object groups** scope *where* access applies — for example, "every device at Plant A."
-  Permission block scope modes like *Direct objects in object group* and *Objects in
-  subgroups* (see [Permission Blocks](/user-guide/permission-blocks)) target an object group.
-- **Principal groups** collect *who* receives access — for example, "the operators who should
-  inherit the plant-operator role." Atom seeds one principal group, `authenticated-users`, for
-  all authenticated human users.
+- **Object groups** are *where-containers*. They hold protected objects, such as devices,
+  clients, channels, resources, or child object groups. A permission block can point at an
+  object group to say where its actions apply.
+- **Principal groups** are *who-containers*. They hold identities, such as users, services,
+  applications, workloads, or devices acting as principals. A role assignment or direct policy
+  can target a principal group so every member receives that access.
 
-Groups can nest: a group can have a **Parent group**, and Principal Group nesting extends
-inherited role assignments down to child groups and their members.
+An object group is not a subject and cannot receive a role assignment. A principal group is not
+a scope boundary and is not used to decide whether a protected object is inside a permission
+block's scope.
+
+Atom seeds one principal group, `authenticated-users`, for all authenticated human users.
+
+Groups can nest within their own purpose: object group nesting extends the object boundary to
+child groups, and principal group nesting extends inherited assignments down to child groups and
+their members.
 
 ## Groups table
 
@@ -61,15 +69,26 @@ Once added, a member row shows its name, kind, status, and a **Remove** button.
 
 ## How groups connect to access control
 
-Groups themselves grant nothing — they're referenced *by* other records:
+Groups themselves grant nothing. Access comes from assignments, direct policies, and permission
+blocks that reference the right kind of group:
 
 - A [permission block](/user-guide/permission-blocks)'s **Scope mode** can target an object
   group directly (*Object group itself*), its direct contents (*Direct objects in object
   group*), or everything under it (*Objects in subgroups*), as well as child groups
-  themselves (*Direct child object groups*, *Descendant object groups*).
-- Principal groups are the mechanism the [Authorization](/user-guide/authorization) debugger
-  refers to when a decision explanation says a role was inherited "through principal group
-  `authenticated-users`" — role-to-principal-group assignments in the current UI build are
-  managed through the GraphQL API rather than a dedicated screen; see
-  [Direct Policies](/user-guide/direct-policies) for the UI-native way to grant access to a
-  specific entity today.
+  themselves (*Direct child object groups*, *Descendant object groups*). This only answers
+  "does this permission apply to this object?"
+- A role assignment or direct policy can target a principal group. Members inherit that grant,
+  which answers "who receives this access?"
+
+For example: `Plant-A` might be an object group containing clients and channels. `Operators`
+might be a principal group containing Alice, Bob, and a service account. A permission block can
+allow `publish` on channels in `Plant-A`, and a role assignment can give that role to
+`Operators`. The object group defines the objects covered by the rule; the principal group
+defines the subjects that receive the rule.
+
+The [Authorization](/user-guide/authorization) debugger uses this distinction in explanations:
+an inherited role may appear as `through principal group "authenticated-users"`, while object
+groups appear in the scope that matched the protected object. Role-to-principal-group
+assignments in the current UI build are managed through the GraphQL API rather than a dedicated
+screen; see [Direct Policies](/user-guide/direct-policies) for the UI-native way to grant
+access to a specific entity today.
