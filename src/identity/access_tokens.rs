@@ -320,6 +320,20 @@ pub async fn list_access_tokens(
 
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM credentials
+           WHERE entity_id = $1
+             AND kind = $2
+             AND ($3::text IS NULL OR status = $3::text)"#,
+    )
+    .bind(entity_id)
+    .bind(CredentialKind::AccessToken)
+    .bind(params.status.clone())
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+
     let rows = sqlx::query(
         r#"SELECT id,
                   COALESCE(NULLIF(metadata->>'name', ''), identifier, 'Access token') AS name,
@@ -329,8 +343,7 @@ pub async fn list_access_tokens(
                   scoped,
                   expires_at,
                   last_used_at,
-                  created_at,
-                  COUNT(*) OVER() AS total
+                  created_at
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
@@ -347,13 +360,9 @@ pub async fn list_access_tokens(
     .await
     .map_err(db_err)?;
 
-    let mut total = 0;
     let credential_ids: Vec<Uuid> = rows
         .iter()
-        .map(|row| {
-            total = row.try_get("total").map_err(db_err)?;
-            row.try_get("id").map_err(db_err)
-        })
+        .map(|row| row.try_get("id").map_err(db_err))
         .collect::<Result<Vec<_>, AppError>>()?;
     let mut permissions = load_access_token_permissions(pool, &credential_ids).await?;
 

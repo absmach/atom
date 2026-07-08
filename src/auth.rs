@@ -55,15 +55,6 @@ pub struct AuthContext {
     /// The loaded permission ceiling for a scoped access token; `None` for
     /// unscoped tokens and JWT/session auth (no cap).
     pub ceiling: Option<std::sync::Arc<crate::authz::repo::CredentialCeiling>>,
-    /// Request-scoped cache of this entity's canonical grant expansion, filled
-    /// on first use by [`AuthContext::effective_grants`]. Shared by clones, so
-    /// every gate and PDP check in one request runs the expansion once. Public
-    /// only so `..Default::default()` construction keeps working; always go
-    /// through `effective_grants`.
-    #[doc(hidden)]
-    pub grants_cache: std::sync::Arc<
-        tokio::sync::OnceCell<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>>,
-    >,
 }
 
 /// Extractor that requires the authenticated entity to hold a `manage` policy
@@ -420,29 +411,21 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         credential_id: Some(cred_id),
         scoped,
         ceiling,
-        ..Default::default()
     })
 }
 
 impl AuthContext {
-    /// The authenticated entity's canonical grant expansion, computed once per
-    /// request and reused by every gate and self-subject PDP check. Reading a
-    /// cached copy means policy writes land on the *next* request — the same
-    /// granularity the product documents for revocation ("denied on the next
-    /// request"), never a wider one.
+    /// Load the authenticated entity's canonical grant expansion for one
+    /// authorization decision. This deliberately hits the DB on each gate/PDP
+    /// entry so policy writes take effect for the next check, even inside a
+    /// multi-field GraphQL request.
     pub async fn effective_grants(
         &self,
         pool: &PgPool,
     ) -> Result<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>, AppError> {
-        let grants = self
-            .grants_cache
-            .get_or_try_init(|| async {
-                crate::authz::repo::effective_grants_for_subject(pool, self.entity_id)
-                    .await
-                    .map(std::sync::Arc::new)
-            })
-            .await?;
-        Ok(grants.clone())
+        crate::authz::repo::effective_grants_for_subject(pool, self.entity_id)
+            .await
+            .map(std::sync::Arc::new)
     }
 
     /// The permission ceiling to apply when `subject_id` is the token owner

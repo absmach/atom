@@ -582,6 +582,86 @@ async fn create_policy_and_authz_check_allow_and_deny() {
 
 #[tokio::test]
 #[ignore]
+async fn policy_deletion_takes_effect_within_same_graphql_request() {
+    let pool = common::pool().await;
+    let actor = entity(&pool, "human").await;
+    let manage_id = seeded_action(&pool, "manage").await;
+    let policy_manage_id = seeded_action(&pool, "policy.manage").await;
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
+           VALUES ('platform', 'allow', '{}'::jsonb)
+           RETURNING id"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert permission block");
+    for action_id in [manage_id, policy_manage_id] {
+        sqlx::query(
+            "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        )
+        .bind(block_id)
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("insert permission block action");
+    }
+    let policy_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
+           VALUES ('entity', $1, $2)
+           RETURNING id"#,
+    )
+    .bind(actor)
+    .bind(block_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert direct policy");
+
+    let schema = build_schema(state(pool.clone()));
+    let before_name = format!("cache-before-{}", Uuid::new_v4());
+    let after_name = format!("cache-after-{}", Uuid::new_v4());
+    let response = schema
+        .execute(authed_as(
+            actor,
+            format!(
+                r#"
+                mutation {{
+                  before: createTenant(input: {{
+                    name: "{before_name}",
+                    alias: "{before_name}"
+                  }}) {{ id }}
+                  revoke: deleteDirectPolicy(id: "{policy_id}")
+                  after: createTenant(input: {{
+                    name: "{after_name}",
+                    alias: "{after_name}"
+                  }}) {{ id }}
+                }}
+                "#
+            ),
+        ))
+        .await;
+
+    let errors = response.errors;
+    let data = response.data.into_json().expect("json data");
+    assert!(data["before"]["id"].is_string(), "first mutation must pass");
+    assert_eq!(data["revoke"], true, "policy deletion must pass");
+    assert!(
+        data["after"].is_null(),
+        "second tenant creation must not use grants cached before policy deletion"
+    );
+    assert!(
+        !errors.is_empty(),
+        "the post-deletion mutation must be denied"
+    );
+    let after_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenants WHERE name = $1")
+        .bind(after_name)
+        .fetch_one(&pool)
+        .await
+        .expect("count after tenant");
+    assert_eq!(after_count, 0);
+}
+
+#[tokio::test]
+#[ignore]
 async fn subject_role_assignments_list_group_composites_and_authorize_members() {
     let pool = common::pool().await;
     let tenant_id = tenant(&pool).await;

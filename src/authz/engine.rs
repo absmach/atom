@@ -341,7 +341,8 @@ async fn load_decision_context(
     // Single canonical grant expansion: direct policies and role-linked blocks,
     // group membership already resolved recursively, each grant carrying its own
     // scope/effect/conditions. One match loop replaces the direct/role split.
-    // A request-scoped cache (the caller's own grants) is reused when supplied.
+    // Reuse the caller's freshly loaded grants when supplied so one PDP
+    // evaluation does not expand the same self-subject twice.
     let grants = match cached_grants {
         Some(grants) => grants,
         None => {
@@ -379,8 +380,8 @@ fn scope_target<'a>(
 
 /// PDP entry point for request-path callers. The access-token ceiling is derived
 /// here from the caller's `AuthContext` (`ceiling_for`), never passed by hand, so
-/// a call site cannot forget to apply it. The caller's request-scoped grant cache
-/// is reused when the checked subject is the caller itself.
+/// a call site cannot forget to apply it. The caller's freshly loaded grants are
+/// reused when the checked subject is the caller itself.
 pub async fn evaluate(
     pool: &PgPool,
     req: &AuthzRequest,

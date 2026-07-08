@@ -2046,6 +2046,20 @@ async fn access_tokens_listing_filters_and_paginates() {
         1
     );
 
+    let empty_page = list("(limit: 1, offset: 10)").await;
+    let json = empty_page.data.into_json().expect("json");
+    assert_eq!(
+        json["accessTokens"]["total"], 3,
+        "total still spans all pages when this page is empty"
+    );
+    assert_eq!(
+        json["accessTokens"]["items"]
+            .as_array()
+            .expect("items")
+            .len(),
+        0
+    );
+
     let invalid = list(r#"(status: "nonsense")"#).await;
     assert!(
         !invalid.errors.is_empty(),
