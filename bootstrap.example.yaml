@@ -1,0 +1,40 @@
+# Atom bootstrap file (example).
+#
+# Point Atom at this file with ATOM_BOOTSTRAP_FILE=/path/to/bootstrap.yaml.
+# It is applied once at startup, right after migrations, and is idempotent:
+# entities/credentials that already exist are left untouched, so it is safe to
+# leave configured across restarts.
+#
+# Secrets are declared inline (just like ADMIN_SECRET) — protect this file:
+# mount it as a secret, keep it out of version control, restrict its mode.
+
+entities:
+  # Attach a password to the pre-seeded platform admin (well-known seed UUID).
+  # This replaces setting ADMIN_SECRET.
+  - id: 00000000-0000-0000-0000-000000000001
+    kind: human
+    name: admin
+    credentials:
+      - kind: password
+        secret: change-me-please
+
+  # A brand-new service identity with a machine shared key.
+  - id: 11111111-1111-1111-1111-111111111111
+    kind: service
+    name: ingest-service
+    alias: ingest-service
+    attributes:
+      system: true
+      purpose: telemetry-ingest
+    credentials:
+      - kind: shared_key
+        key: replace-with-a-strong-machine-secret
+        description: telemetry ingest pipeline
+
+  # A device identity with a shared key.
+  - id: 22222222-2222-2222-2222-222222222222
+    kind: device
+    name: gateway-01
+    credentials:
+      - kind: shared_key
+        key: replace-with-a-strong-device-secret

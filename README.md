@@ -602,6 +602,7 @@ Generic application mapping:
 | `ADMIN_SECRET`                                                                                                                 | *(optional)*                                         | Seeds the admin password on first boot                                                  |
 | `ADMIN_ENTITY_ID`                                                                                                              | `00000000-0000-0000-0000-000000000001`               | Override seeded admin UUID                                                              |
 | `ATOM_SERVICE_SECRET` / `ATOM_SERVICE_ENTITY_ID`                                                                               | *(optional)* / seeded service UUID                   | Seeds a service entity password on first boot                                           |
+| `ATOM_BOOTSTRAP_FILE`                                                                                                          | *(optional)*                                         | Path to a YAML file provisioning entities + credentials at startup (idempotent)         |
 | `ATOM_MIN_PASSWORD_CHARS`                                                                                                      | `12`                                                 | Minimum password length                                                                 |
 | `ATOM_CORS_ALLOWED_ORIGINS`                                                                                                    | `ATOM_PUBLIC_BASE_URL`                               | Comma-separated allowed CORS origins                                                    |
 | `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN`                                                                          | auto-detect HTTPS / *(unset)*                        | Auth cookie options for UI flows                                                        |
@@ -643,6 +644,47 @@ Rate limiting uses the socket peer IP by default. `X-Forwarded-For` and
 ingress that overwrites client IP headers. If the Atom UI is also proxying
 requests to Atom, enable `ATOM_UI_FORWARD_CLIENT_IP_HEADERS=true` only behind an
 upstream proxy that sanitizes those headers.
+
+### Bootstrapping with a config file
+
+Standing up a fresh deployment no longer requires driving the API by hand or
+juggling one `*_SECRET` env var per identity. Point Atom at a YAML file and it
+provisions the declared entities and their credentials at startup:
+
+```bash
+ATOM_BOOTSTRAP_FILE=./bootstrap.yaml
+```
+
+```yaml
+# bootstrap.yaml
+entities:
+  # Attach a password to the pre-seeded admin (replaces ADMIN_SECRET).
+  - id: 00000000-0000-0000-0000-000000000001
+    kind: human
+    name: admin
+    credentials:
+      - kind: password
+        secret: change-me-please
+
+  # A new service identity with a machine shared key.
+  - id: 11111111-1111-1111-1111-111111111111
+    kind: service
+    name: ingest-service
+    credentials:
+      - kind: shared_key
+        key: replace-with-a-strong-machine-secret
+        description: telemetry ingest pipeline
+```
+
+The file is applied once, right after migrations, and is **idempotent**: each
+entity is keyed on its stable UUID and each credential is created only when the
+entity has no active credential of that kind, so re-running against an
+already-provisioned database is a no-op and never clobbers runtime changes. It
+runs alongside the env-var bootstrap above, not instead of it. `shared_key`
+credentials are only valid for machine (non-human) entities and require an
+explicit `key`. Secrets are written in plaintext just like `ADMIN_SECRET`, so
+treat the file as a secret (restrict its mode, keep it out of version control).
+See [`bootstrap.example.yaml`](bootstrap.example.yaml) for a fuller example.
 
 ---
 

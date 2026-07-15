@@ -39,6 +39,9 @@ pub struct Config {
     /// If set, the service entity's password credential is created on first boot.
     pub service_secret: Option<String>,
     pub service_entity_id: Uuid,
+    /// Path to a YAML bootstrap file applied idempotently at startup. `None`
+    /// disables config-file bootstrap (env-var/API bootstrap is unaffected).
+    pub bootstrap_file: Option<String>,
     /// Enables unauthenticated global human self-registration.
     pub self_registration_enabled: bool,
     /// Development-only: allow password login before the signup email is verified.
@@ -422,6 +425,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(SERVICE_ENTITY_ID),
+            bootstrap_file: nonempty_env("ATOM_BOOTSTRAP_FILE"),
             self_registration_enabled: env_bool_default("ATOM_SELF_REGISTRATION_ENABLED", true),
             dev_allow_unverified_email_login: env_bool("ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
@@ -500,6 +504,7 @@ impl Config {
             admin_secret: None,
             service_secret: None,
             service_entity_id: SERVICE_ENTITY_ID,
+            bootstrap_file: None,
             self_registration_enabled: false,
             dev_allow_unverified_email_login: false,
             public_base_url: "http://localhost:8080".into(),
