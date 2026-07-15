@@ -9,12 +9,15 @@ mod common;
 
 use atom::bootstrap::{
     apply, BootstrapConfig, BootstrapCredential, BootstrapDirectPolicy, BootstrapEntity,
-    BootstrapGroup, BootstrapPermissionBlock, BootstrapRole, BootstrapRoleAssignment,
-    BootstrapScope, BootstrapSubject, BootstrapTenant, ScopeMode,
+    BootstrapGroup, BootstrapObjectGroup, BootstrapPermissionBlock, BootstrapResource,
+    BootstrapRole, BootstrapRoleAssignment, BootstrapScope, BootstrapSubject, BootstrapTenant,
+    ScopeMode,
 };
 use atom::config::Config;
 use atom::models::enums::{EntityKind, EntityStatus, SubjectKind, TenantStatus};
+use atom::models::policy::AuthzRequest;
 use common::pool;
+use serde_json::json;
 use uuid::Uuid;
 
 async fn count_active_credentials(pool: &sqlx::PgPool, entity_id: Uuid, kind: &str) -> i64 {
@@ -194,6 +197,7 @@ fn rbac_config(
                 object_kind: Some("resource".to_string()),
                 object_type: Some("resource:channel".to_string()),
                 object_id: None,
+                group_id: None,
             },
             actions: vec!["publish".to_string(), "subscribe".to_string()],
             effect: Default::default(),
@@ -329,6 +333,7 @@ async fn bootstrap_supports_group_subjects_and_direct_policies() {
                 object_kind: None,
                 object_type: None,
                 object_id: None,
+                group_id: None,
             },
             actions: vec!["read".to_string()],
             effect: Default::default(),
@@ -373,5 +378,149 @@ async fn bootstrap_supports_group_subjects_and_direct_policies() {
     assert!(
         read_grants >= 1,
         "device should inherit read via group direct policy"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn bootstrap_provisions_resources_and_object_group_scoped_grant() {
+    let p = pool().await;
+    let signing_keys = Config::for_tests().signing_keys;
+    let tenant = Uuid::new_v4();
+    let device = Uuid::new_v4();
+    let channel = Uuid::new_v4();
+    let object_group = Uuid::new_v4();
+    let block = Uuid::new_v4();
+    let role = Uuid::new_v4();
+
+    let cfg = BootstrapConfig {
+        tenants: vec![BootstrapTenant {
+            id: tenant,
+            name: format!("bootstrap-tenant-{tenant}"),
+            alias: None,
+            tags: vec![],
+            attributes: None,
+            status: TenantStatus::Active,
+        }],
+        entities: vec![BootstrapEntity {
+            id: device,
+            kind: EntityKind::Device,
+            name: format!("bootstrap-device-{device}"),
+            alias: None,
+            status: EntityStatus::Active,
+            attributes: None,
+            tenant_id: Some(tenant),
+            credentials: vec![],
+        }],
+        resources: vec![BootstrapResource {
+            id: channel,
+            kind: "channel".to_string(),
+            name: Some("temperature".to_string()),
+            alias: None,
+            tenant_id: Some(tenant),
+            owner_id: Some(device),
+            attributes: None,
+        }],
+        object_groups: vec![BootstrapObjectGroup {
+            id: object_group,
+            name: format!("channels-{object_group}"),
+            tenant_id: Some(tenant),
+            description: None,
+            attributes: None,
+            parent: None,
+            entities: vec![],
+            resources: vec![channel],
+        }],
+        permission_blocks: vec![BootstrapPermissionBlock {
+            id: block,
+            scope: BootstrapScope {
+                mode: ScopeMode::GroupDirectObjects,
+                tenant_id: Some(tenant),
+                object_kind: Some("resource".to_string()),
+                object_type: Some("resource:channel".to_string()),
+                object_id: None,
+                group_id: Some(object_group),
+            },
+            actions: vec!["publish".to_string()],
+            effect: Default::default(),
+            conditions: None,
+        }],
+        roles: vec![BootstrapRole {
+            id: role,
+            name: format!("channel-publisher-{role}"),
+            tenant_id: Some(tenant),
+            description: None,
+            permission_blocks: vec![block],
+        }],
+        role_assignments: vec![BootstrapRoleAssignment {
+            id: Uuid::new_v4(),
+            tenant_id: Some(tenant),
+            subject: BootstrapSubject {
+                kind: SubjectKind::Entity,
+                id: device,
+            },
+            role_id: role,
+        }],
+        ..Default::default()
+    };
+
+    // Apply twice for idempotency, then let the PDP prove the whole chain.
+    apply(&p, &signing_keys, &cfg).await.expect("first apply");
+    apply(&p, &signing_keys, &cfg).await.expect("second apply");
+
+    // Resource + object-group membership landed.
+    let membership: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM object_group_resources WHERE group_id = $1 AND resource_id = $2",
+    )
+    .bind(object_group)
+    .bind(channel)
+    .fetch_one(&p)
+    .await
+    .expect("membership");
+    assert_eq!(membership, 1);
+
+    // End-to-end: the device can publish on the channel because the group-scoped
+    // block grants publish on resource members of the object group it belongs to.
+    let req = AuthzRequest {
+        subject_id: device,
+        action: "publish".to_string(),
+        resource_id: Some(channel),
+        object_kind: None,
+        object_id: None,
+        context: json!({}),
+    };
+    let resp = atom::authz::engine::evaluate_with_ceiling(&p, &req, None)
+        .await
+        .expect("evaluate");
+    assert!(
+        resp.allowed,
+        "device should be allowed to publish on the channel: {}",
+        resp.reason
+    );
+
+    // A different channel outside the object group must NOT be allowed.
+    let other_channel = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', 'other', $2)",
+    )
+    .bind(other_channel)
+    .bind(tenant)
+    .execute(&p)
+    .await
+    .expect("insert other channel");
+    let deny_req = AuthzRequest {
+        subject_id: device,
+        action: "publish".to_string(),
+        resource_id: Some(other_channel),
+        object_kind: None,
+        object_id: None,
+        context: json!({}),
+    };
+    let deny = atom::authz::engine::evaluate_with_ceiling(&p, &deny_req, None)
+        .await
+        .expect("evaluate other");
+    assert!(
+        !deny.allowed,
+        "a channel outside the object group must not be granted"
     );
 }

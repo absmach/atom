@@ -8,9 +8,9 @@
 # the database (e.g. the pre-seeded `admin` entity or `atom-admin` role).
 #
 # Sections are applied in dependency order:
-#   tenants -> entities (+credentials) -> groups (+members)
-#     -> permission_blocks (+actions) -> roles (+block links)
-#     -> role_assignments -> direct_policies
+#   tenants -> entities (+credentials) -> resources -> groups (+members)
+#     -> object_groups (+members, hierarchy) -> permission_blocks (+actions)
+#     -> roles (+block links) -> role_assignments -> direct_policies
 #
 # Secrets are declared inline (just like ADMIN_SECRET) — protect this file:
 # mount it as a secret, keep it out of version control, restrict its mode.
@@ -45,6 +45,16 @@ entities:
       - kind: shared_key
         key: replace-with-a-strong-device-secret
 
+# --- Resources (protected objects, e.g. channels) ------------------------
+resources:
+  - id: 99999999-9999-9999-9999-999999999999
+    kind: channel
+    name: temperature
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    owner_id: 22222222-2222-2222-2222-222222222222
+    attributes:
+      topic: temperature
+
 # --- Principal (subject) groups (+ members) ------------------------------
 groups:
   - id: 77777777-7777-7777-7777-777777777777
@@ -54,10 +64,25 @@ groups:
     members:
       - 22222222-2222-2222-2222-222222222222
 
+# --- Object groups (group entities/resources for group-scoped blocks) ----
+# An entity or resource belongs to at most one object group. A group with
+# members must declare tenant_id. `parent` nests groups for descendant scopes.
+object_groups:
+  - id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+    name: production-channels
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    resources:
+      - 99999999-9999-9999-9999-999999999999
+
 # --- Permission blocks (scope + actions + effect + conditions) -----------
 # Shared: link to roles below and/or grant directly via direct_policies.
-# scope.mode is one of: platform | tenant | object_kind | object_type | object
+# scope.mode: platform | tenant | object_kind | object_type | object
+#   | group_direct_objects | group_descendant_objects
+#   | group_child_groups | group_descendant_groups
+# The group_* modes require scope.group_id (an object group). The
+# group_*_objects modes also take object_kind (entity|resource) and object_type.
 permission_blocks:
+  # Type-scoped: any channel resource in the tenant.
   - id: 44444444-4444-4444-4444-444444444444
     scope:
       mode: object_type
@@ -68,6 +93,17 @@ permission_blocks:
     effect: allow
     # conditions: {}   # flat ABAC object, ANDed; defaults to {} (always matches)
 
+  # Group-scoped: only the channel resource members of an object group.
+  - id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+    scope:
+      mode: group_direct_objects
+      tenant_id: 33333333-3333-3333-3333-333333333333
+      group_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+      object_kind: resource
+      object_type: resource:channel
+    actions: [read]
+    effect: allow
+
 # --- Roles (named collections of permission blocks) ----------------------
 roles:
   - id: 55555555-5555-5555-5555-555555555555
@@ -76,6 +112,7 @@ roles:
     description: Devices that can publish telemetry
     permission_blocks:
       - 44444444-4444-4444-4444-444444444444
+      - bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
 
 # --- Role assignments (subject gets a role) ------------------------------
 role_assignments:

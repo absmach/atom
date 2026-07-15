@@ -650,7 +650,8 @@ upstream proxy that sanitizes those headers.
 Standing up a fresh deployment no longer requires driving the API by hand or
 juggling one `*_SECRET` env var per identity. Point Atom at a YAML file and it
 provisions the whole RBAC baseline — tenants, entities and their credentials,
-principal groups, permission blocks, roles and policies — at startup:
+resources, principal groups, object groups, permission blocks, roles and
+policies — at startup:
 
 ```bash
 ATOM_BOOTSTRAP_FILE=./bootstrap.yaml
@@ -700,10 +701,11 @@ role_assignments:
 ```
 
 Sections are applied in dependency order: `tenants` → `entities` (+
-credentials) → `groups` (+ members) → `permission_blocks` (+ actions) → `roles`
-(+ block links) → `role_assignments` → `direct_policies`. Every section is
-optional, and records may reference rows that already exist in the database
-(for example the pre-seeded `admin` entity or `atom-admin` role).
+credentials) → `resources` → `groups` (+ members) → `object_groups` (+ members,
+hierarchy) → `permission_blocks` (+ actions) → `roles` (+ block links) →
+`role_assignments` → `direct_policies`. Every section is optional, and records
+may reference rows that already exist in the database (for example the
+pre-seeded `admin` entity or `atom-admin` role).
 
 The file is applied once, right after migrations, and is **idempotent**: every
 record is keyed on a stable UUID and inserted with `ON CONFLICT DO NOTHING`
@@ -713,12 +715,17 @@ never clobbers runtime changes. It runs alongside the env-var bootstrap above,
 not instead of it.
 
 Notes: permission-block `scope.mode` is one of `platform`, `tenant`,
-`object_kind`, `object_type` or `object` (group-relative scopes are not covered
-by bootstrap); block `actions` are seeded action names; `shared_key`
-credentials are only valid for machine (non-human) entities and require an
-explicit `key`. Secrets are written in plaintext just like `ADMIN_SECRET`, so
-treat the file as a secret (restrict its mode, keep it out of version control).
-See [`bootstrap.example.yaml`](bootstrap.example.yaml) for a fuller example.
+`object_kind`, `object_type`, `object`, or a group-relative mode
+(`group_direct_objects`, `group_descendant_objects`, `group_child_groups`,
+`group_descendant_groups`) which scopes to an object group via `scope.group_id`
+— the `*_objects` modes also take `object_kind` (`entity`/`resource`) and
+`object_type` (e.g. `resource:channel`); block `actions` are seeded action
+names. An entity or resource belongs to at most one object group, and an object
+group with members must declare `tenant_id`. `shared_key` credentials are only valid for
+machine (non-human) entities and require an explicit `key`. Secrets are written
+in plaintext just like `ADMIN_SECRET`, so treat the file as a secret (restrict
+its mode, keep it out of version control). See
+[`bootstrap.example.yaml`](bootstrap.example.yaml) for a fuller example.
 
 ---
 
