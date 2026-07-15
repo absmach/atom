@@ -21,8 +21,9 @@ src/
   │                       config-file bootstrap, router
   config.rs            — Config struct, reads env vars (incl. ADMIN_ENTITY_ID, ADMIN_SECRET)
   bootstrap.rs         — optional idempotent YAML bootstrap (ATOM_BOOTSTRAP_FILE):
-  │                       tenants, entities+credentials, groups, permission blocks,
-  │                       roles, role assignments, direct policies
+  │                       tenants, entities+credentials, resources, principal &
+  │                       object groups, permission blocks, roles, role
+  │                       assignments, direct policies
   state.rs             — AppState (pool + config), cloned into every handler
   routes.rs            — live router: GraphQL, gRPC, auth/session REST, custom endpoints,
   │                       JWKS, health/live, health/ready, cert artifacts (rate-limit + CORS layers)

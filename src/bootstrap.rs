@@ -14,11 +14,12 @@
 //! instead of it.
 //!
 //! It provisions the full RBAC graph, applied in dependency order:
-//! tenants → entities (+ credentials) → principal groups (+ members) →
-//! permission blocks (+ actions) → roles (+ block links) → role assignments →
-//! direct policies. Records may reference rows that already exist in the
-//! database (for example the pre-seeded `admin` entity or `atom-admin` role);
-//! foreign-key violations for genuinely missing references abort startup.
+//! tenants → entities (+ credentials) → resources → principal groups
+//! (+ members) → object groups (+ members, hierarchy) → permission blocks
+//! (+ actions) → roles (+ block links) → role assignments → direct policies.
+//! Records may reference rows that already exist in the database (for example
+//! the pre-seeded `admin` entity or `atom-admin` role); foreign-key violations
+//! for genuinely missing references abort startup.
 //!
 //! ## Example
 //!
@@ -86,7 +87,11 @@ pub struct BootstrapConfig {
     #[serde(default)]
     pub entities: Vec<BootstrapEntity>,
     #[serde(default)]
+    pub resources: Vec<BootstrapResource>,
+    #[serde(default)]
     pub groups: Vec<BootstrapGroup>,
+    #[serde(default)]
+    pub object_groups: Vec<BootstrapObjectGroup>,
     #[serde(default)]
     pub permission_blocks: Vec<BootstrapPermissionBlock>,
     #[serde(default)]
@@ -155,6 +160,26 @@ pub enum BootstrapCredential {
     },
 }
 
+/// A protected resource object (e.g. a `channel`). `kind` is a free-form label.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapResource {
+    pub id: Uuid,
+    pub kind: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// Owning tenant. `None` places the resource at platform scope.
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
+    /// Optional owning entity.
+    #[serde(default)]
+    pub owner_id: Option<Uuid>,
+    #[serde(default)]
+    pub attributes: Option<Value>,
+}
+
 /// A principal (subject) group and its entity members.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -170,6 +195,32 @@ pub struct BootstrapGroup {
     /// Entity IDs that belong to this group.
     #[serde(default)]
     pub members: Vec<Uuid>,
+}
+
+/// An object group: groups entities and/or resources so a single permission
+/// block can scope to all of them (and, via `parent`, to descendant groups).
+/// An entity or resource belongs to at most one object group. Membership rows
+/// require a tenant, so a group with members must declare `tenant_id`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapObjectGroup {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub attributes: Option<Value>,
+    /// Parent object group (this group becomes its child in the hierarchy).
+    #[serde(default)]
+    pub parent: Option<Uuid>,
+    /// Entity IDs that belong to this group.
+    #[serde(default)]
+    pub entities: Vec<Uuid>,
+    /// Resource IDs that belong to this group.
+    #[serde(default)]
+    pub resources: Vec<Uuid>,
 }
 
 /// A permission block: scope + actions + effect + conditions. Shared — link it
@@ -189,9 +240,9 @@ pub struct BootstrapPermissionBlock {
     pub conditions: Option<Value>,
 }
 
-/// The subset of permission-block scope modes bootstrap supports. The advanced
-/// group-relative scopes are intentionally excluded — they require object
-/// groups that bootstrap does not manage.
+/// Permission-block scope modes. The `group_*` modes scope a block to the
+/// members (or descendant groups) of an object group, referenced by
+/// `scope.group_id`.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeMode {
@@ -200,6 +251,15 @@ pub enum ScopeMode {
     ObjectKind,
     ObjectType,
     Object,
+    /// A namespaced object type among the direct entity/resource members of the
+    /// object group (needs `object_kind` + `object_type`).
+    GroupDirectObjects,
+    /// Like `group_direct_objects`, extended to descendant groups.
+    GroupDescendantObjects,
+    /// Direct child groups of the object group.
+    GroupChildGroups,
+    /// Descendant groups of the object group.
+    GroupDescendantGroups,
 }
 
 impl ScopeMode {
@@ -210,7 +270,21 @@ impl ScopeMode {
             ScopeMode::ObjectKind => "object_kind",
             ScopeMode::ObjectType => "object_type",
             ScopeMode::Object => "object",
+            ScopeMode::GroupDirectObjects => "group_direct_objects",
+            ScopeMode::GroupDescendantObjects => "group_descendant_objects",
+            ScopeMode::GroupChildGroups => "group_child_groups",
+            ScopeMode::GroupDescendantGroups => "group_descendant_groups",
         }
+    }
+
+    fn is_group(self) -> bool {
+        matches!(
+            self,
+            ScopeMode::GroupDirectObjects
+                | ScopeMode::GroupDescendantObjects
+                | ScopeMode::GroupChildGroups
+                | ScopeMode::GroupDescendantGroups
+        )
     }
 }
 
@@ -229,6 +303,9 @@ pub struct BootstrapScope {
     pub object_type: Option<String>,
     #[serde(default)]
     pub object_id: Option<Uuid>,
+    /// Object group the block scopes to (required by the `group_*` modes).
+    #[serde(default)]
+    pub group_id: Option<Uuid>,
 }
 
 impl BootstrapScope {
@@ -237,6 +314,7 @@ impl BootstrapScope {
         let has_type = self.object_type.is_some();
         let has_object = self.object_id.is_some();
         let has_tenant = self.tenant_id.is_some();
+        let has_group = self.group_id.is_some();
         let require = |cond: bool, msg: &str| -> Result<()> {
             if cond {
                 Ok(())
@@ -244,6 +322,10 @@ impl BootstrapScope {
                 Err(anyhow!("permission block {block_id}: {msg}"))
             }
         };
+        // group_id belongs only to the group_* modes.
+        if !self.mode.is_group() {
+            require(!has_group, "only group_* scopes take a group_id")?;
+        }
         match self.mode {
             ScopeMode::Platform => {
                 require(
@@ -281,6 +363,38 @@ impl BootstrapScope {
                     !has_kind && !has_type,
                     "object scope takes no object_kind/object_type",
                 )?;
+            }
+            ScopeMode::GroupChildGroups | ScopeMode::GroupDescendantGroups => {
+                require(
+                    has_tenant && has_group,
+                    "group scopes require tenant_id and group_id",
+                )?;
+                require(
+                    !has_kind && !has_type && !has_object,
+                    "this group scope takes no object_kind/object_type/object_id",
+                )?;
+            }
+            ScopeMode::GroupDirectObjects | ScopeMode::GroupDescendantObjects => {
+                require(
+                    has_tenant && has_group,
+                    "group object scopes require tenant_id and group_id",
+                )?;
+                let kind_ok = matches!(
+                    self.object_kind.as_deref(),
+                    Some("entity") | Some("resource")
+                );
+                require(
+                    kind_ok,
+                    "group object scopes require object_kind of 'entity' or 'resource'",
+                )?;
+                // The scope_ref is `<group>:<object_type>` (e.g.
+                // `resource:channel`); without object_type the scope never
+                // matches, so require it rather than ship a dead grant.
+                require(
+                    has_type,
+                    "group object scopes require object_type (e.g. 'resource:channel')",
+                )?;
+                require(!has_object, "group object scopes take no object_id")?;
             }
         }
         Ok(())
@@ -339,7 +453,9 @@ impl BootstrapConfig {
     pub fn validate(&self) -> Result<()> {
         unique_ids(self.tenants.iter().map(|t| t.id), "tenant")?;
         unique_ids(self.entities.iter().map(|e| e.id), "entity")?;
+        unique_ids(self.resources.iter().map(|r| r.id), "resource")?;
         unique_ids(self.groups.iter().map(|g| g.id), "group")?;
+        unique_ids(self.object_groups.iter().map(|g| g.id), "object group")?;
         unique_ids(
             self.permission_blocks.iter().map(|b| b.id),
             "permission block",
@@ -360,11 +476,39 @@ impl BootstrapConfig {
         for entity in &self.entities {
             entity.validate()?;
         }
+        for resource in &self.resources {
+            if resource.kind.trim().is_empty() {
+                bail!("bootstrap resource {} has an empty kind", resource.id);
+            }
+            check_object_attributes(&resource.attributes, "resource", resource.id)?;
+        }
         for group in &self.groups {
             if group.name.trim().is_empty() {
                 bail!("bootstrap group {} has an empty name", group.id);
             }
             check_object_attributes(&group.attributes, "group", group.id)?;
+        }
+        for group in &self.object_groups {
+            if group.name.trim().is_empty() {
+                bail!("bootstrap object group {} has an empty name", group.id);
+            }
+            check_object_attributes(&group.attributes, "object group", group.id)?;
+            if group.parent == Some(group.id) {
+                bail!(
+                    "bootstrap object group {} cannot be its own parent",
+                    group.id
+                );
+            }
+            // Membership rows carry a NOT NULL tenant_id, so a group with
+            // members must declare its tenant.
+            if group.tenant_id.is_none()
+                && (!group.entities.is_empty() || !group.resources.is_empty())
+            {
+                bail!(
+                    "bootstrap object group {} has members but no tenant_id",
+                    group.id
+                );
+            }
         }
         for block in &self.permission_blocks {
             block.scope.validate(block.id)?;
@@ -473,8 +617,19 @@ pub async fn apply(
             ensure_credential(pool, signing_keys, entity, cred).await?;
         }
     }
+    for resource in &cfg.resources {
+        ensure_resource(pool, resource).await?;
+    }
     for group in &cfg.groups {
         ensure_group(pool, group).await?;
+    }
+    // Object group rows first, then hierarchy/membership, so a parent declared
+    // later in the file still resolves.
+    for group in &cfg.object_groups {
+        ensure_object_group(pool, group).await?;
+    }
+    for group in &cfg.object_groups {
+        ensure_object_group_links(pool, group).await?;
     }
     for block in &cfg.permission_blocks {
         ensure_permission_block(pool, block).await?;
@@ -632,6 +787,122 @@ async fn ensure_group(pool: &PgPool, group: &BootstrapGroup) -> Result<()> {
     Ok(())
 }
 
+async fn ensure_resource(pool: &PgPool, resource: &BootstrapResource) -> Result<()> {
+    let alias = validate_alias_opt(resource.alias.clone())
+        .map_err(|e| anyhow!("bootstrap resource {}: {e}", resource.id))?;
+    let attributes = resource
+        .attributes
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let result = sqlx::query(
+        r#"INSERT INTO resources (id, kind, name, alias, tenant_id, owner_id, attributes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (id) DO NOTHING"#,
+    )
+    .bind(resource.id)
+    .bind(&resource.kind)
+    .bind(&resource.name)
+    .bind(alias)
+    .bind(resource.tenant_id)
+    .bind(resource.owner_id)
+    .bind(attributes)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to insert bootstrap resource {}", resource.id))?;
+    log_upsert(result.rows_affected(), "resource", resource.id);
+    Ok(())
+}
+
+/// Insert the object group row only. Membership and hierarchy are applied in a
+/// second pass ([`ensure_object_group_links`]) so a parent declared later in the
+/// file still resolves.
+async fn ensure_object_group(pool: &PgPool, group: &BootstrapObjectGroup) -> Result<()> {
+    let attributes = group
+        .attributes
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let result = sqlx::query(
+        r#"INSERT INTO object_groups (id, name, tenant_id, description, attributes)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (id) DO NOTHING"#,
+    )
+    .bind(group.id)
+    .bind(&group.name)
+    .bind(group.tenant_id)
+    .bind(&group.description)
+    .bind(attributes)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to insert bootstrap object group {}", group.id))?;
+    log_upsert(result.rows_affected(), "object group", group.id);
+    Ok(())
+}
+
+/// Apply an object group's parent link and entity/resource membership. An entity
+/// or resource belongs to at most one object group, so membership rows conflict
+/// on the member id and are left untouched if already present.
+async fn ensure_object_group_links(pool: &PgPool, group: &BootstrapObjectGroup) -> Result<()> {
+    if let Some(parent_id) = group.parent {
+        sqlx::query(
+            r#"INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (child_id) DO NOTHING"#,
+        )
+        .bind(parent_id)
+        .bind(group.id)
+        .bind(group.tenant_id)
+        .execute(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to link object group {} under parent {parent_id}",
+                group.id
+            )
+        })?;
+    }
+
+    for entity_id in &group.entities {
+        sqlx::query(
+            r#"INSERT INTO object_group_entities (group_id, entity_id, tenant_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (entity_id) DO NOTHING"#,
+        )
+        .bind(group.id)
+        .bind(entity_id)
+        .bind(group.tenant_id)
+        .execute(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to add entity {entity_id} to object group {}",
+                group.id
+            )
+        })?;
+    }
+
+    for resource_id in &group.resources {
+        sqlx::query(
+            r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (resource_id) DO NOTHING"#,
+        )
+        .bind(group.id)
+        .bind(resource_id)
+        .bind(group.tenant_id)
+        .execute(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to add resource {resource_id} to object group {}",
+                group.id
+            )
+        })?;
+    }
+    Ok(())
+}
+
 async fn ensure_permission_block(pool: &PgPool, block: &BootstrapPermissionBlock) -> Result<()> {
     let conditions = block
         .conditions
@@ -641,8 +912,8 @@ async fn ensure_permission_block(pool: &PgPool, block: &BootstrapPermissionBlock
 
     let result = sqlx::query(
         r#"INSERT INTO permission_blocks
-             (id, tenant_id, scope_mode, object_kind, object_type, object_id, effect, conditions)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             (id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (id) DO NOTHING"#,
     )
     .bind(block.id)
@@ -651,6 +922,7 @@ async fn ensure_permission_block(pool: &PgPool, block: &BootstrapPermissionBlock
     .bind(&scope.object_kind)
     .bind(&scope.object_type)
     .bind(scope.object_id)
+    .bind(scope.group_id)
     .bind(&block.effect)
     .bind(conditions)
     .execute(pool)
@@ -812,12 +1084,26 @@ entities:
       - kind: shared_key
         key: a-strong-device-secret
 
+resources:
+  - id: 99999999-9999-9999-9999-999999999999
+    kind: channel
+    name: temperature
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    owner_id: 22222222-2222-2222-2222-222222222222
+
 groups:
   - id: 77777777-7777-7777-7777-777777777777
     name: publishers
     tenant_id: 33333333-3333-3333-3333-333333333333
     members:
       - 22222222-2222-2222-2222-222222222222
+
+object_groups:
+  - id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+    name: production-channels
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    resources:
+      - 99999999-9999-9999-9999-999999999999
 
 permission_blocks:
   - id: 44444444-4444-4444-4444-444444444444
@@ -827,6 +1113,15 @@ permission_blocks:
       object_kind: resource
       object_type: resource:channel
     actions: [publish, subscribe]
+    effect: allow
+  - id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+    scope:
+      mode: group_direct_objects
+      tenant_id: 33333333-3333-3333-3333-333333333333
+      group_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+      object_kind: resource
+      object_type: resource:channel
+    actions: [read]
     effect: allow
 
 roles:
@@ -850,9 +1145,16 @@ direct_policies:
         let cfg = parse(yaml).expect("parse");
         assert_eq!(cfg.tenants.len(), 1);
         assert_eq!(cfg.entities.len(), 1);
+        assert_eq!(cfg.resources[0].kind, "channel");
         assert_eq!(cfg.groups[0].members.len(), 1);
+        assert_eq!(cfg.object_groups[0].resources.len(), 1);
         assert_eq!(cfg.permission_blocks[0].scope.mode, ScopeMode::ObjectType);
         assert_eq!(cfg.permission_blocks[0].effect, Effect::Allow);
+        assert_eq!(
+            cfg.permission_blocks[1].scope.mode,
+            ScopeMode::GroupDirectObjects
+        );
+        assert!(cfg.permission_blocks[1].scope.group_id.is_some());
         assert_eq!(cfg.roles[0].permission_blocks.len(), 1);
         assert_eq!(cfg.role_assignments[0].subject.kind, SubjectKind::Entity);
         assert_eq!(cfg.direct_policies[0].subject.kind, SubjectKind::Group);
@@ -1023,5 +1325,108 @@ tenants:
 "#;
         let err = parse(yaml).expect_err("duplicate tenant ids");
         assert!(err.to_string().contains("duplicate bootstrap tenant id"));
+    }
+
+    #[test]
+    fn group_scope_requires_group_id() {
+        let yaml = r#"
+permission_blocks:
+  - id: 44444444-4444-4444-4444-444444444444
+    scope:
+      mode: group_direct_objects
+      tenant_id: 33333333-3333-3333-3333-333333333333
+      object_kind: resource
+    actions: [read]
+"#;
+        let err = parse(yaml).expect_err("missing group_id");
+        assert!(err.to_string().contains("require tenant_id and group_id"));
+    }
+
+    #[test]
+    fn group_object_scope_requires_entity_or_resource_kind() {
+        let yaml = r#"
+permission_blocks:
+  - id: 44444444-4444-4444-4444-444444444444
+    scope:
+      mode: group_direct_objects
+      tenant_id: 33333333-3333-3333-3333-333333333333
+      group_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+      object_kind: tenant
+    actions: [read]
+"#;
+        let err = parse(yaml).expect_err("bad object_kind");
+        assert!(err
+            .to_string()
+            .contains("object_kind of 'entity' or 'resource'"));
+    }
+
+    #[test]
+    fn group_object_scope_requires_object_type() {
+        let yaml = r#"
+permission_blocks:
+  - id: 44444444-4444-4444-4444-444444444444
+    scope:
+      mode: group_direct_objects
+      tenant_id: 33333333-3333-3333-3333-333333333333
+      group_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+      object_kind: resource
+    actions: [read]
+"#;
+        let err = parse(yaml).expect_err("missing object_type");
+        assert!(err.to_string().contains("require object_type"));
+    }
+
+    #[test]
+    fn group_id_rejected_on_non_group_scope() {
+        let yaml = r#"
+permission_blocks:
+  - id: 44444444-4444-4444-4444-444444444444
+    scope:
+      mode: tenant
+      tenant_id: 33333333-3333-3333-3333-333333333333
+      group_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+    actions: [read]
+"#;
+        let err = parse(yaml).expect_err("group_id on tenant scope");
+        assert!(err
+            .to_string()
+            .contains("only group_* scopes take a group_id"));
+    }
+
+    #[test]
+    fn object_group_with_members_requires_tenant() {
+        let yaml = r#"
+object_groups:
+  - id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+    name: channels
+    resources:
+      - 99999999-9999-9999-9999-999999999999
+"#;
+        let err = parse(yaml).expect_err("members without tenant");
+        assert!(err.to_string().contains("has members but no tenant_id"));
+    }
+
+    #[test]
+    fn object_group_cannot_be_its_own_parent() {
+        let yaml = r#"
+object_groups:
+  - id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+    name: channels
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    parent: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+"#;
+        let err = parse(yaml).expect_err("self parent");
+        assert!(err.to_string().contains("cannot be its own parent"));
+    }
+
+    #[test]
+    fn resource_requires_kind() {
+        let yaml = r#"
+resources:
+  - id: 99999999-9999-9999-9999-999999999999
+    kind: "  "
+"#;
+        let err = parse(yaml).expect_err("empty kind");
+        assert!(err.to_string().contains("empty kind"));
     }
 }
