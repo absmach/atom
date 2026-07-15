@@ -2,15 +2,33 @@
 #
 # Point Atom at this file with ATOM_BOOTSTRAP_FILE=/path/to/bootstrap.yaml.
 # It is applied once at startup, right after migrations, and is idempotent:
-# entities/credentials that already exist are left untouched, so it is safe to
-# leave configured across restarts.
+# every record is keyed on a stable UUID and inserted with ON CONFLICT DO
+# NOTHING, so existing rows are left untouched and it is safe to leave
+# configured across restarts. Records may reference rows that already exist in
+# the database (e.g. the pre-seeded `admin` entity or `atom-admin` role).
+#
+# Sections are applied in dependency order:
+#   tenants -> entities (+credentials) -> groups (+members)
+#     -> permission_blocks (+actions) -> roles (+block links)
+#     -> role_assignments -> direct_policies
 #
 # Secrets are declared inline (just like ADMIN_SECRET) — protect this file:
 # mount it as a secret, keep it out of version control, restrict its mode.
 
+# --- Tenants (domains) ---------------------------------------------------
+tenants:
+  - id: 33333333-3333-3333-3333-333333333333
+    name: factory
+    alias: factory
+    tags: [demo, factory]
+    attributes:
+      region: eu
+      plan: gold
+    # status: active   # active | inactive | frozen (default active)
+
+# --- Entities (+ credentials) --------------------------------------------
 entities:
-  # Attach a password to the pre-seeded platform admin (well-known seed UUID).
-  # This replaces setting ADMIN_SECRET.
+  # Attach a password to the pre-seeded platform admin (replaces ADMIN_SECRET).
   - id: 00000000-0000-0000-0000-000000000001
     kind: human
     name: admin
@@ -18,23 +36,57 @@ entities:
       - kind: password
         secret: change-me-please
 
-  # A brand-new service identity with a machine shared key.
-  - id: 11111111-1111-1111-1111-111111111111
-    kind: service
-    name: ingest-service
-    alias: ingest-service
-    attributes:
-      system: true
-      purpose: telemetry-ingest
-    credentials:
-      - kind: shared_key
-        key: replace-with-a-strong-machine-secret
-        description: telemetry ingest pipeline
-
-  # A device identity with a shared key.
+  # A device placed inside the factory tenant, with a machine shared key.
   - id: 22222222-2222-2222-2222-222222222222
     kind: device
     name: gateway-01
+    tenant_id: 33333333-3333-3333-3333-333333333333
     credentials:
       - kind: shared_key
         key: replace-with-a-strong-device-secret
+
+# --- Principal (subject) groups (+ members) ------------------------------
+groups:
+  - id: 77777777-7777-7777-7777-777777777777
+    name: publishers
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    description: Devices allowed to publish telemetry
+    members:
+      - 22222222-2222-2222-2222-222222222222
+
+# --- Permission blocks (scope + actions + effect + conditions) -----------
+# Shared: link to roles below and/or grant directly via direct_policies.
+# scope.mode is one of: platform | tenant | object_kind | object_type | object
+permission_blocks:
+  - id: 44444444-4444-4444-4444-444444444444
+    scope:
+      mode: object_type
+      tenant_id: 33333333-3333-3333-3333-333333333333
+      object_kind: resource
+      object_type: resource:channel
+    actions: [publish, subscribe]
+    effect: allow
+    # conditions: {}   # flat ABAC object, ANDed; defaults to {} (always matches)
+
+# --- Roles (named collections of permission blocks) ----------------------
+roles:
+  - id: 55555555-5555-5555-5555-555555555555
+    name: publisher
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    description: Devices that can publish telemetry
+    permission_blocks:
+      - 44444444-4444-4444-4444-444444444444
+
+# --- Role assignments (subject gets a role) ------------------------------
+role_assignments:
+  - id: 66666666-6666-6666-6666-666666666666
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    subject: { kind: entity, id: 22222222-2222-2222-2222-222222222222 }
+    role_id: 55555555-5555-5555-5555-555555555555
+
+# --- Direct policies (subject gets one permission block directly) --------
+direct_policies:
+  - id: 88888888-8888-8888-8888-888888888888
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    subject: { kind: group, id: 77777777-7777-7777-7777-777777777777 }
+    permission_block_id: 44444444-4444-4444-4444-444444444444

@@ -17,8 +17,12 @@ Lightweight replacement for Keycloak — single Rust binary, single Postgres dat
 
 ```
 src/
-  main.rs              — startup: config, DB pool, migrations, admin bootstrap, router
+  main.rs              — startup: config, DB pool, migrations, admin bootstrap,
+  │                       config-file bootstrap, router
   config.rs            — Config struct, reads env vars (incl. ADMIN_ENTITY_ID, ADMIN_SECRET)
+  bootstrap.rs         — optional idempotent YAML bootstrap (ATOM_BOOTSTRAP_FILE):
+  │                       tenants, entities+credentials, groups, permission blocks,
+  │                       roles, role assignments, direct policies
   state.rs             — AppState (pool + config), cloned into every handler
   routes.rs            — live router: GraphQL, gRPC, auth/session REST, custom endpoints,
   │                       JWKS, health/live, health/ready, cert artifacts (rate-limit + CORS layers)
@@ -195,6 +199,7 @@ Environment variables: copy `.env.example` to `.env`. Required: `DATABASE_URL`. 
 
 Optional: `ADMIN_SECRET` — if set, bootstraps the admin entity's password on first boot.
 Optional: `ADMIN_ENTITY_ID` — override the seeded admin UUID (default `00000000-0000-0000-0000-000000000001`).
+Optional: `ATOM_BOOTSTRAP_FILE` — path to a YAML file (`src/bootstrap.rs`) applied idempotently after migrations to provision the RBAC baseline (tenants, entities + credentials, groups, permission blocks, roles, policies); runs alongside the env-var bootstrap. See `bootstrap.example.yaml`.
 
 The runtime is production-hardened: configurable DB pool, five-category IP rate limiter, GraphQL depth/complexity/introspection limits (introspection **off** by default — opt in with `ATOM_GRAPHQL_INTROSPECTION_ENABLED=true`), per-route body limits, encryption at rest for recoverable secrets (signing keys, shared keys), audit retention, a `/health/ready` readiness probe, and graceful shutdown on SIGINT/SIGTERM (both the HTTP and gRPC servers drain in-flight requests before exit).
 

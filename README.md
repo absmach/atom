@@ -602,7 +602,7 @@ Generic application mapping:
 | `ADMIN_SECRET`                                                                                                                 | *(optional)*                                         | Seeds the admin password on first boot                                                  |
 | `ADMIN_ENTITY_ID`                                                                                                              | `00000000-0000-0000-0000-000000000001`               | Override seeded admin UUID                                                              |
 | `ATOM_SERVICE_SECRET` / `ATOM_SERVICE_ENTITY_ID`                                                                               | *(optional)* / seeded service UUID                   | Seeds a service entity password on first boot                                           |
-| `ATOM_BOOTSTRAP_FILE`                                                                                                          | *(optional)*                                         | Path to a YAML file provisioning entities + credentials at startup (idempotent)         |
+| `ATOM_BOOTSTRAP_FILE`                                                                                                          | *(optional)*                                         | Path to a YAML file provisioning the RBAC baseline at startup (idempotent)              |
 | `ATOM_MIN_PASSWORD_CHARS`                                                                                                      | `12`                                                 | Minimum password length                                                                 |
 | `ATOM_CORS_ALLOWED_ORIGINS`                                                                                                    | `ATOM_PUBLIC_BASE_URL`                               | Comma-separated allowed CORS origins                                                    |
 | `ATOM_AUTH_COOKIE_SECURE` / `ATOM_AUTH_COOKIE_DOMAIN`                                                                          | auto-detect HTTPS / *(unset)*                        | Auth cookie options for UI flows                                                        |
@@ -649,7 +649,8 @@ upstream proxy that sanitizes those headers.
 
 Standing up a fresh deployment no longer requires driving the API by hand or
 juggling one `*_SECRET` env var per identity. Point Atom at a YAML file and it
-provisions the declared entities and their credentials at startup:
+provisions the whole RBAC baseline — tenants, entities and their credentials,
+principal groups, permission blocks, roles and policies — at startup:
 
 ```bash
 ATOM_BOOTSTRAP_FILE=./bootstrap.yaml
@@ -657,6 +658,11 @@ ATOM_BOOTSTRAP_FILE=./bootstrap.yaml
 
 ```yaml
 # bootstrap.yaml
+tenants:
+  - id: 33333333-3333-3333-3333-333333333333
+    name: factory
+    alias: factory
+
 entities:
   # Attach a password to the pre-seeded admin (replaces ADMIN_SECRET).
   - id: 00000000-0000-0000-0000-000000000001
@@ -665,22 +671,50 @@ entities:
     credentials:
       - kind: password
         secret: change-me-please
-
-  # A new service identity with a machine shared key.
-  - id: 11111111-1111-1111-1111-111111111111
-    kind: service
-    name: ingest-service
+  # A device inside the factory tenant with a machine shared key.
+  - id: 22222222-2222-2222-2222-222222222222
+    kind: device
+    name: gateway-01
+    tenant_id: 33333333-3333-3333-3333-333333333333
     credentials:
       - kind: shared_key
         key: replace-with-a-strong-machine-secret
-        description: telemetry ingest pipeline
+
+permission_blocks:
+  - id: 44444444-4444-4444-4444-444444444444
+    scope: { mode: object_type, tenant_id: 33333333-3333-3333-3333-333333333333, object_kind: resource, object_type: resource:channel }
+    actions: [publish, subscribe]
+    effect: allow
+
+roles:
+  - id: 55555555-5555-5555-5555-555555555555
+    name: publisher
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    permission_blocks: [44444444-4444-4444-4444-444444444444]
+
+role_assignments:
+  - id: 66666666-6666-6666-6666-666666666666
+    tenant_id: 33333333-3333-3333-3333-333333333333
+    subject: { kind: entity, id: 22222222-2222-2222-2222-222222222222 }
+    role_id: 55555555-5555-5555-5555-555555555555
 ```
 
-The file is applied once, right after migrations, and is **idempotent**: each
-entity is keyed on its stable UUID and each credential is created only when the
-entity has no active credential of that kind, so re-running against an
-already-provisioned database is a no-op and never clobbers runtime changes. It
-runs alongside the env-var bootstrap above, not instead of it. `shared_key`
+Sections are applied in dependency order: `tenants` → `entities` (+
+credentials) → `groups` (+ members) → `permission_blocks` (+ actions) → `roles`
+(+ block links) → `role_assignments` → `direct_policies`. Every section is
+optional, and records may reference rows that already exist in the database
+(for example the pre-seeded `admin` entity or `atom-admin` role).
+
+The file is applied once, right after migrations, and is **idempotent**: every
+record is keyed on a stable UUID and inserted with `ON CONFLICT DO NOTHING`
+(credentials are created only when the entity has no active credential of that
+kind), so re-running against an already-provisioned database is a no-op and
+never clobbers runtime changes. It runs alongside the env-var bootstrap above,
+not instead of it.
+
+Notes: permission-block `scope.mode` is one of `platform`, `tenant`,
+`object_kind`, `object_type` or `object` (group-relative scopes are not covered
+by bootstrap); block `actions` are seeded action names; `shared_key`
 credentials are only valid for machine (non-human) entities and require an
 explicit `key`. Secrets are written in plaintext just like `ADMIN_SECRET`, so
 treat the file as a secret (restrict its mode, keep it out of version control).
