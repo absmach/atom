@@ -3,10 +3,6 @@ use argon2::{
     Argon2,
 };
 use chrono::{DateTime, Duration, Utc};
-use lettre::{
-    message::header::ContentType, transport::smtp::authentication::Credentials, AsyncSmtpTransport,
-    AsyncTransport, Message, Tokio1Executor,
-};
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
     reqwest, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
@@ -21,10 +17,11 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::encode_jwt,
-    config::{Config, OidcProviderConfig, SigningKeyConfig, SmtpTls},
+    config::{Config, OidcProviderConfig, SigningKeyConfig},
     crypto,
     error::{db_err, AppError},
     keys::LoadedKey,
+    mail,
     models::{
         enums::{AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus},
         session::{
@@ -1480,65 +1477,14 @@ async fn insert_email_token_in_tx(
 
 async fn send_verification_email(cfg: &Config, email: &str, token: &str) -> Result<(), AppError> {
     let verification_url = url_with_params(&cfg.email_verification_redirect, &[("token", token)]);
-    let Some(smtp) = cfg.smtp.as_ref() else {
-        if cfg.dev_allow_unverified_email_login {
-            tracing::warn!(
-                email,
-                verification_url,
-                "SMTP is not configured; skipping verification email in development bypass mode"
-            );
-            return Ok(());
-        }
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "SMTP is not configured"
-        )));
-    };
-
-    let message = Message::builder()
-        .from(
-            smtp.from
-                .parse()
-                .map_err(|e| AppError::bad_request(format!("invalid SMTP from address: {e}")))?,
-        )
-        .to(email
-            .parse()
-            .map_err(|e| AppError::bad_request(format!("invalid email address: {e}")))?)
-        .subject("Verify your Atom account")
-        .header(ContentType::TEXT_PLAIN)
-        .body(format!(
-            "Verify your Atom account by opening this link:\n\n{verification_url}\n"
-        ))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("build email: {e}")))?;
-
-    let mut builder = match smtp.tls {
-        SmtpTls::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host),
-        SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp.host)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("smtp starttls: {e}")))?,
-        SmtpTls::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp.host)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("smtp tls: {e}")))?,
-    }
-    .port(smtp.port);
-
-    if let (Some(username), Some(password)) = (&smtp.username, &smtp.password) {
-        builder = builder.credentials(Credentials::new(username.clone(), password.clone()));
-    }
-
-    let mailer = builder.build();
-    if let Err(err) = mailer.send(message).await {
-        if cfg.dev_allow_unverified_email_login {
-            tracing::warn!(
-                email,
-                verification_url,
-                error = %err,
-                "SMTP send failed; skipping verification email in development bypass mode"
-            );
-            return Ok(());
-        }
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "send verification email: {err}"
-        )));
-    }
-    Ok(())
+    mail::send_templated_email(
+        cfg,
+        mail::EmailTemplate::Verification,
+        email,
+        &verification_url,
+        &[("verification_url", verification_url.as_str())],
+    )
+    .await
 }
 
 async fn send_password_reset_email(
@@ -1548,65 +1494,14 @@ async fn send_password_reset_email(
     token: &str,
 ) -> Result<(), AppError> {
     let reset_url = url_with_params(redirect_url, &[("token", token)]);
-    let Some(smtp) = cfg.smtp.as_ref() else {
-        if cfg.dev_allow_unverified_email_login {
-            tracing::warn!(
-                email,
-                reset_url,
-                "SMTP is not configured; skipping password reset email in development bypass mode"
-            );
-            return Ok(());
-        }
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "SMTP is not configured"
-        )));
-    };
-
-    let message = Message::builder()
-        .from(
-            smtp.from
-                .parse()
-                .map_err(|e| AppError::bad_request(format!("invalid SMTP from address: {e}")))?,
-        )
-        .to(email
-            .parse()
-            .map_err(|e| AppError::bad_request(format!("invalid email address: {e}")))?)
-        .subject("Reset your Atom password")
-        .header(ContentType::TEXT_PLAIN)
-        .body(format!(
-            "Reset your Atom password by opening this link:\n\n{reset_url}\n"
-        ))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("build email: {e}")))?;
-
-    let mut builder = match smtp.tls {
-        SmtpTls::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host),
-        SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp.host)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("smtp starttls: {e}")))?,
-        SmtpTls::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp.host)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("smtp tls: {e}")))?,
-    }
-    .port(smtp.port);
-
-    if let (Some(username), Some(password)) = (&smtp.username, &smtp.password) {
-        builder = builder.credentials(Credentials::new(username.clone(), password.clone()));
-    }
-
-    let mailer = builder.build();
-    if let Err(err) = mailer.send(message).await {
-        if cfg.dev_allow_unverified_email_login {
-            tracing::warn!(
-                email,
-                reset_url,
-                error = %err,
-                "SMTP send failed; skipping password reset email in development bypass mode"
-            );
-            return Ok(());
-        }
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "send password reset email: {err}"
-        )));
-    }
-    Ok(())
+    mail::send_templated_email(
+        cfg,
+        mail::EmailTemplate::PasswordReset,
+        email,
+        &reset_url,
+        &[("reset_url", reset_url.as_str())],
+    )
+    .await
 }
 
 struct OAuthStateRow {

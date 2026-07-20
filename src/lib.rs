@@ -19,6 +19,7 @@ pub mod guardrails;
 pub mod health;
 pub mod identity;
 pub mod keys;
+pub mod mail;
 pub mod metrics;
 pub mod models;
 pub mod purge;

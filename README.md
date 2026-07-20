@@ -357,6 +357,33 @@ For a host `cargo run`, use host paths such as
 `ATOM_GRPC_TLS_CERT_PATH=./certs/grpc-server.crt`; `/certs/...` paths apply
 inside the Compose containers.
 
+### Email templates
+
+Atom sends three transactional emails — signup verification, password reset,
+and tenant invitation — each rendered from a single `.tmpl` file under
+[`email-templates/`](email-templates/): a `Subject: ...` header line, a
+blank line, then the plain-text body, both using
+[minijinja](https://docs.rs/minijinja) `{{ variable }}` syntax. The built-in
+defaults are baked into the image; Compose additionally mounts them
+read-only at `/email-templates` and points `ATOM_EMAIL_TEMPLATES_DIR` there
+by default, so overriding one is just editing a file and restarting the
+container — no rebuild required.
+
+To customize without touching this repository's own copy, point
+`ATOM_EMAIL_TEMPLATES_HOST_DIR` at your own directory. Only the files you
+want to change need to exist there; anything missing falls back to the
+built-in default, so overriding just one template (e.g.
+`verification.tmpl`) is enough:
+
+```dotenv
+ATOM_EMAIL_TEMPLATES_HOST_DIR=./my-email-templates
+```
+
+Since Atom is embedded by multiple platforms/projects, each deployment can
+mount its own branding without forking or rebuilding the image. See
+[`email-templates/README.md`](email-templates/README.md) for the full
+variable reference per template.
+
 ### Port overrides
 
 If a host port is already occupied, override only the host-side port:
@@ -624,6 +651,7 @@ Generic application mapping:
 | `ATOM_SMTP_HOST` / `ATOM_SMTP_FROM`                                                                                            | *(optional)*                                         | Required pair for signup and password reset email delivery                              |
 | `ATOM_SMTP_PORT` / `ATOM_SMTP_TLS`                                                                                             | `587` / `starttls`                                   | SMTP port and TLS mode                                                                  |
 | `ATOM_SMTP_USERNAME` / `ATOM_SMTP_PASSWORD`                                                                                    | *(optional)*                                         | SMTP credentials                                                                        |
+| `ATOM_EMAIL_TEMPLATES_DIR`                                                                                                     | *(unset; `/email-templates` in Compose)*             | Directory checked first (per-file) for email template overrides, see [Email templates](#email-templates) |
 | `ATOM_CERTS_ENABLED`                                                                                                           | `true`                                               | Enables certificate lifecycle support                                                   |
 | `ATOM_CERTS_CA_MODE`                                                                                                           | `file_intermediate_issuer`                           | CA mode: `file_intermediate_issuer` or `file_root_issuer`                               |
 | `ATOM_CERTS_ROOT_CA_CERT_PATH`                                                                                                 | *(optional)*                                         | Mounted root CA certificate path                                                        |
@@ -633,6 +661,7 @@ Generic application mapping:
 | `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS`                                                                                             | `2592000`                                            | Default issued certificate lifetime                                                     |
 | `ATOM_CERTS_LEAF_MAX_TTL_SECS`                                                                                                 | `2592000`                                            | Maximum issued certificate lifetime                                                     |
 | `ATOM_CERTS_CA_DIR`                                                                                                            | `./certs`                                            | Docker Compose host directory mounted at `/certs:ro`                                    |
+| `ATOM_EMAIL_TEMPLATES_HOST_DIR`                                                                                                | `./email-templates`                                  | Docker Compose host directory mounted at `/email-templates:ro`                          |
 | `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8081` / `18081` / `3005` | Docker Compose host ports                                                               |
 | `ATOM_GRAPHQL_URL`                                                                                                             | `http://atom:8080/graphql`                           | GraphQL endpoint used by the Dockerized Next UI                                         |
 | `RUST_LOG`                                                                                                                     | *(legacy fallback)*                                  | Used only when `ATOM_LOG_LEVEL` is unset                                                |
