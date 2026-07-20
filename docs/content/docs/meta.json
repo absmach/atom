@@ -9,6 +9,7 @@
     "authentication",
     "queries",
     "magistrala-on-atom",
-    "endpoints"
+    "endpoints",
+    "user-guide"
   ]
 }

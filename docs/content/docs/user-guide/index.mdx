@@ -1,0 +1,49 @@
+---
+title: User Guide
+description: Operate the Atom Next UI — tenants, identities, access control, authorization, audit, and developer tools.
+---
+
+This guide is for operators and administrators who manage Atom through **Atom Next**, the
+web UI shipped alongside the Atom backend. It complements the rest of this documentation
+site, which focuses on the GraphQL API and the underlying access model — this guide focuses
+on the screens, dialogs, and buttons you click.
+
+The UI is reachable at `http://localhost:3005` in a default `make up` stack, and signs in
+with the same admin credentials as the API (`admin` / `12345678` in a fresh dev environment).
+
+## How this guide is organized
+
+Start with the [Quick Start](/user-guide/quick-start) if you are new to Atom — it walks
+through a complete access-control scenario end to end, from creating a tenant to seeing an
+`allow` and a `deny` decision in the Authorization debugger.
+
+After that, each page documents one section of the left sidebar in detail: every field on
+every form, every row action, and every tab in every detail view.
+
+<Cards>
+  <Card title="Quick Start" href="/user-guide/quick-start" description="Create a tenant, two entities, a resource, and see your first authorization decision." />
+  <Card title="Dashboard" href="/user-guide/dashboard" description="The control plane overview screen and its summary tiles." />
+  <Card title="Tenants" href="/user-guide/tenants" description="Top-level boundaries for entities, resources, groups, roles, and assignments." />
+  <Card title="Entities" href="/user-guide/entities" description="Humans, devices, services, workloads, and applications, plus their credentials." />
+  <Card title="Profiles" href="/user-guide/profiles" description="Schema-backed templates that shape entity creation forms." />
+  <Card title="Groups" href="/user-guide/groups" description="Object groups and principal groups." />
+  <Card title="Resources" href="/user-guide/resources" description="Protected objects evaluated by the PDP." />
+  <Card title="Actions" href="/user-guide/actions" description="The action catalog, action applicability, and assignment guardrails." />
+  <Card title="Permission Blocks" href="/user-guide/permission-blocks" description="Reusable scope, effect, action, and condition sets." />
+  <Card title="Roles" href="/user-guide/roles" description="Named collections of permission blocks." />
+  <Card title="Direct Policies" href="/user-guide/direct-policies" description="Advanced subject-to-permission-block grants." />
+  <Card title="Authorization" href="/user-guide/authorization" description="The authorization debugger — explain any allow or deny decision." />
+  <Card title="Audit" href="/user-guide/audit" description="Immutable log of identity and authorization activity, with CSV export." />
+  <Card title="Operations" href="/user-guide/operations" description="System health and signing key rotation." />
+  <Card title="Developer Tools" href="/user-guide/developer" description="The API Builder (custom endpoints) and the GraphQL Playground." />
+  <Card title="Account" href="/user-guide/account" description="Profile settings, password, theme, and personal access tokens." />
+</Cards>
+
+## Conventions used in this guide
+
+- **Bold** text names a UI label, field, button, or tab exactly as it appears on screen.
+- `Code` text is a value you type, a URL path, or a raw field value.
+- Screenshots are captured in the light theme; use the account menu's **Theme** switcher
+  (see [Account](/user-guide/account)) if your instance is in dark mode.
+- Row actions (**Inspect**, **Edit**, **Disable**, **Delete**, and similar) appear at the end
+  of each table row and are described once per page rather than repeated per screenshot.

@@ -1,0 +1,72 @@
+---
+title: Authorization
+description: The authorization debugger — explain any allow or deny decision with full reasoning.
+---
+
+The **Authorization** page (`/authz`) is Atom's authorization debugger. It builds one
+request — "who wants to do what on which target" — and shows exactly which
+[permission blocks](/user-guide/permission-blocks), roles, or direct policies matched,
+skipped, or denied it. Because Atom performs online authorization (no cached permissions in
+tokens), this debugger reflects the same live decision the PDP would return to any API caller
+right now.
+
+## Building a request
+
+![Authorization debugger, empty, with Explain decision highlighted](/img/user-guide/authorization/authz-explain-highlight.png)
+
+- **Who** (required) — search and select the subject entity making the request.
+- **Can do** (required) — the action name, from the platform catalog (see
+  [Actions](/user-guide/actions)).
+- **Target type** (required) — currently `Resource`; described as "a channel, rule, report,
+  alarm, or other resource."
+- **Resource** (required) — search and select the target resource.
+- **Optional context JSON** — extra request attributes evaluated by conditional (ABAC)
+  permissions. Leave `{}` for a normal check.
+
+A **REQUEST PREVIEW** line updates live as you fill in each field: "*Selected subject* wants
+to *selected action* on *selected target*."
+
+Click **Explain decision**.
+
+![Request fully filled in before explaining](/img/user-guide/authorization/authz-request-filled.png)
+
+## Reading an Allowed decision
+
+A green **Allowed** banner appears with the resolved reason (for example `allowed`), followed
+by:
+
+- **Matched permission** — the specific permission block that granted the request: its
+  **EFFECT** (`Allow`), **ACTION**, what it **APPLIES TO** (for example `exact object <id>`),
+  and **VIA** (`Direct assignment or policy` or an inherited role/principal group path).
+- **Permissions checked** — every other permission block considered, each marked either as
+  contributing to the allow or **Skipped — Action not covered by this grant** when it matched
+  scope but not the requested action.
+
+![Allowed decision with matched-permission detail](/img/user-guide/authorization/authz-decision-allowed.png)
+
+## Reading a Denied decision
+
+A red **Denied** banner appears with the reason (for example `no matching allow policy`).
+**Matched permission** shows "No permissions returned," and **Permissions checked** lists
+every candidate block or inherited role that was evaluated and why each one didn't apply —
+including grants inherited through principal-group membership, labeled **VIA** `Inherited
+through principal group "<name>"`.
+
+![Denied decision with skipped-permission detail](/img/user-guide/authorization/authz-decision-denied.png)
+
+This is the fastest way to answer "why was this denied?" without reverse-engineering roles
+and permission blocks by hand — every skipped grant is shown, not just the one that would
+have worked.
+
+## Jumping in from other pages
+
+Rather than searching for a subject or target from scratch, use the **Check authorization**
+shortcut on an [entity's](/user-guide/entities) or [resource's](/user-guide/resources)
+**Inspect** view — it opens this page with **Who** or **Resource** pre-filled via the URL
+(`?subjectId=...` or `?targetKind=resource&targetId=...`).
+
+## Every decision is audited
+
+Each explanation you run is itself recorded — open [Audit](/user-guide/audit) and filter by
+event `authz.explain` to see every check you've made, including its outcome (`allow`/`deny`)
+and full request details.
