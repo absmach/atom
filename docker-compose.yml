@@ -77,8 +77,10 @@ services:
       ATOM_OIDC_PROVIDERS: ${ATOM_OIDC_PROVIDERS:-}
       ATOM_LOG_LEVEL: ${ATOM_LOG_LEVEL:-${RUST_LOG:-info}}
       ATOM_LOG_FORMAT: ${ATOM_LOG_FORMAT:-text}
+      ATOM_EMAIL_TEMPLATES_DIR: ${ATOM_EMAIL_TEMPLATES_DIR:-/email-templates}
     volumes:
       - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
+      - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
     ports:
       - "${ATOM_HTTP_PORT:-8080}:${ATOM_HTTP_PORT:-8080}"
       - "${ATOM_GRPC_PORT:-8081}:${ATOM_GRPC_PORT:-8081}"
@@ -152,8 +154,10 @@ services:
       ATOM_OIDC_PROVIDERS: ${ATOM_OIDC_PROVIDERS:-}
       ATOM_LOG_LEVEL: ${ATOM_LOG_LEVEL:-${RUST_LOG:-info}}
       ATOM_LOG_FORMAT: ${ATOM_LOG_FORMAT:-text}
+      ATOM_EMAIL_TEMPLATES_DIR: ${ATOM_EMAIL_TEMPLATES_DIR:-/email-templates}
     volumes:
       - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
+      - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
     ports:
       - "${ATOM_DEV_HTTP_PORT:-8081}:${ATOM_DEV_HTTP_PORT:-8081}"
       - "${ATOM_DEV_GRPC_PORT:-18081}:${ATOM_DEV_GRPC_PORT:-18081}"

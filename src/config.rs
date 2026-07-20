@@ -54,6 +54,12 @@ pub struct Config {
     pub oauth_error_redirect: String,
     pub oidc_providers: Vec<OidcProviderConfig>,
     pub smtp: Option<SmtpConfig>,
+    /// Operator-mounted directory overriding the built-in email templates
+    /// shipped at `mail::DEFAULT_TEMPLATES_DIR`. `None` means every template
+    /// uses its built-in default. Files present here take precedence
+    /// per-file, so an override directory need only contain the templates an
+    /// operator actually wants to customize.
+    pub email_templates_dir: Option<String>,
     pub email_verification_expiry_secs: u64,
     pub invitation_expiry_secs: u64,
     pub oauth_state_expiry_secs: u64,
@@ -444,6 +450,7 @@ impl Config {
                 .unwrap_or_else(|_| ui_auth_callback.clone()),
             oidc_providers: parse_oidc_providers()?,
             smtp: smtp_from_env(),
+            email_templates_dir: nonempty_env("ATOM_EMAIL_TEMPLATES_DIR"),
             email_verification_expiry_secs: env_u64("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS", 86_400),
             invitation_expiry_secs: env_u64("ATOM_INVITATION_EXPIRY_SECS", 604_800),
             oauth_state_expiry_secs: env_u64("ATOM_OAUTH_STATE_EXPIRY_SECS", 600),
@@ -513,6 +520,7 @@ impl Config {
             oauth_error_redirect: "http://localhost:8080".into(),
             oidc_providers: vec![],
             smtp: None,
+            email_templates_dir: None,
             email_verification_expiry_secs: 86_400,
             invitation_expiry_secs: 604_800,
             oauth_state_expiry_secs: 600,
@@ -1012,6 +1020,32 @@ mod tests {
     }
 
     #[test]
+    fn blank_email_templates_dir_env_is_treated_as_unset() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_EMAIL_TEMPLATES_DIR", "  ");
+
+        let cfg = Config::from_env().expect("config");
+        assert!(cfg.email_templates_dir.is_none());
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn email_templates_dir_env_is_read() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_EMAIL_TEMPLATES_DIR", "/email-templates");
+
+        let cfg = Config::from_env().expect("config");
+        assert_eq!(cfg.email_templates_dir.as_deref(), Some("/email-templates"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn graphql_introspection_opts_in_via_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -1152,6 +1186,7 @@ mod tests {
             "ATOM_GRPC_TLS_CERT_PATH",
             "ATOM_GRPC_TLS_KEY_PATH",
             "ATOM_GRPC_TLS_CLIENT_CA_PATH",
+            "ATOM_EMAIL_TEMPLATES_DIR",
         ] {
             std::env::remove_var(name);
         }

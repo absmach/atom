@@ -25,6 +25,7 @@ RUN apk add --no-cache ca-certificates libgcc \
 WORKDIR /app
 COPY --from=builder-release /app/target/release/atom /usr/local/bin/atom
 COPY migrations ./migrations
+COPY email-templates ./email-templates
 RUN chown -R atom:atom /app /usr/local/bin/atom
 USER atom
 EXPOSE 8080 8081
@@ -39,6 +40,7 @@ RUN apk add --no-cache ca-certificates libgcc \
 WORKDIR /app
 COPY --from=builder-dev /app/target/debug/atom /usr/local/bin/atom
 COPY migrations ./migrations
+COPY email-templates ./email-templates
 RUN chown -R atom:atom /app /usr/local/bin/atom
 USER atom
 EXPOSE 8080 8081
