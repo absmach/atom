@@ -1,6 +1,6 @@
 use anyhow::Context;
 use atom::{
-    audit, certs, config, db, grpc, identity, keys, metrics, purge, routes,
+    audit, bootstrap, certs, config, db, grpc, identity, keys, metrics, purge, routes,
     state::{self, GrpcRuntimeStatus},
 };
 use tracing_subscriber::EnvFilter;
@@ -24,6 +24,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(ref secret) = cfg.service_secret {
         bootstrap_password_credentials(&pool, cfg.service_entity_id, secret, "service").await?;
+    }
+
+    if let Some(ref path) = cfg.bootstrap_file {
+        let bootstrap_cfg = bootstrap::load(std::path::Path::new(path))?;
+        bootstrap::apply(&pool, &cfg.signing_keys, &bootstrap_cfg).await?;
+        tracing::info!("bootstrap file applied: {path}");
     }
 
     keys::bootstrap_if_needed(&pool, &cfg.signing_keys).await?;
