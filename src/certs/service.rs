@@ -355,7 +355,13 @@ pub async fn issue_certificate(
         params.not_before = not_before;
         params.not_after = not_after;
         params.use_authority_key_identifier_extension = true;
+        params.key_usages.clear();
         params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params.key_usages.push(KeyUsagePurpose::KeyEncipherment);
+        params.extended_key_usages.clear();
+        params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
         params
             .extended_key_usages
             .push(ExtendedKeyUsagePurpose::ClientAuth);
@@ -910,7 +916,11 @@ fn force_leaf_csr_params(params: &mut CertificateParams) {
     params.is_ca = IsCa::NoCa;
     params.key_usages.clear();
     params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    params.key_usages.push(KeyUsagePurpose::KeyEncipherment);
     params.extended_key_usages.clear();
+    params
+        .extended_key_usages
+        .push(ExtendedKeyUsagePurpose::ServerAuth);
     params
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ClientAuth);
@@ -1406,10 +1416,19 @@ mod tests {
         force_leaf_csr_params(&mut params);
 
         assert!(matches!(params.is_ca, IsCa::NoCa));
-        assert_eq!(params.key_usages, vec![KeyUsagePurpose::DigitalSignature]);
+        assert_eq!(
+            params.key_usages,
+            vec![
+                KeyUsagePurpose::DigitalSignature,
+                KeyUsagePurpose::KeyEncipherment
+            ]
+        );
         assert_eq!(
             params.extended_key_usages,
-            vec![ExtendedKeyUsagePurpose::ClientAuth]
+            vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth
+            ]
         );
     }
 
