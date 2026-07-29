@@ -35,6 +35,7 @@ use atom::{
         token::CreateAccessToken,
     },
     state::AppState,
+    tenants::repo as tenant_repo,
 };
 use common::{cache_client, pool};
 use serde_json::json;
@@ -1034,6 +1035,133 @@ async fn entity_delete_then_restore_immediately_rejects_a_pre_existing_access_to
         "an access token revoked by entity delete must stay rejected even once entity_status is \
          a cache hit again post-restore — this only fails if the credential cache entry wasn't \
          invalidated at delete time and survived as a stale 'active' hit"
+    );
+}
+
+// ─── Enumerate-before-lock race (session/credential bulk invalidation) ─────
+
+/// Regression test for a review finding: `deleteEntity`'s session/access-token
+/// cache-key enumeration used to run via a plain pool query *before* any
+/// transaction or lock was taken. A session or access-token credential
+/// created for the entity concurrently — after that enumeration but before
+/// the delete's own revoke ran — was never included in the cache barrier and
+/// could keep serving as a valid cache hit indefinitely (past the delete, and
+/// even across a later `restoreEntity`), despite being revoked in Postgres.
+/// This is the identical race shape already closed for group-membership
+/// invalidation (see `concurrent_group_membership_change_serializes_against_
+/// the_group_subject_lock` below), just previously unfixed for
+/// sessions/credentials.
+///
+/// Fixed by moving the enumeration inside the same transaction as the
+/// status-flip `UPDATE`
+/// (`identity::repo::deactivate_entity_and_collect_revocation_ids_in_tx`),
+/// which takes an exclusive lock on the entity row — the same lock
+/// `create_session`/`create_access_token` take (via `lock_active_entity`)
+/// before inserting. As with the group-membership fix, an end-to-end test
+/// racing a real `create_session` against a real `deleteEntity` mutation
+/// can't actually distinguish fixed from unfixed (a post-hoc read is always a
+/// fresh cold-cache load reflecting final Postgres state); this test instead
+/// calls the new function directly and proves there is no window in which a
+/// concurrent `create_session` can slip past it uncounted: either it's
+/// blocked until the transaction commits, or (once committed) it correctly
+/// fails against the now-deactivated entity — there is no third outcome
+/// where it silently succeeds outside the transaction's lock.
+#[tokio::test]
+#[ignore]
+async fn concurrent_session_creation_cannot_evade_the_entity_delete_enumeration() {
+    let p = pool().await;
+    let entity = active_entity(&p, "service").await;
+
+    let mut tx = p.begin().await.expect("begin tx");
+    let (session_ids, credential_ids) =
+        identity_repo::deactivate_entity_and_collect_revocation_ids_in_tx(&mut tx, entity, None)
+            .await
+            .expect("lock, deactivate, and enumerate");
+    assert!(
+        session_ids.is_empty() && credential_ids.is_empty(),
+        "no sessions/credentials exist yet for this fresh entity"
+    );
+
+    // `create_session` takes the same entity-row lock before inserting, so it
+    // must block until the transaction above commits — not race ahead of the
+    // still-open delete transaction and create a session the enumeration has
+    // already missed.
+    let p2 = p.clone();
+    let handle =
+        tokio::spawn(async move { identity_repo::create_session(&p2, entity, 3600).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !handle.is_finished(),
+        "create_session must block on the same entity-row lock the delete's enumeration holds, \
+         not commit a session the enumeration has already missed"
+    );
+
+    tx.commit().await.expect("commit lock-holding tx");
+
+    // Once committed, the entity is deactivated (the same effect
+    // `deleteEntity`'s cache-aware path has by this point). The
+    // previously-blocked `create_session` must now correctly fail rather than
+    // slip through and create a session outside of any cache barrier the
+    // delete established.
+    let outcome = handle.await.expect("join create_session task");
+    assert!(
+        outcome.is_err(),
+        "create_session must fail once the entity has been deactivated by the transaction it \
+         was blocked on — succeeding here would mean a session was created in a window the \
+         delete's enumeration could never see, exactly the race this fix closes"
+    );
+}
+
+/// Tenant-level counterpart to the test above: `deleteTenant`'s session
+/// cache-key enumeration used to run via a plain pool query before any
+/// transaction/lock was taken, so a session created for a member entity in
+/// the window between enumeration and the tenant's own bulk revoke was never
+/// included in the cache barrier. Fixed by moving the enumeration inside the
+/// same transaction as the tenant's status-flip `UPDATE`
+/// (`tenants::repo::deactivate_tenant_and_collect_session_ids_in_tx`), which
+/// takes an exclusive lock on the tenant row — the same lock
+/// `lock_active_entity` takes (via `lock_optional_active_tenant`) before any
+/// session/credential can be created for *any* entity in the tenant.
+#[tokio::test]
+#[ignore]
+async fn concurrent_session_creation_cannot_evade_the_tenant_delete_enumeration() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let entity = active_entity_in_tenant(&p, tenant_id, "service").await;
+
+    let mut tx = p.begin().await.expect("begin tx");
+    let (_tenant, session_ids) =
+        tenant_repo::deactivate_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id, None)
+            .await
+            .expect("lock, deactivate, and enumerate");
+    assert!(
+        session_ids.is_empty(),
+        "no sessions exist yet for this fresh tenant's member"
+    );
+
+    let p2 = p.clone();
+    let handle =
+        tokio::spawn(async move { identity_repo::create_session(&p2, entity, 3600).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !handle.is_finished(),
+        "create_session for an entity in this tenant must block on the tenant-row lock the \
+         delete's enumeration holds, not commit a session the enumeration has already missed"
+    );
+
+    tx.commit().await.expect("commit lock-holding tx");
+
+    // Once committed, the tenant is deleted (so `lock_active_entity`'s own
+    // `lock_optional_active_tenant` check fails) — the previously-blocked
+    // `create_session` must now correctly fail rather than slip through.
+    let outcome = handle.await.expect("join create_session task");
+    assert!(
+        outcome.is_err(),
+        "create_session must fail once the tenant has been deactivated by the transaction it \
+         was blocked on — succeeding here would mean a session was created in a window the \
+         delete's enumeration could never see, exactly the race this fix closes"
     );
 }
 

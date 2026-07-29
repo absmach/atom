@@ -82,3 +82,39 @@ where
     }
     result
 }
+
+/// Establishes a barrier on every `(category, keys)` group, in order. Used by
+/// callers that already hold an open `Transaction` across their own
+/// lock/enumerate/mutate/commit sequence (so the barrier can't be established
+/// via a `FnOnce` closure the way [`guarded_mutation`]/[`guarded_multi_mutation`]
+/// do — a closure can't cleanly borrow `&mut Transaction` across an await
+/// point on stable Rust). If a later group's barrier can't be established, the
+/// ones already established are cleared immediately rather than left to
+/// self-heal on their barrier TTL. Pair with [`end_all`], called
+/// unconditionally after the mutation regardless of outcome.
+pub async fn begin_all(
+    cache: &CacheClient,
+    groups: &[(CacheCategory, &[String])],
+) -> Result<(), AppError> {
+    let mut established = Vec::with_capacity(groups.len());
+    for &(category, keys) in groups {
+        match cache.begin(category, keys).await {
+            Ok(()) => established.push((category, keys)),
+            Err(err) => {
+                for (category, keys) in established {
+                    cache.end(category, keys).await;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Clears the barrier on every `(category, keys)` group established by a
+/// prior [`begin_all`] call. Always best-effort, mirroring [`CacheClient::end`].
+pub async fn end_all(cache: &CacheClient, groups: &[(CacheCategory, &[String])]) {
+    for &(category, keys) in groups {
+        cache.end(category, keys).await;
+    }
+}

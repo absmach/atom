@@ -399,18 +399,8 @@ impl TenantMutation {
         };
         let details = serde_json::json!({});
 
-        let result = async {
+        let result: std::result::Result<(), AppError> = async {
             crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
-            // Enumerate *before* the delete revokes them — the revoke
-            // UPDATE's own `WHERE revoked_at IS NULL` no longer matches these
-            // rows afterward.
-            let session_ids =
-                tenant_repo::tenant_active_session_ids(&state.pool, tenant_id).await?;
-            let session_keys: Vec<String> = session_ids
-                .iter()
-                .map(|id| crate::cache::keys::session(*id))
-                .collect();
-            let tenant_status_keys = [crate::cache::keys::tenant_status(tenant_id)];
             // `soft_delete_tenant` is a separate function from
             // `change_tenant_status` (it also bulk-revokes sessions and
             // credentials). `tenant_status` invalidation alone is *not*
@@ -421,29 +411,62 @@ impl TenantMutation {
             // stale session becomes a full cache hit and authenticates
             // despite being revoked in Postgres. Credentials don't need the
             // same treatment here — `restore_tenant`'s own invalidation
-            // (see `tenant_restore_reactivated_credential_ids`) already
-            // covers the credential side by the time a restore could ever
-            // matter.
-            crate::cache::invalidate::guarded_multi_mutation(
-                state.cache.as_deref(),
-                &[
-                    (
-                        crate::cache::CacheCategory::TenantStatus,
-                        &tenant_status_keys,
-                    ),
-                    (crate::cache::CacheCategory::Session, &session_keys),
-                ],
-                || {
-                    tenant_repo::soft_delete_tenant_with_audit(
-                        &state.pool,
-                        state.config.events.enabled(),
-                        Some(auth.entity_id),
-                        tenant_id,
-                        Some(auth.entity_id),
-                    )
-                },
+            // (see `reactivate_tenant_and_collect_credential_ids_in_tx`)
+            // already covers the credential side by the time a restore could
+            // ever matter.
+            //
+            // Session ids are enumerated *inside* the same transaction as the
+            // status flip (see
+            // `deactivate_tenant_and_collect_session_ids_in_tx`), not via a
+            // pre-transaction pool query — that lock is what stops a
+            // concurrently-created session from being missed and left
+            // permanently uninvalidated. See `src/cache/mod.rs`'s
+            // consistency model.
+            let Some(cache) = state.cache.as_deref() else {
+                tenant_repo::soft_delete_tenant_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    tenant_id,
+                    Some(auth.entity_id),
+                )
+                .await?;
+                return Ok(());
+            };
+            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+            let (_tenant, session_ids) =
+                tenant_repo::deactivate_tenant_and_collect_session_ids_in_tx(
+                    &mut tx,
+                    tenant_id,
+                    Some(auth.entity_id),
+                )
+                .await?;
+            let session_keys: Vec<String> = session_ids
+                .iter()
+                .map(|id| crate::cache::keys::session(*id))
+                .collect();
+            let tenant_status_keys = [crate::cache::keys::tenant_status(tenant_id)];
+            let groups: [(crate::cache::CacheCategory, &[String]); 2] = [
+                (
+                    crate::cache::CacheCategory::TenantStatus,
+                    &tenant_status_keys,
+                ),
+                (crate::cache::CacheCategory::Session, &session_keys),
+            ];
+            crate::cache::invalidate::begin_all(cache, &groups).await?;
+            let outcome = tenant_repo::finish_tenant_soft_delete_in_tx(
+                &mut tx,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                tenant_id,
             )
-            .await
+            .await;
+            let outcome = match outcome {
+                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
+                Err(err) => Err(err),
+            };
+            crate::cache::invalidate::end_all(cache, &groups).await;
+            outcome
         }
         .await;
 
@@ -490,34 +513,79 @@ impl TenantMutation {
             // overridden by a fresher tenant_status check afterward, so it
             // must be invalidated explicitly or a just-restored API key
             // keeps getting denied until its own cache entry's TTL expires.
-            let reactivated_credential_ids =
-                tenant_repo::tenant_restore_reactivated_credential_ids(&state.pool, tenant_id)
-                    .await?;
-            let credential_keys: Vec<String> = reactivated_credential_ids
+            //
+            // Credential ids are enumerated *inside* the same transaction as
+            // the status flip (see
+            // `reactivate_tenant_and_collect_credential_ids_in_tx`), not via
+            // a pre-transaction pool query, mirroring `delete_tenant`'s fix
+            // for the same class of race — see `src/cache/mod.rs`'s
+            // consistency model.
+            let Some(cache) = state.cache.as_deref() else {
+                return tenant_repo::restore_tenant_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    tenant_id,
+                    Some(auth.entity_id),
+                )
+                .await;
+            };
+            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+            let (tenant, credential_ids) =
+                tenant_repo::reactivate_tenant_and_collect_credential_ids_in_tx(
+                    &mut tx,
+                    tenant_id,
+                    Some(auth.entity_id),
+                )
+                .await?;
+            let credential_keys: Vec<String> = credential_ids
                 .iter()
                 .map(|id| crate::cache::keys::credential(*id))
                 .collect();
             let tenant_status_keys = [crate::cache::keys::tenant_status(tenant_id)];
-            crate::cache::invalidate::guarded_multi_mutation(
-                state.cache.as_deref(),
-                &[
-                    (
-                        crate::cache::CacheCategory::TenantStatus,
-                        &tenant_status_keys,
-                    ),
-                    (crate::cache::CacheCategory::Credential, &credential_keys),
-                ],
-                || {
-                    tenant_repo::restore_tenant_with_audit(
-                        &state.pool,
-                        state.config.events.enabled(),
-                        Some(auth.entity_id),
-                        tenant_id,
-                        Some(auth.entity_id),
-                    )
+            let groups: [(crate::cache::CacheCategory, &[String]); 2] = [
+                (
+                    crate::cache::CacheCategory::TenantStatus,
+                    &tenant_status_keys,
+                ),
+                (crate::cache::CacheCategory::Credential, &credential_keys),
+            ];
+            crate::cache::invalidate::begin_all(cache, &groups).await?;
+            let outcome = tenant_repo::finish_tenant_restore_in_tx(
+                &mut tx,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                tenant_id,
+            )
+            .await;
+            let outcome = match outcome {
+                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
+                Err(err) => Err(err),
+            };
+            crate::cache::invalidate::end_all(cache, &groups).await;
+            outcome?;
+            // Mirrors `restore_tenant_with_audit`'s own post-commit audit
+            // write (fire-and-forget, after the mutation durably commits) —
+            // see `audit::commit_with_audit`'s doc comment. Only needed on
+            // this locked path; the cache-disabled fallback above already
+            // gets it from `restore_tenant_with_audit` itself.
+            audit::write(
+                &state.pool,
+                false,
+                audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: Some(tenant.id),
+                    target_kind: Some("tenant"),
+                    target_id: Some(tenant.id),
+                    event: "tenant.restore",
+                    outcome: crate::models::enums::AuditOutcome::Allow,
+                    details: serde_json::json!({
+                        "tenant_name": tenant.name,
+                    }),
                 },
             )
-            .await
+            .await;
+            Ok(tenant)
         }
         .await;
 

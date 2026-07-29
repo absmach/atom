@@ -1079,31 +1079,28 @@ pub async fn entity_active_access_token_ids(
     .map_err(db_err)
 }
 
-/// Soft-delete an entity: mark it inactive, set the tombstone, and immediately
-/// cut off access by revoking its credentials and active sessions. Physical
-/// removal is deferred to the purge cron. Hard delete (the old behavior) relied
-/// on FK cascade for the credential/session cleanup, so the revocations are now
-/// explicit.
-pub async fn delete_entity_with_audit(
-    pool: &PgPool,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
+/// Flips the entity to inactive/tombstoned and, in the *same* transaction,
+/// enumerates the exact session and access-token credential ids this delete
+/// is about to revoke. Callers invalidate `atom:v1:session:*` /
+/// `atom:v1:credential:*` cache entries for these before calling
+/// [`finish_entity_deletion_in_tx`].
+///
+/// The status-flip `UPDATE` below takes an exclusive row lock on the entity —
+/// the same lock `create_session`/`create_access_token` take (via
+/// `lock_active_entity`) before inserting. So a session or access token
+/// created concurrently for this entity either committed before this `UPDATE`
+/// acquired the lock (and is therefore visible to the enumeration below,
+/// which runs after it, in the same transaction) or is blocked until this
+/// transaction commits (and then fails, since the entity is no longer
+/// active). Enumerating via a plain pre-transaction pool query — the previous
+/// shape of this code — could miss a session/credential created in that
+/// window, leaving its cache entry uninvalidated indefinitely. See
+/// `src/cache/mod.rs`'s consistency model.
+pub async fn deactivate_entity_and_collect_revocation_ids_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
     deleted_by: Option<Uuid>,
-) -> Result<(), AppError> {
-    ensure_not_config_managed_entity(pool, id).await?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
-
-    let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_err)?;
-    let Some(tenant_id) = tenant_id else {
-        return Err(AppError::not_found(format!("entity {id} not found")));
-    };
-
+) -> Result<(Vec<Uuid>, Vec<Uuid>), AppError> {
     let result = sqlx::query(
         "UPDATE entities
          SET status = 'inactive', deleted_at = now(), deleted_by = $2, updated_at = now()
@@ -1111,14 +1108,46 @@ pub async fn delete_entity_with_audit(
     )
     .bind(id)
     .bind(deleted_by)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("entity {id} not found")));
     }
 
-    let revocation_actor_id = actor_id.or(deleted_by);
+    let session_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL")
+            .bind(id)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    // Restricted to the one credential kind this codebase caches under
+    // `CacheCategory::Credential` (certificates are tracked via the CRL
+    // instead, not this cache).
+    let credential_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM credentials WHERE entity_id = $1 AND status = 'active' AND kind = $2",
+    )
+    .bind(id)
+    .bind(crate::models::enums::CredentialKind::AccessToken)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    Ok((session_ids, credential_ids))
+}
+
+/// Finishes the entity soft-delete started by
+/// [`deactivate_entity_and_collect_revocation_ids_in_tx`] in the same
+/// transaction: revokes active credentials (all kinds) and sessions, and
+/// tombstones the email. Does not commit — the caller commits after this
+/// succeeds, once the cache barrier established on the enumerated ids covers
+/// the whole transaction.
+pub async fn finish_entity_deletion_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<(), AppError> {
     let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"WITH revoked AS (
                UPDATE credentials
@@ -1138,15 +1167,18 @@ pub async fn delete_entity_with_audit(
            SELECT id, issuer_id FROM revoked WHERE kind = 'certificate'"#,
     )
     .bind(id)
-    .bind(revocation_actor_id)
-    .fetch_all(&mut *tx)
+    .bind(actor_id)
+    .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
+    if !revoked_certificates.is_empty() {
+        crate::certs::repo::mark_crl_dirty_tx(tx).await?;
+    }
     sqlx::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
@@ -1156,33 +1188,37 @@ pub async fn delete_entity_with_audit(
          WHERE entity_id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
-    let event = crate::audit::AuditEvent {
+    let tenant_id: Option<Uuid> = sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id,
-        target_kind: Some("entity"),
+        target_kind: "entity",
         target_id: Some(id),
         event: "entity.delete",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({
-            "certificate_revocations": {
-                "count": revoked_certificates.len(),
-                "credential_ids": revoked_certificates
-                    .iter()
-                    .map(|(credential_id, _)| credential_id)
-                    .collect::<Vec<_>>(),
-                "issuer_ids": revoked_certificates
-                    .iter()
-                    .filter_map(|(_, issuer_id)| *issuer_id)
-                    .collect::<Vec<_>>(),
-                "reason": "entity_deleted",
-            }
-        }),
     };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
+    let details = serde_json::json!({
+        "certificate_revocations": {
+            "count": revoked_certificates.len(),
+            "credential_ids": revoked_certificates
+                .iter()
+                .map(|(credential_id, _)| credential_id)
+                .collect::<Vec<_>>(),
+            "issuer_ids": revoked_certificates
+                .iter()
+                .filter_map(|(_, issuer_id)| *issuer_id)
+                .collect::<Vec<_>>(),
+            "reason": "entity_deleted",
+        }
+    });
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
@@ -1192,6 +1228,50 @@ pub async fn delete_entity(
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     delete_entity_with_audit(pool, false, None, id, deleted_by).await
+}
+
+/// Soft-delete an entity: mark it inactive, set the tombstone, and immediately
+/// cut off access by revoking its credentials and active sessions. Physical
+/// removal is deferred to the purge cron. Hard delete (the old behavior) relied
+/// on FK cascade for the credential/session cleanup, so the revocations are now
+/// explicit.
+///
+/// Used directly only when no cache is configured; the cache-aware path
+/// (`graphql::entities::delete_entity`) calls
+/// [`deactivate_entity_and_collect_revocation_ids_in_tx`] and
+/// [`finish_entity_deletion_in_tx`] itself so it can establish the cache
+/// barrier between them.
+pub async fn delete_entity_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    deactivate_entity_and_collect_revocation_ids_in_tx(&mut tx, id, deleted_by).await?;
+    finish_entity_deletion_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    tx.commit().await.map_err(db_err)?;
+    // The audit_logs row is deliberately written after commit (fire-and-forget,
+    // never blocks an already-valid delete) — see `audit::commit_with_audit`'s
+    // doc comment. The outbox row, by contrast, went in atomically with the
+    // mutation above via `observe_in_tx`.
+    let tenant_id = get_entity(pool, id).await.ok().and_then(|e| e.tenant_id);
+    crate::audit::write(
+        pool,
+        false,
+        crate::audit::AuditEvent {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: Some("entity"),
+            target_id: Some(id),
+            event: "entity.delete",
+            outcome: crate::models::enums::AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        },
+    )
+    .await;
+    Ok(())
 }
 
 pub async fn restore_entity_with_audit(

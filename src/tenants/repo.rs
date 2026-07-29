@@ -585,48 +585,28 @@ pub async fn update_tenant(
     update_tenant_with_audit(pool, false, None, id, req, updated_by).await
 }
 
-/// The exact set of active session ids `soft_delete_tenant` is about to
-/// revoke — mirrors that function's `UPDATE sessions` `WHERE` clause
-/// precisely, so callers can invalidate `atom:v1:session:*` cache entries for
-/// them *before* the delete runs (afterward, `revoked_at IS NULL` no longer
-/// matches these rows). See `src/cache/mod.rs`'s consistency model.
-pub async fn tenant_active_session_ids(
-    pool: &PgPool,
-    tenant_id: Uuid,
-) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar(
-        r#"SELECT id FROM sessions
-           WHERE revoked_at IS NULL
-             AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)"#,
-    )
-    .bind(tenant_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
-}
-
-/// Soft-delete a tenant: mark `status = deleted`, stamp the tombstone, and
-/// immediately revoke every active credential and session of entities in the
-/// tenant. Physical removal (and the entity cascade) is deferred to the purge
-/// cron.
-pub async fn soft_delete_tenant(
-    pool: &PgPool,
+/// Flips the tenant to `deleted` and, in the *same* transaction, enumerates
+/// the exact active session ids of its member entities that
+/// [`finish_tenant_soft_delete_in_tx`] is about to revoke. Callers invalidate
+/// `atom:v1:session:*` cache entries for these before calling it.
+///
+/// The status-flip `UPDATE` below takes an exclusive row lock on the tenant —
+/// the same lock `lock_active_tenant`/`lock_optional_active_tenant` take
+/// (transitively, via `lock_active_entity`) before any session or credential
+/// can be created for an entity in this tenant. So a session created
+/// concurrently for a member entity either committed before this `UPDATE`
+/// acquired the lock (and is therefore visible to the enumeration below,
+/// which runs after it, in the same transaction) or is blocked until this
+/// transaction commits (and then fails, since the tenant is no longer
+/// active). Enumerating via a plain pre-transaction pool query — the previous
+/// shape of this code — could miss a session created in that window, leaving
+/// its cache entry uninvalidated indefinitely. See `src/cache/mod.rs`'s
+/// consistency model.
+pub async fn deactivate_tenant_and_collect_session_ids_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
     deleted_by: Option<Uuid>,
-) -> Result<Tenant, AppError> {
-    soft_delete_tenant_with_audit(pool, false, None, id, deleted_by).await
-}
-
-pub async fn soft_delete_tenant_with_audit(
-    pool: &PgPool,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-    deleted_by: Option<Uuid>,
-) -> Result<Tenant, AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
-
+) -> Result<(Tenant, Vec<Uuid>), AppError> {
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = 'deleted', deleted_at = now(), deleted_by = $2,
@@ -636,14 +616,42 @@ pub async fn soft_delete_tenant_with_audit(
     ))
     .bind(id)
     .bind(deleted_by)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
         other => AppError::Database(other),
     })?;
 
-    let revocation_actor_id = actor_id.or(deleted_by);
+    let session_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM sessions
+           WHERE revoked_at IS NULL
+             AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)"#,
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    Ok((tenant, session_ids))
+}
+
+/// Finishes the tenant soft-delete started by
+/// [`deactivate_tenant_and_collect_session_ids_in_tx`] in the same
+/// transaction: revokes every active credential and session belonging to the
+/// tenant's entities. Does not commit — the caller commits after this
+/// succeeds, once the cache barrier established on the enumerated session ids
+/// covers the whole transaction.
+pub async fn finish_tenant_soft_delete_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<(), AppError> {
+    // Stamp the tenant-delete marker on every revoked credential (not just
+    // certificates) so restore_tenant can reverse exactly the revocations this
+    // delete caused, without disturbing credentials revoked earlier for other
+    // reasons.
     let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"WITH revoked AS (
                UPDATE credentials c
@@ -662,10 +670,13 @@ pub async fn soft_delete_tenant_with_audit(
            SELECT id, issuer_id FROM revoked WHERE kind = 'certificate'"#,
     )
     .bind(id)
-    .bind(revocation_actor_id)
-    .fetch_all(&mut *tx)
+    .bind(actor_id)
+    .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
+    if !revoked_certificates.is_empty() {
+        crate::certs::repo::mark_crl_dirty_tx(tx).await?;
+    }
 
     sqlx::query(
         "UPDATE sessions SET revoked_at = now()
@@ -673,7 +684,7 @@ pub async fn soft_delete_tenant_with_audit(
            AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
@@ -698,7 +709,40 @@ pub async fn soft_delete_tenant_with_audit(
             "reason": "tenant_deleted",
         }
     });
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
+    Ok(())
+}
+
+/// Soft-delete a tenant: mark `status = deleted`, stamp the tombstone, and
+/// immediately revoke every active credential and session of entities in the
+/// tenant. Physical removal (and the entity cascade) is deferred to the purge
+/// cron.
+pub async fn soft_delete_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    soft_delete_tenant_with_audit(pool, false, None, id, deleted_by).await
+}
+
+/// Used directly only when no cache is configured; the cache-aware path
+/// (`graphql::tenants::delete_tenant`) calls
+/// [`deactivate_tenant_and_collect_session_ids_in_tx`] and
+/// [`finish_tenant_soft_delete_in_tx`] itself so it can establish the cache
+/// barrier between them.
+pub async fn soft_delete_tenant_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let (tenant, _session_ids) =
+        deactivate_tenant_and_collect_session_ids_in_tx(&mut tx, id, deleted_by).await?;
+    finish_tenant_soft_delete_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    tx.commit().await.map_err(db_err)?;
     Ok(tenant)
 }
 
@@ -719,46 +763,31 @@ pub async fn soft_delete_tenant_with_audit(
 ///
 /// Fails with a conflict if the tenant name/alias was re-taken by a live tenant
 /// during the retention window.
-/// The exact set of credential ids `restore_tenant` is about to reactivate —
-/// mirrors that function's `UPDATE credentials` `WHERE` clause precisely, so
-/// callers can invalidate `atom:v1:credential:*` cache entries for them
-/// *before* running the restore (see `src/cache/mod.rs`'s consistency
-/// model). A stale cached "revoked" credential is a false-deny (fails
-/// closed, not a security hole) but is still worth fixing: unlike a tenant
-/// or entity status flip, which a later-checked fresh field can catch
-/// regardless of earlier stale fields, `verify_api_key_snapshot` checks the
-/// credential's own status first — a stale value there is never overridden
-/// by anything checked afterward.
-pub async fn tenant_restore_reactivated_credential_ids(
-    pool: &PgPool,
-    tenant_id: Uuid,
-) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar(
-        r#"SELECT c.id
-           FROM credentials c
-           JOIN entities e ON c.entity_id = e.id
-           WHERE e.tenant_id = $1
-             AND e.deleted_at IS NULL
-             AND c.status = 'revoked'
-             AND c.kind <> 'certificate'
-             AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
-    )
-    .bind(tenant_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
-}
-
-pub async fn restore_tenant_with_audit(
-    pool: &PgPool,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
+///
+/// Flips the tenant back to `active` and, in the *same* transaction,
+/// enumerates the exact credential ids [`finish_tenant_restore_in_tx`] is
+/// about to reactivate — mirrors that function's `UPDATE credentials` `WHERE`
+/// clause precisely, so callers can invalidate `atom:v1:credential:*` cache
+/// entries for them (see `src/cache/mod.rs`'s consistency model). A stale
+/// cached "revoked" credential is a false-deny (fails closed, not a security
+/// hole) but is still worth fixing: unlike a tenant or entity status flip,
+/// which a later-checked fresh field can catch regardless of earlier stale
+/// fields, `verify_api_key_snapshot` checks the credential's own status first
+/// — a stale value there is never overridden by anything checked afterward.
+///
+/// The status-flip `UPDATE` below takes an exclusive row lock on the tenant,
+/// so the enumeration that follows it (in the same transaction) sees a
+/// consistent snapshot with respect to any concurrent restore/purge of the
+/// same tenant — mirroring the same lock-then-enumerate shape used by
+/// [`deactivate_tenant_and_collect_session_ids_in_tx`], even though (unlike
+/// that case) no *new* matching credential can appear here: only
+/// `soft_delete_tenant` ever stamps the `tenant_deleted` revocation reason,
+/// and it cannot run again against an already-deleted tenant.
+pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
     restored_by: Option<Uuid>,
-) -> Result<Tenant, AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
-
+) -> Result<(Tenant, Vec<Uuid>), AppError> {
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = 'active', deleted_at = NULL, deleted_by = NULL,
@@ -768,7 +797,7 @@ pub async fn restore_tenant_with_audit(
     ))
     .bind(id)
     .bind(restored_by)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
@@ -777,6 +806,35 @@ pub async fn restore_tenant_with_audit(
         other => restore_conflict(other),
     })?;
 
+    let credential_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT c.id
+           FROM credentials c
+           JOIN entities e ON c.entity_id = e.id
+           WHERE e.tenant_id = $1
+             AND e.deleted_at IS NULL
+             AND c.status = 'revoked'
+             AND c.kind <> 'certificate'
+             AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    Ok((tenant, credential_ids))
+}
+
+/// Finishes the tenant restore started by
+/// [`reactivate_tenant_and_collect_credential_ids_in_tx`] in the same
+/// transaction: reactivates exactly the credentials it enumerated. Does not
+/// commit — the caller commits after this succeeds, once the cache barrier
+/// established on those credential ids covers the whole transaction.
+pub async fn finish_tenant_restore_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<(), AppError> {
     sqlx::query(
         r#"UPDATE credentials c
            SET status = 'active',
@@ -790,21 +848,19 @@ pub async fn restore_tenant_with_audit(
              AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
-    let event = crate::audit::AuditEvent {
+    let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: Some(id),
-        target_kind: Some("tenant"),
+        target_kind: "tenant",
         target_id: Some(id),
         event: "tenant.restore",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
     };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
-    Ok(tenant)
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &serde_json::json!({})).await?;
+    Ok(())
 }
 
 pub async fn restore_tenant(
@@ -813,6 +869,44 @@ pub async fn restore_tenant(
     restored_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
     restore_tenant_with_audit(pool, false, None, id, restored_by).await
+}
+
+/// Used directly only when no cache is configured; the cache-aware path
+/// (`graphql::tenants::restore_tenant`) calls
+/// [`reactivate_tenant_and_collect_credential_ids_in_tx`] and
+/// [`finish_tenant_restore_in_tx`] itself so it can establish the cache
+/// barrier between them.
+pub async fn restore_tenant_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let (tenant, _credential_ids) =
+        reactivate_tenant_and_collect_credential_ids_in_tx(&mut tx, id, restored_by).await?;
+    finish_tenant_restore_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    tx.commit().await.map_err(db_err)?;
+    // The audit_logs row is deliberately written after commit (fire-and-forget,
+    // never blocks an already-valid restore) — see `audit::commit_with_audit`'s
+    // doc comment. The outbox row, by contrast, went in atomically with the
+    // mutation above via `observe_in_tx`.
+    crate::audit::write(
+        pool,
+        false,
+        crate::audit::AuditEvent {
+            actor_entity_id: actor_id,
+            tenant_id: Some(id),
+            target_kind: Some("tenant"),
+            target_id: Some(id),
+            event: "tenant.restore",
+            outcome: crate::models::enums::AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        },
+    )
+    .await;
+    Ok(tenant)
 }
 
 pub(crate) async fn tenant_purge_object_ids(
