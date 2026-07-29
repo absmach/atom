@@ -81,6 +81,7 @@ fn authed_scoped_with_credential(
         credential_id: Some(credential_id),
         scoped: true,
         ceiling: Some(std::sync::Arc::new(ceiling)),
+        cache: None,
     })
 }
 

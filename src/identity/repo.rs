@@ -1656,7 +1656,7 @@ pub(crate) async fn update_group_in_tx(
         return Err(AppError::not_found(format!("group {id} not found")));
     };
     crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
-    sqlx::query_as::<_, Group>(
+    let group = sqlx::query_as::<_, Group>(
         r#"WITH p AS (
              UPDATE principal_groups
              SET name        = COALESCE($2, name),
