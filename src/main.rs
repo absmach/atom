@@ -1,6 +1,6 @@
 use anyhow::Context;
 use atom::{
-    audit, bootstrap, callout, certs, config, db, events, grpc, http_server, identity, keys,
+    audit, bootstrap, cache, callout, certs, config, db, events, grpc, http_server, identity, keys,
     metrics, purge, routes,
     state::{self, GrpcRuntimeStatus},
 };
@@ -75,9 +75,10 @@ async fn main() -> anyhow::Result<()> {
 
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
+    let cache = init_cache(&cfg.cache).await?;
 
     let mut state =
-        state::AppState::new(pool, cfg.clone(), active_keys).with_callouts(callout_service);
+        state::AppState::new(pool, cfg.clone(), active_keys, cache).with_callouts(callout_service);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await
@@ -148,6 +149,29 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Connects the Redis-backed cache when enabled. A connect failure honors
+/// `ATOM_CACHE_FAIL_FAST_ON_STARTUP`: abort like an unreachable Postgres
+/// would, or log and continue cache-free (the recommended default — caching
+/// is a performance optimization, not a correctness dependency for reads).
+async fn init_cache(cfg: &config::CacheConfig) -> anyhow::Result<Option<cache::CacheClient>> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    match cache::CacheClient::connect(cfg).await {
+        Ok(client) => {
+            tracing::info!("cache enabled; connected to Redis");
+            Ok(Some(client))
+        }
+        Err(err) if cfg.fail_fast_on_startup => {
+            Err(err.context("cache connect failed and ATOM_CACHE_FAIL_FAST_ON_STARTUP=true"))
+        }
+        Err(err) => {
+            tracing::error!("cache connect failed, continuing without cache: {err}");
+            Ok(None)
+        }
+    }
 }
 
 fn init_tracing(logging: &config::LoggingConfig) -> anyhow::Result<()> {

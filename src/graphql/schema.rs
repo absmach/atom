@@ -644,6 +644,7 @@ mod tests {
                 primary,
                 standby: None,
             },
+            None,
         )
     }
 

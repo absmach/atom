@@ -79,6 +79,7 @@ pub struct SystemStatus {
     pub migrations: ComponentCheck,
     pub signing_keys: ComponentCheck,
     pub certificate_issuer: ComponentCheck,
+    pub cache: ComponentCheck,
     pub db_pool: DbPoolStatus,
     pub signing_key_state: Option<SigningKeyStatus>,
     pub audit_retention: AuditRetentionStatus,
@@ -101,6 +102,7 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let database = database_check(state).await;
     let migrations = migrations_check(state).await;
     let (signing_keys, signing_key_state) = signing_keys_check(state).await;
+    let cache = cache_check(state).await;
     let grpc_ready = grpc_check(state).await;
     let certificate_issuer = certificate_issuer_check(state).await;
     let ready = readiness_ok(
@@ -129,6 +131,7 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
         migrations,
         signing_keys,
         certificate_issuer,
+        cache,
         db_pool: db_pool_status(state),
         signing_key_state,
         audit_retention: audit_retention_status(state).await,
@@ -342,6 +345,34 @@ fn certificate_issuer_config_check(
     }
 }
 
+/// Never part of the hard readiness requirement (see `readiness_ok`) — caching
+/// is a performance optimization with a Postgres fallback for reads, so a down
+/// Redis must not fail `/health/ready`. While enabled, an unreachable Redis
+/// does refuse security-sensitive mutations (see `src/cache/mod.rs`); that
+/// distinction is noted in the message rather than folded into the readiness
+/// gate, which only concerns general request-serving availability.
+async fn cache_check(state: &AppState) -> ComponentCheck {
+    let Some(cache) = &state.cache else {
+        return ComponentCheck {
+            status: ComponentStatus::Disabled,
+            message: "cache disabled".to_string(),
+        };
+    };
+    match cache.ping().await {
+        Ok(()) => ComponentCheck {
+            status: ComponentStatus::Ok,
+            message: "cache reachable".to_string(),
+        },
+        Err(err) => ComponentCheck {
+            status: ComponentStatus::Degraded,
+            message: format!(
+                "cache unreachable: {err}; reads fall back to the database, but \
+                 security-sensitive mutations are refused until it recovers"
+            ),
+        },
+    }
+}
+
 async fn grpc_check(state: &AppState) -> ComponentCheck {
     let status = state.grpc_status().await;
     match status.state {
@@ -427,6 +458,7 @@ mod tests {
             migrations: check(ComponentStatus::Ok),
             signing_keys: check(ComponentStatus::Ok),
             certificate_issuer: check(ComponentStatus::Ok),
+            cache: check(ComponentStatus::Disabled),
             db_pool: DbPoolStatus {
                 max_connections: 0,
                 min_connections: 0,
