@@ -735,6 +735,7 @@ pub async fn request_password_reset(
 
 pub async fn reset_password(
     pool: &PgPool,
+    cache: Option<&crate::cache::CacheClient>,
     req: PasswordResetConfirmRequest,
 ) -> Result<(), AppError> {
     if let Some(confirm_password) = req.confirm_password.as_deref() {
@@ -781,53 +782,75 @@ pub async fn reset_password(
         .map_err(db_err)?;
     let password_hash = hash_secret(req.password.as_bytes())?;
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    if super::repo::lock_active_entity(&mut tx, entity_id)
-        .await?
-        .is_none()
-    {
-        return Err(AppError::bad_request("invalid password reset token"));
-    }
-    let updated = sqlx::query(
-        "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
-    )
-    .bind(token_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_err)?;
-    if updated.rows_affected() == 0 {
-        return Err(AppError::bad_request("password reset token expired"));
-    }
-    sqlx::query(
-        r#"UPDATE credentials
-           SET status = 'revoked'
-           WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#,
+    // Every currently-active session is about to be bulk-revoked below (by
+    // entity_id, not by session_id) — collect their cache keys first so the
+    // barrier can cover all of them, not just one.
+    let session_keys: Vec<String> = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(entity_id)
-    .execute(&mut *tx)
+    .fetch_all(pool)
     .await
-    .map_err(db_err)?;
-    sqlx::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
-           VALUES ($1, $2, $3, $4, $5)"#,
+    .map_err(db_err)?
+    .into_iter()
+    .map(crate::cache::keys::session)
+    .collect();
+
+    crate::cache::invalidate::guarded_mutation(
+        cache,
+        crate::cache::CacheCategory::Session,
+        &session_keys,
+        || async {
+            let mut tx = pool.begin().await.map_err(db_err)?;
+            if super::repo::lock_active_entity(&mut tx, entity_id)
+                .await?
+                .is_none()
+            {
+                return Err(AppError::bad_request("invalid password reset token"));
+            }
+            let updated = sqlx::query(
+                "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
+            )
+            .bind(token_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            if updated.rows_affected() == 0 {
+                return Err(AppError::bad_request("password reset token expired"));
+            }
+            sqlx::query(
+                r#"UPDATE credentials
+                   SET status = 'revoked'
+                   WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#,
+            )
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            sqlx::query(
+                r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
+                   VALUES ($1, $2, $3, $4, $5)"#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(entity_id)
+            .bind(CredentialKind::Password)
+            .bind(&email)
+            .bind(password_hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            sqlx::query(
+                "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(entity_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            tx.commit().await.map_err(db_err)?;
+            Ok(())
+        },
     )
-    .bind(Uuid::new_v4())
-    .bind(entity_id)
-    .bind(CredentialKind::Password)
-    .bind(email)
-    .bind(password_hash)
-    .execute(&mut *tx)
     .await
-    .map_err(db_err)?;
-    sqlx::query(
-        "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
-    )
-    .bind(entity_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
-    Ok(())
 }
 
 pub async fn oauth_start(

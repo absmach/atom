@@ -280,32 +280,39 @@ impl CredentialMutation {
             .into_iter()
             .map(permission_input_into_model)
             .collect::<Result<Vec<_>>>()?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        service::replace_access_token_permissions_in_tx(
-            &mut tx,
-            owner_id,
-            credential_id,
-            permissions,
-        )
-        .await
-        .map_err(gql_error)?;
-        audit::commit_with_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: audit_tenant_id,
-                target_kind: Some("credential"),
-                target_id: Some(credential_id),
-                event: "credential.update",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "entity_id": owner_id,
-                    "kind": "access_token",
-                    "delegated": delegated,
-                    "credential_id": credential_id
-                }),
+        crate::cache::invalidate::guarded_mutation(
+            state.cache.as_deref(),
+            crate::cache::CacheCategory::CredentialCeiling,
+            std::slice::from_ref(&crate::cache::keys::cred_ceiling(credential_id)),
+            || async {
+                let mut tx = state.pool.begin().await.map_err(db_err)?;
+                service::replace_access_token_permissions_in_tx(
+                    &mut tx,
+                    owner_id,
+                    credential_id,
+                    permissions,
+                )
+                .await?;
+                audit::commit_with_audit(
+                    &state.pool,
+                    tx,
+                    state.config.events.enabled(),
+                    &audit::AuditEvent {
+                        actor_entity_id: Some(auth.entity_id),
+                        tenant_id: audit_tenant_id,
+                        target_kind: Some("credential"),
+                        target_id: Some(credential_id),
+                        event: "credential.update",
+                        outcome: AuditOutcome::Allow,
+                        details: serde_json::json!({
+                            "entity_id": owner_id,
+                            "kind": "access_token",
+                            "delegated": delegated,
+                            "credential_id": credential_id
+                        }),
+                    },
+                )
+                .await
             },
         )
         .await
@@ -320,27 +327,33 @@ impl CredentialMutation {
         let credential_id = parse_id(credential_id, "credentialId")?;
         let (owner_id, delegated, audit_tenant_id) =
             resolve_token_lifecycle_target(state, &auth, credential_id).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        service::revoke_access_token_in_tx(&mut tx, owner_id, credential_id)
-            .await
-            .map_err(gql_error)?;
-        audit::commit_with_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: audit_tenant_id,
-                target_kind: Some("credential"),
-                target_id: Some(credential_id),
-                event: "credential.revoke",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "entity_id": owner_id,
-                    "kind": "access_token",
-                    "delegated": delegated,
-                    "credential_id": credential_id
-                }),
+        crate::cache::invalidate::guarded_mutation(
+            state.cache.as_deref(),
+            crate::cache::CacheCategory::Credential,
+            std::slice::from_ref(&crate::cache::keys::credential(credential_id)),
+            || async {
+                let mut tx = state.pool.begin().await.map_err(db_err)?;
+                service::revoke_access_token_in_tx(&mut tx, owner_id, credential_id).await?;
+                audit::commit_with_audit(
+                    &state.pool,
+                    tx,
+                    state.config.events.enabled(),
+                    &audit::AuditEvent {
+                        actor_entity_id: Some(auth.entity_id),
+                        tenant_id: audit_tenant_id,
+                        target_kind: Some("credential"),
+                        target_id: Some(credential_id),
+                        event: "credential.revoke",
+                        outcome: AuditOutcome::Allow,
+                        details: serde_json::json!({
+                            "entity_id": owner_id,
+                            "kind": "access_token",
+                            "delegated": delegated,
+                            "credential_id": credential_id
+                        }),
+                    },
+                )
+                .await
             },
         )
         .await
@@ -454,22 +467,28 @@ impl CredentialMutation {
             } else {
                 require_credential_management(state, &auth, entity_id).await?
             };
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        service::revoke_credential_in_tx(&mut tx, entity_id, credential_id)
-            .await
-            .map_err(gql_error)?;
-        audit::commit_with_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(entity_id),
-                event: "credential.revoke",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({"credential_id": credential_id}),
+        crate::cache::invalidate::guarded_mutation(
+            state.cache.as_deref(),
+            crate::cache::CacheCategory::Credential,
+            std::slice::from_ref(&crate::cache::keys::credential(credential_id)),
+            || async {
+                let mut tx = state.pool.begin().await.map_err(db_err)?;
+                service::revoke_credential_in_tx(&mut tx, entity_id, credential_id).await?;
+                audit::commit_with_audit(
+                    &state.pool,
+                    tx,
+                    state.config.events.enabled(),
+                    &audit::AuditEvent {
+                        actor_entity_id: Some(auth.entity_id),
+                        tenant_id,
+                        target_kind: Some("entity"),
+                        target_id: Some(entity_id),
+                        event: "credential.revoke",
+                        outcome: AuditOutcome::Allow,
+                        details: serde_json::json!({"credential_id": credential_id}),
+                    },
+                )
+                .await
             },
         )
         .await

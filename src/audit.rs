@@ -205,7 +205,7 @@ pub async fn commit_with_audit(
 /// Enqueues a domain event outbox row inside an existing DB transaction for
 /// non-audited operations (e.g. create mutations), keeping the mutation and outbox
 /// event strictly atomic.
-async fn observe_in_tx(
+pub(crate) async fn observe_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     events_enabled: bool,
     meta: &AuditMeta<'_>,
@@ -256,7 +256,7 @@ pub async fn commit_with_observation(
 
 /// Emits an audit log tracing line for a successful non-audited operation (observe path)
 /// after its database transaction has successfully committed.
-fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {
+pub(crate) fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {
     let event = AuditEvent {
         actor_entity_id: meta.actor_entity_id,
         tenant_id: meta.tenant_id,

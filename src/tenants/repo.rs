@@ -585,6 +585,38 @@ pub async fn update_tenant(
     update_tenant_with_audit(pool, false, None, id, req, updated_by).await
 }
 
+/// The exact set of active session ids `soft_delete_tenant` is about to
+/// revoke — mirrors that function's `UPDATE sessions` `WHERE` clause
+/// precisely, so callers can invalidate `atom:v1:session:*` cache entries for
+/// them *before* the delete runs (afterward, `revoked_at IS NULL` no longer
+/// matches these rows). See `src/cache/mod.rs`'s consistency model.
+pub async fn tenant_active_session_ids(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        r#"SELECT id FROM sessions
+           WHERE revoked_at IS NULL
+             AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)"#,
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
+}
+
+/// Soft-delete a tenant: mark `status = deleted`, stamp the tombstone, and
+/// immediately revoke every active credential and session of entities in the
+/// tenant. Physical removal (and the entity cascade) is deferred to the purge
+/// cron.
+pub async fn soft_delete_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    soft_delete_tenant_with_audit(pool, false, None, id, deleted_by).await
+}
+
 pub async fn soft_delete_tenant_with_audit(
     pool: &PgPool,
     events_enabled: bool,
@@ -670,12 +702,51 @@ pub async fn soft_delete_tenant_with_audit(
     Ok(tenant)
 }
 
-pub async fn soft_delete_tenant(
+/// Reverse a tenant soft delete within the retention window. Reactivates the
+/// tenant and clears its tombstone; its children (entities, groups, roles,
+/// resources) were never individually tombstoned by `soft_delete_tenant` — they
+/// were hidden only via the tenant's `deleted_at` — so they become visible again
+/// automatically.
+///
+/// To make the restored tenant operational, the non-certificate child
+/// credentials (passwords, API keys) that *this* delete revoked — identified by
+/// the `tenant_deleted` revocation marker — are reactivated, so members can log
+/// in with their existing secrets. Certificates stay revoked (their revocation
+/// is published via the CRL and cannot be safely undone — re-issue is required),
+/// and sessions stay revoked, so a fresh login is required. Credentials revoked
+/// earlier for other reasons (e.g. an individually soft-deleted child) are left
+/// untouched.
+///
+/// Fails with a conflict if the tenant name/alias was re-taken by a live tenant
+/// during the retention window.
+/// The exact set of credential ids `restore_tenant` is about to reactivate —
+/// mirrors that function's `UPDATE credentials` `WHERE` clause precisely, so
+/// callers can invalidate `atom:v1:credential:*` cache entries for them
+/// *before* running the restore (see `src/cache/mod.rs`'s consistency
+/// model). A stale cached "revoked" credential is a false-deny (fails
+/// closed, not a security hole) but is still worth fixing: unlike a tenant
+/// or entity status flip, which a later-checked fresh field can catch
+/// regardless of earlier stale fields, `verify_api_key_snapshot` checks the
+/// credential's own status first — a stale value there is never overridden
+/// by anything checked afterward.
+pub async fn tenant_restore_reactivated_credential_ids(
     pool: &PgPool,
-    id: Uuid,
-    deleted_by: Option<Uuid>,
-) -> Result<Tenant, AppError> {
-    soft_delete_tenant_with_audit(pool, false, None, id, deleted_by).await
+    tenant_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        r#"SELECT c.id
+           FROM credentials c
+           JOIN entities e ON c.entity_id = e.id
+           WHERE e.tenant_id = $1
+             AND e.deleted_at IS NULL
+             AND c.status = 'revoked'
+             AND c.kind <> 'certificate'
+             AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
 
 pub async fn restore_tenant_with_audit(

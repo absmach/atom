@@ -1043,6 +1043,42 @@ fn entity_kind_as_str(kind: &EntityKind) -> &'static str {
     }
 }
 
+/// The exact set of active session ids `delete_entity` is about to revoke —
+/// mirrors that function's `UPDATE sessions` `WHERE` clause precisely, so
+/// callers can invalidate `atom:v1:session:*` cache entries for them *before*
+/// the delete runs (afterward, `revoked_at IS NULL` no longer matches these
+/// rows). See `src/cache/mod.rs`'s consistency model.
+pub async fn entity_active_session_ids(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar("SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL")
+        .bind(entity_id)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)
+}
+
+/// The exact set of active access-token credential ids `delete_entity` is
+/// about to revoke — restricted to the one credential kind this codebase
+/// caches under `CacheCategory::Credential` (certificates are tracked via the
+/// CRL instead, not this cache). Callers invalidate `atom:v1:credential:*`
+/// entries for these *before* the delete runs. See `src/cache/mod.rs`'s
+/// consistency model.
+pub async fn entity_active_access_token_ids(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        "SELECT id FROM credentials WHERE entity_id = $1 AND status = 'active' AND kind = $2",
+    )
+    .bind(entity_id)
+    .bind(crate::models::enums::CredentialKind::AccessToken)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
+}
+
 /// Soft-delete an entity: mark it inactive, set the tombstone, and immediately
 /// cut off access by revoking its credentials and active sessions. Physical
 /// removal is deferred to the purge cron. Hard delete (the old behavior) relied
@@ -1594,6 +1630,121 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     Ok(GroupList { items, total })
 }
 
+/// [`update_group`]'s body, minus opening/committing its own transaction —
+/// see `authz::repo::create_role_assignment_in_tx`'s doc comment for the
+/// caller contract (the resolver locks this group's closure via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
+/// `tx` first, when the update changes `status` — see the resolver for why
+/// only a status change needs the lock).
+pub(crate) async fn update_group_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    req: UpdateGroup,
+    event_name: &str,
+    audit_details: Value,
+) -> Result<Group, AppError> {
+    let attributes = req.attributes.map(normalize_attributes);
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!("group {id} not found")));
+    };
+    crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
+    sqlx::query_as::<_, Group>(
+        r#"WITH p AS (
+             UPDATE principal_groups
+             SET name        = COALESCE($2, name),
+                 description = COALESCE($3, description),
+                 status      = COALESCE($4, status),
+                 attributes  = COALESCE($5, attributes),
+                 updated_at  = now()
+             WHERE id = $1 AND deleted_at IS NULL
+             RETURNING id, name, tenant_id, 'principal'::text AS group_type, description,
+                       (SELECT parent_id FROM principal_group_hierarchy WHERE child_id = principal_groups.id) AS parent_id,
+                       status, attributes, deleted_at, deleted_by, created_at, updated_at
+           ),
+           o AS (
+             UPDATE object_groups
+             SET name        = COALESCE($2, name),
+                 description = COALESCE($3, description),
+                 status      = COALESCE($4, status),
+                 attributes  = COALESCE($5, attributes),
+                 updated_at  = now()
+             WHERE id = $1 AND deleted_at IS NULL
+             RETURNING id, name, tenant_id, 'object'::text AS group_type, description,
+                       (SELECT parent_id FROM object_group_hierarchy WHERE child_id = object_groups.id) AS parent_id,
+                       status, attributes, deleted_at, deleted_by, created_at, updated_at
+           )
+           SELECT * FROM p
+           UNION ALL
+           SELECT * FROM o"#,
+    )
+    .bind(id)
+    .bind(req.name)
+    .bind(req.description)
+    .bind(req.status)
+    .bind(attributes)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("group {id} not found")),
+        other => AppError::Database(other),
+    })?;
+
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: group.tenant_id,
+        target_kind: "group",
+        target_id: Some(id),
+        event: event_name,
+    };
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &audit_details).await?;
+    Ok(group)
+}
+
+pub async fn update_group(pool: &PgPool, id: Uuid, req: UpdateGroup) -> Result<Group, AppError> {
+    update_group_with_audit(
+        pool,
+        false,
+        None,
+        id,
+        req,
+        "group.update",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+pub async fn update_group_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    req: UpdateGroup,
+    event_name: &str,
+    audit_details: Value,
+) -> Result<Group, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let group = update_group_in_tx(
+        &mut tx,
+        events_enabled,
+        actor_id,
+        id,
+        req,
+        event_name,
+        audit_details,
+    )
+    .await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(group)
+}
+
 pub async fn set_group_parent(
     pool: &PgPool,
     child_id: Uuid,
@@ -1609,12 +1760,32 @@ pub async fn set_group_parent_with_audit(
     child_id: Uuid,
     parent_id: Uuid,
 ) -> Result<Group, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    set_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id, parent_id).await?;
+    tx.commit().await.map_err(db_err)?;
+    get_group(pool, child_id).await
+}
+
+/// [`set_group_parent`]'s body, minus opening/committing its own
+/// transaction and the post-commit `get_group` read — see
+/// `authz::repo::create_role_assignment_in_tx`'s doc comment for the caller
+/// contract (the resolver locks `child_id`'s closure via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
+/// `tx` first — reparenting `child_id` only changes what it and its
+/// descendants inherit from above, never `group_hierarchy` rows below it, so
+/// that closure is exactly what this mutation can affect).
+pub(crate) async fn set_group_parent_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    child_id: Uuid,
+    parent_id: Uuid,
+) -> Result<(), AppError> {
     if child_id == parent_id {
         return Err(AppError::bad_request("group cannot be its own parent"));
     }
 
     use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(db_err)?;
     let child = sqlx::query(
         r#"SELECT tenant_id, group_type
            FROM groups
@@ -1623,7 +1794,7 @@ pub async fn set_group_parent_with_audit(
            LIMIT 1"#,
     )
     .bind(child_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("group {child_id} not found")),
@@ -1637,7 +1808,7 @@ pub async fn set_group_parent_with_audit(
            LIMIT 1"#,
     )
     .bind(parent_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
@@ -1673,7 +1844,7 @@ pub async fn set_group_parent_with_audit(
     } else {
         "object_groups"
     };
-    crate::tenants::repo::lock_optional_active_tenant(&mut tx, child_tenant_id).await?;
+    crate::tenants::repo::lock_optional_active_tenant(tx, child_tenant_id).await?;
     let lock_sql = format!(
         "SELECT id FROM {group_table}
          WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
@@ -1681,7 +1852,7 @@ pub async fn set_group_parent_with_audit(
     );
     let locked_ids: Vec<Uuid> = sqlx::query_scalar(&lock_sql)
         .bind(vec![child_id, parent_id])
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .map_err(db_err)?;
     if locked_ids.len() != 2 {
@@ -1701,7 +1872,7 @@ pub async fn set_group_parent_with_audit(
     let creates_cycle: bool = sqlx::query_scalar(&creates_cycle_sql)
         .bind(parent_id)
         .bind(child_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(db_err)?;
     if creates_cycle {
@@ -1720,7 +1891,7 @@ pub async fn set_group_parent_with_audit(
         .bind(parent_id)
         .bind(child_id)
         .bind(child_tenant_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_err)?;
 
@@ -1731,7 +1902,7 @@ pub async fn set_group_parent_with_audit(
                ORDER BY id FOR UPDATE"#,
         )
         .bind(vec![child_id, parent_id])
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .map_err(db_err)?;
         if principal_ids.len() == 2 {
@@ -1746,13 +1917,12 @@ pub async fn set_group_parent_with_audit(
             .bind(parent_id)
             .bind(child_id)
             .bind(child_tenant_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(db_err)?;
         }
     }
 
-    let group = fetch_group(&mut *tx, child_id).await?;
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: child_tenant_id,
@@ -1761,8 +1931,8 @@ pub async fn set_group_parent_with_audit(
         event: "group.parent.set",
     };
     let details = serde_json::json!({ "parent_id": parent_id });
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    Ok(group)
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
+    Ok(())
 }
 
 pub async fn remove_group_parent(pool: &PgPool, child_id: Uuid) -> Result<(), AppError> {
@@ -1776,28 +1946,41 @@ pub async fn remove_group_parent_with_audit(
     child_id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    remove_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id).await?;
+    tx.commit().await.map_err(db_err)
+}
+
+/// [`remove_group_parent`]'s body, minus opening/committing its own
+/// transaction — see [`set_group_parent_in_tx`]'s doc comment for the caller
+/// contract.
+pub(crate) async fn remove_group_parent_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    child_id: Uuid,
+) -> Result<(), AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
             .bind(child_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("group {child_id} not found")));
     };
-    crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
+    crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
     let object_locked: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM object_groups WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(child_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     let principal_locked: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(child_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     if object_locked.is_none() && principal_locked.is_none() {
@@ -1810,7 +1993,7 @@ pub async fn remove_group_parent_with_audit(
            DELETE FROM object_group_hierarchy WHERE child_id = $1"#,
     )
     .bind(child_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     let meta = crate::audit::AuditMeta {
@@ -1821,7 +2004,7 @@ pub async fn remove_group_parent_with_audit(
         event: "group.parent.remove",
     };
     let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
@@ -1947,10 +2130,27 @@ pub async fn delete_group_with_audit(
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    delete_group_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
+    tx.commit().await.map_err(db_err)
+}
+
+/// [`delete_group`]'s body, minus opening/committing its own transaction —
+/// see `authz::repo::create_role_assignment_in_tx`'s doc comment for the
+/// caller contract (the resolver locks this group's closure via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
+/// `tx` first — `group_hierarchy` rows aren't touched by a soft delete, only
+/// `deleted_at`, so the closure is unaffected by this mutation's own effect).
+pub(crate) async fn delete_group_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -1972,7 +2172,7 @@ pub async fn delete_group_with_audit(
     )
     .bind(id)
     .bind(deleted_by)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     if result.is_none() {
@@ -1987,7 +2187,7 @@ pub async fn delete_group_with_audit(
         event: "group.delete",
     };
     let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
@@ -2007,9 +2207,45 @@ pub async fn restore_group_with_audit(
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
-    let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    restore_group_in_tx(&mut tx, events_enabled, actor_id, id, restored_by).await?;
+    tx.commit().await.map_err(db_err)?;
+    // The audit_logs row is deliberately written after commit (fire-and-forget,
+    // never blocks an already-valid restore) — see `audit::commit_with_audit`'s
+    // doc comment. The outbox row, by contrast, went in atomically with the
+    // mutation inside `restore_group_in_tx` via `observe_in_tx`.
+    let tenant_id = get_group(pool, id).await.ok().and_then(|g| g.tenant_id);
+    crate::audit::write(
+        pool,
+        false,
+        crate::audit::AuditEvent {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: Some("group"),
+            target_id: Some(id),
+            event: "group.restore",
+            outcome: crate::models::enums::AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        },
+    )
+    .await;
+    Ok(())
+}
 
+/// [`restore_group`]'s body, minus opening/committing its own transaction —
+/// see `authz::repo::create_role_assignment_in_tx`'s doc comment for the
+/// caller contract (the resolver locks this group's closure via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
+/// `tx` first — that lock works regardless of the group's own `deleted_at`
+/// status, so it applies here unchanged).
+pub(crate) async fn restore_group_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let _ = restored_by;
     let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
         "SELECT g.tenant_id, (t.deleted_at IS NOT NULL)
          FROM groups g
@@ -2017,7 +2253,7 @@ pub async fn restore_group_with_audit(
          WHERE g.id = $1 AND g.deleted_at IS NOT NULL",
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     let (tenant_id, _is_tenant_deleted) = match tenant_info {
@@ -2048,20 +2284,18 @@ pub async fn restore_group_with_audit(
            SELECT id FROM o"#,
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(restore_conflict)?;
 
-    let event = crate::audit::AuditEvent {
+    let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id,
-        target_kind: Some("group"),
+        target_kind: "group",
         target_id: Some(id),
         event: "group.restore",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
     };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &serde_json::json!({})).await?;
     Ok(())
 }
 

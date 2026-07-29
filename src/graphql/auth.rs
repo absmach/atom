@@ -94,9 +94,30 @@ impl AuthMutation {
             .await
             .map_err(|e| gql_error(crate::error::db_err(e)))?;
         if let Some(session_id) = auth.session_id {
-            repo::revoke_session_in_tx(&mut tx, session_id)
-                .await
-                .map_err(gql_error)?;
+            // The revoke must stay inside `tx` so it commits atomically with
+            // the audit event/outbox row below, but it also needs the cache
+            // barrier around it so a concurrent reader can't repopulate a
+            // stale (not-yet-revoked) session entry — see `src/cache/mod.rs`.
+            let session_key = crate::cache::keys::session(session_id);
+            if let Some(cache) = state.cache.as_deref() {
+                cache
+                    .begin(
+                        crate::cache::CacheCategory::Session,
+                        std::slice::from_ref(&session_key),
+                    )
+                    .await
+                    .map_err(gql_error)?;
+            }
+            let result = repo::revoke_session_in_tx(&mut tx, session_id).await;
+            if let Some(cache) = state.cache.as_deref() {
+                cache
+                    .end(
+                        crate::cache::CacheCategory::Session,
+                        std::slice::from_ref(&session_key),
+                    )
+                    .await;
+            }
+            result.map_err(gql_error)?;
         }
         audit::commit_with_audit(
             &state.pool,
@@ -127,13 +148,26 @@ impl AuthMutation {
         })?;
         let state = ctx.data::<AppState>()?;
         let keys = state.keys.read().await;
+        let primary_key = keys.primary.clone();
+        drop(keys);
 
-        service::refresh_session(
-            &state.pool,
-            &state.config,
-            &keys.primary,
-            auth.entity_id,
-            session_id,
+        // Extends `expires_at` in place for the same session_id; without
+        // invalidating, a stale cached (shorter) expiry could cause a
+        // spurious "session expired" false-deny until the entry's own TTL
+        // catches up — not a security issue, but worth fixing.
+        crate::cache::invalidate::guarded_mutation(
+            state.cache.as_deref(),
+            crate::cache::CacheCategory::Session,
+            std::slice::from_ref(&crate::cache::keys::session(session_id)),
+            || {
+                service::refresh_session(
+                    &state.pool,
+                    &state.config,
+                    &primary_key,
+                    auth.entity_id,
+                    session_id,
+                )
+            },
         )
         .await
         .map(Into::into)
@@ -176,7 +210,8 @@ pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {
         | AppError::Forbidden
         | AppError::Conflict(_)
         | AppError::PayloadTooLarge(_)
-        | AppError::RateLimited { .. } => async_graphql::Error::new(err.to_string()),
+        | AppError::RateLimited { .. }
+        | AppError::ServiceUnavailable(_) => async_graphql::Error::new(err.to_string()),
     }
 }
 
