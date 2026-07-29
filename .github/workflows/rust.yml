@@ -34,6 +34,23 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # Cache-gated tests (src/cache/mod.rs's unit tests, tests/m25_cache_invalidation.rs)
+      # are #[ignore]d specifically so they're skippable without Redis, but
+      # `--include-ignored` below runs them anyway — they need a reachable
+      # Redis, unlike the Postgres-gated tests which need their own fresh
+      # database per binary, these use randomly-suffixed keys and don't share
+      # mutable state across tests/binaries, so one shared instance for the
+      # whole job is sufficient.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -102,6 +119,7 @@ jobs:
         env:
           PGPASSWORD: atom
           MAINT_URL: postgres://atom:atom@localhost:5432/atom
+          ATOM_TEST_REDIS_URL: redis://localhost:6379/0
         run: |
           set -euo pipefail
           command -v psql >/dev/null || {
