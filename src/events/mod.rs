@@ -184,21 +184,50 @@ pub async fn deliver_outbox_batch(
         return Ok(0);
     }
 
-    let events: Vec<DomainEventPayload> = rows
-        .iter()
-        .filter_map(|row| match serde_json::from_value(row.payload.clone()) {
-            Ok(event) => Some(event),
+    // Split the batch: a row whose payload fails to deserialize must never be
+    // marked delivered (it was never actually published) or handed to
+    // `publisher.publish`, but it also must not silently vanish. It's left
+    // undelivered with `attempts`/`last_error` recorded, same as a publish
+    // failure, so it stays visible for operator follow-up instead of being
+    // dropped.
+    let mut ids: Vec<Uuid> = Vec::with_capacity(rows.len());
+    let mut events: Vec<DomainEventPayload> = Vec::with_capacity(rows.len());
+    let mut unparseable_ids: Vec<Uuid> = Vec::new();
+
+    for row in &rows {
+        match serde_json::from_value(row.payload.clone()) {
+            Ok(event) => {
+                ids.push(row.id);
+                events.push(event);
+            }
             Err(err) => {
                 tracing::error!(
-                    "event_outbox row {} has an unparseable payload, skipping: {err}",
+                    "event_outbox row {} has an unparseable payload, will not be published: {err}",
                     row.id
                 );
-                None
+                unparseable_ids.push(row.id);
             }
-        })
-        .collect();
+        }
+    }
 
-    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    if !unparseable_ids.is_empty() {
+        crate::metrics::record_outbox_publish_failure();
+        sqlx::query(
+            "UPDATE event_outbox
+             SET attempts = attempts + 1, last_error = $2
+             WHERE id = ANY($1)",
+        )
+        .bind(&unparseable_ids)
+        .bind("payload does not deserialize into the current DomainEventPayload schema")
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    if ids.is_empty() {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(0);
+    }
 
     match publisher.publish(&events).await {
         Ok(()) => {

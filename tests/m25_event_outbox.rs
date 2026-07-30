@@ -227,6 +227,51 @@ async fn arbitrary_event_names_are_all_delivered_no_filtering() {
     assert_eq!(seen, expected);
 }
 
+/// A row whose payload doesn't deserialize into `DomainEventPayload` (e.g.
+/// left over from an older schema version) must never be marked delivered —
+/// it was never actually handed to the publisher — but a good row in the
+/// same batch must still be delivered normally.
+#[tokio::test]
+#[ignore]
+async fn a_row_with_an_unparseable_payload_is_never_marked_delivered() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let bad_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
+        .bind(bad_id)
+        .bind("resource.create")
+        .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
+        .execute(&pool)
+        .await
+        .expect("insert malformed event_outbox row");
+
+    let good_payload = sample_payload("resource.create");
+    let good_id = insert_outbox_row(&pool, &good_payload).await;
+
+    let publisher = MockPublisher::default();
+    let delivered = deliver_outbox_batch(&pool, &publisher, &test_events_config())
+        .await
+        .expect("deliver batch");
+
+    assert_eq!(delivered, 1, "only the well-formed row counts as delivered");
+    assert_eq!(
+        publisher.event_ids_seen(),
+        vec![good_id],
+        "the publisher must never see the unparseable row"
+    );
+
+    assert!(delivered_at(&pool, good_id).await.is_some());
+    assert!(
+        delivered_at(&pool, bad_id).await.is_none(),
+        "an unparseable row must not be marked delivered"
+    );
+
+    let (attempts, last_error) = attempts_and_error(&pool, bad_id).await;
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("does not deserialize"));
+}
+
 #[tokio::test]
 #[ignore]
 async fn delivering_with_no_undelivered_rows_is_a_harmless_no_op() {
