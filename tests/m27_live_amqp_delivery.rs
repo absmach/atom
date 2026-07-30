@@ -261,3 +261,66 @@ async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
         );
     }
 }
+
+/// Under the default exchange, the routing key doubles as the destination
+/// queue name — if nothing has declared a queue with that name, the message
+/// is unroutable. Proves `AmqpPublisher` catches this (via `mandatory:
+/// true` plus inspecting the returned `Confirmation`, see its doc comment)
+/// instead of letting the row be marked delivered just because the broker
+/// acked receipt of an otherwise-dropped message.
+#[tokio::test]
+#[ignore]
+async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
+    let pool = common::pool().await;
+    sqlx::query("TRUNCATE TABLE event_outbox")
+        .execute(&pool)
+        .await
+        .expect("truncate event_outbox");
+
+    let url = amqp_url();
+    // Deliberately no `queue_declare` for this routing key: nothing in the
+    // broker is bound to it, so the publish below is unroutable.
+    let routing_key = format!("atom-events-test-unroutable-{}", Uuid::new_v4());
+
+    let cfg = EventsConfig {
+        amqp_url: Some(url.clone()),
+        amqp_exchange: String::new(),
+        amqp_routing_key: routing_key.clone(),
+        ..EventsConfig::default()
+    };
+    let publisher = AmqpPublisher::connect(&cfg)
+        .await
+        .expect("connect AmqpPublisher to broker");
+
+    let payload = sample_payload("resource.create");
+    let event_id = payload.event_id;
+    insert_outbox_row(&pool, &payload).await;
+
+    let delivered = deliver_outbox_batch(&pool, &publisher, &cfg)
+        .await
+        .expect("deliver batch");
+    assert_eq!(
+        delivered, 0,
+        "an unroutable publish must not be counted as delivered"
+    );
+
+    let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch delivered_at");
+    assert!(
+        delivered_at.is_none(),
+        "a message the broker never routed anywhere must not be marked delivered"
+    );
+
+    let (attempts, last_error): (i32, Option<String>) =
+        sqlx::query_as("SELECT attempts, last_error FROM event_outbox WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch attempts/last_error");
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("unroutable"));
+}

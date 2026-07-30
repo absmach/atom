@@ -169,13 +169,21 @@ pub async fn deliver_outbox_batch(
         return Ok(0);
     }
 
+    // `attempts < $2` excludes rows that have already exhausted
+    // `outbox_max_attempts`: without it, a row that can never succeed (a
+    // permanently misconfigured payload, a routing key the broker will
+    // never accept) stays at the front of the oldest-first queue forever,
+    // occupying a batch slot on every single poll and starving every newer
+    // row behind it. Config validation guarantees `outbox_max_attempts > 0`,
+    // so a fresh row (`attempts = 0`) always passes this filter.
     let rows: Vec<OutboxRow> = sqlx::query_as(
         "SELECT id, payload FROM event_outbox
-         WHERE delivered_at IS NULL
+         WHERE delivered_at IS NULL AND attempts < $2
          ORDER BY created_at ASC
          LIMIT $1",
     )
     .bind(cfg.outbox_batch_size)
+    .bind(cfg.outbox_max_attempts)
     .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -212,16 +220,13 @@ pub async fn deliver_outbox_batch(
 
     if !unparseable_ids.is_empty() {
         crate::metrics::record_outbox_publish_failure();
-        sqlx::query(
-            "UPDATE event_outbox
-             SET attempts = attempts + 1, last_error = $2
-             WHERE id = ANY($1)",
+        record_attempt_failure(
+            &mut tx,
+            &unparseable_ids,
+            "payload does not deserialize into the current DomainEventPayload schema",
+            cfg.outbox_max_attempts,
         )
-        .bind(&unparseable_ids)
-        .bind("payload does not deserialize into the current DomainEventPayload schema")
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        .await?;
     }
 
     if ids.is_empty() {
@@ -241,20 +246,45 @@ pub async fn deliver_outbox_batch(
         }
         Err(err) => {
             crate::metrics::record_outbox_publish_failure();
-            sqlx::query(
-                "UPDATE event_outbox
-                 SET attempts = attempts + 1, last_error = $2
-                 WHERE id = ANY($1)",
-            )
-            .bind(&ids)
-            .bind(err.0)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
+            record_attempt_failure(&mut tx, &ids, &err.0, cfg.outbox_max_attempts).await?;
             tx.commit().await.map_err(db_err)?;
             Ok(0)
         }
     }
+}
+
+/// Increments `attempts` and records `last_error` for a set of rows. A row
+/// whose `attempts` reaches `max_attempts` here is excluded from every
+/// future poll's `SELECT` (see the `attempts < $2` filter above), so this is
+/// the only point where that transition — a row giving up for good — is
+/// observable; it's logged and counted here rather than silently happening.
+async fn record_attempt_failure(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[Uuid],
+    error: &str,
+    max_attempts: i32,
+) -> Result<(), AppError> {
+    let updated: Vec<(Uuid, i32)> = sqlx::query_as(
+        "UPDATE event_outbox
+         SET attempts = attempts + 1, last_error = $2
+         WHERE id = ANY($1)
+         RETURNING id, attempts",
+    )
+    .bind(ids)
+    .bind(error)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    for (id, attempts) in updated {
+        if attempts >= max_attempts {
+            tracing::error!(
+                "event_outbox row {id} has reached the {max_attempts}-attempt limit and will not be retried again: {error}"
+            );
+            crate::metrics::record_outbox_exhausted();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

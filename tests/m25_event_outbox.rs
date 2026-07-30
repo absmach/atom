@@ -227,6 +227,70 @@ async fn arbitrary_event_names_are_all_delivered_no_filtering() {
     assert_eq!(seen, expected);
 }
 
+/// Fails only for batches containing one specific event, regardless of how
+/// many times it's called — models a row that can never succeed (e.g. a
+/// permanently unroutable routing key), unlike `MockPublisher::fail_next_n`
+/// which fails a fixed number of calls no matter their content.
+struct FailsForId {
+    poison_id: Uuid,
+}
+
+#[async_trait]
+impl EventPublisher for FailsForId {
+    async fn publish(&self, events: &[DomainEventPayload]) -> Result<(), PublishError> {
+        if events.iter().any(|e| e.event_id == self.poison_id) {
+            Err(PublishError("simulated permanent failure".to_string()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A row that can never succeed must stop being retried once it hits
+/// `outbox_max_attempts`, and — just as important — must stop occupying
+/// batch slots once excluded, so a healthy row queued behind it (oldest
+/// first) is no longer starved forever.
+#[tokio::test]
+#[ignore]
+async fn an_exhausted_row_stops_being_retried_and_unblocks_newer_rows() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let poison_id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+    let healthy_id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+
+    let publisher = FailsForId { poison_id };
+    let cfg = EventsConfig {
+        outbox_batch_size: 1,
+        outbox_max_attempts: 2,
+        ..test_events_config()
+    };
+
+    // With batch_size=1, each tick fetches only the oldest still-eligible
+    // row. Both ticks below must hit the poison row (it's older) and fail.
+    for _ in 0..2 {
+        let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+        assert_eq!(delivered, 0);
+    }
+    let (attempts, _) = attempts_and_error(&pool, poison_id).await;
+    assert_eq!(attempts, 2, "poison row should have exhausted max_attempts");
+    assert!(delivered_at(&pool, poison_id).await.is_none());
+
+    // Now that the poison row has hit the cap, it must be excluded from the
+    // SELECT entirely — this tick should reach the healthy row instead of
+    // retrying (and re-failing on) the exhausted one forever.
+    let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+    assert_eq!(delivered, 1, "the healthy row must no longer be starved");
+    assert!(delivered_at(&pool, healthy_id).await.is_some());
+
+    // And the poison row itself must never be retried past the cap.
+    let (attempts_after, _) = attempts_and_error(&pool, poison_id).await;
+    assert_eq!(
+        attempts_after, 2,
+        "an exhausted row must not be retried further"
+    );
+}
+
 /// A row whose payload doesn't deserialize into `DomainEventPayload` (e.g.
 /// left over from an older schema version) must never be marked delivered —
 /// it was never actually handed to the publisher — but a good row in the

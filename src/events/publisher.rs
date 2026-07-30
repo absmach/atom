@@ -24,7 +24,7 @@ use lapin::{
     options::{BasicPublishOptions, ConfirmSelectOptions, ExchangeDeclareOptions},
     tcp::{OwnedIdentity, OwnedTLSConfig},
     types::FieldTable,
-    BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind,
+    BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, ExchangeKind,
 };
 
 use crate::config::EventsConfig;
@@ -204,7 +204,18 @@ impl EventPublisher for AmqpPublisher {
                 .basic_publish(
                     self.exchange.as_str().into(),
                     self.routing_key.as_str().into(),
-                    BasicPublishOptions::default(),
+                    // `mandatory: true` asks the broker to return the message
+                    // instead of silently dropping it when the routing key
+                    // matches no queue (e.g. a misconfigured
+                    // ATOM_EVENTS_AMQP_ROUTING_KEY, or a consumer that hasn't
+                    // provisioned its queue yet). Without this, an unroutable
+                    // publish under the default exchange still resolves the
+                    // confirm as a plain ack, and the outbox row would be
+                    // marked delivered despite never having reached a queue.
+                    BasicPublishOptions {
+                        mandatory: true,
+                        ..BasicPublishOptions::default()
+                    },
                     &body,
                     BasicProperties::default().with_content_type("application/json".into()),
                 )
@@ -213,9 +224,37 @@ impl EventPublisher for AmqpPublisher {
             pending.push((event.event_id, confirm));
         }
         for (event_id, confirm) in pending {
-            confirm
+            let confirmation = confirm
                 .await
                 .map_err(|e| PublishError(format!("confirm event {event_id}: {e}")))?;
+            match confirmation {
+                // A plain ack: the broker accepted the message and it was
+                // routed to at least one queue.
+                Confirmation::Ack(None) => {}
+                // The broker acked the publish but also returned the message
+                // as unroutable (mandatory + no matching queue) — it was
+                // never actually stored anywhere, so this must not be
+                // treated as delivered.
+                Confirmation::Ack(Some(_)) => {
+                    return Err(PublishError(format!(
+                        "event {event_id} was returned as unroutable (no queue bound to routing key {:?}); the broker never stored it",
+                        self.routing_key
+                    )));
+                }
+                Confirmation::Nack(_) => {
+                    return Err(PublishError(format!(
+                        "event {event_id} was nacked by the broker"
+                    )));
+                }
+                // confirm_select() is always called in connect(), so this
+                // should be unreachable; fail loudly rather than assume
+                // success if that invariant is ever broken.
+                Confirmation::NotRequested => {
+                    return Err(PublishError(format!(
+                        "event {event_id}: broker did not confirm (publisher confirms not active)"
+                    )));
+                }
+            }
         }
         Ok(())
     }
