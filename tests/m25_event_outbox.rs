@@ -227,39 +227,101 @@ async fn arbitrary_event_names_are_all_delivered_no_filtering() {
     assert_eq!(seen, expected);
 }
 
-/// Fails only for batches containing one specific event, regardless of how
-/// many times it's called — models a row that can never succeed (e.g. a
-/// permanently unroutable routing key), unlike `MockPublisher::fail_next_n`
-/// which fails a fixed number of calls no matter their content.
-struct FailsForId {
-    poison_id: Uuid,
+/// Always fails while `failing` is set, regardless of which events are in
+/// the batch — models a broker outage (a property of the connection, not of
+/// any specific event), unlike `MockPublisher::fail_next_n` (a fixed number
+/// of calls) which isn't tied to time or recovery.
+#[derive(Default)]
+struct FlakyPublisher {
+    failing: std::sync::atomic::AtomicBool,
+}
+
+impl FlakyPublisher {
+    fn new_failing() -> Self {
+        Self {
+            failing: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    fn recover(&self) {
+        self.failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
-impl EventPublisher for FailsForId {
-    async fn publish(&self, events: &[DomainEventPayload]) -> Result<(), PublishError> {
-        if events.iter().any(|e| e.event_id == self.poison_id) {
-            Err(PublishError("simulated permanent failure".to_string()))
+impl EventPublisher for FlakyPublisher {
+    async fn publish(&self, _events: &[DomainEventPayload]) -> Result<(), PublishError> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(PublishError("simulated broker outage".to_string()))
         } else {
             Ok(())
         }
     }
 }
 
-/// A row that can never succeed must stop being retried once it hits
-/// `outbox_max_attempts`, and — just as important — must stop occupying
-/// batch slots once excluded, so a healthy row queued behind it (oldest
-/// first) is no longer starved forever.
+/// A publish failure (unlike an unparseable payload) must never be excluded
+/// by `outbox_max_attempts`, no matter how long the outage lasts — it might
+/// still succeed once the broker recovers, and capping it would silently
+/// and permanently drop an otherwise-valid event.
 #[tokio::test]
 #[ignore]
-async fn an_exhausted_row_stops_being_retried_and_unblocks_newer_rows() {
+async fn a_publish_failure_is_retried_forever_and_recovers_after_the_outage_ends() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+
+    let publisher = FlakyPublisher::new_failing();
+    let cfg = EventsConfig {
+        outbox_max_attempts: 2,
+        ..test_events_config()
+    };
+
+    // Keep failing well past outbox_max_attempts (2 here): the row must stay
+    // eligible on every single tick regardless.
+    for _ in 0..5 {
+        let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+        assert_eq!(delivered, 0);
+    }
+    let (attempts, _) = attempts_and_error(&pool, id).await;
+    assert_eq!(
+        attempts, 5,
+        "attempts must keep climbing past max_attempts, not stop there"
+    );
+    assert!(delivered_at(&pool, id).await.is_none());
+
+    // The "outage" ends — the row must still be eligible and deliver right
+    // away, proving it was never permanently excluded.
+    publisher.recover();
+    let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+    assert_eq!(
+        delivered, 1,
+        "a row that only ever failed to publish must still be retryable after the outage ends"
+    );
+    assert!(delivered_at(&pool, id).await.is_some());
+}
+
+/// An unparseable row (unlike a publish failure) must stop being retried
+/// once it hits `outbox_max_attempts` — retrying it can never succeed — and
+/// must stop occupying batch slots once excluded, so a healthy row queued
+/// behind it (oldest first) is no longer starved forever.
+#[tokio::test]
+#[ignore]
+async fn an_unparseable_row_stops_being_retried_and_unblocks_newer_rows() {
     let pool = common::pool().await;
     truncate_event_outbox(&pool).await;
 
-    let poison_id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+    let poison_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
+        .bind(poison_id)
+        .bind("resource.create")
+        .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
+        .execute(&pool)
+        .await
+        .expect("insert malformed event_outbox row");
     let healthy_id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
 
-    let publisher = FailsForId { poison_id };
+    let publisher = MockPublisher::default();
     let cfg = EventsConfig {
         outbox_batch_size: 1,
         outbox_max_attempts: 2,

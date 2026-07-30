@@ -169,16 +169,20 @@ pub async fn deliver_outbox_batch(
         return Ok(0);
     }
 
-    // `attempts < $2` excludes rows that have already exhausted
-    // `outbox_max_attempts`: without it, a row that can never succeed (a
-    // permanently misconfigured payload, a routing key the broker will
-    // never accept) stays at the front of the oldest-first queue forever,
-    // occupying a batch slot on every single poll and starving every newer
-    // row behind it. Config validation guarantees `outbox_max_attempts > 0`,
-    // so a fresh row (`attempts = 0`) always passes this filter.
+    // `outbox_max_attempts` only ever excludes an `unparseable` row: whether
+    // a row's payload deserializes into the current `DomainEventPayload` is
+    // a fixed, structural fact about that row (the `payload` column is never
+    // updated after insert), so if it fails once it will fail identically
+    // forever — safe to stop retrying once we've logged it enough times.
+    // A publish failure is different: it may be a transient broker outage,
+    // and `unparseable` is never set for it, so it keeps passing the `NOT
+    // unparseable` half of this filter and stays eligible no matter how long
+    // the outage lasts or how high its `attempts` climbs — capping those
+    // too would silently and permanently drop otherwise-valid events the
+    // moment an outage outlasts `outbox_max_attempts` polls.
     let rows: Vec<OutboxRow> = sqlx::query_as(
         "SELECT id, payload FROM event_outbox
-         WHERE delivered_at IS NULL AND attempts < $2
+         WHERE delivered_at IS NULL AND (NOT unparseable OR attempts < $2)
          ORDER BY created_at ASC
          LIMIT $1",
     )
@@ -220,7 +224,7 @@ pub async fn deliver_outbox_batch(
 
     if !unparseable_ids.is_empty() {
         crate::metrics::record_outbox_publish_failure();
-        record_attempt_failure(
+        record_unparseable_failure(
             &mut tx,
             &unparseable_ids,
             "payload does not deserialize into the current DomainEventPayload schema",
@@ -245,20 +249,35 @@ pub async fn deliver_outbox_batch(
             Ok(ids.len())
         }
         Err(err) => {
+            // Deliberately does not touch `unparseable` or check
+            // `outbox_max_attempts` — see the SELECT comment above. This row
+            // stays eligible for every future poll no matter how many times
+            // publishing keeps failing.
             crate::metrics::record_outbox_publish_failure();
-            record_attempt_failure(&mut tx, &ids, &err.0, cfg.outbox_max_attempts).await?;
+            sqlx::query(
+                "UPDATE event_outbox
+                 SET attempts = attempts + 1, last_error = $2
+                 WHERE id = ANY($1)",
+            )
+            .bind(&ids)
+            .bind(&err.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
             tx.commit().await.map_err(db_err)?;
             Ok(0)
         }
     }
 }
 
-/// Increments `attempts` and records `last_error` for a set of rows. A row
-/// whose `attempts` reaches `max_attempts` here is excluded from every
-/// future poll's `SELECT` (see the `attempts < $2` filter above), so this is
-/// the only point where that transition — a row giving up for good — is
-/// observable; it's logged and counted here rather than silently happening.
-async fn record_attempt_failure(
+/// Increments `attempts`, records `last_error`, and marks a set of rows
+/// `unparseable` — the only rows `outbox_max_attempts` is ever allowed to
+/// exclude (see the SELECT comment in [`deliver_outbox_batch`]). A row that
+/// reaches the limit here stops being selected by every future poll, so
+/// this is the only point where that transition — a row giving up for good
+/// — is observable; it's logged and counted here rather than silently
+/// happening.
+async fn record_unparseable_failure(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ids: &[Uuid],
     error: &str,
@@ -266,7 +285,7 @@ async fn record_attempt_failure(
 ) -> Result<(), AppError> {
     let updated: Vec<(Uuid, i32)> = sqlx::query_as(
         "UPDATE event_outbox
-         SET attempts = attempts + 1, last_error = $2
+         SET attempts = attempts + 1, last_error = $2, unparseable = true
          WHERE id = ANY($1)
          RETURNING id, attempts",
     )

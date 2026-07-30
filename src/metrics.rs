@@ -28,8 +28,10 @@ pub const AUDIT_DB_SUPPRESSED: &str = "atom_audit_db_suppressed_total";
 pub const RATE_LIMIT_REJECTIONS: &str = "atom_rate_limit_rejections_total";
 /// Counter of event-outbox delivery attempts that failed.
 pub const EVENT_OUTBOX_PUBLISH_FAILURES: &str = "atom_event_outbox_publish_failures_total";
-/// Counter of event-outbox rows that hit `outbox_max_attempts` and stopped
-/// being retried.
+/// Counter of event-outbox rows with a structurally-unparseable payload that
+/// hit `outbox_max_attempts` and stopped being retried. Never incremented
+/// for a publish failure (broker outage, etc.) — those stay retryable
+/// forever regardless of `outbox_max_attempts`.
 pub const EVENT_OUTBOX_EXHAUSTED: &str = "atom_event_outbox_exhausted_total";
 /// Gauge of DB pool connections, labelled by `state` (total|idle).
 pub const DB_POOL_CONNECTIONS: &str = "atom_db_pool_connections";
