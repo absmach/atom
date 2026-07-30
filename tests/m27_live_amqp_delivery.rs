@@ -48,6 +48,23 @@ async fn insert_outbox_row(pool: &PgPool, payload: &DomainEventPayload) {
         .expect("insert event_outbox row");
 }
 
+fn sample_payload(event: &str) -> DomainEventPayload {
+    DomainEventPayload {
+        schema_version: 1,
+        event_id: Uuid::new_v4(),
+        event: event.to_string(),
+        occurred_at: chrono::Utc::now(),
+        source: "atom".to_string(),
+        actor_entity_id: None,
+        tenant_id: None,
+        target_kind: Some("resource".to_string()),
+        target_id: Some(Uuid::new_v4()),
+        outcome: "allow".to_string(),
+        details: serde_json::json!({"kind": "channel"}),
+        request_id: None,
+    }
+}
+
 #[tokio::test]
 #[ignore]
 async fn a_published_event_is_actually_delivered_to_the_broker() {
@@ -94,21 +111,8 @@ async fn a_published_event_is_actually_delivered_to_the_broker() {
         .await
         .expect("connect AmqpPublisher to broker");
 
-    let event_id = Uuid::new_v4();
-    let payload = DomainEventPayload {
-        schema_version: 1,
-        event_id,
-        event: "resource.create".to_string(),
-        occurred_at: chrono::Utc::now(),
-        source: "atom".to_string(),
-        actor_entity_id: None,
-        tenant_id: None,
-        target_kind: Some("resource".to_string()),
-        target_id: Some(Uuid::new_v4()),
-        outcome: "allow".to_string(),
-        details: serde_json::json!({"kind": "channel"}),
-        request_id: None,
-    };
+    let payload = sample_payload("resource.create");
+    let event_id = payload.event_id;
     insert_outbox_row(&pool, &payload).await;
 
     let delivered = deliver_outbox_batch(&pool, &publisher, &cfg)
@@ -149,4 +153,111 @@ async fn a_published_event_is_actually_delivered_to_the_broker() {
     assert_eq!(received.event_id, event_id);
     assert_eq!(received.event, "resource.create");
     assert_eq!(received.details["kind"], "channel");
+}
+
+/// `AmqpPublisher::publish` sends every event in a batch before awaiting any
+/// of their confirms (see its doc comment), rather than one full round trip
+/// per event. A single-row batch can't tell that code path apart from a
+/// naive sequential one — this test forces a multi-row batch through one
+/// `deliver_outbox_batch` call and proves every event still actually reaches
+/// the broker.
+#[tokio::test]
+#[ignore]
+async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
+    let pool = common::pool().await;
+    sqlx::query("TRUNCATE TABLE event_outbox")
+        .execute(&pool)
+        .await
+        .expect("truncate event_outbox");
+
+    let url = amqp_url();
+    let routing_key = format!("atom-events-test-{}", Uuid::new_v4());
+
+    let consumer_conn = Connection::connect(&url, ConnectionProperties::default())
+        .await
+        .expect("connect consumer to broker");
+    let consumer_channel = consumer_conn
+        .create_channel()
+        .await
+        .expect("create consumer channel");
+    consumer_channel
+        .queue_declare(
+            routing_key.as_str().into(),
+            QueueDeclareOptions {
+                durable: true,
+                auto_delete: true,
+                ..QueueDeclareOptions::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .expect("declare queue");
+
+    let cfg = EventsConfig {
+        amqp_url: Some(url.clone()),
+        amqp_exchange: String::new(),
+        amqp_routing_key: routing_key.clone(),
+        ..EventsConfig::default()
+    };
+    let publisher = AmqpPublisher::connect(&cfg)
+        .await
+        .expect("connect AmqpPublisher to broker");
+
+    let payloads = [
+        sample_payload("resource.create"),
+        sample_payload("tenant.delete"),
+        sample_payload("auth.login"),
+    ];
+    for payload in &payloads {
+        insert_outbox_row(&pool, payload).await;
+    }
+    let expected_ids: std::collections::HashSet<Uuid> =
+        payloads.iter().map(|p| p.event_id).collect();
+
+    let delivered = deliver_outbox_batch(&pool, &publisher, &cfg)
+        .await
+        .expect("deliver batch");
+    assert_eq!(
+        delivered,
+        payloads.len(),
+        "every row in the batch must be delivered, not just the first"
+    );
+
+    let mut received_ids = std::collections::HashSet::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while received_ids.len() < payloads.len() {
+            if let Some(msg) = consumer_channel
+                .basic_get(routing_key.as_str().into(), BasicGetOptions::default())
+                .await
+                .expect("basic_get")
+            {
+                let received: DomainEventPayload = serde_json::from_slice(&msg.delivery.data)
+                    .expect("deserialize delivered payload");
+                received_ids.insert(received.event_id);
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for every event in the batch to arrive at the broker");
+
+    assert_eq!(
+        received_ids, expected_ids,
+        "every event published in the pipelined batch must arrive, none dropped or duplicated"
+    );
+
+    for payload in &payloads {
+        let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+                .bind(payload.event_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch delivered_at");
+        assert!(
+            delivered_at.is_some(),
+            "delivered_at must be set for event {}",
+            payload.event_id
+        );
+    }
 }
