@@ -104,7 +104,24 @@ impl AmqpPublisher {
     ///
     /// Auto-recovers the connection on drops (exponential backoff) rather
     /// than requiring Atom to implement its own reconnect loop.
+    ///
+    /// The whole sequence (TCP/TLS connect, channel open, confirm mode,
+    /// optional exchange declare) is bounded by `cfg.publish_timeout_secs` —
+    /// the same budget [`super::deliver_outbox_batch`] gives one delivery
+    /// tick. Without it, a broker that accepts the TCP connection but stalls
+    /// during the handshake would hang Atom's startup indefinitely instead
+    /// of failing fast like the rest of the startup sequence.
     pub async fn connect(cfg: &EventsConfig) -> anyhow::Result<Self> {
+        let timeout = std::time::Duration::from_secs(cfg.publish_timeout_secs);
+        match tokio::time::timeout(timeout, Self::connect_inner(cfg)).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(anyhow::anyhow!(
+                "connecting to the broker timed out after {timeout:?}"
+            )),
+        }
+    }
+
+    async fn connect_inner(cfg: &EventsConfig) -> anyhow::Result<Self> {
         let url = cfg
             .amqp_url
             .as_deref()
@@ -311,5 +328,50 @@ mod tests {
         let tls = amqp_tls_config(&cfg).expect("no TLS config is a valid default");
         assert!(tls.identity.is_none());
         assert!(tls.cert_chain.is_none());
+    }
+
+    /// Models a broker that's reachable at the TCP layer but stalls during
+    /// the AMQP handshake (never replies at all) — a real broker instance
+    /// can't be made to do this on demand, but a bare listener that accepts
+    /// and then reads-and-discards forever reproduces the same symptom.
+    /// `AmqpPublisher::connect` must time out and fail rather than hang.
+    #[tokio::test]
+    async fn connect_times_out_instead_of_hanging_when_the_broker_stalls() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalling listener");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    // Read whatever the client sends and never reply — the
+                    // stall being modeled.
+                    while socket.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+                });
+            }
+        });
+
+        let cfg = EventsConfig {
+            amqp_url: Some(format!("amqp://guest:guest@{addr}/%2f")),
+            publish_timeout_secs: 1,
+            ..EventsConfig::default()
+        };
+
+        let started = std::time::Instant::now();
+        let result = AmqpPublisher::connect(&cfg).await;
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("connect must fail rather than hang");
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "connect must return promptly once its timeout elapses, took {elapsed:?}"
+        );
     }
 }

@@ -271,11 +271,13 @@ pub struct EventsConfig {
     pub outbox_poll_interval_secs: u64,
     pub outbox_batch_size: i64,
     pub outbox_max_attempts: i32,
-    /// Bounds how long one delivery tick waits on the broker before treating
-    /// it as a (retryable) failure. Guards against a broker that accepts the
+    /// Bounds how long Atom waits on the broker for any single operation:
+    /// both one outbox delivery tick and the initial connect at startup
+    /// (`AmqpPublisher::connect`). Guards against a broker that accepts the
     /// connection but stalls internally rather than erroring outright, which
-    /// would otherwise hang the delivery task indefinitely while holding a
-    /// pool connection and the outbox's advisory lock.
+    /// would otherwise hang indefinitely — the delivery task while holding a
+    /// pool connection and the outbox's advisory lock, or Atom's startup
+    /// itself.
     pub publish_timeout_secs: u64,
 }
 

@@ -27,7 +27,7 @@ use atom::events::deliver_outbox_batch;
 use atom::events::publisher::AmqpPublisher;
 use atom::events::DomainEventPayload;
 use lapin::{
-    options::{BasicGetOptions, QueueDeclareOptions},
+    options::{BasicGetOptions, QueueBindOptions, QueueDeclareOptions},
     types::FieldTable,
     Connection, ConnectionProperties,
 };
@@ -323,4 +323,111 @@ async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
             .expect("fetch attempts/last_error");
     assert_eq!(attempts, 1);
     assert!(last_error.unwrap().contains("unroutable"));
+}
+
+/// Every other test in this file uses the default exchange (`exchange ==
+/// ""`), where `AmqpPublisher::connect` skips all topology setup entirely
+/// (see its doc comment). Setting `ATOM_EVENTS_AMQP_EXCHANGE` takes a
+/// different path — `connect` itself declares a durable topic exchange —
+/// which until now only had unit-level config validation, not a live
+/// end-to-end proof that declare-then-publish-then-route actually works.
+#[tokio::test]
+#[ignore]
+async fn publishing_to_a_custom_topic_exchange_declares_and_routes_correctly() {
+    let pool = common::pool().await;
+    sqlx::query("TRUNCATE TABLE event_outbox")
+        .execute(&pool)
+        .await
+        .expect("truncate event_outbox");
+
+    let url = amqp_url();
+    let exchange = format!("atom-events-test-exchange-{}", Uuid::new_v4());
+    let routing_key = "atom-events-test-custom-routing-key".to_string();
+
+    let cfg = EventsConfig {
+        amqp_url: Some(url.clone()),
+        amqp_exchange: exchange.clone(),
+        amqp_routing_key: routing_key.clone(),
+        ..EventsConfig::default()
+    };
+    // Exercises the exchange_declare branch in AmqpPublisher::connect that
+    // the default-exchange tests above never touch. Must happen before the
+    // consumer below binds to it — a topic exchange only exists once
+    // something declares it, unlike the default exchange.
+    let publisher = AmqpPublisher::connect(&cfg)
+        .await
+        .expect("connect AmqpPublisher and declare the custom exchange");
+
+    // Unlike the default exchange, a topic exchange requires an explicit
+    // binding — routing key no longer doubles as the queue name. A real
+    // consumer would set this up once, out of band, exactly like this.
+    let consumer_conn = Connection::connect(&url, ConnectionProperties::default())
+        .await
+        .expect("connect consumer to broker");
+    let consumer_channel = consumer_conn
+        .create_channel()
+        .await
+        .expect("create consumer channel");
+    let queue_name = format!("atom-events-test-queue-{}", Uuid::new_v4());
+    consumer_channel
+        .queue_declare(
+            queue_name.as_str().into(),
+            QueueDeclareOptions {
+                durable: true,
+                auto_delete: true,
+                ..QueueDeclareOptions::default()
+            },
+            FieldTable::default(),
+        )
+        .await
+        .expect("declare queue");
+    consumer_channel
+        .queue_bind(
+            queue_name.as_str().into(),
+            exchange.as_str().into(),
+            routing_key.as_str().into(),
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .expect("bind queue to the custom exchange");
+
+    let payload = sample_payload("resource.create");
+    let event_id = payload.event_id;
+    insert_outbox_row(&pool, &payload).await;
+
+    let delivered = deliver_outbox_batch(&pool, &publisher, &cfg)
+        .await
+        .expect("deliver batch");
+    assert_eq!(
+        delivered, 1,
+        "the row must be delivered via the custom exchange"
+    );
+
+    let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch delivered_at");
+    assert!(delivered_at.is_some());
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(msg) = consumer_channel
+                .basic_get(queue_name.as_str().into(), BasicGetOptions::default())
+                .await
+                .expect("basic_get")
+            {
+                return msg;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the message to arrive via the custom exchange");
+
+    let received: DomainEventPayload =
+        serde_json::from_slice(&message.delivery.data).expect("deserialize delivered payload");
+    assert_eq!(received.event_id, event_id);
 }
