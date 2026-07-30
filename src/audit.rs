@@ -219,16 +219,13 @@ pub async fn write(pool: &PgPool, events_enabled: bool, event: AuditEvent<'_>) {
     }
 }
 
-async fn write_and_enqueue(
-    pool: &PgPool,
-    events_enabled: bool,
+async fn insert_audit_log<'e, E>(
+    executor: E,
     event: &AuditEvent<'_>,
-) -> Result<(), crate::error::AppError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(crate::error::AppError::Database)?;
-
+) -> Result<(), crate::error::AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         "INSERT INTO audit_logs (id, actor_entity_id, tenant_id, target_kind, target_id, event, outcome, details)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -241,9 +238,33 @@ async fn write_and_enqueue(
     .bind(event.event)
     .bind(event.outcome.clone())
     .bind(&event.details)
-    .execute(&mut *tx)
+    .execute(executor)
     .await
     .map_err(crate::error::AppError::Database)?;
+    Ok(())
+}
+
+async fn write_and_enqueue(
+    pool: &PgPool,
+    events_enabled: bool,
+    event: &AuditEvent<'_>,
+) -> Result<(), crate::error::AppError> {
+    if !events_enabled {
+        // No transaction needed: there's nothing else here to make atomic
+        // with the audit_logs insert once event publishing is off, and
+        // wrapping a single INSERT in BEGIN/COMMIT would triple its round
+        // trips on every audit write (including hot-path authz checks) for
+        // every deployment that hasn't opted into a broker — currently all
+        // of them.
+        return insert_audit_log(pool, event).await;
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(crate::error::AppError::Database)?;
+
+    insert_audit_log(&mut *tx, event).await?;
 
     crate::events::enqueue(
         &mut *tx,

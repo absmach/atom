@@ -26,7 +26,8 @@ pub const AUDIT_WRITE_FAILURES: &str = "atom_audit_write_failures_total";
 pub const AUDIT_DB_SUPPRESSED: &str = "atom_audit_db_suppressed_total";
 /// Counter of rate-limiter rejections, labelled by `category`.
 pub const RATE_LIMIT_REJECTIONS: &str = "atom_rate_limit_rejections_total";
-/// Counter of event-outbox delivery attempts that failed.
+/// Counter of event-outbox rows whose delivery attempt failed (incremented
+/// once per affected row, not once per batch).
 pub const EVENT_OUTBOX_PUBLISH_FAILURES: &str = "atom_event_outbox_publish_failures_total";
 /// Counter of event-outbox rows with a structurally-unparseable payload that
 /// hit `outbox_max_attempts` and stopped being retried. Never incremented
@@ -94,8 +95,8 @@ mod backend {
         metrics::counter!(RATE_LIMIT_REJECTIONS, "category" => category).increment(1);
     }
 
-    pub fn record_outbox_publish_failure() {
-        metrics::counter!(EVENT_OUTBOX_PUBLISH_FAILURES).increment(1);
+    pub fn record_outbox_publish_failure(rows: u64) {
+        metrics::counter!(EVENT_OUTBOX_PUBLISH_FAILURES).increment(rows);
     }
 
     pub fn record_outbox_exhausted() {
@@ -126,7 +127,7 @@ mod backend {
     #[inline]
     pub fn record_rate_limit_rejection(_category: &'static str) {}
     #[inline]
-    pub fn record_outbox_publish_failure() {}
+    pub fn record_outbox_publish_failure(_rows: u64) {}
     #[inline]
     pub fn record_outbox_exhausted() {}
 }

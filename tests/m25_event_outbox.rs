@@ -301,6 +301,55 @@ async fn a_publish_failure_is_retried_forever_and_recovers_after_the_outage_ends
     assert!(delivered_at(&pool, id).await.is_some());
 }
 
+/// Never resolves within any reasonable test duration — models a broker
+/// that accepts the connection but stalls internally rather than erroring
+/// outright, unlike `FlakyPublisher` which fails promptly every time.
+struct StallingPublisher;
+
+#[async_trait]
+impl EventPublisher for StallingPublisher {
+    async fn publish(&self, _events: &[DomainEventPayload]) -> Result<(), PublishError> {
+        std::future::pending().await
+    }
+}
+
+/// A publish call that never resolves must not hang `deliver_outbox_batch`
+/// forever — `publish_timeout_secs` bounds it, so the row still ends up
+/// undelivered-and-retryable (not `unparseable`) within a bounded time
+/// instead of holding the transaction, pool connection, and advisory lock
+/// indefinitely.
+#[tokio::test]
+#[ignore]
+async fn a_stalled_publish_times_out_instead_of_hanging_forever() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+
+    let publisher = StallingPublisher;
+    let cfg = EventsConfig {
+        publish_timeout_secs: 1,
+        ..test_events_config()
+    };
+
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        deliver_outbox_batch(&pool, &publisher, &cfg),
+    )
+    .await
+    .expect("deliver_outbox_batch must return well within the outer test timeout")
+    .expect("deliver batch");
+
+    assert_eq!(
+        delivered, 0,
+        "a stalled publish must not count as delivered"
+    );
+    assert!(delivered_at(&pool, id).await.is_none());
+
+    let (attempts, last_error) = attempts_and_error(&pool, id).await;
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("timed out"));
+}
+
 /// An unparseable row (unlike a publish failure) must stop being retried
 /// once it hits `outbox_max_attempts` — retrying it can never succeed — and
 /// must stop occupying batch slots once excluded, so a healthy row queued

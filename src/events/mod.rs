@@ -223,7 +223,7 @@ pub async fn deliver_outbox_batch(
     }
 
     if !unparseable_ids.is_empty() {
-        crate::metrics::record_outbox_publish_failure();
+        crate::metrics::record_outbox_publish_failure(unparseable_ids.len() as u64);
         record_unparseable_failure(
             &mut tx,
             &unparseable_ids,
@@ -238,7 +238,30 @@ pub async fn deliver_outbox_batch(
         return Ok(0);
     }
 
-    match publisher.publish(&events).await {
+    // Bounded rather than a bare `.await`: a broker that accepts the TCP
+    // connection but then stalls internally (rather than erroring outright —
+    // a disconnect or a Nack both return promptly) would otherwise hang
+    // `publisher.publish` indefinitely. Since that call runs inside this
+    // function's still-open transaction, an indefinite hang would hold the
+    // checked-out pool connection and the transaction-scoped advisory lock
+    // for as long as the stall lasts, and the poller's single background
+    // task would simply stop ticking with nothing logged — a quieter version
+    // of the same "queued events stop moving" failure mode fixed above for
+    // explicit broker errors. A timeout turns a stall into an ordinary,
+    // visible publish failure instead: the affected rows stay undelivered
+    // and retryable (never `unparseable`, so `outbox_max_attempts` never
+    // excludes them), and the connection/lock are released for the next
+    // tick.
+    let publish_timeout = std::time::Duration::from_secs(cfg.publish_timeout_secs);
+    let publish_result =
+        match tokio::time::timeout(publish_timeout, publisher.publish(&events)).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(publisher::PublishError(format!(
+                "publish timed out after {publish_timeout:?} waiting on the broker"
+            ))),
+        };
+
+    match publish_result {
         Ok(()) => {
             sqlx::query("UPDATE event_outbox SET delivered_at = now() WHERE id = ANY($1)")
                 .bind(&ids)
@@ -253,7 +276,7 @@ pub async fn deliver_outbox_batch(
             // `outbox_max_attempts` — see the SELECT comment above. This row
             // stays eligible for every future poll no matter how many times
             // publishing keeps failing.
-            crate::metrics::record_outbox_publish_failure();
+            crate::metrics::record_outbox_publish_failure(ids.len() as u64);
             sqlx::query(
                 "UPDATE event_outbox
                  SET attempts = attempts + 1, last_error = $2

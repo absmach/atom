@@ -271,6 +271,12 @@ pub struct EventsConfig {
     pub outbox_poll_interval_secs: u64,
     pub outbox_batch_size: i64,
     pub outbox_max_attempts: i32,
+    /// Bounds how long one delivery tick waits on the broker before treating
+    /// it as a (retryable) failure. Guards against a broker that accepts the
+    /// connection but stalls internally rather than erroring outright, which
+    /// would otherwise hang the delivery task indefinitely while holding a
+    /// pool connection and the outbox's advisory lock.
+    pub publish_timeout_secs: u64,
 }
 
 impl EventsConfig {
@@ -291,6 +297,7 @@ impl Default for EventsConfig {
             outbox_poll_interval_secs: 5,
             outbox_batch_size: 100,
             outbox_max_attempts: 10,
+            publish_timeout_secs: 30,
         }
     }
 }
@@ -829,6 +836,10 @@ fn events_from_env() -> Result<EventsConfig> {
             "ATOM_EVENTS_OUTBOX_MAX_ATTEMPTS",
             default.outbox_max_attempts,
         )?,
+        publish_timeout_secs: env_parse(
+            "ATOM_EVENTS_PUBLISH_TIMEOUT_SECS",
+            default.publish_timeout_secs,
+        )?,
     };
     if cfg.outbox_poll_interval_secs == 0 {
         anyhow::bail!("ATOM_EVENTS_OUTBOX_POLL_INTERVAL_SECS must be greater than zero");
@@ -838,6 +849,9 @@ fn events_from_env() -> Result<EventsConfig> {
     }
     if cfg.outbox_max_attempts <= 0 {
         anyhow::bail!("ATOM_EVENTS_OUTBOX_MAX_ATTEMPTS must be greater than zero");
+    }
+    if cfg.publish_timeout_secs == 0 {
+        anyhow::bail!("ATOM_EVENTS_PUBLISH_TIMEOUT_SECS must be greater than zero");
     }
     if cfg.amqp_tls_client_cert_path.is_some() != cfg.amqp_tls_client_key_path.is_some() {
         anyhow::bail!(
