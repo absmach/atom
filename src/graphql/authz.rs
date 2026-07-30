@@ -96,6 +96,7 @@ impl AuthzMutation {
         audit_authz_check(
             &state.pool,
             state.config.audit_policy,
+            state.config.events.enabled(),
             auth.entity_id,
             &req,
             &response,
@@ -120,7 +121,15 @@ impl AuthzMutation {
         let response = engine::explain(&state.pool, &req, &auth)
             .await
             .map_err(gql_error)?;
-        audit_authz_explain(&state.pool, auth.entity_id, &req, &response, tenant_id).await;
+        audit_authz_explain(
+            &state.pool,
+            state.config.events.enabled(),
+            auth.entity_id,
+            &req,
+            &response,
+            tenant_id,
+        )
+        .await;
         Ok(response.into())
     }
 
@@ -151,6 +160,7 @@ impl AuthzMutation {
             audit_authz_check(
                 &state.pool,
                 state.config.audit_policy,
+                state.config.events.enabled(),
                 auth.entity_id,
                 &req,
                 &response,
@@ -184,6 +194,7 @@ fn authz_request_target(req: &AuthzRequest) -> (Option<&str>, Option<Uuid>) {
 async fn audit_authz_check(
     pool: &sqlx::PgPool,
     audit_policy: AuditPolicyConfig,
+    events_enabled: bool,
     actor_id: Uuid,
     req: &AuthzRequest,
     response: &ModelAuthzResponse,
@@ -213,6 +224,7 @@ async fn audit_authz_check(
     audit::write_hot_path(
         pool,
         audit_policy,
+        events_enabled,
         audit::HotPathAuditKind::AuthzCheck,
         audit::AuditEvent {
             actor_entity_id: Some(actor_id),
@@ -233,6 +245,7 @@ async fn audit_authz_check(
 
 async fn audit_authz_explain(
     pool: &sqlx::PgPool,
+    events_enabled: bool,
     actor_id: Uuid,
     req: &AuthzRequest,
     response: &access_model::AuthzExplainResponse,
@@ -257,6 +270,7 @@ async fn audit_authz_explain(
     let (target_kind, target_id) = authz_request_target(req);
     audit::write(
         pool,
+        events_enabled,
         audit::AuditEvent {
             actor_entity_id: Some(actor_id),
             tenant_id,

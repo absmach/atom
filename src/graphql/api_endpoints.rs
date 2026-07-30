@@ -136,6 +136,8 @@ impl ApiEndpointMutation {
         .await;
 
         crate::audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             crate::audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -145,7 +147,8 @@ impl ApiEndpointMutation {
             },
             json!({}),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -187,6 +190,8 @@ impl ApiEndpointMutation {
         .await;
 
         crate::audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             crate::audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
@@ -196,7 +201,8 @@ impl ApiEndpointMutation {
             },
             json!({}),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -212,6 +218,8 @@ impl ApiEndpointMutation {
         }
         .await;
         crate::audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             crate::audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
@@ -221,7 +229,8 @@ impl ApiEndpointMutation {
             },
             json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -236,6 +245,8 @@ impl ApiEndpointMutation {
         }
         .await;
         crate::audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             crate::audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
@@ -245,7 +256,8 @@ impl ApiEndpointMutation {
             },
             json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 }

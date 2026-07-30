@@ -68,6 +68,7 @@ async fn audit_write_persists_tenant_id() {
 
     audit::write(
         &p,
+        false,
         audit::AuditEvent {
             actor_entity_id: Some(e),
             tenant_id: Some(t),
@@ -117,6 +118,7 @@ async fn tenant_audit_filter_returns_only_allowed_tenant_rows() {
 
     audit::write(
         &p,
+        false,
         audit::AuditEvent {
             actor_entity_id: Some(auditor),
             tenant_id: Some(t1),
@@ -130,6 +132,7 @@ async fn tenant_audit_filter_returns_only_allowed_tenant_rows() {
     .await;
     audit::write(
         &p,
+        false,
         audit::AuditEvent {
             actor_entity_id: Some(auditor),
             tenant_id: Some(t2),
@@ -179,6 +182,7 @@ async fn hot_path_allow_skips_db_audit_by_default() {
     audit::write_hot_path(
         &p,
         AuditPolicyConfig::default(),
+        false,
         audit::HotPathAuditKind::AuthLogin,
         audit::AuditEvent {
             actor_entity_id: Some(entity_id),
@@ -211,6 +215,7 @@ async fn hot_path_deny_keeps_db_audit_by_default() {
     audit::write_hot_path(
         &p,
         AuditPolicyConfig::default(),
+        false,
         audit::HotPathAuditKind::AuthzCheck,
         audit::AuditEvent {
             actor_entity_id: Some(entity_id),
@@ -245,6 +250,7 @@ async fn hot_path_allow_db_audit_can_be_enabled() {
         AuditPolicyConfig {
             hot_path_allow_db_enabled: true,
         },
+        false,
         audit::HotPathAuditKind::AuthLogin,
         audit::AuditEvent {
             actor_entity_id: Some(entity_id),

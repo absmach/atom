@@ -342,6 +342,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -351,7 +353,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -380,6 +383,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|r| r.tenant_id),
@@ -389,7 +394,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -426,6 +432,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -435,7 +443,8 @@ impl PolicyMutation {
             },
             serde_json::json!({ "permission_block_ids": permission_block_ids }),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -458,6 +467,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -467,7 +478,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -490,6 +502,7 @@ impl PolicyMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: role.tenant_id,
@@ -519,6 +532,7 @@ impl PolicyMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -561,6 +575,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,
@@ -570,7 +586,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -596,6 +613,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,
@@ -605,7 +624,8 @@ impl PolicyMutation {
             },
             serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
             &result,
-        );
+        )
+        .await;
         result.map(ActionApplicabilityEntry).map_err(gql_error)
     }
 
@@ -631,6 +651,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,
@@ -640,7 +662,8 @@ impl PolicyMutation {
             },
             serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -674,7 +697,14 @@ impl PolicyMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit_action_assignment_rule(&state.pool, auth.entity_id, &rule, "create").await;
+        audit_action_assignment_rule(
+            &state.pool,
+            state.config.events.enabled(),
+            auth.entity_id,
+            &rule,
+            "create",
+        )
+        .await;
         Ok(ActionAssignmentRule(rule))
     }
 
@@ -696,7 +726,14 @@ impl PolicyMutation {
         let rule = authz_repo::delete_action_assignment_rule(&state.pool, id)
             .await
             .map_err(gql_error)?;
-        audit_action_assignment_rule(&state.pool, auth.entity_id, &rule, "delete").await;
+        audit_action_assignment_rule(
+            &state.pool,
+            state.config.events.enabled(),
+            auth.entity_id,
+            &rule,
+            "delete",
+        )
+        .await;
         Ok(true)
     }
 
@@ -735,6 +772,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,
@@ -744,7 +783,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -758,6 +798,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,
@@ -767,7 +809,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -812,6 +855,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -821,7 +866,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -844,6 +890,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -853,7 +901,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -889,6 +938,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -898,7 +949,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -921,6 +973,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -930,7 +984,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -966,6 +1021,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -975,7 +1032,8 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -998,6 +1056,8 @@ impl PolicyMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -1007,13 +1067,15 @@ impl PolicyMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 }
 
 async fn audit_action_assignment_rule(
     pool: &sqlx::PgPool,
+    events_enabled: bool,
     actor_id: uuid::Uuid,
     rule: &crate::models::action_assignment_rule::ActionAssignmentRule,
     action: &str,
@@ -1021,6 +1083,7 @@ async fn audit_action_assignment_rule(
     let event = format!("action_assignment_rule.{action}");
     audit::write(
         pool,
+        events_enabled,
         audit::AuditEvent {
             actor_entity_id: Some(actor_id),
             tenant_id: rule.tenant_id,

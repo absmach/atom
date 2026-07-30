@@ -155,6 +155,7 @@ impl OperationsMutation {
         *state.keys.write().await = new_keys;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,

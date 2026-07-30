@@ -44,13 +44,23 @@ pub struct AuditMeta<'a> {
 /// its `Result`: `Ok` => info `allow`, `Err` => warn (`Deny`) or error (other)
 /// per [`AppError::audit_outcome`]. The error string is folded into `details`.
 ///
-/// This is the observability channel **only** — it does NOT write the
-/// `audit_logs` DB table. That persisted compliance trail is [`write`] /
-/// [`write_hot_path`], and those already emit their own paired log line via
-/// [`log_audit_event`]; never call both for the same operation or it double-logs.
-/// Use `observe_result` for operations that are not part of the DB audit trail
-/// (e.g. create mutations and the non-audited update/delete paths).
-pub fn observe_result<T>(
+/// This is the observability channel — it does NOT write the `audit_logs` DB
+/// table (that persisted compliance trail is [`write`] / [`write_hot_path`]).
+/// It **does** also enqueue a domain event (see `src/events/mod.rs`) when
+/// `events_enabled` is true, since operations recorded here (e.g.
+/// `resource.create`, `tenant.create`) are exactly the events an external
+/// consumer cares about, even though they're not part of the DB audit trail.
+/// Use `observe_result` for operations that are not part of the DB audit
+/// trail (e.g. create mutations and the non-audited update/delete paths).
+///
+/// Takes `pool`/`events_enabled` rather than `&AppState` deliberately: some
+/// callers (e.g. the authz PDP's audit helpers) intentionally depend only on
+/// `PgPool` and plain config values, not the transport-level `AppState` type
+/// — threading `&AppState` through would leak a transport-level dependency
+/// into that transport-agnostic code.
+pub async fn observe_result<T>(
+    pool: &PgPool,
+    events_enabled: bool,
     meta: AuditMeta<'_>,
     details: Value,
     result: &Result<T, crate::error::AppError>,
@@ -70,7 +80,7 @@ pub fn observe_result<T>(
         }
     };
 
-    log_audit_event(&AuditEvent {
+    let event = AuditEvent {
         actor_entity_id: meta.actor_entity_id,
         tenant_id: meta.tenant_id,
         target_kind: Some(meta.target_kind),
@@ -78,7 +88,24 @@ pub fn observe_result<T>(
         event: meta.event,
         outcome,
         details,
-    });
+    };
+    log_audit_event(&event);
+
+    if let Err(err) = crate::events::enqueue(
+        pool,
+        events_enabled,
+        event.actor_entity_id,
+        event.tenant_id,
+        event.target_kind,
+        event.target_id,
+        event.event,
+        outcome_str(&event.outcome),
+        &event.details,
+    )
+    .await
+    {
+        tracing::error!("event outbox enqueue failed event={}: {err}", event.event);
+    }
 }
 
 /// Emit a structured tracing line for an operation (level keyed to outcome), so
@@ -122,6 +149,14 @@ fn log_audit_event(event: &AuditEvent<'_>) {
     }
 }
 
+fn outcome_str(outcome: &AuditOutcome) -> &'static str {
+    match outcome {
+        AuditOutcome::Allow => "allow",
+        AuditOutcome::Deny => "deny",
+        AuditOutcome::Error => "error",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotPathAuditKind {
     AuthzCheck,
@@ -143,9 +178,15 @@ fn should_write_hot_path_allow(policy: AuditPolicyConfig) -> bool {
     policy.hot_path_allow_db_enabled
 }
 
+/// Suppressed hot-path `Allow` outcomes (the default for `AuthzCheck`,
+/// `AuthLogin`, `AuthCredentialAuthenticate` — see `AuditPolicyConfig`) never
+/// reach [`write`], so they're also never published as domain events. This
+/// is deliberate: it's what naturally excludes high-volume AuthN/AuthZ noise
+/// from the event stream without needing a separate filter.
 pub async fn write_hot_path(
     pool: &PgPool,
     policy: AuditPolicyConfig,
+    events_enabled: bool,
     kind: HotPathAuditKind,
     event: AuditEvent<'_>,
 ) {
@@ -159,13 +200,36 @@ pub async fn write_hot_path(
         return;
     }
 
-    write(pool, event).await;
+    write(pool, events_enabled, event).await;
 }
 
-pub async fn write(pool: &PgPool, event: AuditEvent<'_>) {
+/// Persists the event to `audit_logs` and, when `events_enabled` is true,
+/// enqueues the same event into `event_outbox` — both in the same
+/// transaction, so the two are atomic with each other (though, matching this
+/// codebase's existing precedent, not atomic with whatever mutation the
+/// caller performed beforehand: audit writes have never been strictly
+/// transactional with their triggering mutation, and this does not change
+/// that).
+pub async fn write(pool: &PgPool, events_enabled: bool, event: AuditEvent<'_>) {
     log_audit_event(&event);
 
-    let result = sqlx::query(
+    if let Err(e) = write_and_enqueue(pool, events_enabled, &event).await {
+        crate::metrics::record_audit_failure();
+        tracing::error!("audit write failed event={}: {e}", event.event);
+    }
+}
+
+async fn write_and_enqueue(
+    pool: &PgPool,
+    events_enabled: bool,
+    event: &AuditEvent<'_>,
+) -> Result<(), crate::error::AppError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(crate::error::AppError::Database)?;
+
+    sqlx::query(
         "INSERT INTO audit_logs (id, actor_entity_id, tenant_id, target_kind, target_id, event, outcome, details)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
@@ -175,15 +239,26 @@ pub async fn write(pool: &PgPool, event: AuditEvent<'_>) {
     .bind(event.target_kind)
     .bind(event.target_id)
     .bind(event.event)
-    .bind(event.outcome)
-    .bind(event.details)
-    .execute(pool)
-    .await;
+    .bind(event.outcome.clone())
+    .bind(&event.details)
+    .execute(&mut *tx)
+    .await
+    .map_err(crate::error::AppError::Database)?;
 
-    if let Err(e) = result {
-        crate::metrics::record_audit_failure();
-        tracing::error!("audit write failed event={}: {e}", event.event);
-    }
+    crate::events::enqueue(
+        &mut *tx,
+        events_enabled,
+        event.actor_entity_id,
+        event.tenant_id,
+        event.target_kind,
+        event.target_id,
+        event.event,
+        outcome_str(&event.outcome),
+        &event.details,
+    )
+    .await?;
+
+    tx.commit().await.map_err(crate::error::AppError::Database)
 }
 
 pub fn spawn_retention_cleanup(state: AppState) {
@@ -204,6 +279,7 @@ pub fn spawn_retention_cleanup(state: AppState) {
                 Ok(summary) if summary.deleted_rows > 0 => {
                     write(
                         &state.pool,
+                        state.config.events.enabled(),
                         AuditEvent {
                             actor_entity_id: None,
                             tenant_id: None,

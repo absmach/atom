@@ -126,6 +126,7 @@ impl AuthzService for AtomAuthz {
         audit::write_hot_path(
             &self.state.pool,
             self.state.config.audit_policy,
+            self.state.config.events.enabled(),
             audit::HotPathAuditKind::AuthzCheck,
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
@@ -243,6 +244,7 @@ impl AuthService for AtomAuth {
         audit::write_hot_path(
             &self.state.pool,
             self.state.config.audit_policy,
+            self.state.config.events.enabled(),
             audit::HotPathAuditKind::AuthCredentialAuthenticate,
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
@@ -368,6 +370,7 @@ impl CertificateService for AtomCertificates {
         .map_err(Status::from)?;
         audit::write(
             &self.state.pool,
+            self.state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,

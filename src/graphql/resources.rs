@@ -207,6 +207,8 @@ impl ResourceMutation {
         .await;
 
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -216,7 +218,8 @@ impl ResourceMutation {
             },
             serde_json::json!({ "kind": kind }),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -258,6 +261,7 @@ impl ResourceMutation {
 
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: resource.tenant_id,
@@ -296,6 +300,7 @@ impl ResourceMutation {
 
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: existing.tenant_id,
@@ -326,6 +331,7 @@ impl ResourceMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: resource.tenant_id,
@@ -352,6 +358,7 @@ impl ResourceMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -394,6 +401,8 @@ impl ResourceMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|r| r.tenant_id),
@@ -403,7 +412,8 @@ impl ResourceMutation {
             },
             serde_json::json!({ "group_id": group_id }),
             &result,
-        );
+        )
+        .await;
         result.map(Resource::from).map_err(gql_error)
     }
 
@@ -442,6 +452,8 @@ impl ResourceMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|r| r.tenant_id),
@@ -451,7 +463,8 @@ impl ResourceMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Resource::from).map_err(gql_error)
     }
 

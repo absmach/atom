@@ -49,6 +49,11 @@ x509-parser = "0.18.1"
 zeroize = "1"
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }
+lapin = { version = "4.10.0", default-features = false, features = [
+    "default-runtime",
+    "rustls--ring",
+    "rustls-webpki-roots-certs",
+] }
 
 [features]
 # Metrics are on by default. Disable at compile time for maximum-performance

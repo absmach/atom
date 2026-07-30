@@ -318,6 +318,8 @@ impl GroupMutation {
         .await;
 
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -327,7 +329,8 @@ impl GroupMutation {
             },
             serde_json::json!({ "group_type": group_type }),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -376,6 +379,8 @@ impl GroupMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
@@ -385,7 +390,8 @@ impl GroupMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -416,6 +422,8 @@ impl GroupMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
@@ -425,7 +433,8 @@ impl GroupMutation {
             },
             serde_json::json!({ "parent_id": parent_id }),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -452,6 +461,8 @@ impl GroupMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -461,7 +472,8 @@ impl GroupMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -486,6 +498,8 @@ impl GroupMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -495,7 +509,8 @@ impl GroupMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -513,6 +528,7 @@ impl GroupMutation {
         let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: group.tenant_id,
@@ -539,6 +555,7 @@ impl GroupMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -580,6 +597,8 @@ impl GroupMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -589,7 +608,8 @@ impl GroupMutation {
             },
             serde_json::json!({ "entity_id": entity_id }),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -620,6 +640,8 @@ impl GroupMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().copied().flatten(),
@@ -629,7 +651,8 @@ impl GroupMutation {
             },
             serde_json::json!({ "entity_id": entity_id }),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 }
@@ -663,6 +686,8 @@ impl GroupMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
@@ -672,7 +697,8 @@ impl GroupMutation {
             },
             serde_json::json!({ "status": status_detail }),
             &result,
-        );
+        )
+        .await;
         result.map(Into::into).map_err(gql_error)
     }
 }

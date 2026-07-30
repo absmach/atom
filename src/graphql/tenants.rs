@@ -294,6 +294,8 @@ impl TenantMutation {
 
         let tenant_id = result.as_ref().ok().map(|t| t.id);
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -303,7 +305,8 @@ impl TenantMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -343,6 +346,8 @@ impl TenantMutation {
         .await;
 
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: Some(tenant_id),
@@ -352,7 +357,8 @@ impl TenantMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -368,6 +374,8 @@ impl TenantMutation {
         .await;
 
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: Some(tenant_id),
@@ -377,7 +385,8 @@ impl TenantMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
 
         result.map(|_| true).map_err(gql_error)
     }
@@ -399,6 +408,7 @@ impl TenantMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: Some(tenant.id),
@@ -431,6 +441,7 @@ impl TenantMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,
@@ -598,6 +609,8 @@ impl TenantMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: Some(tenant_id),
@@ -607,7 +620,8 @@ impl TenantMutation {
             },
             serde_json::json!({ "entity_id": entity_id }),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -635,6 +649,8 @@ impl TenantMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: Some(tenant_id),
@@ -644,7 +660,8 @@ impl TenantMutation {
             },
             serde_json::json!({ "entity_id": entity_id, "role_id": role_id }),
             &result,
-        );
+        )
+        .await;
         result.map(|_| true).map_err(gql_error)
     }
 }
@@ -662,6 +679,8 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
     }
     .await;
     audit::observe_result(
+        &state.pool,
+        state.config.events.enabled(),
         audit::AuditMeta {
             actor_entity_id: Some(auth.entity_id),
             tenant_id: Some(tenant_id),
@@ -671,7 +690,8 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
         },
         serde_json::json!({ "status": status_detail }),
         &result,
-    );
+    )
+    .await;
     result.map(Into::into).map_err(gql_error)
 }
 

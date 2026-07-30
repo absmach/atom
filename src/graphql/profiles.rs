@@ -126,6 +126,8 @@ impl ProfileMutation {
         .await;
 
         crate::audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             crate::audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -135,7 +137,8 @@ impl ProfileMutation {
             },
             json!({}),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -177,6 +180,8 @@ impl ProfileMutation {
         .await;
 
         crate::audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             crate::audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: profile.tenant_id,
@@ -186,7 +191,8 @@ impl ProfileMutation {
             },
             json!({ "profile_id": profile_id }),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -229,6 +235,8 @@ impl ProfileMutation {
         .await;
 
         crate::audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             crate::audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: existing.tenant_id,
@@ -238,7 +246,8 @@ impl ProfileMutation {
             },
             json!({}),
             &result,
-        );
+        )
+        .await;
 
         result.map(Into::into).map_err(gql_error)
     }

@@ -236,6 +236,7 @@ impl EntityMutation {
             Ok(entity) => {
                 audit::write(
                     &state.pool,
+                    state.config.events.enabled(),
                     audit::AuditEvent {
                         actor_entity_id: Some(auth.entity_id),
                         tenant_id: entity.tenant_id,
@@ -248,17 +249,22 @@ impl EntityMutation {
                 )
                 .await;
             }
-            Err(_) => audit::observe_result(
-                audit::AuditMeta {
-                    actor_entity_id: Some(auth.entity_id),
-                    tenant_id,
-                    target_kind: "entity",
-                    target_id: None,
-                    event: "entity.create",
-                },
-                serde_json::json!({}),
-                &result,
-            ),
+            Err(_) => {
+                audit::observe_result(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    audit::AuditMeta {
+                        actor_entity_id: Some(auth.entity_id),
+                        tenant_id,
+                        target_kind: "entity",
+                        target_id: None,
+                        event: "entity.create",
+                    },
+                    serde_json::json!({}),
+                    &result,
+                )
+                .await
+            }
         }
 
         result.map(Into::into).map_err(gql_error)
@@ -310,6 +316,7 @@ impl EntityMutation {
 
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: entity.tenant_id,
@@ -346,6 +353,7 @@ impl EntityMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: existing.tenant_id,
@@ -376,6 +384,7 @@ impl EntityMutation {
         let entity = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: entity.tenant_id,
@@ -402,6 +411,7 @@ impl EntityMutation {
             .map_err(gql_error)?;
         audit::write(
             &state.pool,
+            state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
@@ -447,6 +457,8 @@ impl EntityMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
@@ -456,7 +468,8 @@ impl EntityMutation {
             },
             serde_json::json!({ "group_id": group_id }),
             &result,
-        );
+        )
+        .await;
         result.map(Entity::from).map_err(gql_error)
     }
 
@@ -491,6 +504,8 @@ impl EntityMutation {
         }
         .await;
         audit::observe_result(
+            &state.pool,
+            state.config.events.enabled(),
             audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
@@ -500,7 +515,8 @@ impl EntityMutation {
             },
             serde_json::json!({}),
             &result,
-        );
+        )
+        .await;
         result.map(Entity::from).map_err(gql_error)
     }
 
@@ -596,6 +612,7 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
     .map_err(gql_error)?;
     audit::write(
         &state.pool,
+        state.config.events.enabled(),
         audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id: entity.tenant_id,

@@ -26,6 +26,7 @@ pub struct Config {
     pub audit_retention: AuditRetentionConfig,
     pub purge: PurgeConfig,
     pub rate_limits: RateLimitConfig,
+    pub events: EventsConfig,
     pub body_limits: BodyLimitConfig,
     pub graphql_limits: GraphqlLimitConfig,
     pub metrics: MetricsConfig,
@@ -235,6 +236,65 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Generic domain-event publishing: audit-worthy events are optionally
+/// mirrored to an AMQP broker. Gated by *presence* of `amqp_url`, not a
+/// separate enabled flag — unconfigured (the default) means zero behavior
+/// change: no outbox rows are written and no delivery task is spawned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventsConfig {
+    /// AMQP broker URL (e.g. `amqp://user:pass@host:5672/%2f`, or
+    /// `amqps://user:pass@host:port/%2f` for TLS). `None` (the default)
+    /// disables event publishing entirely.
+    pub amqp_url: Option<String>,
+    /// AMQP exchange events are published to. Empty string (the default)
+    /// means the default exchange — every event is published with
+    /// `amqp_routing_key` as the routing key, which the default exchange
+    /// treats as a queue name. This is standard AMQP 0-9-1 (works against
+    /// any compliant broker) and matches brokers whose operators only grant
+    /// Atom publish access to one fixed, pre-provisioned queue rather than
+    /// letting it declare arbitrary topology. Set a non-empty name to
+    /// publish to a custom (e.g. topic) exchange instead, in which case Atom
+    /// declares it on connect.
+    pub amqp_exchange: String,
+    /// Routing key used for every published event, regardless of event
+    /// type. Consumers distinguish event types via the payload's own
+    /// `event` field, not via AMQP routing.
+    pub amqp_routing_key: String,
+    /// Optional client TLS identity for mTLS to the broker. Both
+    /// `amqp_tls_client_cert_path` and `amqp_tls_client_key_path` must be set
+    /// together, or neither.
+    pub amqp_tls_client_cert_path: Option<String>,
+    pub amqp_tls_client_key_path: Option<String>,
+    /// Optional CA bundle used to verify the broker's server certificate.
+    /// Only meaningful with an `amqps://` URL.
+    pub amqp_tls_ca_path: Option<String>,
+    pub outbox_poll_interval_secs: u64,
+    pub outbox_batch_size: i64,
+    pub outbox_max_attempts: i32,
+}
+
+impl EventsConfig {
+    pub fn enabled(&self) -> bool {
+        self.amqp_url.is_some()
+    }
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            amqp_url: None,
+            amqp_exchange: String::new(),
+            amqp_routing_key: "atom.events".to_string(),
+            amqp_tls_client_cert_path: None,
+            amqp_tls_client_key_path: None,
+            amqp_tls_ca_path: None,
+            outbox_poll_interval_secs: 5,
+            outbox_batch_size: 100,
+            outbox_max_attempts: 10,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BodyLimitConfig {
     pub auth_bytes: usize,
@@ -405,6 +465,7 @@ impl Config {
             audit_retention: audit_retention_from_env()?,
             purge: purge_from_env()?,
             rate_limits: rate_limits_from_env()?,
+            events: events_from_env()?,
             body_limits: body_limits_from_env()?,
             graphql_limits: graphql_limits_from_env()?,
             metrics: MetricsConfig {
@@ -497,6 +558,7 @@ impl Config {
                 enabled: false,
                 ..RateLimitConfig::default()
             },
+            events: EventsConfig::default(),
             body_limits: BodyLimitConfig::default(),
             graphql_limits: GraphqlLimitConfig::default(),
             metrics: MetricsConfig::default(),
@@ -746,6 +808,43 @@ fn rate_limits_from_env() -> Result<RateLimitConfig> {
         )?,
         trusted_proxy_cidrs: trusted_proxy_cidrs_from_env()?,
     })
+}
+
+fn events_from_env() -> Result<EventsConfig> {
+    let default = EventsConfig::default();
+    let cfg = EventsConfig {
+        amqp_url: nonempty_env("ATOM_EVENTS_AMQP_URL"),
+        amqp_exchange: std::env::var("ATOM_EVENTS_AMQP_EXCHANGE").unwrap_or(default.amqp_exchange),
+        amqp_routing_key: std::env::var("ATOM_EVENTS_AMQP_ROUTING_KEY")
+            .unwrap_or(default.amqp_routing_key),
+        amqp_tls_client_cert_path: nonempty_env("ATOM_EVENTS_AMQP_TLS_CLIENT_CERT_PATH"),
+        amqp_tls_client_key_path: nonempty_env("ATOM_EVENTS_AMQP_TLS_CLIENT_KEY_PATH"),
+        amqp_tls_ca_path: nonempty_env("ATOM_EVENTS_AMQP_TLS_CA_PATH"),
+        outbox_poll_interval_secs: env_parse(
+            "ATOM_EVENTS_OUTBOX_POLL_INTERVAL_SECS",
+            default.outbox_poll_interval_secs,
+        )?,
+        outbox_batch_size: env_parse("ATOM_EVENTS_OUTBOX_BATCH_SIZE", default.outbox_batch_size)?,
+        outbox_max_attempts: env_parse(
+            "ATOM_EVENTS_OUTBOX_MAX_ATTEMPTS",
+            default.outbox_max_attempts,
+        )?,
+    };
+    if cfg.outbox_poll_interval_secs == 0 {
+        anyhow::bail!("ATOM_EVENTS_OUTBOX_POLL_INTERVAL_SECS must be greater than zero");
+    }
+    if cfg.outbox_batch_size <= 0 {
+        anyhow::bail!("ATOM_EVENTS_OUTBOX_BATCH_SIZE must be greater than zero");
+    }
+    if cfg.outbox_max_attempts <= 0 {
+        anyhow::bail!("ATOM_EVENTS_OUTBOX_MAX_ATTEMPTS must be greater than zero");
+    }
+    if cfg.amqp_tls_client_cert_path.is_some() != cfg.amqp_tls_client_key_path.is_some() {
+        anyhow::bail!(
+            "ATOM_EVENTS_AMQP_TLS_CLIENT_CERT_PATH and ATOM_EVENTS_AMQP_TLS_CLIENT_KEY_PATH must both be set, or neither"
+        );
+    }
+    Ok(cfg)
 }
 
 fn rate_limit_policy_from_env(

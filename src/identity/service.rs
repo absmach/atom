@@ -156,6 +156,7 @@ pub async fn login_credential_with_tenant(
     audit::write_hot_path(
         pool,
         cfg.audit_policy,
+        cfg.events.enabled(),
         audit::HotPathAuditKind::AuthLogin,
         audit::AuditEvent {
             actor_entity_id: entity_id_opt,
@@ -387,6 +388,7 @@ pub async fn signup_human(
 
     audit::write(
         pool,
+        cfg.events.enabled(),
         audit::AuditEvent {
             actor_entity_id: entity_id_opt,
             tenant_id: None,

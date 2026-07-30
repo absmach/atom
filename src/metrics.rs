@@ -26,6 +26,8 @@ pub const AUDIT_WRITE_FAILURES: &str = "atom_audit_write_failures_total";
 pub const AUDIT_DB_SUPPRESSED: &str = "atom_audit_db_suppressed_total";
 /// Counter of rate-limiter rejections, labelled by `category`.
 pub const RATE_LIMIT_REJECTIONS: &str = "atom_rate_limit_rejections_total";
+/// Counter of event-outbox delivery attempts that failed.
+pub const EVENT_OUTBOX_PUBLISH_FAILURES: &str = "atom_event_outbox_publish_failures_total";
 /// Gauge of DB pool connections, labelled by `state` (total|idle).
 pub const DB_POOL_CONNECTIONS: &str = "atom_db_pool_connections";
 
@@ -86,6 +88,10 @@ mod backend {
     pub fn record_rate_limit_rejection(category: &'static str) {
         metrics::counter!(RATE_LIMIT_REJECTIONS, "category" => category).increment(1);
     }
+
+    pub fn record_outbox_publish_failure() {
+        metrics::counter!(EVENT_OUTBOX_PUBLISH_FAILURES).increment(1);
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -110,9 +116,11 @@ mod backend {
     pub fn record_audit_db_suppressed(_category: &'static str) {}
     #[inline]
     pub fn record_rate_limit_rejection(_category: &'static str) {}
+    #[inline]
+    pub fn record_outbox_publish_failure() {}
 }
 
 pub use backend::{
     enabled, init, record_audit_db_suppressed, record_audit_failure, record_decision,
-    record_rate_limit_rejection, render,
+    record_outbox_publish_failure, record_rate_limit_rejection, render,
 };

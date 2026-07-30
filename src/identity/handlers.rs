@@ -247,6 +247,7 @@ pub async fn logout(
     }
     audit::write(
         &state.pool,
+        state.config.events.enabled(),
         audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id: auth.tenant_id,
@@ -501,6 +502,7 @@ pub async fn create_password(
     let credential_id = service::create_password(&state.pool, entity_id, password).await?;
     audit::write(
         &state.pool,
+        state.config.events.enabled(),
         audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id,
@@ -545,6 +547,7 @@ pub async fn revoke_credential(
     service::revoke_credential(&state.pool, entity_id, cred_id).await?;
     audit::write(
         &state.pool,
+        state.config.events.enabled(),
         audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id,

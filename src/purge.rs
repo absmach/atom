@@ -44,6 +44,7 @@ pub fn spawn_purge_cleanup(state: AppState) {
                 Ok(summary) if summary.deleted_rows > 0 => {
                     audit::write(
                         &state.pool,
+                        state.config.events.enabled(),
                         audit::AuditEvent {
                             actor_entity_id: None,
                             tenant_id: None,

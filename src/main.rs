@@ -1,6 +1,6 @@
 use anyhow::Context;
 use atom::{
-    audit, certs, config, db, grpc, identity, keys, metrics, purge, routes,
+    audit, certs, config, db, events, grpc, identity, keys, metrics, purge, routes,
     state::{self, GrpcRuntimeStatus},
 };
 use tracing_subscriber::EnvFilter;
@@ -39,12 +39,28 @@ async fn main() -> anyhow::Result<()> {
     // startup instead of leaving HTTP up with a permanently failing gRPC task.
     let grpc_tls = grpc::load_tls_config(&cfg).await?;
 
-    let state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer);
+    let mut state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer);
+    if cfg.events.enabled() {
+        let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
+            .await
+            .with_context(|| {
+                "failed to connect to the configured AMQP broker for event publishing"
+            })?;
+        state = state.with_event_publisher(std::sync::Arc::new(publisher));
+        tracing::info!(
+            "event publishing enabled (AMQP exchange {:?}, routing key {})",
+            cfg.events.amqp_exchange,
+            cfg.events.amqp_routing_key
+        );
+    } else {
+        tracing::info!("event publishing disabled (ATOM_EVENTS_AMQP_URL not set)");
+    }
     state
         .set_grpc_status(GrpcRuntimeStatus::starting(grpc_bound_addr.to_string()))
         .await;
     audit::spawn_retention_cleanup(state.clone());
     purge::spawn_purge_cleanup(state.clone());
+    events::spawn_event_publisher(state.clone());
 
     // Spawn gRPC server on a separate port; runs concurrently with HTTP. It
     // installs its own shutdown listener and drains on SIGINT/SIGTERM.
