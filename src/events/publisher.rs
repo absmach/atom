@@ -189,10 +189,18 @@ fn amqp_tls_config(cfg: &EventsConfig) -> anyhow::Result<OwnedTLSConfig> {
 #[async_trait]
 impl EventPublisher for AmqpPublisher {
     async fn publish(&self, events: &[DomainEventPayload]) -> Result<(), PublishError> {
+        // Two passes rather than one: sending every `basic_publish` frame
+        // before awaiting any confirm pipelines the batch into one round
+        // trip instead of `events.len()` sequential ones. The first await
+        // per event only waits for the frame to be written to the channel,
+        // not for the broker's response — that response is the second await,
+        // now deferred to its own loop below.
+        let mut pending = Vec::with_capacity(events.len());
         for event in events {
             let body = serde_json::to_vec(event)
                 .map_err(|e| PublishError(format!("serialize event {}: {e}", event.event_id)))?;
-            self.channel
+            let confirm = self
+                .channel
                 .basic_publish(
                     self.exchange.as_str().into(),
                     self.routing_key.as_str().into(),
@@ -201,9 +209,13 @@ impl EventPublisher for AmqpPublisher {
                     BasicProperties::default().with_content_type("application/json".into()),
                 )
                 .await
-                .map_err(|e| PublishError(format!("publish event {}: {e}", event.event_id)))?
+                .map_err(|e| PublishError(format!("publish event {}: {e}", event.event_id)))?;
+            pending.push((event.event_id, confirm));
+        }
+        for (event_id, confirm) in pending {
+            confirm
                 .await
-                .map_err(|e| PublishError(format!("confirm event {}: {e}", event.event_id)))?;
+                .map_err(|e| PublishError(format!("confirm event {event_id}: {e}")))?;
         }
         Ok(())
     }
