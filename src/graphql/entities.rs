@@ -392,24 +392,14 @@ impl EntityMutation {
                 )
                 .await?;
             }
-            // `entity_status` invalidation alone is *not* sufficient:
-            // `delete_entity` also revokes this entity's sessions and
-            // access-token credentials in the same transaction, and
-            // `restoreEntity` deliberately does not reinstate them (an
-            // identity must re-authenticate after restore). A stale cached
-            // session/credential survives the tombstoned window untouched
-            // (masked only by the entity_status miss forcing a fresh
-            // Postgres check), then becomes a full cache hit again the
-            // moment `restoreEntity` repopulates entity_status as active —
-            // despite being revoked in Postgres and meant to stay that way.
-            //
-            // The session/credential ids are enumerated *inside* the same
-            // transaction as the status flip (see
-            // `deactivate_entity_and_collect_revocation_ids_in_tx`), not via
-            // a pre-transaction pool query — that lock is what stops a
-            // concurrently-created session/credential from being missed and
-            // left permanently uninvalidated. See `src/cache/mod.rs`'s
-            // consistency model.
+            // `entity_status` invalidation alone is *not* sufficient: this
+            // also revokes sessions and access-token credentials, which
+            // `restoreEntity` deliberately never reinstates. Without their
+            // own invalidation, a stale cached session/credential would
+            // become a full hit again the moment `restoreEntity` repopulates
+            // entity_status as active — despite staying revoked in Postgres.
+            // See `deactivate_entity_and_collect_revocation_ids_in_tx` for
+            // why the ids are enumerated inside the same locked transaction.
             let Some(cache) = state.cache.as_deref() else {
                 return repo::delete_entity_with_audit(
                     &state.pool,

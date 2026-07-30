@@ -1358,12 +1358,10 @@ pub async fn replace_role_permission_block_links_with_audit(
     tx.commit().await.map_err(db_err)
 }
 
-/// [`replace_role_permission_block_links`]'s body, minus opening/committing
-/// its own transaction — see [`create_role_assignment_in_tx`]'s doc comment
-/// for the caller contract (the resolver locks the role, and every group
-/// currently assigned it, via [`lock_role_and_collect_grants_keys`] on this
-/// same `tx` first — `lock_role` below then just re-acquires that same,
-/// already-held role lock).
+/// Body of [`replace_role_permission_block_links`]; caller contract per
+/// [`create_role_assignment_in_tx`]. The resolver must already hold the role
+/// lock via [`lock_role_and_collect_grants_keys`] on this `tx` — `lock_role`
+/// below just re-acquires it (same-transaction no-op).
 pub(crate) async fn replace_role_permission_block_links_in_tx(
     pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
@@ -2948,11 +2946,9 @@ pub async fn delete_role_with_audit(
     tx.commit().await.map_err(db_err)
 }
 
-/// [`delete_role`]'s body, minus opening/committing its own transaction —
-/// see [`create_role_assignment_in_tx`]'s doc comment for the caller
-/// contract (the resolver locks the role, and every group currently
-/// assigned it, via [`lock_role_and_collect_grants_keys`] on this same `tx`
-/// first).
+/// Body of [`delete_role`]; caller contract per
+/// [`create_role_assignment_in_tx`] — the resolver must already hold the
+/// role lock via [`lock_role_and_collect_grants_keys`] on this `tx`.
 pub(crate) async fn delete_role_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
@@ -3034,11 +3030,9 @@ pub async fn restore_role_with_audit(
     Ok(())
 }
 
-/// [`restore_role`]'s body, minus opening/committing its own transaction —
-/// see [`create_role_assignment_in_tx`]'s doc comment for the caller
-/// contract (the resolver locks the role, and every group currently
-/// assigned it, via [`lock_role_and_collect_grants_keys`] on this same `tx`
-/// first).
+/// Body of [`restore_role`]; caller contract per
+/// [`create_role_assignment_in_tx`] — the resolver must already hold the
+/// role lock via [`lock_role_and_collect_grants_keys`] on this `tx`.
 pub(crate) async fn restore_role_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
@@ -4291,14 +4285,15 @@ pub async fn create_role_assignment_with_audit(
     Ok(assignment)
 }
 
-/// [`create_role_assignment`]'s body, minus opening/committing its own
-/// transaction. For a group subject, the caller (the group-subject mutation
-/// resolver path) must have already run
-/// [`lock_group_closures_and_collect_grants_keys`] on this same `tx` and
-/// called `cache.begin()` on the result before calling this — `lock_role`
-/// and `lock_live_subject` below then just re-acquire (safe, same-transaction
-/// no-op) locks this function has always taken. The caller commits `tx`, not
-/// this function.
+/// Body of [`create_role_assignment`], callable directly against a caller-held
+/// `tx` (not committed here). For a group subject, the caller must already
+/// have run [`lock_group_closures_and_collect_grants_keys`] on this same `tx`
+/// and called `cache.begin()` on the result — `lock_role`/`lock_live_subject`
+/// below then just re-acquire those same locks (safe, same-transaction no-op).
+/// Every other `_in_tx` twin in this module and `identity::repo` follows this
+/// same convention: caller locks + begins the cache barrier first, this kind
+/// of function re-acquires (never re-validates) those locks, and the caller
+/// commits.
 pub(crate) async fn create_role_assignment_in_tx(
     _pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
@@ -4516,10 +4511,9 @@ pub async fn delete_role_assignment_with_audit(
     tx.commit().await.map_err(db_err)
 }
 
-/// [`delete_role_assignment`]'s body, minus opening/committing its own
-/// transaction — see [`create_role_assignment_in_tx`]'s doc comment for the
-/// caller contract (group-subject resolver path locks the subject's group
-/// closure on this same `tx` first).
+/// Body of [`delete_role_assignment`]; caller contract per
+/// [`create_role_assignment_in_tx`] — the group-subject resolver path must
+/// already hold the subject's group closure lock on this `tx`.
 pub(crate) async fn delete_role_assignment_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
@@ -4574,9 +4568,8 @@ pub async fn create_direct_policy_with_audit(
     Ok(policy)
 }
 
-/// [`create_direct_policy`]'s body, minus opening/committing its own
-/// transaction — see [`create_role_assignment_in_tx`]'s doc comment for the
-/// caller contract.
+/// Body of [`create_direct_policy`]; caller contract per
+/// [`create_role_assignment_in_tx`].
 pub(crate) async fn create_direct_policy_in_tx(
     pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
@@ -4860,9 +4853,8 @@ pub async fn delete_direct_policy_with_audit(
     tx.commit().await.map_err(db_err)
 }
 
-/// [`delete_direct_policy`]'s body, minus opening/committing its own
-/// transaction — see [`create_role_assignment_in_tx`]'s doc comment for the
-/// caller contract.
+/// Body of [`delete_direct_policy`]; caller contract per
+/// [`create_role_assignment_in_tx`].
 pub(crate) async fn delete_direct_policy_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,

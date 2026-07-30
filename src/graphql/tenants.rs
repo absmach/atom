@@ -401,27 +401,15 @@ impl TenantMutation {
 
         let result: std::result::Result<(), AppError> = async {
             crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
-            // `soft_delete_tenant` is a separate function from
-            // `change_tenant_status` (it also bulk-revokes sessions and
-            // credentials). `tenant_status` invalidation alone is *not*
-            // sufficient: while the tenant stays deleted, a stale cached
-            // session survives untouched (masked only by the tenant_status
-            // miss forcing a fresh Postgres check), but the moment
-            // `restoreTenant` repopulates tenant_status as active again, that
-            // stale session becomes a full cache hit and authenticates
-            // despite being revoked in Postgres. Credentials don't need the
-            // same treatment here — `restore_tenant`'s own invalidation
-            // (see `reactivate_tenant_and_collect_credential_ids_in_tx`)
-            // already covers the credential side by the time a restore could
-            // ever matter.
-            //
-            // Session ids are enumerated *inside* the same transaction as the
-            // status flip (see
-            // `deactivate_tenant_and_collect_session_ids_in_tx`), not via a
-            // pre-transaction pool query — that lock is what stops a
-            // concurrently-created session from being missed and left
-            // permanently uninvalidated. See `src/cache/mod.rs`'s
-            // consistency model.
+            // `tenant_status` invalidation alone is *not* sufficient: this
+            // also bulk-revokes sessions, which would otherwise become a
+            // stale cache hit again the moment `restoreTenant` repopulates
+            // tenant_status as active. Credentials don't need the same
+            // treatment — `restore_tenant`'s own invalidation (see
+            // `reactivate_tenant_and_collect_credential_ids_in_tx`) already
+            // covers that side by the time a restore could matter. See
+            // `deactivate_tenant_and_collect_session_ids_in_tx` for why
+            // session ids are enumerated inside the same locked transaction.
             let Some(cache) = state.cache.as_deref() else {
                 tenant_repo::soft_delete_tenant_with_audit(
                     &state.pool,
@@ -503,23 +491,16 @@ impl TenantMutation {
 
         let result = async {
             crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
-            // `restore_tenant` is a separate function from
-            // `change_tenant_status` and touches two cache categories in one
-            // transaction: the tenant's own status, and every credential it
-            // reactivates. Both need invalidating — unlike the
-            // tenant-status-only case in `delete_tenant`/
-            // `change_tenant_status`, a stale cached credential status is
-            // checked *first* in `verify_api_key_snapshot` and isn't
-            // overridden by a fresher tenant_status check afterward, so it
-            // must be invalidated explicitly or a just-restored API key
-            // keeps getting denied until its own cache entry's TTL expires.
-            //
-            // Credential ids are enumerated *inside* the same transaction as
-            // the status flip (see
-            // `reactivate_tenant_and_collect_credential_ids_in_tx`), not via
-            // a pre-transaction pool query, mirroring `delete_tenant`'s fix
-            // for the same class of race — see `src/cache/mod.rs`'s
-            // consistency model.
+            // Unlike the tenant-status-only case in `delete_tenant`, this
+            // also reactivates credentials, which need their own
+            // invalidation: `verify_api_key_snapshot` checks a credential's
+            // status first and isn't overridden by a fresher tenant_status
+            // check afterward, so a just-restored API key would keep
+            // getting denied until its own cache entry's TTL expires
+            // otherwise. See
+            // `reactivate_tenant_and_collect_credential_ids_in_tx` for why
+            // credential ids are enumerated inside the same locked
+            // transaction.
             let Some(cache) = state.cache.as_deref() else {
                 return tenant_repo::restore_tenant_with_audit(
                     &state.pool,

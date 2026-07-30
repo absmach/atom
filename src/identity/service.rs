@@ -790,16 +790,13 @@ pub async fn reset_password(
         return Err(AppError::bad_request("invalid password reset token"));
     }
 
-    // Every currently-active session is about to be bulk-revoked below (by
-    // entity_id, not by session_id) — enumerated *inside* the transaction,
-    // immediately after the entity lock above: `create_session` takes the
-    // same lock before inserting, so a session created concurrently for this
-    // entity either committed before this transaction acquired the lock (and
-    // is therefore visible here) or is blocked until this transaction
-    // finishes. Enumerating via a plain pre-transaction pool query — the
-    // previous shape of this code — could miss a session created in that
-    // window, leaving its cache entry uninvalidated indefinitely. See
-    // `src/cache/mod.rs`'s consistency model.
+    // Every active session is about to be bulk-revoked below — enumerated
+    // *inside* the transaction, right after the entity lock: `create_session`
+    // takes that same lock, so a concurrently created session either
+    // committed before we acquired it (visible here) or is blocked until we
+    // finish. A pre-transaction pool query could miss one, leaving its cache
+    // entry uninvalidated indefinitely. See `src/cache/mod.rs`'s consistency
+    // model.
     let session_keys: Vec<String> = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
     )

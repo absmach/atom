@@ -1710,12 +1710,10 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     Ok(GroupList { items, total })
 }
 
-/// [`update_group`]'s body, minus opening/committing its own transaction —
-/// see `authz::repo::create_role_assignment_in_tx`'s doc comment for the
-/// caller contract (the resolver locks this group's closure via
-/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
-/// `tx` first, when the update changes `status` — see the resolver for why
-/// only a status change needs the lock).
+/// Body of [`update_group`]; caller contract per
+/// `authz::repo::create_role_assignment_in_tx`. When the update changes
+/// `status`, the resolver must already hold this group's closure lock via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this `tx`.
 pub(crate) async fn update_group_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
@@ -1846,14 +1844,13 @@ pub async fn set_group_parent_with_audit(
     get_group(pool, child_id).await
 }
 
-/// [`set_group_parent`]'s body, minus opening/committing its own
-/// transaction and the post-commit `get_group` read — see
-/// `authz::repo::create_role_assignment_in_tx`'s doc comment for the caller
-/// contract (the resolver locks `child_id`'s closure via
-/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
-/// `tx` first — reparenting `child_id` only changes what it and its
-/// descendants inherit from above, never `group_hierarchy` rows below it, so
-/// that closure is exactly what this mutation can affect).
+/// Body of [`set_group_parent`] (minus its post-commit `get_group` read);
+/// caller contract per `authz::repo::create_role_assignment_in_tx`. The
+/// resolver must already hold `child_id`'s closure lock via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this `tx` —
+/// reparenting only changes what `child_id` and its descendants inherit from
+/// above, never `group_hierarchy` rows below it, so that closure is exactly
+/// what this mutation can affect.
 pub(crate) async fn set_group_parent_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
@@ -2030,9 +2027,8 @@ pub async fn remove_group_parent_with_audit(
     tx.commit().await.map_err(db_err)
 }
 
-/// [`remove_group_parent`]'s body, minus opening/committing its own
-/// transaction — see [`set_group_parent_in_tx`]'s doc comment for the caller
-/// contract.
+/// Body of [`remove_group_parent`]; caller contract per
+/// [`set_group_parent_in_tx`].
 pub(crate) async fn remove_group_parent_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
@@ -2214,12 +2210,12 @@ pub async fn delete_group_with_audit(
     tx.commit().await.map_err(db_err)
 }
 
-/// [`delete_group`]'s body, minus opening/committing its own transaction —
-/// see `authz::repo::create_role_assignment_in_tx`'s doc comment for the
-/// caller contract (the resolver locks this group's closure via
-/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
-/// `tx` first — `group_hierarchy` rows aren't touched by a soft delete, only
-/// `deleted_at`, so the closure is unaffected by this mutation's own effect).
+/// Body of [`delete_group`]; caller contract per
+/// `authz::repo::create_role_assignment_in_tx`. The resolver must already
+/// hold this group's closure lock via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this `tx` —
+/// a soft delete only sets `deleted_at`, leaving `group_hierarchy` untouched,
+/// so the closure is unaffected by this mutation's own effect.
 pub(crate) async fn delete_group_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
@@ -2312,12 +2308,10 @@ pub async fn restore_group_with_audit(
     Ok(())
 }
 
-/// [`restore_group`]'s body, minus opening/committing its own transaction —
-/// see `authz::repo::create_role_assignment_in_tx`'s doc comment for the
-/// caller contract (the resolver locks this group's closure via
-/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this same
-/// `tx` first — that lock works regardless of the group's own `deleted_at`
-/// status, so it applies here unchanged).
+/// Body of [`restore_group`]; caller contract per
+/// `authz::repo::create_role_assignment_in_tx`. The resolver must already
+/// hold this group's closure lock via
+/// `authz::repo::lock_group_closures_and_collect_grants_keys` on this `tx`.
 pub(crate) async fn restore_group_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
