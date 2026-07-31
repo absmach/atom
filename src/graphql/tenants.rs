@@ -6,7 +6,7 @@ use crate::{
     authz::engine,
     error::AppError,
     models::{
-        enums::{AuditOutcome, DeletedFilter, TenantStatus},
+        enums::{DeletedFilter, TenantStatus},
         tenant as tenant_model,
         tenant::ListTenants,
     },
@@ -307,7 +307,14 @@ impl TenantMutation {
         .await;
 
         if let Err(ref err) = result {
-            audit::observe_error(&meta, &details, err);
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
         }
 
         result.map(Into::into).map_err(gql_error)
@@ -322,6 +329,15 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(id, "id")?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: Some(tenant_id),
+            target_kind: "tenant",
+            target_id: Some(tenant_id),
+            event: "tenant.update",
+        };
+        let details = serde_json::json!({});
+
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
@@ -332,8 +348,10 @@ impl TenantMutation {
                 ],
             )
             .await?;
-            tenant_repo::update_tenant(
+            tenant_repo::update_tenant_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 tenant_id,
                 tenant_model::UpdateTenant {
                     name: input.name,
@@ -347,20 +365,16 @@ impl TenantMutation {
         }
         .await;
 
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: Some(tenant_id),
-                target_kind: "tenant",
-                target_id: Some(tenant_id),
-                event: "tenant.update",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -369,26 +383,38 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(id, "id")?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: Some(tenant_id),
+            target_kind: "tenant",
+            target_id: Some(tenant_id),
+            event: "tenant.delete",
+        };
+        let details = serde_json::json!({});
+
         let result = async {
             crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
-            tenant_repo::soft_delete_tenant(&state.pool, tenant_id, Some(auth.entity_id)).await
+            tenant_repo::soft_delete_tenant_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                tenant_id,
+                Some(auth.entity_id),
+            )
+            .await
         }
         .await;
 
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: Some(tenant_id),
-                target_kind: "tenant",
-                target_id: Some(tenant_id),
-                event: "tenant.delete",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
 
         result.map(|_| true).map_err(gql_error)
     }
@@ -400,32 +426,41 @@ impl TenantMutation {
     async fn restore_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<Tenant> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, &auth, "manage", Scope::Platform)
-            .await
-            .map_err(gql_error)?;
-
         let tenant_id = parse_id(id, "id")?;
-        let tenant = tenant_repo::restore_tenant(&state.pool, tenant_id, Some(auth.entity_id))
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: Some(tenant_id),
+            target_kind: "tenant",
+            target_id: Some(tenant_id),
+            event: "tenant.restore",
+        };
+        let details = serde_json::json!({});
+
+        let result = async {
+            crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+            tenant_repo::restore_tenant_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                tenant_id,
+                Some(auth.entity_id),
+            )
             .await
-            .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: Some(tenant.id),
-                target_kind: Some("tenant"),
-                target_id: Some(tenant.id),
-                event: "tenant.restore",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "tenant_name": tenant.name,
-                }),
-            },
-        )
+        }
         .await;
 
-        Ok(tenant.into())
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(Into::into).map_err(gql_error)
     }
 
     /// Physically purge an already-soft-deleted tenant and all its data,
@@ -433,32 +468,40 @@ impl TenantMutation {
     async fn purge_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, &auth, "manage", Scope::Platform)
-            .await
-            .map_err(gql_error)?;
-
         let tenant_id = parse_id(id, "id")?;
-        let purged = tenant_repo::purge_tenant(&state.pool, tenant_id)
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: Some(tenant_id),
+            target_kind: "tenant",
+            target_id: Some(tenant_id),
+            event: "tenant.purge",
+        };
+        let details = serde_json::json!({});
+
+        let result = async {
+            crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+            tenant_repo::purge_tenant_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                tenant_id,
+            )
             .await
-            .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: None,
-                target_kind: Some("tenant"),
-                target_id: Some(purged.id),
-                event: "tenant.purge",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "tenant_name": purged.name,
-                }),
-            },
-        )
+        }
         .await;
 
-        Ok(true)
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     async fn enable_tenant(&self, ctx: &Context<'_>, id: ID) -> Result<Tenant> {

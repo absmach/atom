@@ -248,7 +248,14 @@ impl EntityMutation {
         .await;
 
         if let Err(ref err) = result {
-            audit::observe_error(&meta, &details, err);
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
         }
 
         result.map(Into::into).map_err(gql_error)
@@ -263,93 +270,117 @@ impl EntityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
         let updated_fields = entity_update_fields(&input);
-        if auth.entity_id != id {
-            require_any_capability(
+        let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
+        let profile_id = parse_optional_id(input.profile_id, "profileId")?;
+        let profile_version_id = parse_optional_id(input.profile_version_id, "profileVersionId")?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "entity",
+            target_id: Some(id),
+            event: "entity.update",
+        };
+        let details = serde_json::json!({ "updated_fields": updated_fields });
+
+        let result = async {
+            let existing = repo::get_entity(&state.pool, id).await?;
+            if auth.entity_id != id {
+                crate::auth::require_any_capability(
+                    &state.pool,
+                    &auth,
+                    &[
+                        ("manage", Scope::Object(id)),
+                        ("manage", scope_for_tenant(existing.tenant_id)),
+                        ("write", scope_for_tenant(existing.tenant_id)),
+                    ],
+                )
+                .await?;
+            }
+
+            repo::update_entity_with_audit(
                 &state.pool,
-                &auth,
-                &[
-                    ("manage", Scope::Object(id)),
-                    ("manage", scope_for_tenant(existing.tenant_id)),
-                    ("write", scope_for_tenant(existing.tenant_id)),
-                ],
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                entity_model::UpdateEntity {
+                    name: input.name,
+                    kind: parse_optional_entity_kind(input.kind),
+                    alias: input.alias.into(),
+                    tenant_id,
+                    profile_id,
+                    profile_version_id,
+                    status: input.status.map(Into::into),
+                    attributes: input.attributes,
+                },
             )
-            .await?;
+            .await
         }
-
-        let entity = repo::update_entity(
-            &state.pool,
-            id,
-            entity_model::UpdateEntity {
-                name: input.name,
-                kind: parse_optional_entity_kind(input.kind),
-                alias: input.alias.into(),
-                tenant_id: parse_optional_id(input.tenant_id, "tenantId")?,
-                profile_id: parse_optional_id(input.profile_id, "profileId")?,
-                profile_version_id: parse_optional_id(
-                    input.profile_version_id,
-                    "profileVersionId",
-                )?,
-                status: input.status.map(Into::into),
-                attributes: input.attributes,
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: entity.tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(id),
-                event: "entity.update",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({ "updated_fields": updated_fields }),
-            },
-        )
         .await;
 
-        Ok(entity.into())
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(Entity::from).map_err(gql_error)
     }
 
     async fn delete_entity(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
-        if auth.entity_id != id {
-            require_any_capability(
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "entity",
+            target_id: Some(id),
+            event: "entity.delete",
+        };
+        let details = serde_json::json!({});
+
+        let result = async {
+            let existing = repo::get_entity(&state.pool, id).await?;
+            if auth.entity_id != id {
+                crate::auth::require_any_capability(
+                    &state.pool,
+                    &auth,
+                    &[
+                        ("manage", Scope::Object(id)),
+                        ("manage", scope_for_tenant(existing.tenant_id)),
+                    ],
+                )
+                .await?;
+            }
+            repo::delete_entity_with_audit(
                 &state.pool,
-                &auth,
-                &[
-                    ("manage", Scope::Object(id)),
-                    ("manage", scope_for_tenant(existing.tenant_id)),
-                ],
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                Some(auth.entity_id),
             )
-            .await?;
-        }
-        repo::delete_entity(&state.pool, id, Some(auth.entity_id))
             .await
-            .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: existing.tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(id),
-                event: "entity.delete",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+        }
         .await;
-        Ok(true)
+
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     /// Restore a soft-deleted entity while it is still within the purge
@@ -360,27 +391,42 @@ impl EntityMutation {
     async fn restore_entity(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
-        repo::restore_entity(&state.pool, id, Some(auth.entity_id))
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "entity",
+            target_id: Some(id),
+            event: "entity.restore",
+        };
+        let details = serde_json::json!({});
+
+        let result = async {
+            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
+                .await?;
+            repo::restore_entity_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                Some(auth.entity_id),
+            )
             .await
-            .map_err(gql_error)?;
-        let entity = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: entity.tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(id),
-                event: "entity.restore",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+        }
         .await;
-        Ok(true)
+
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     /// Physically purge an already-soft-deleted entity, bypassing the retention
@@ -388,26 +434,41 @@ impl EntityMutation {
     async fn purge_entity(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
-        let tenant_id = repo::purge_entity(&state.pool, id)
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "entity",
+            target_id: Some(id),
+            event: "entity.purge",
+        };
+        let details = serde_json::json!({});
+
+        let result = async {
+            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
+                .await?;
+            repo::purge_entity_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+            )
             .await
-            .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(id),
-                event: "entity.purge",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+        }
         .await;
-        Ok(true)
+
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     async fn set_entity_parent_group(

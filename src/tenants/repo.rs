@@ -492,8 +492,10 @@ pub async fn list_tenants_for_entity_with_ceiling(
     Ok(TenantList { items, total })
 }
 
-pub async fn update_tenant(
+pub async fn update_tenant_with_audit(
     pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     id: Uuid,
     req: UpdateTenant,
     updated_by: Option<Uuid>,
@@ -501,7 +503,8 @@ pub async fn update_tenant(
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
-    sqlx::query_as::<_, Tenant>(&format!(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET name       = COALESCE($2, name),
                alias      = CASE WHEN $3 THEN $4 ELSE alias END,
@@ -519,20 +522,41 @@ pub async fn update_tenant(
     .bind(req.tags)
     .bind(req.attributes)
     .bind(updated_by)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
         other => AppError::Database(other),
-    })
+    })?;
+
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: Some(id),
+        target_kind: "tenant",
+        target_id: Some(id),
+        event: "tenant.update",
+    };
+    let details = serde_json::json!({});
+    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
+
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(&meta, &details);
+    Ok(tenant)
 }
 
-/// Soft-delete a tenant: mark `status = deleted`, stamp the tombstone, and
-/// immediately revoke every active credential and session of entities in the
-/// tenant. Physical removal (and the entity cascade) is deferred to the purge
-/// cron.
-pub async fn soft_delete_tenant(
+pub async fn update_tenant(
     pool: &PgPool,
+    id: Uuid,
+    req: UpdateTenant,
+    updated_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    update_tenant_with_audit(pool, false, None, id, req, updated_by).await
+}
+
+pub async fn soft_delete_tenant_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
@@ -554,10 +578,6 @@ pub async fn soft_delete_tenant(
         other => AppError::Database(other),
     })?;
 
-    // Stamp the tenant-delete marker on every revoked credential (not just
-    // certificates) so restore_tenant can reverse exactly the revocations this
-    // delete caused, without disturbing credentials revoked earlier for other
-    // reasons.
     let revoked_certificates: i64 = sqlx::query_scalar(
         r#"WITH revoked AS (
                UPDATE credentials c
@@ -570,9 +590,9 @@ pub async fn soft_delete_tenant(
                WHERE c.entity_id = e.id
                  AND e.tenant_id = $1
                  AND c.status = 'active'
-               RETURNING c.kind
+               RETURNING c.id, c.kind
            )
-           SELECT COUNT(*) FILTER (WHERE kind = 'certificate') FROM revoked"#,
+           SELECT COUNT(*) FROM revoked WHERE kind = 'certificate'"#,
     )
     .bind(id)
     .fetch_one(&mut *tx)
@@ -592,29 +612,33 @@ pub async fn soft_delete_tenant(
     .await
     .map_err(db_err)?;
 
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: Some(id),
+        target_kind: "tenant",
+        target_id: Some(id),
+        event: "tenant.delete",
+    };
+    let details = serde_json::json!({});
+    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
+
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(&meta, &details);
     Ok(tenant)
 }
 
-/// Reverse a tenant soft delete within the retention window. Reactivates the
-/// tenant and clears its tombstone; its children (entities, groups, roles,
-/// resources) were never individually tombstoned by `soft_delete_tenant` — they
-/// were hidden only via the tenant's `deleted_at` — so they become visible again
-/// automatically.
-///
-/// To make the restored tenant operational, the non-certificate child
-/// credentials (passwords, API keys) that *this* delete revoked — identified by
-/// the `tenant_deleted` revocation marker — are reactivated, so members can log
-/// in with their existing secrets. Certificates stay revoked (their revocation
-/// is published via the CRL and cannot be safely undone — re-issue is required),
-/// and sessions stay revoked, so a fresh login is required. Credentials revoked
-/// earlier for other reasons (e.g. an individually soft-deleted child) are left
-/// untouched.
-///
-/// Fails with a conflict if the tenant name/alias was re-taken by a live tenant
-/// during the retention window.
-pub async fn restore_tenant(
+pub async fn soft_delete_tenant(
     pool: &PgPool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    soft_delete_tenant_with_audit(pool, false, None, id, deleted_by).await
+}
+
+pub async fn restore_tenant_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
@@ -655,19 +679,29 @@ pub async fn restore_tenant(
     .await
     .map_err(db_err)?;
 
+    let event = crate::audit::AuditEvent {
+        actor_entity_id: actor_id,
+        tenant_id: Some(id),
+        target_kind: Some("tenant"),
+        target_id: Some(id),
+        event: "tenant.restore",
+        outcome: crate::models::enums::AuditOutcome::Allow,
+        details: serde_json::json!({}),
+    };
+    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
+
     tx.commit().await.map_err(db_err)?;
     Ok(tenant)
 }
 
-/// Every protected-object UUID that physically purging the given tenants will
-/// remove: the tenants themselves plus all of their cascaded children
-/// (entities and their credentials, object/principal groups, roles, resources).
-/// These are exactly the ids whose bare-UUID authorization references
-/// (`permission_blocks.object_id`, `direct_policies`/`role_assignments`
-/// `subject_id`) must be cleaned up, since no foreign key does it for them.
-///
-/// Must be called *before* the tenant rows are deleted, while the children still
-/// exist. Shared by the explicit `purge_tenant` and the background retention job.
+pub async fn restore_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    restore_tenant_with_audit(pool, false, None, id, restored_by).await
+}
+
 pub(crate) async fn tenant_purge_object_ids(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_ids: &[Uuid],
@@ -692,16 +726,14 @@ pub(crate) async fn tenant_purge_object_ids(
     .map_err(db_err)
 }
 
-/// Physically remove a tenant that has already been soft-deleted, bypassing the
-/// purge retention window. This cascades to all tenant-owned data, so it is an
-/// explicit, deliberate admin action (a soft delete is required first). The
-/// bare-UUID authorization references to the tenant and every cascaded child are
-/// cleaned up in the same transaction (no FK does this) via the canonical
-/// [`crate::authz::repo::purge_authz_references_for_ids`].
-pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppError> {
+pub async fn purge_tenant_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<PurgedTenant, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
 
-    // Gather doomed object ids before the cascade removes the children.
     let doomed = tenant_purge_object_ids(&mut tx, &[id]).await?;
 
     let purged = sqlx::query_as::<_, (Uuid, String)>(
@@ -721,15 +753,31 @@ pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppEr
 
     crate::authz::repo::purge_authz_references_for_ids(&mut tx, &doomed).await?;
 
+    let event = crate::audit::AuditEvent {
+        actor_entity_id: actor_id,
+        tenant_id: None,
+        target_kind: Some("tenant"),
+        target_id: Some(id),
+        event: "tenant.purge",
+        outcome: crate::models::enums::AuditOutcome::Allow,
+        details: serde_json::json!({
+            "tenant_name": name,
+        }),
+    };
+    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
+
     tx.commit().await.map_err(db_err)?;
     Ok(PurgedTenant { id, name })
 }
 
-/// Sets `status` to a new value (non-delete lifecycle: active/inactive/frozen).
-/// The row is retained so historical references (audit logs, attributes,
-/// etc.) remain resolvable.
-pub async fn change_tenant_status(
+pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppError> {
+    purge_tenant_with_audit(pool, false, None, id).await
+}
+
+pub async fn change_tenant_status_with_audit(
     pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     id: Uuid,
     status: TenantStatus,
     updated_by: Option<Uuid>,
@@ -739,22 +787,57 @@ pub async fn change_tenant_status(
             "use delete tenant to apply the soft-delete lifecycle",
         ));
     }
-
-    sqlx::query_as::<_, Tenant>(&format!(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = $2, updated_by = $3, updated_at = now()
            WHERE id = $1 AND deleted_at IS NULL
            RETURNING {TENANT_COLS}"#,
     ))
     .bind(id)
-    .bind(status)
+    .bind(&status)
     .bind(updated_by)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
         other => AppError::Database(other),
-    })
+    })?;
+
+    if status != TenantStatus::Active {
+        sqlx::query(
+            "UPDATE sessions SET revoked_at = now()
+             WHERE revoked_at IS NULL
+               AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: Some(id),
+        target_kind: "tenant",
+        target_id: Some(id),
+        event: "tenant.status.update",
+    };
+    let details = serde_json::json!({ "status": tenant.status });
+    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
+
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(&meta, &details);
+    Ok(tenant)
+}
+
+pub async fn change_tenant_status(
+    pool: &PgPool,
+    id: Uuid,
+    status: TenantStatus,
+    updated_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    change_tenant_status_with_audit(pool, false, None, id, status, updated_by).await
 }
 
 fn search_pattern(q: Option<String>) -> Option<String> {

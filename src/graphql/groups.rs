@@ -8,7 +8,7 @@ use crate::{
     identity::repo,
     models::{
         access::AuthorizedObjectIdsQuery,
-        enums::{AuditOutcome, DeletedFilter, EntityStatus},
+        enums::{DeletedFilter, EntityStatus},
         group::{CreateGroup, ListGroups, UpdateGroup},
         policy::AuthzRequest,
     },
@@ -330,7 +330,14 @@ impl GroupMutation {
         .await;
 
         if let Err(ref err) = result {
-            audit::observe_error(&meta, &details, err);
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
         }
 
         result.map(Into::into).map_err(gql_error)
@@ -363,11 +370,21 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "group",
+            target_id: Some(id),
+            event: "group.update",
+        };
+        let details = serde_json::json!({});
         let result = async {
             let existing = repo::get_group(&state.pool, id).await?;
             require_group_manage_app(&state.pool, &auth, id, existing.tenant_id).await?;
-            repo::update_group(
+            repo::update_group_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 id,
                 UpdateGroup {
                     name: input.name,
@@ -379,20 +396,16 @@ impl GroupMutation {
             .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
-                target_kind: "group",
-                target_id: Some(id),
-                event: "group.update",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -490,28 +503,39 @@ impl GroupMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "group",
+            target_id: Some(id),
+            event: "group.delete",
+        };
+        let details = serde_json::json!({});
         let result = async {
             let existing = repo::get_group(&state.pool, id).await?;
             let tenant_id = existing.tenant_id;
             require_group_manage_app(&state.pool, &auth, id, tenant_id).await?;
-            repo::delete_group(&state.pool, id, Some(auth.entity_id)).await?;
+            repo::delete_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                Some(auth.entity_id),
+            )
+            .await?;
             Ok(tenant_id)
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().copied().flatten(),
-                target_kind: "group",
-                target_id: Some(id),
-                event: "group.delete",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -521,27 +545,39 @@ impl GroupMutation {
     async fn restore_group(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
-        repo::restore_group(&state.pool, id, Some(auth.entity_id))
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "group",
+            target_id: Some(id),
+            event: "group.restore",
+        };
+        let details = serde_json::json!({});
+        let result = async {
+            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
+                .await?;
+            repo::restore_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                Some(auth.entity_id),
+            )
             .await
-            .map_err(gql_error)?;
-        let group = repo::get_group(&state.pool, id).await.map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: group.tenant_id,
-                target_kind: Some("group"),
-                target_id: Some(id),
-                event: "group.restore",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+        }
         .await;
-        Ok(true)
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+        result.map(|_| true).map_err(gql_error)
     }
 
     /// Physically purge an already-soft-deleted group, bypassing the retention
@@ -549,26 +585,38 @@ impl GroupMutation {
     async fn purge_group(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
-        let tenant_id = repo::purge_group(&state.pool, id)
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "group",
+            target_id: Some(id),
+            event: "group.purge",
+        };
+        let details = serde_json::json!({});
+        let result = async {
+            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
+                .await?;
+            repo::purge_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+            )
             .await
-            .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: Some("group"),
-                target_id: Some(id),
-                event: "group.purge",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+        }
         .await;
-        Ok(true)
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+        result.map(|_| true).map_err(gql_error)
     }
 
     async fn add_group_member(

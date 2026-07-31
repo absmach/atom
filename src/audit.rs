@@ -296,8 +296,14 @@ pub fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {
     log_audit_event(&event);
 }
 
-/// Emits an audit log tracing line for a failed or denied operation (observe path).
-pub fn observe_error(meta: &AuditMeta<'_>, details: &Value, err: &crate::error::AppError) {
+/// Emits an audit log tracing line and enqueues a domain event outbox row for a failed or denied operation (observe path).
+pub async fn observe_error(
+    pool: &PgPool,
+    events_enabled: bool,
+    meta: &AuditMeta<'_>,
+    details: &Value,
+    err: &crate::error::AppError,
+) {
     let outcome = err.audit_outcome();
     let mut merged = details.clone();
     if let Value::Object(ref mut map) = merged {
@@ -313,6 +319,24 @@ pub fn observe_error(meta: &AuditMeta<'_>, details: &Value, err: &crate::error::
         details: merged,
     };
     log_audit_event(&event);
+
+    if events_enabled {
+        if let Err(e) = crate::events::enqueue(
+            pool,
+            events_enabled,
+            event.actor_entity_id,
+            event.tenant_id,
+            event.target_kind,
+            event.target_id,
+            event.event,
+            outcome_str(&event.outcome),
+            &event.details,
+        )
+        .await
+        {
+            tracing::error!("failed to enqueue error domain event {}: {e}", event.event);
+        }
+    }
 }
 
 async fn insert_audit_log<'e, E>(
