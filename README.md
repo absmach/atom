@@ -614,7 +614,7 @@ Generic application mapping:
 | `ATOM_EVENTS_AMQP_ROUTING_KEY`                                                                                                 | `atom.events`                                        | AMQP routing key for published domain events                                            |
 | `ATOM_EVENTS_AMQP_TLS_CLIENT_CERT_PATH` / `ATOM_EVENTS_AMQP_TLS_CLIENT_KEY_PATH`                                              | *(unset)*                                            | PEM client cert/key pair for mTLS broker connection                                     |
 | `ATOM_EVENTS_AMQP_TLS_CA_PATH`                                                                                                 | *(unset)*                                            | PEM CA bundle to verify broker server cert (`amqps://`)                                 |
-| `ATOM_EVENTS_OUTBOX_POLL_INTERVAL_SECS` / `ATOM_EVENTS_OUTBOX_BATCH_SIZE` / `ATOM_EVENTS_OUTBOX_MAX_ATTEMPTS`                 | `5` / `100` / `10`                                   | Outbox poller interval, batch size, and max delivery retries per item                   |
+| `ATOM_EVENTS_OUTBOX_POLL_INTERVAL_SECS` / `ATOM_EVENTS_OUTBOX_BATCH_SIZE` / `ATOM_EVENTS_OUTBOX_MAX_ATTEMPTS`                 | `5` / `100` / `10`                                   | Poll interval, batch size, and retry limit for structurally unparseable rows; broker delivery failures retry indefinitely |
 | `ATOM_EVENTS_PUBLISH_TIMEOUT_SECS`                                                                                            | `30`                                                 | Broker publish and startup connect timeout in seconds                                   |
 | `ATOM_LOGIN_FAILURE_LIMIT` / `ATOM_LOGIN_FAILURE_WINDOW_SECS`                                                                  | `5` / `900`                                          | Password login throttle                                                                 |
 | `ATOM_RATE_LIMIT_ENABLED`                                                                                                      | `true`                                               | Enables in-process HTTP rate limits                                                     |
@@ -672,6 +672,80 @@ Generic application mapping:
 | `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8081` / `18081` / `3005` | Docker Compose host ports                                                               |
 | `ATOM_GRAPHQL_URL`                                                                                                             | `http://atom:8080/graphql`                           | GraphQL endpoint used by the Dockerized Next UI                                         |
 | `RUST_LOG`                                                                                                                     | *(legacy fallback)*                                  | Used only when `ATOM_LOG_LEVEL` is unset                                                |
+
+### Publishing Atom events through FluxMQ
+
+Atom's defaults already match the FluxMQ durable-stream contract: it publishes
+every domain event to the default AMQP exchange with the exact routing key
+`atom.events`. Provision that exact stream and ACL in FluxMQ; do not use a
+`routing_key_prefix` for Atom, because prefix grants use ordinary topic routing
+instead of the crash-durable append path.
+
+```yaml
+# FluxMQ
+server:
+  amqp091:
+    local:
+      addr: ":5683"
+      max_connections: 32
+      cert_file: "/run/secrets/fluxmq_server_cert"
+      key_file: "/run/secrets/fluxmq_server_key"
+      ca_file: "/run/secrets/atom_client_ca"
+      client_auth: "require"
+      min_version: "TLS1.2"
+
+storage:
+  type: "badger"
+  badger_dir: "/var/lib/fluxmq/data"
+  sync_writes: true
+
+cluster:
+  enabled: false
+
+auth:
+  local_principals:
+    - name: "atom-audit-publisher"
+      certificate_uri_san: "spiffe://absmach/atom/audit-publisher"
+      role: "publisher"
+      current_secret_file: "/run/secrets/atom_audit_secret_current"
+      previous_secret_file: "/run/secrets/atom_audit_secret_previous"
+      permissions:
+        publish:
+          - exchange: ""
+            routing_key: "atom.events"
+        subscribe: []
+
+queues:
+  - name: "atom.events"
+    topics:
+      - "$queue/atom.events/#"
+    reserved: true
+    type: "stream"
+    retention:
+      max_age: "720h"
+      max_length_bytes: 10737418240
+      max_length_messages: 0
+    limits:
+      max_message_size: 1048576
+      message_ttl: "720h"
+```
+
+Then point Atom at the private listener and mount its mTLS identity:
+
+```dotenv
+ATOM_EVENTS_AMQP_URL=amqps://atom-audit-publisher:<url-encoded-secret>@fluxmq:5683/%2f
+ATOM_EVENTS_AMQP_EXCHANGE=
+ATOM_EVENTS_AMQP_ROUTING_KEY=atom.events
+ATOM_EVENTS_AMQP_TLS_CLIENT_CERT_PATH=/run/secrets/atom_client_cert
+ATOM_EVENTS_AMQP_TLS_CLIENT_KEY_PATH=/run/secrets/atom_client_key
+ATOM_EVENTS_AMQP_TLS_CA_PATH=/run/secrets/fluxmq_server_ca
+```
+
+Atom does not declare or mutate broker topology on this path. FluxMQ confirms
+the exact publication only after appending and syncing it to the pre-provisioned
+stream. `ATOM_EVENTS_OUTBOX_MAX_ATTEMPTS` applies only to rows whose stored
+payload is structurally unparseable; broker outages, NACKs, and timeouts leave
+valid rows eligible for retry indefinitely.
 
 Rate limiting uses the socket peer IP by default. `X-Forwarded-For` and
 `X-Real-IP` are ignored unless the immediate peer IP is inside

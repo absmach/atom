@@ -8,7 +8,7 @@
 //! (which proves the same `AmqpPublisher` works against a plain broker with
 //! no TLS at all).
 //!
-//! Requires a running FluxMQ instance configured with the internal listener
+//! Requires a running FluxMQ instance configured with the local listener
 //! and matching PKI. To set this up locally:
 //!
 //! 1. Build FluxMQ from a local checkout: `make build`.
@@ -17,9 +17,10 @@
 //!    session's `/tmp/.../scratchpad/gen-pki/main.go` for a minimal
 //!    generator mirroring FluxMQ's own `tests/smoke/local_principal_test.go`.
 //! 3. Write a FluxMQ config with every listener disabled except
-//!    `server.amqp091.internal` (cert/key/ca_file pointing at the generated
+//!    `server.amqp091.local` (cert/key/ca_file pointing at the generated
 //!    PKI, `client_auth: "require"`), one `auth.local_principals` entry
-//!    (`certificate_uri_san` matching the client cert, `current_secret_file`
+//!    (`certificate_uri_san` matching the client cert, `role: "publisher"`,
+//!    `current_secret_file`
 //!    a 32+ byte random secret, `permissions.publish` granting exactly
 //!    `exchange: ""` / the routing key used below), and a matching
 //!    pre-provisioned `queues:` entry (`type: "stream"`, `reserved: true`).
@@ -35,9 +36,8 @@
 //! TEST_FLUXMQ_MTLS_CLIENT_CERT=/path/to/client.crt \
 //! TEST_FLUXMQ_MTLS_CLIENT_KEY=/path/to/client.key \
 //! TEST_FLUXMQ_MTLS_CA=/path/to/ca.crt \
-//! TEST_FLUXMQ_MTLS_ROUTING_KEY=atom-events-test \
 //! TEST_FLUXMQ_MTLS_ADMIN_API=http://127.0.0.1:18092 \
-//!   cargo test --test m28_amqp_mtls_local_principal -- --ignored
+//!   cargo test --test m28_amqp_mtls_local_principal -- --ignored --test-threads=1
 //! ```
 
 use atom::config::EventsConfig;
@@ -45,6 +45,8 @@ use atom::events::publisher::{AmqpPublisher, EventPublisher};
 use atom::events::DomainEventPayload;
 use serde_json::Value;
 use uuid::Uuid;
+
+const ATOM_EVENTS_ROUTING_KEY: &str = "atom.events";
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set to run this live test"))
@@ -113,18 +115,32 @@ fn amqp_local_principal_stats(stats: &Value) -> &Value {
 
 #[tokio::test]
 #[ignore]
-async fn publishing_to_the_granted_target_succeeds_and_is_authenticated() {
-    let routing_key = env("TEST_FLUXMQ_MTLS_ROUTING_KEY");
+async fn publishing_to_atom_events_is_confirmed_without_topology_mutation() {
+    assert_eq!(
+        EventsConfig::default().amqp_routing_key,
+        ATOM_EVENTS_ROUTING_KEY,
+        "the live FluxMQ contract must exercise Atom's configured default"
+    );
     let before = fetch_stats();
     let auth_success_before = amqp_local_principal_stats(&before)["authentication"]["success"]
         .as_i64()
         .unwrap_or(0);
     let messages_received_before = before["messages"]["received"].as_i64().unwrap_or(0);
+    let operation_denied_before = amqp_local_principal_stats(&before)["authorization"]
+        ["operation_denied"]
+        .as_i64()
+        .unwrap_or(0);
+    let publish_rejections_before = amqp_local_principal_stats(&before)["publish_rejections"]
+        .as_i64()
+        .unwrap_or(0);
+    let publish_timeouts_before = amqp_local_principal_stats(&before)["publish_timeouts"]
+        .as_i64()
+        .unwrap_or(0);
 
-    let cfg = test_config(&routing_key);
+    let cfg = test_config(ATOM_EVENTS_ROUTING_KEY);
     let publisher = AmqpPublisher::connect(&cfg)
         .await
-        .expect("connect via mTLS + SASL to FluxMQ's internal listener");
+        .expect("connect via mTLS + SASL to FluxMQ's local listener");
 
     let res = publisher
         .publish(&[sample_payload()])
@@ -137,6 +153,10 @@ async fn publishing_to_the_granted_target_succeeds_and_is_authenticated() {
         .as_i64()
         .unwrap_or(0);
     let messages_received_after = after["messages"]["received"].as_i64().unwrap_or(0);
+    let operation_denied_after = amqp_local_principal_stats(&after)["authorization"]
+        ["operation_denied"]
+        .as_i64()
+        .unwrap_or(0);
     let publish_rejections = amqp_local_principal_stats(&after)["publish_rejections"]
         .as_i64()
         .unwrap_or(-1);
@@ -153,12 +173,16 @@ async fn publishing_to_the_granted_target_succeeds_and_is_authenticated() {
         "the broker must have received the publish (before={messages_received_before}, after={messages_received_after})"
     );
     assert_eq!(
-        publish_rejections, 0,
-        "no local-principal publish should be rejected"
+        publish_rejections, publish_rejections_before,
+        "the confirmed Atom publish must not add a local-principal storage rejection"
     );
     assert_eq!(
-        publish_timeouts, 0,
-        "no local-principal publish should time out"
+        publish_timeouts, publish_timeouts_before,
+        "the confirmed Atom publish must not add a local-principal timeout"
+    );
+    assert_eq!(
+        operation_denied_after, operation_denied_before,
+        "Atom must publish without attempting a forbidden topology mutation"
     );
 }
 
@@ -167,7 +191,7 @@ async fn publishing_to_the_granted_target_succeeds_and_is_authenticated() {
 #[tokio::test]
 #[ignore]
 async fn publishing_to_a_different_routing_key_is_denied() {
-    let cfg = test_config("not-the-granted-routing-key");
+    let cfg = test_config("atom.events.other");
     let publisher = AmqpPublisher::connect(&cfg)
         .await
         .expect("the connection itself should still succeed (auth is per-connection)");
