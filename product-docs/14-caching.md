@@ -89,6 +89,8 @@ flowchart TD
 - API-key auth: [`src/auth.rs`](../src/auth.rs) around `auth_from_api_key`.
 - Grants load: [`src/auth.rs`](../src/auth.rs) `AuthContext::effective_grants` and [`src/authz/engine.rs`](../src/authz/engine.rs) inside `load_decision_context`.
 
+The auth hot path reads its independent keys (session/entity/tenant for JWT, credential/entity/tenant for API-key) in **one pipelined round trip on a single pooled connection** via `CacheClient::lookup_many` + `CacheClient::decode` — see [`src/cache/mod.rs`](../src/cache/mod.rs). Issued one at a time it would be three pool acquisitions and three serial round trips, each bounded by `op_timeout`, before any request work started.
+
 ---
 
 ## Consistency Model
@@ -151,11 +153,12 @@ sequenceDiagram
     end
 ```
 
-### The three races this prevents
+### The races this prevents
 
 1. **Read-before-mutation.** A reader observes version `N`, starts loading from Postgres; a mutation runs to completion, bumping to `N+2`. The reader's `try_populate` presents `N` — rejected on version mismatch.
 2. **Read-during-dirty-window.** A reader lands while `dirty=1`, observes the post-`begin` version. `end`'s **second** version bump ensures that observed version is stale by the time `try_populate` runs — rejected either by the dirty check (if still dirty) or the version check (if `end` already ran).
-3. **Lost-invalidation.** If `end` never runs (crash), the barrier TTL causes the whole entry to expire rather than being stuck dirty forever.
+3. **Lost-invalidation.** If `end` never runs (crash), the barrier TTL causes the whole entry to expire rather than being stuck dirty forever. `end` re-applies `PEXPIRE` on the entry, since `HINCRBY` would otherwise recreate an already-expired key and leave it immortal.
+4. **Cross-key poisoning during populate.** A miss loader whose returned payload describes a *different* key than the one being populated must never write across keys — e.g. the JWT miss loader joins tenants through `entities.tenant_id`, so it returns the entity's *current* tenant's status, which is not necessarily the tenant the token's `tid` claim points to when the token outlived a tenant move. Populates now write only when the observed version's key matches the key the payload describes.
 
 The first primitive that fails self-heals: `begin` failing refuses the mutation; `end` failing leaves the entry dirty until barrier-TTL expiry; `try_populate` failing just leaves the entry as a miss for the next reader to reload.
 
@@ -182,7 +185,9 @@ Which mutation invalidates which category:
 | Role assignment (create / delete) | `Grants` for each affected subject | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
 | Direct policy (create / delete) | `Grants` for the subject | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
 | Role permission-block change | `Grants` for every assignee of the role | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
-| Group membership change | `Grants` for every member of the group closure | [`src/graphql/groups.rs`](../src/graphql/groups.rs) |
+| Group membership change (REST or GraphQL) | `Grants` for every member of the group closure | [`src/graphql/groups.rs`](../src/graphql/groups.rs), [`src/identity/handlers.rs`](../src/identity/handlers.rs) |
+
+The REST paths (`delete_entity`, `add_group_member`, `remove_group_member`) invalidate through the same helpers as the GraphQL resolvers — entity deletion is consolidated into a single service entry point at [`src/identity/service.rs`](../src/identity/service.rs), and both group-member handlers wrap their mutation in `guarded_mutation`.
 
 ### Race-safe enumeration
 
@@ -193,7 +198,7 @@ To close this, the enumeration functions lock the relevant rows `FOR UPDATE` ins
 - [`lock_group_closures_and_collect_grants_keys`](../src/authz/repo.rs) — locks every group in the closure of the given roots (id-sorted, so it cannot deadlock against itself), then returns the affected `grants` keys.
 - [`lock_role_and_collect_grants_keys`](../src/authz/repo.rs) — locks the role row, then locks the closure of every group assigned to it.
 
-Callers pair these with `begin_all` / `end_all` (see below) rather than `guarded_mutation`, because the enumeration must happen inside the same open transaction as the mutation itself.
+Callers pair these with `guarded_tx_mutation` (see below) rather than `guarded_mutation`, because the enumeration must happen inside the same open transaction as the mutation itself.
 
 ---
 
@@ -226,30 +231,43 @@ crate::cache::invalidate::guarded_mutation(
 
 Defined at [`src/cache/invalidate.rs`](../src/cache/invalidate.rs) `guarded_mutation`.
 
-### Writing (multi-category, single call site)
+### Writing (single-category, mutation owns a `Transaction`)
+
+Use `guarded_tx_mutation` when the affected keys can only be enumerated **under the locks the mutation itself takes** — every group-closure and role mutation. It opens the transaction, runs `collect_keys` (which locks and enumerates), establishes the barrier on that key set, runs `mutate` on the same transaction, commits, and clears the barrier — in that fixed order, regardless of outcome. Stable Rust has no async closures, so the closures return a boxed future borrowing the transaction:
 
 ```rust
-crate::cache::invalidate::guarded_multi_mutation(
+crate::cache::invalidate::guarded_tx_mutation(
     cache,
-    &[
-        (CacheCategory::TenantStatus, &tenant_keys),
-        (CacheCategory::Session,       &session_keys),
-    ],
-    || async { /* mutation touching both */ },
+    CacheCategory::Grants,
+    &state.pool,
+    |tx| Box::pin(async move {
+        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[group_id]).await
+    }),
+    |tx| Box::pin(async move { do_mutation_in_tx(tx).await }),
 ).await?
 ```
 
-### Writing (mutation already owns a `Transaction`)
+Defined at [`src/cache/invalidate.rs`](../src/cache/invalidate.rs) `guarded_tx_mutation`. Callers hold the `cache: None` fallback themselves because the uncached path is usually a different repo function (typically the non-`_in_tx` variant that opens its own transaction).
 
-Use `begin_all` / `end_all` when the enumeration of affected keys must happen inside the same open transaction as the mutation (see the race-safe enumeration section):
+### Writing (multi-category, mutation owns a `Transaction`)
+
+Use `begin_all` / `end_all` for mutations spanning several categories on one open transaction (e.g. `deleteEntity` invalidates `EntityStatus` + `Session` + `Credential`):
 
 ```rust
 let mut tx = pool.begin().await?;
-let grants_keys = lock_group_closures_and_collect_grants_keys(&mut tx, &[group_id]).await?;
-let groups = [(CacheCategory::Grants, grants_keys.as_slice())];
+let (session_ids, credential_ids) =
+    repo::deactivate_entity_and_collect_revocation_ids_in_tx(&mut tx, id, deleted_by).await?;
+let session_keys: Vec<String> = session_ids.iter().map(|id| keys::session(*id)).collect();
+let credential_keys: Vec<String> = credential_ids.iter().map(|id| keys::credential(*id)).collect();
+let entity_status_keys = [keys::entity_status(id)];
+let groups = [
+    (CacheCategory::EntityStatus, entity_status_keys.as_slice()),
+    (CacheCategory::Session,      session_keys.as_slice()),
+    (CacheCategory::Credential,   credential_keys.as_slice()),
+];
 
 cache::invalidate::begin_all(cache, &groups).await?;
-let outcome = do_mutation_in_tx(&mut tx).await;
+let outcome = repo::finish_entity_deletion_in_tx(&mut tx, id).await;
 let outcome = match outcome {
     Ok(()) => tx.commit().await,
     Err(e) => Err(e),
@@ -305,8 +323,11 @@ All cache operations emit metrics through [`src/metrics.rs`](../src/metrics.rs):
 |---|---|---|
 | `atom_cache_lookup_total` | `category`, `outcome` | `hit`, `miss`, `error` |
 | `atom_cache_invalidation_total` | `category`, `outcome` | `ok`, `error` |
+| `atom_cache_populate_total` | `category`, `outcome` | `applied`, `stale`, `error` |
 
-Category labels are fixed enum variants, so cardinality is bounded (six categories × three outcomes for lookups, six × two for invalidations).
+Category labels are fixed enum variants, so cardinality is bounded.
+
+The populate metric splits `applied` (the write took) from `stale` (rejected by the barrier: dirty entry, or the version moved since the caller's `lookup`). A hit rate stuck at zero can then be told apart from every write being rejected by a stuck barrier — otherwise indistinguishable.
 
 ---
 
