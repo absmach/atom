@@ -1616,6 +1616,7 @@ async fn upsert_oauth_identity(
             {
                 return Err(AppError::unauthorized("entity is not active"));
             }
+            super::repo::add_authenticated_user_membership_in_tx(&mut tx, entity_id).await?;
             entity_id
         }
         None => {
@@ -1631,6 +1632,7 @@ async fn upsert_oauth_identity(
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
+            super::repo::add_authenticated_user_membership_in_tx(&mut tx, entity_id).await?;
             sqlx::query(
                 r#"INSERT INTO entity_emails (id, entity_id, email, verified_at)
                    VALUES ($1, $2, $3, now())"#,
