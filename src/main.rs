@@ -151,27 +151,40 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Connects the Redis-backed cache when enabled. A connect failure honors
-/// `ATOM_CACHE_FAIL_FAST_ON_STARTUP`: abort like an unreachable Postgres
-/// would, or log and continue cache-free (the recommended default — caching
-/// is a performance optimization, not a correctness dependency for reads).
+/// Builds the Redis-backed cache when enabled.
+///
+/// `None` means "caching is not configured", and every mutation guard becomes
+/// a pure pass-through on that basis. So an *enabled* cache that merely can't
+/// reach Redis right now must never degrade to `None`: this process would go
+/// on mutating grants, sessions, and credentials without invalidating entries
+/// that other replicas are still serving, and a revoke here would stay
+/// authorized there. Unreachable Redis is a runtime condition, not a
+/// configuration one — the client is retained either way, and its own
+/// behavior covers the outage: reads fall through to Postgres as misses,
+/// while `begin` fails and so refuses security-sensitive mutations until
+/// Redis returns (see `src/cache/mod.rs` and `src/cache/invalidate.rs`).
+///
+/// A *build* failure is fatal regardless: an unparseable URL cannot recover.
+/// `ATOM_CACHE_FAIL_FAST_ON_STARTUP` then decides whether an unreachable
+/// Redis should also abort startup, rather than boot into the refusing state.
 async fn init_cache(cfg: &config::CacheConfig) -> anyhow::Result<Option<cache::CacheClient>> {
     if !cfg.enabled {
         return Ok(None);
     }
-    match cache::CacheClient::connect(cfg).await {
-        Ok(client) => {
-            tracing::info!("cache enabled; connected to Redis");
-            Ok(Some(client))
-        }
+    let client = cache::CacheClient::build(cfg).context("cache configuration is invalid")?;
+    match client.probe(cfg.connect_timeout_ms).await {
+        Ok(()) => tracing::info!("cache enabled; connected to Redis"),
         Err(err) if cfg.fail_fast_on_startup => {
-            Err(err.context("cache connect failed and ATOM_CACHE_FAIL_FAST_ON_STARTUP=true"))
+            return Err(
+                err.context("cache connect failed and ATOM_CACHE_FAIL_FAST_ON_STARTUP=true")
+            );
         }
-        Err(err) => {
-            tracing::error!("cache connect failed, continuing without cache: {err}");
-            Ok(None)
-        }
+        Err(err) => tracing::error!(
+            "cache enabled but Redis is unreachable: {err}. Reads fall through to Postgres; \
+             security-sensitive mutations are refused until Redis recovers."
+        ),
     }
+    Ok(Some(client))
 }
 
 fn init_tracing(logging: &config::LoggingConfig) -> anyhow::Result<()> {

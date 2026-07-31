@@ -22,8 +22,8 @@
 //!   barrier itself with an expiry so a lost `end` call self-heals rather than
 //!   leaving the entry dirty forever.
 //! - `end` — called after the mutation (success or failure). Bumps the
-//!   version *again* and clears `dirty`. Never restores a payload — the next
-//!   reader does a clean reload. The second version bump (beyond the one
+//!   version *again*, clears `dirty`, and clears any payload — the next reader
+//!   does a clean reload. The second version bump (beyond the one
 //!   `begin` already did) is what closes the dirty-window race below — it is
 //!   not merely resetting a flag.
 //! - `try_populate` — called by a cache-miss read after it finishes loading
@@ -61,7 +61,6 @@ pub mod keys;
 use std::{future::Future, time::Duration};
 
 use deadpool_redis::{Config as PoolConfig, Pool, Runtime};
-use redis::AsyncCommands;
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
@@ -91,11 +90,19 @@ return 1
 // with no TTL would never be reclaimed. An `end` that lands after its own
 // barrier expired (a long mutation, or a bulk invalidation chunking through
 // many keys) would otherwise leak an immortal hash per key.
+//
+// `HDEL p` is defensive rather than load-bearing: `begin` already cleared the
+// payload, and `try_populate` refuses to write while dirty. It costs one call
+// and guarantees that whatever happened to the key in between — including a
+// reader repopulating it against a barrier that was destroyed out from under
+// this mutation — the entry is left without a payload for the next reader to
+// reload cleanly, which is what `end`'s contract has always claimed.
 const END_SCRIPT_SRC: &str = r#"
 local ttl_ms = ARGV[1]
 for i, key in ipairs(KEYS) do
   redis.call('HINCRBY', key, 'v', 1)
   redis.call('HSET', key, 'dirty', '0')
+  redis.call('HDEL', key, 'p')
   redis.call('PEXPIRE', key, ttl_ms)
 end
 return 1
@@ -112,6 +119,25 @@ end
 redis.call('HSET', KEYS[1], 'p', ARGV[2])
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
 return 'applied'
+"#;
+
+// Discards a corrupt payload without touching the barrier fields. Guarded by
+// exactly the same version/dirty check as `try_populate`, and for the same
+// reason: an unconditional `DEL` of the whole hash would take `v` and `dirty`
+// with it, destroying an in-flight mutation's barrier. The next reader would
+// then see an absent key, observe version 0, load pre-commit state, and
+// populate it successfully — the barrier's whole purpose, defeated by a
+// cleanup path.
+const DISCARD_SCRIPT_SRC: &str = r#"
+local v = redis.call('HGET', KEYS[1], 'v')
+if v == false then v = '0' end
+local dirty = redis.call('HGET', KEYS[1], 'dirty')
+if dirty == false then dirty = '0' end
+if dirty == '1' or v ~= ARGV[1] then
+  return 'skipped'
+end
+redis.call('HDEL', KEYS[1], 'p')
+return 'discarded'
 "#;
 
 /// Fixed, low-cardinality label for cache metrics and log lines. Never an ID,
@@ -222,13 +248,17 @@ pub struct CacheClient {
     begin_script: redis::Script,
     end_script: redis::Script,
     try_populate_script: redis::Script,
+    discard_script: redis::Script,
 }
 
 impl CacheClient {
-    /// Connects and verifies reachability with a single `PING`, bounded by
-    /// `cfg.connect_timeout`. Callers decide what to do with a connect
-    /// failure (fail fast vs. degrade) — see `main.rs`.
-    pub async fn connect(cfg: &CacheConfig) -> anyhow::Result<Self> {
+    /// Builds the client and its connection pool *without* contacting Redis.
+    ///
+    /// An error here is a configuration error — an unparseable URL, an invalid
+    /// pool size — never a transient outage, so callers should treat it as
+    /// fatal. Reachability is a separate, retryable concern: see
+    /// [`Self::probe`] and `main::init_cache`.
+    pub fn build(cfg: &CacheConfig) -> anyhow::Result<Self> {
         let pool_cfg = PoolConfig::from_url(&cfg.redis_url);
         let mut pool_builder = pool_cfg
             .builder()
@@ -239,20 +269,31 @@ impl CacheClient {
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build cache pool: {e}"))?;
 
-        let client = Self {
+        Ok(Self {
             pool,
             op_timeout: Duration::from_millis(cfg.op_timeout_ms),
             ttl: cfg.ttl,
             begin_script: redis::Script::new(BEGIN_SCRIPT_SRC),
             end_script: redis::Script::new(END_SCRIPT_SRC),
             try_populate_script: redis::Script::new(TRY_POPULATE_SCRIPT_SRC),
-        };
+            discard_script: redis::Script::new(DISCARD_SCRIPT_SRC),
+        })
+    }
 
-        tokio::time::timeout(Duration::from_millis(cfg.connect_timeout_ms), client.ping())
+    /// One-shot reachability check with a single `PING`, bounded by
+    /// `connect_timeout_ms`.
+    pub async fn probe(&self, connect_timeout_ms: u64) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_millis(connect_timeout_ms), self.ping())
             .await
             .map_err(|_| anyhow::anyhow!("cache connect timed out"))?
-            .map_err(|e| anyhow::anyhow!("cache connect failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("cache connect failed: {e}"))
+    }
 
+    /// [`build`](Self::build) plus a [`probe`](Self::probe) — fails unless
+    /// Redis is reachable right now.
+    pub async fn connect(cfg: &CacheConfig) -> anyhow::Result<Self> {
+        let client = Self::build(cfg)?;
+        client.probe(cfg.connect_timeout_ms).await?;
         Ok(client)
     }
 
@@ -370,17 +411,29 @@ impl CacheClient {
             }
             Err(err) => {
                 tracing::warn!(category = category.as_str(), error = %err, "cache payload corrupt; discarding");
-                self.best_effort_delete(key).await;
+                self.discard_payload(key, version).await;
                 metrics::record_cache_lookup(category.as_str(), "miss");
                 Lookup::Miss { version }
             }
         }
     }
 
-    async fn best_effort_delete(&self, key: &str) {
-        if let Ok(mut conn) = self.get_conn().await {
-            let _: Result<(), redis::RedisError> = conn.del(key).await;
-        }
+    /// Clears a corrupt payload field, leaving the barrier (`v`/`dirty`)
+    /// intact, and only while the entry is still at `observed_version` and not
+    /// dirty. Best-effort: a failure just leaves the corrupt payload for the
+    /// next reader to trip over and re-attempt.
+    async fn discard_payload(&self, key: &str, observed_version: i64) {
+        let Ok(mut conn) = self.get_conn().await else {
+            return;
+        };
+        let _ = tokio::time::timeout(
+            self.op_timeout,
+            self.discard_script
+                .key(key)
+                .arg(observed_version)
+                .invoke_async::<String>(&mut conn),
+        )
+        .await;
     }
 
     /// Best-effort conditional write following a cache-miss load. Discarded
@@ -689,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn corrupt_payload_is_treated_as_a_miss_and_deleted() {
+    async fn corrupt_payload_is_discarded_without_destroying_the_barrier() {
         let client = test_client().await;
         let key = unique_key("corrupt");
 
@@ -711,14 +764,69 @@ mod tests {
             other => panic!("expected corrupt payload to be a miss, got {other:?}"),
         }
 
-        // The corrupt entry must have been best-effort deleted so the next
-        // lookup doesn't repeat the same deserialize failure.
-        let exists: bool = redis::cmd("EXISTS")
+        // The corrupt payload must be gone so the next lookup doesn't repeat
+        // the same deserialize failure — but *only* the payload. Deleting the
+        // whole hash would take `v`/`dirty` with it, and a concurrent
+        // mutation's barrier along with them.
+        let (version, payload): (Option<i64>, Option<Vec<u8>>) = redis::cmd("HMGET")
             .arg(&key)
+            .arg("v")
+            .arg("p")
             .query_async(&mut conn)
             .await
-            .expect("exists check");
-        assert!(!exists, "corrupt entry should have been deleted");
+            .expect("read back barrier fields");
+        assert!(
+            payload.is_none(),
+            "corrupt payload should have been cleared"
+        );
+        assert_eq!(
+            version,
+            Some(1),
+            "the version must survive: it is what a concurrent mutation's barrier rests on"
+        );
+    }
+
+    /// The reason [`DISCARD_SCRIPT_SRC`] is version-guarded: a corrupt-payload
+    /// cleanup racing a mutation must not clear the barrier that mutation just
+    /// established, or a reader could repopulate pre-commit state over it.
+    #[tokio::test]
+    #[ignore]
+    async fn corrupt_payload_cleanup_leaves_a_concurrent_barrier_intact() {
+        let client = test_client().await;
+        let key = unique_key("corrupt-vs-barrier");
+        let keys = vec![key.clone()];
+
+        let mut conn = client.get_conn().await.expect("conn");
+        let _: () = redis::cmd("HSET")
+            .arg(&key)
+            .arg("v")
+            .arg(1)
+            .arg("p")
+            .arg("not valid json")
+            .query_async(&mut conn)
+            .await
+            .expect("seed corrupt payload");
+
+        // A mutation opens its barrier *after* the reader observed version 1.
+        client
+            .begin(CacheCategory::Grants, &keys)
+            .await
+            .expect("begin");
+
+        // The reader's cleanup now fires against its stale observed version.
+        client.discard_payload(&key, 1).await;
+
+        let dirty: Option<String> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("dirty")
+            .query_async(&mut conn)
+            .await
+            .expect("read dirty");
+        assert_eq!(
+            dirty.as_deref(),
+            Some("1"),
+            "the in-flight mutation's barrier must survive a late corrupt-payload cleanup"
+        );
     }
 
     #[tokio::test]

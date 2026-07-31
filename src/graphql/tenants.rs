@@ -296,18 +296,31 @@ impl TenantMutation {
                 &[("manage", Scope::Platform), ("create", Scope::Platform)],
             )
             .await?;
-            tenant_repo::create_tenant_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                tenant_model::CreateTenant {
-                    id,
-                    name: input.name,
-                    alias: input.alias,
-                    tags: input.tags.unwrap_or_default(),
-                    attributes: input.attributes.unwrap_or(serde_json::Value::Null),
+            // `create_tenant` bootstraps a tenant-admin role, role assignment
+            // and membership for the creator in the same transaction, so it
+            // grows the creator's own grant set. The capability gate directly
+            // above has just warmed that exact `grants` entry, so without this
+            // barrier a creator who isn't already a platform admin cannot
+            // manage the tenant they just created until the grants TTL lapses.
+            crate::cache::invalidate::guarded_mutation(
+                state.cache.as_deref(),
+                crate::cache::CacheCategory::Grants,
+                std::slice::from_ref(&crate::cache::keys::grants(auth.entity_id)),
+                || {
+                    tenant_repo::create_tenant_with_audit(
+                        &state.pool,
+                        state.config.events.enabled(),
+                        Some(auth.entity_id),
+                        tenant_model::CreateTenant {
+                            id,
+                            name: input.name,
+                            alias: input.alias,
+                            tags: input.tags.unwrap_or_default(),
+                            attributes: input.attributes.unwrap_or(serde_json::Value::Null),
+                        },
+                        Some(auth.entity_id),
+                    )
                 },
-                Some(auth.entity_id),
             )
             .await
         }

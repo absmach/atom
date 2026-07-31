@@ -1356,6 +1356,103 @@ async fn a_stale_jwt_from_before_a_tenant_move_cannot_poison_the_old_tenants_sta
     );
 }
 
+/// A platform-scope allow block granting `create`, so a non-admin subject can
+/// be given exactly the capability `createTenant`'s gate requires.
+async fn make_platform_create_block(pool: &PgPool) -> Uuid {
+    let action_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'create' LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .expect("create action");
+    authz_repo::create_permission_block(
+        pool,
+        CreatePermissionBlock {
+            tenant_id: None,
+            scope_mode: "platform".into(),
+            object_kind: None,
+            object_type: None,
+            object_id: None,
+            group_id: None,
+            effect: Effect::Allow,
+            conditions: json!({}),
+            action_ids: vec![action_id],
+        },
+    )
+    .await
+    .expect("create permission block")
+    .id
+}
+
+/// Regression test for a review finding: `createTenant` bootstraps a
+/// tenant-admin role, role assignment and membership for the creator in the
+/// same transaction — growing the creator's own grant set — but ran with no
+/// `grants` invalidation. The capability gate immediately above it warms that
+/// exact key, so a creator without platform-wide `manage` could not administer
+/// the tenant they had just created until the grants TTL lapsed.
+#[tokio::test]
+#[ignore]
+async fn tenant_creation_immediately_grants_the_creator_tenant_admin() {
+    let p = pool().await;
+    let (state, cache) = state_with_cache(p.clone()).await;
+    // Deliberately *not* a platform admin: with platform-wide `manage` the
+    // creator would pass the post-creation check no matter what the cache
+    // held, and the test would prove nothing.
+    let creator = active_entity(&p, "service").await;
+    let block_id = make_platform_create_block(&p).await;
+    authz_repo::create_direct_policy(
+        &p,
+        CreateDirectPolicy {
+            tenant_id: None,
+            subject_kind: SubjectKind::Entity,
+            subject_id: creator,
+            permission_block_id: block_id,
+        },
+    )
+    .await
+    .expect("create direct policy");
+
+    let schema = build_schema(state.clone());
+    let resp = schema
+        .execute(authed(
+            creator,
+            cache.clone(),
+            r#"mutation { createTenant(input: { name: "cache-test-bootstrap" }) { id } }"#,
+        ))
+        .await;
+    assert!(
+        resp.errors.is_empty(),
+        "createTenant failed: {:?}",
+        resp.errors
+    );
+    let tenant_id: Uuid = resp
+        .data
+        .into_json()
+        .expect("response is json")
+        .pointer("/createTenant/id")
+        .and_then(|id| id.as_str())
+        .expect("createTenant returned an id")
+        .parse()
+        .expect("parse created tenant id");
+
+    // The creator's grants were warmed by `createTenant`'s own capability
+    // gate, moments before the bootstrap added the tenant-admin assignment.
+    let req = AuthzRequest {
+        subject_id: creator,
+        action: "manage".into(),
+        resource_id: None,
+        object_kind: Some("tenant".into()),
+        object_id: Some(tenant_id),
+        context: json!({}),
+    };
+    let auth = auth_context(creator, cache.clone());
+    let decision = engine::evaluate(&p, &req, &auth).await.expect("evaluate");
+    assert!(
+        decision.allowed,
+        "the creator must be able to manage the tenant they just created on the very next \
+         request, not after the grants TTL expires"
+    );
+}
+
 // ─── Group-subject mutation vs. concurrent membership change ───────────────
 
 /// Regression test for a review finding: resolving a group-subject
