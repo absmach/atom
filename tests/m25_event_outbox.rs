@@ -494,6 +494,14 @@ impl EventPublisher for SelectivePublisher {
     }
 }
 
+async fn unparseable_flag(pool: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT unparseable FROM event_outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch unparseable")
+}
+
 #[tokio::test]
 #[ignore]
 async fn a_single_unroutable_event_does_not_block_or_re_deliver_healthy_events() {
@@ -517,6 +525,10 @@ async fn a_single_unroutable_event_does_not_block_or_re_deliver_healthy_events()
     let (attempts, last_error) = attempts_and_error(&pool, bad_id).await;
     assert_eq!(attempts, 1);
     assert!(last_error.unwrap().contains("unroutable"));
+    assert!(
+        !unparseable_flag(&pool, bad_id).await,
+        "an unroutable message must NOT be marked unparseable — it remains retryable"
+    );
 }
 
 #[tokio::test]

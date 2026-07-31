@@ -270,6 +270,18 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_optional_id(input.id, "id")?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "tenant",
+            target_id: id,
+            event: "tenant.create",
+        };
+        let details = serde_json::json!({
+            "name": input.name,
+            "alias": input.alias,
+        });
+
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
@@ -277,8 +289,10 @@ impl TenantMutation {
                 &[("manage", Scope::Platform), ("create", Scope::Platform)],
             )
             .await?;
-            tenant_repo::create_tenant(
+            tenant_repo::create_tenant_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 tenant_model::CreateTenant {
                     id,
                     name: input.name,
@@ -292,21 +306,9 @@ impl TenantMutation {
         }
         .await;
 
-        let tenant_id = result.as_ref().ok().map(|t| t.id);
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: "tenant",
-                target_id: tenant_id,
-                event: "tenant.create",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(&meta, &details, err);
+        }
 
         result.map(Into::into).map_err(gql_error)
     }

@@ -179,34 +179,53 @@ impl ResourceMutation {
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
         let id = parse_optional_id(input.id, "id")?;
         let owner_id = parse_optional_id(input.owner_id, "ownerId")?;
-        crate::auth::require_any_capability(
-            &state.pool,
-            &auth,
-            &[
-                ("manage", scope_for_tenant(tenant_id)),
-                ("write", scope_for_tenant(tenant_id)),
-            ],
-        )
-        .await?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "resource",
+            target_id: id,
+            event: "resource.create",
+        };
+        let details = serde_json::json!({
+            "kind": input.kind,
+            "name": input.name,
+            "alias": input.alias,
+        });
 
-        let resource = authz_repo::create_resource_with_audit(
-            &state.pool,
-            state.config.events.enabled(),
-            Some(auth.entity_id),
-            CreateResource {
-                id,
-                kind: input.kind,
-                name: input.name,
-                alias: input.alias,
-                tenant_id,
-                owner_id,
-                attributes: input.attributes.unwrap_or(serde_json::Value::Null),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                &auth,
+                &[
+                    ("manage", scope_for_tenant(tenant_id)),
+                    ("write", scope_for_tenant(tenant_id)),
+                ],
+            )
+            .await?;
 
-        Ok(resource.into())
+            authz_repo::create_resource_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                CreateResource {
+                    id,
+                    kind: input.kind,
+                    name: input.name,
+                    alias: input.alias,
+                    tenant_id,
+                    owner_id,
+                    attributes: input.attributes.unwrap_or(serde_json::Value::Null),
+                },
+            )
+            .await
+        }
+        .await;
+
+        if let Err(ref err) = result {
+            audit::observe_error(&meta, &details, err);
+        }
+
+        result.map(Resource::from).map_err(gql_error)
     }
 
     async fn update_resource(

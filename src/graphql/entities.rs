@@ -205,6 +205,19 @@ impl EntityMutation {
         let profile_id = parse_optional_id(input.profile_id, "profileId")?;
         let profile_version_id = parse_optional_id(input.profile_version_id, "profileVersionId")?;
         let kind = parse_optional_entity_kind(input.kind);
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "entity",
+            target_id: id,
+            event: "entity.create",
+        };
+        let details = serde_json::json!({
+            "kind": kind,
+            "name": input.name,
+            "alias": input.alias,
+        });
+
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
@@ -215,8 +228,10 @@ impl EntityMutation {
                 ],
             )
             .await?;
-            repo::create_entity(
+            repo::create_entity_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 entity_model::CreateEntity {
                     id,
                     kind,
@@ -232,39 +247,8 @@ impl EntityMutation {
         }
         .await;
 
-        match &result {
-            Ok(entity) => {
-                audit::write(
-                    &state.pool,
-                    state.config.events.enabled(),
-                    audit::AuditEvent {
-                        actor_entity_id: Some(auth.entity_id),
-                        tenant_id: entity.tenant_id,
-                        target_kind: Some("entity"),
-                        target_id: Some(entity.id),
-                        event: "entity.create",
-                        outcome: AuditOutcome::Allow,
-                        details: serde_json::json!({}),
-                    },
-                )
-                .await;
-            }
-            Err(_) => {
-                audit::observe_result(
-                    &state.pool,
-                    state.config.events.enabled(),
-                    audit::AuditMeta {
-                        actor_entity_id: Some(auth.entity_id),
-                        tenant_id,
-                        target_kind: "entity",
-                        target_id: None,
-                        event: "entity.create",
-                    },
-                    serde_json::json!({}),
-                    &result,
-                )
-                .await
-            }
+        if let Err(ref err) = result {
+            audit::observe_error(&meta, &details, err);
         }
 
         result.map(Into::into).map_err(gql_error)

@@ -97,11 +97,11 @@ async fn outbox_row_for(pool: &PgPool, event: &str, target_id: Uuid) -> Option<V
     .expect("query event_outbox")
 }
 
-/// `resource.create` is `observe_result`-channeled (see `src/graphql/resources.rs`)
-/// and is *never* written to `audit_logs` — confirming this still produces a
+/// `resource.create` is transactionally observe-enqueued inside `create_resource_with_audit`
+/// (see `src/authz/repo.rs`) and is *never* written to `audit_logs` — confirming this produces a
 /// domain event when publishing is enabled is the core correctness claim of
 /// this feature: hooking events only into the already-DB-persisted `write`
-/// path would have silently missed this (and `tenant.create`, `group.create`).
+/// path would have silently missed this (and `tenant.create`, `group.create`, `entity.create`).
 #[tokio::test]
 #[ignore]
 async fn resource_create_produces_an_event_even_though_it_is_never_db_audited() {
@@ -121,7 +121,7 @@ async fn resource_create_produces_an_event_even_though_it_is_never_db_audited() 
     .expect("query audit_logs");
     assert!(
         audited.is_none(),
-        "resource.create is observe_result-channeled and must NOT reach audit_logs \
+        "resource.create is observe-channeled (not DB-audited) and must NOT reach audit_logs \
          (this assertion documents the existing behavior this feature works around)"
     );
 

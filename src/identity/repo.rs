@@ -52,7 +52,12 @@ pub async fn lock_active_entity(
     .map_err(db_err)
 }
 
-pub async fn create_entity(pool: &PgPool, req: CreateEntity) -> Result<Entity, AppError> {
+pub async fn create_entity_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreateEntity,
+) -> Result<Entity, AppError> {
     let id = req.id.unwrap_or_else(Uuid::new_v4);
     let attrs = normalize_attributes(req.attributes);
     let parent_group_id = parent_group_id_from_attrs(&attrs)?;
@@ -95,8 +100,27 @@ pub async fn create_entity(pool: &PgPool, req: CreateEntity) -> Result<Entity, A
         set_entity_parent_group_in_tx(&mut tx, entity.id, parent_group_id).await?;
     }
 
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: entity.tenant_id,
+        target_kind: "entity",
+        target_id: Some(entity.id),
+        event: "entity.create",
+    };
+    let details = serde_json::json!({
+        "kind": entity.kind,
+        "name": entity.name,
+        "alias": entity.alias,
+    });
+    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
+
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(&meta, &details);
     Ok(entity)
+}
+
+pub async fn create_entity(pool: &PgPool, req: CreateEntity) -> Result<Entity, AppError> {
+    create_entity_with_audit(pool, false, None, req).await
 }
 
 pub async fn add_authenticated_user_membership_in_tx(
@@ -873,7 +897,12 @@ pub async fn revoke_session(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
 
 // ─── Groups ──────────────────────────────────────────────────────────────────
 
-pub async fn create_group(pool: &PgPool, req: CreateGroup) -> Result<Group, AppError> {
+pub async fn create_group_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreateGroup,
+) -> Result<Group, AppError> {
     let CreateGroup {
         id,
         name,
@@ -928,8 +957,23 @@ pub async fn create_group(pool: &PgPool, req: CreateGroup) -> Result<Group, AppE
             ))
         }
     };
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: group.tenant_id,
+        target_kind: "group",
+        target_id: Some(group.id),
+        event: "group.create",
+    };
+    let details = serde_json::json!({ "group_type": group.group_type });
+    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
+
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(&meta, &details);
     Ok(group)
+}
+
+pub async fn create_group(pool: &PgPool, req: CreateGroup) -> Result<Group, AppError> {
+    create_group_with_audit(pool, false, None, req).await
 }
 
 pub async fn get_group(pool: &PgPool, id: Uuid) -> Result<Group, AppError> {

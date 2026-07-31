@@ -263,7 +263,6 @@ pub async fn observe_in_tx(
         outcome: AuditOutcome::Allow,
         details: details.clone(),
     };
-    log_audit_event(&event);
 
     if events_enabled {
         crate::events::enqueue(
@@ -280,6 +279,40 @@ pub async fn observe_in_tx(
         .await?;
     }
     Ok(())
+}
+
+/// Emits an audit log tracing line for a successful non-audited operation (observe path)
+/// after its database transaction has successfully committed.
+pub fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {
+    let event = AuditEvent {
+        actor_entity_id: meta.actor_entity_id,
+        tenant_id: meta.tenant_id,
+        target_kind: Some(meta.target_kind),
+        target_id: meta.target_id,
+        event: meta.event,
+        outcome: AuditOutcome::Allow,
+        details: details.clone(),
+    };
+    log_audit_event(&event);
+}
+
+/// Emits an audit log tracing line for a failed or denied operation (observe path).
+pub fn observe_error(meta: &AuditMeta<'_>, details: &Value, err: &crate::error::AppError) {
+    let outcome = err.audit_outcome();
+    let mut merged = details.clone();
+    if let Value::Object(ref mut map) = merged {
+        map.insert("error".to_string(), Value::String(err.to_string()));
+    }
+    let event = AuditEvent {
+        actor_entity_id: meta.actor_entity_id,
+        tenant_id: meta.tenant_id,
+        target_kind: Some(meta.target_kind),
+        target_id: meta.target_id,
+        event: meta.event,
+        outcome,
+        details: merged,
+    };
+    log_audit_event(&event);
 }
 
 async fn insert_audit_log<'e, E>(

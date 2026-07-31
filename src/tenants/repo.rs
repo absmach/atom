@@ -108,8 +108,10 @@ pub async fn lock_optional_active_tenant(
     Ok(())
 }
 
-pub async fn create_tenant(
+pub async fn create_tenant_with_audit(
     pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     req: CreateTenant,
     created_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
@@ -118,8 +120,30 @@ pub async fn create_tenant(
     if let Some(creator_id) = created_by {
         bootstrap_tenant_admin(&mut tx, tenant_admin_bootstrap(tenant.id, creator_id)).await?;
     }
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: Some(tenant.id),
+        target_kind: "tenant",
+        target_id: Some(tenant.id),
+        event: "tenant.create",
+    };
+    let details = serde_json::json!({
+        "name": tenant.name,
+        "alias": tenant.alias,
+    });
+    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
+
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(&meta, &details);
     Ok(tenant)
+}
+
+pub async fn create_tenant(
+    pool: &PgPool,
+    req: CreateTenant,
+    created_by: Option<Uuid>,
+) -> Result<Tenant, AppError> {
+    create_tenant_with_audit(pool, false, None, req, created_by).await
 }
 
 async fn create_tenant_in_tx(

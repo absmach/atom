@@ -79,25 +79,22 @@ pub async fn create_resource_with_audit(
     if let Some(parent_group_id) = parent_group_id {
         set_resource_parent_group_in_tx(&mut tx, resource.id, parent_group_id).await?;
     }
-    crate::audit::observe_in_tx(
-        &mut tx,
-        events_enabled,
-        &crate::audit::AuditMeta {
-            actor_entity_id: actor_id,
-            tenant_id: resource.tenant_id,
-            target_kind: "resource",
-            target_id: Some(resource.id),
-            event: "resource.create",
-        },
-        &serde_json::json!({
-            "kind": resource.kind,
-            "name": resource.name,
-            "alias": resource.alias,
-            "attributes": resource.attributes,
-        }),
-    )
-    .await?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: resource.tenant_id,
+        target_kind: "resource",
+        target_id: Some(resource.id),
+        event: "resource.create",
+    };
+    let details = serde_json::json!({
+        "kind": resource.kind,
+        "name": resource.name,
+        "alias": resource.alias,
+        "attributes": resource.attributes,
+    });
+    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(&meta, &details);
     Ok(resource)
 }
 

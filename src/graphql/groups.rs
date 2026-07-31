@@ -292,6 +292,16 @@ impl GroupMutation {
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
         let group_type = input.group_type.clone();
         let id = parse_optional_id(input.id, "id")?;
+
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "group",
+            target_id: id,
+            event: "group.create",
+        };
+        let details = serde_json::json!({ "group_type": group_type });
+
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
@@ -302,8 +312,10 @@ impl GroupMutation {
                 ],
             )
             .await?;
-            repo::create_group(
+            repo::create_group_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 CreateGroup {
                     id,
                     name: input.name,
@@ -317,20 +329,9 @@ impl GroupMutation {
         }
         .await;
 
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: "group",
-                target_id: result.as_ref().ok().map(|g| g.id),
-                event: "group.create",
-            },
-            serde_json::json!({ "group_type": group_type }),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(&meta, &details, err);
+        }
 
         result.map(Into::into).map_err(gql_error)
     }

@@ -273,18 +273,14 @@ pub async fn deliver_outbox_batch(
                     }
                     Err(err) => {
                         failed_count += 1;
-                        let is_unroutable_or_nacked =
-                            err.0.contains("unroutable") || err.0.contains("nacked");
                         sqlx::query(
                             "UPDATE event_outbox
                              SET attempts = attempts + 1,
-                                 last_error = $2,
-                                 unparseable = (unparseable OR $3)
+                                 last_error = $2
                              WHERE id = $1",
                         )
                         .bind(id)
                         .bind(&err.0)
-                        .bind(is_unroutable_or_nacked)
                         .execute(&mut *tx)
                         .await
                         .map_err(db_err)?;
