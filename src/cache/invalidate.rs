@@ -9,10 +9,18 @@
 //! `affected_subject_ids_for_group`) before calling this; the enumeration
 //! itself is domain SQL and does not belong here.
 
-use std::future::Future;
+use std::{future::Future, pin::Pin};
+
+use sqlx::{PgPool, Postgres, Transaction};
 
 use super::{CacheCategory, CacheClient};
-use crate::error::AppError;
+use crate::error::{db_err, AppError};
+
+/// A boxed future borrowing the transaction it runs on — what
+/// [`guarded_tx_mutation`]'s closures return. Stable Rust has no async
+/// closures, so a closure that awaits while holding `&mut Transaction` has to
+/// spell the borrow out by hand; call sites write `|tx| Box::pin(f(tx, ..))`.
+pub type TxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AppError>> + Send + 'a>>;
 
 /// Runs `mutate` guarded by a cache barrier on `keys`. With caching disabled
 /// (`cache: None`) this is a pure passthrough to `mutate`, byte-identical to
@@ -42,56 +50,58 @@ where
     result
 }
 
-/// Like [`guarded_mutation`], for a mutation whose effects span more than one
-/// cache category in a single Postgres transaction — e.g. tenant restore,
-/// which both flips the tenant's own status and reactivates a set of
-/// credentials. Establishes a barrier on every `(category, keys)` group
-/// before running `mutate`; if a later group's barrier can't be established,
-/// the ones already established are cleared immediately (rather than left to
-/// self-heal on their barrier TTL) before the mutation is refused. Every
-/// established group is cleared after `mutate` regardless of outcome.
-pub async fn guarded_multi_mutation<T, F, Fut>(
-    cache: Option<&CacheClient>,
-    groups: &[(CacheCategory, &[String])],
-    mutate: F,
+/// [`guarded_mutation`] for a mutation whose affected keys can only be
+/// determined *under the locks the mutation itself takes* — every
+/// group-closure and role mutation, where the set of affected `grants` keys
+/// is the enumerated member set and a concurrent membership change would
+/// otherwise slip past the enumeration (see
+/// `authz::repo::lock_group_closures_and_collect_member_ids`).
+///
+/// Opens the transaction, runs `collect_keys` on it (which locks and
+/// enumerates), establishes the barrier on what it returned, runs `mutate` on
+/// the same transaction, commits, and clears the barrier — in that order,
+/// regardless of outcome. That ordering is the whole point of the helper: the
+/// barrier must be established after the lock (so the enumeration is
+/// complete) and cleared after the commit (so no reader repopulates from
+/// pre-commit state), and every call site previously re-derived it by hand.
+///
+/// Callers hold the `None` cache case themselves, since the uncached
+/// fallback is a different repo function per call site rather than the same
+/// one — usually the non-`_in_tx` variant that opens its own transaction.
+pub async fn guarded_tx_mutation<T, K, M>(
+    cache: &CacheClient,
+    category: CacheCategory,
+    pool: &PgPool,
+    collect_keys: K,
+    mutate: M,
 ) -> Result<T, AppError>
 where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<T, AppError>>,
+    K: for<'a> FnOnce(&'a mut Transaction<'static, Postgres>) -> TxFuture<'a, Vec<String>>,
+    M: for<'a> FnOnce(&'a mut Transaction<'static, Postgres>) -> TxFuture<'a, T>,
 {
-    let Some(cache) = cache else {
-        return mutate().await;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let keys = collect_keys(&mut tx).await?;
+    cache.begin(category, &keys).await?;
+    let outcome = mutate(&mut tx).await;
+    let outcome = match outcome {
+        Ok(value) => tx.commit().await.map_err(db_err).map(|_| value),
+        Err(err) => Err(err),
     };
-
-    let mut established = Vec::with_capacity(groups.len());
-    for &(category, keys) in groups {
-        match cache.begin(category, keys).await {
-            Ok(()) => established.push((category, keys)),
-            Err(err) => {
-                for (category, keys) in established {
-                    cache.end(category, keys).await;
-                }
-                return Err(err);
-            }
-        }
-    }
-
-    let result = mutate().await;
-    for (category, keys) in established {
-        cache.end(category, keys).await;
-    }
-    result
+    cache.end(category, &keys).await;
+    outcome
 }
 
 /// Establishes a barrier on every `(category, keys)` group, in order. Used by
 /// callers that already hold an open `Transaction` across their own
 /// lock/enumerate/mutate/commit sequence (so the barrier can't be established
-/// via a `FnOnce` closure the way [`guarded_mutation`]/[`guarded_multi_mutation`]
-/// do — a closure can't cleanly borrow `&mut Transaction` across an await
-/// point on stable Rust). If a later group's barrier can't be established, the
-/// ones already established are cleared immediately rather than left to
-/// self-heal on their barrier TTL. Pair with [`end_all`], called
-/// unconditionally after the mutation regardless of outcome.
+/// via a `FnOnce` closure the way [`guarded_mutation`] does). Prefer
+/// [`guarded_tx_mutation`] for the single-category case it covers; `begin_all`
+/// remains for mutations spanning several categories on one transaction.
+///
+/// If a later group's barrier can't be established, the ones already
+/// established are cleared immediately rather than left to self-heal on their
+/// barrier TTL. Pair with [`end_all`], called unconditionally after the
+/// mutation regardless of outcome.
 pub async fn begin_all(
     cache: &CacheClient,
     groups: &[(CacheCategory, &[String])],

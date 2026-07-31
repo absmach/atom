@@ -166,6 +166,44 @@ pub enum Lookup<T> {
     Unavailable,
 }
 
+/// One key's unparsed entry from [`CacheClient::lookup_many`]. Opaque by
+/// design — [`CacheClient::decode`] is the only way to read it, so the
+/// dirty-bit and version handling can't be reimplemented per call site.
+#[derive(Debug)]
+pub struct RawLookup {
+    /// `None` when the read itself failed, which `decode` maps to
+    /// `Lookup::Unavailable`.
+    version: Option<i64>,
+    /// `None` for an absent *or* dirty entry — both are misses, and a dirty
+    /// entry's payload must never be served.
+    payload: Option<Vec<u8>>,
+}
+
+impl Default for RawLookup {
+    /// An unavailable entry — the safe reading of a result that never arrived.
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
+impl RawLookup {
+    fn unavailable() -> Self {
+        Self {
+            version: None,
+            payload: None,
+        }
+    }
+
+    fn from_fields(fields: (Option<i64>, Option<String>, Option<Vec<u8>>)) -> Self {
+        let (version, dirty, payload) = fields;
+        let is_dirty = dirty.as_deref() == Some("1");
+        Self {
+            version: Some(version.unwrap_or(0)),
+            payload: payload.filter(|_| !is_dirty),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CacheError {
     #[error("cache operation timed out")]
@@ -241,50 +279,90 @@ impl CacheClient {
         category: CacheCategory,
         key: &str,
     ) -> Lookup<T> {
+        let raw = self
+            .lookup_many(std::slice::from_ref(&key))
+            .await
+            .pop()
+            .unwrap_or_else(RawLookup::unavailable);
+        self.decode(category, key, raw).await
+    }
+
+    /// Reads every key in one pipelined round trip on a single pooled
+    /// connection, returning one [`RawLookup`] per key, in order.
+    ///
+    /// The auth hot path reads up to three keys before any request work
+    /// starts; issued one at a time that is three pool acquisitions and three
+    /// serial round trips, each bounded by `op_timeout`. Use this wherever the
+    /// keys have no data dependency on each other, then [`Self::decode`] each
+    /// result into its own type. Metrics are recorded by `decode`, not here,
+    /// so one batch can span several categories.
+    ///
+    /// Always returns exactly `keys.len()` entries; a transport failure yields
+    /// unavailable entries rather than a short vector.
+    pub async fn lookup_many(&self, keys: &[&str]) -> Vec<RawLookup> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let unavailable = || keys.iter().map(|_| RawLookup::unavailable()).collect();
+
         let mut conn = match self.get_conn().await {
             Ok(conn) => conn,
             Err(err) => {
-                tracing::warn!(category = category.as_str(), error = %err, "cache lookup unavailable");
-                metrics::record_cache_lookup(category.as_str(), "error");
-                return Lookup::Unavailable;
+                tracing::warn!(error = %err, "cache lookup unavailable");
+                return unavailable();
             }
         };
 
+        let mut pipe = redis::pipe();
+        for key in keys {
+            pipe.cmd("HMGET").arg(*key).arg("v").arg("dirty").arg("p");
+        }
         let result = tokio::time::timeout(
             self.op_timeout,
-            redis::cmd("HMGET")
-                .arg(key)
-                .arg("v")
-                .arg("dirty")
-                .arg("p")
-                .query_async::<(Option<i64>, Option<String>, Option<Vec<u8>>)>(&mut conn),
+            pipe.query_async::<Vec<(Option<i64>, Option<String>, Option<Vec<u8>>)>>(&mut conn),
         )
         .await;
 
-        let (version, dirty, payload) = match result {
-            Ok(Ok(fields)) => fields,
+        match result {
+            Ok(Ok(rows)) if rows.len() == keys.len() => {
+                rows.into_iter().map(RawLookup::from_fields).collect()
+            }
+            Ok(Ok(rows)) => {
+                tracing::warn!(
+                    expected = keys.len(),
+                    got = rows.len(),
+                    "cache pipelined lookup returned an unexpected row count"
+                );
+                unavailable()
+            }
             Ok(Err(err)) => {
-                tracing::warn!(category = category.as_str(), error = %err, "cache lookup failed");
-                metrics::record_cache_lookup(category.as_str(), "error");
-                return Lookup::Unavailable;
+                tracing::warn!(error = %err, "cache lookup failed");
+                unavailable()
             }
             Err(_) => {
-                tracing::warn!(category = category.as_str(), "cache lookup timed out");
-                metrics::record_cache_lookup(category.as_str(), "error");
-                return Lookup::Unavailable;
+                tracing::warn!("cache lookup timed out");
+                unavailable()
             }
+        }
+    }
+
+    /// Parses one [`lookup_many`](Self::lookup_many) result into a typed
+    /// [`Lookup`], recording the read in the per-category metrics. A corrupt
+    /// payload is deleted and reported as a miss, exactly as in `lookup`.
+    pub async fn decode<T: DeserializeOwned>(
+        &self,
+        category: CacheCategory,
+        key: &str,
+        raw: RawLookup,
+    ) -> Lookup<T> {
+        let Some(version) = raw.version else {
+            metrics::record_cache_lookup(category.as_str(), "error");
+            return Lookup::Unavailable;
         };
-
-        let observed_version = version.unwrap_or(0);
-        let is_dirty = dirty.as_deref() == Some("1");
-
-        let Some(payload) = payload.filter(|_| !is_dirty) else {
+        let Some(payload) = raw.payload else {
             metrics::record_cache_lookup(category.as_str(), "miss");
-            return Lookup::Miss {
-                version: observed_version,
-            };
+            return Lookup::Miss { version };
         };
-
         match serde_json::from_slice::<T>(&payload) {
             Ok(value) => {
                 metrics::record_cache_lookup(category.as_str(), "hit");
@@ -294,9 +372,7 @@ impl CacheClient {
                 tracing::warn!(category = category.as_str(), error = %err, "cache payload corrupt; discarding");
                 self.best_effort_delete(key).await;
                 metrics::record_cache_lookup(category.as_str(), "miss");
-                Lookup::Miss {
-                    version: observed_version,
-                }
+                Lookup::Miss { version }
             }
         }
     }
@@ -322,11 +398,15 @@ impl CacheClient {
                 category = category.as_str(),
                 "cache payload serialize failed"
             );
+            metrics::record_cache_populate(category.as_str(), "error");
             return;
         };
         let mut conn = match self.get_conn().await {
             Ok(conn) => conn,
-            Err(_) => return,
+            Err(_) => {
+                metrics::record_cache_populate(category.as_str(), "error");
+                return;
+            }
         };
         let ttl = category.ttl(&self.ttl);
         let outcome = tokio::time::timeout(
@@ -339,10 +419,27 @@ impl CacheClient {
                 .invoke_async::<String>(&mut conn),
         )
         .await;
-        if let Err(err) = outcome {
-            tracing::warn!(category = category.as_str(), error = %err, "cache populate timed out");
-        } else if let Ok(Err(err)) = outcome {
-            tracing::warn!(category = category.as_str(), error = %err, "cache populate failed");
+        // The script distinguishes `applied` from `stale` (barrier dirty, or
+        // the version moved since the caller's `lookup`). Both are normal, but
+        // only the split tells an operator whether a zero hit rate means "cold"
+        // or "every write is being rejected" — so it is recorded, not dropped.
+        match outcome {
+            Ok(Ok(result)) => {
+                let outcome = if result == "applied" {
+                    "applied"
+                } else {
+                    "stale"
+                };
+                metrics::record_cache_populate(category.as_str(), outcome);
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(category = category.as_str(), error = %err, "cache populate failed");
+                metrics::record_cache_populate(category.as_str(), "error");
+            }
+            Err(_) => {
+                tracing::warn!(category = category.as_str(), "cache populate timed out");
+                metrics::record_cache_populate(category.as_str(), "error");
+            }
         }
     }
 
@@ -380,15 +477,16 @@ impl CacheClient {
             return Ok(());
         }
         let barrier_ttl = barrier_ttl(category.ttl(&self.ttl));
+        // One connection for every chunk, not one per chunk: a bulk
+        // invalidation re-acquiring from the pool per 500 keys competes with
+        // the request path for connections while already holding Postgres row
+        // locks.
+        let mut conn = self.get_conn().await.map_err(|err| {
+            tracing::warn!(category = category.as_str(), error = %err, "cache begin: connection unavailable");
+            metrics::record_cache_invalidation(category.as_str(), "error");
+            AppError::service_unavailable("cache unavailable; refusing security-sensitive mutation")
+        })?;
         for chunk in keys.chunks(BULK_CHUNK_SIZE) {
-            let mut conn = self.get_conn().await.map_err(|err| {
-                tracing::warn!(category = category.as_str(), error = %err, "cache begin: connection unavailable");
-                metrics::record_cache_invalidation(category.as_str(), "error");
-                AppError::service_unavailable(
-                    "cache unavailable; refusing security-sensitive mutation",
-                )
-            })?;
-
             let mut invocation = self.begin_script.prepare_invoke();
             for key in chunk {
                 invocation.key(key);
@@ -431,15 +529,16 @@ impl CacheClient {
             return;
         }
         let barrier_ttl = barrier_ttl(category.ttl(&self.ttl));
+        // One connection for every chunk — see `begin`.
+        let mut conn = match self.get_conn().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!(category = category.as_str(), error = %err, "cache end: connection unavailable");
+                metrics::record_cache_invalidation(category.as_str(), "error");
+                return;
+            }
+        };
         for chunk in keys.chunks(BULK_CHUNK_SIZE) {
-            let mut conn = match self.get_conn().await {
-                Ok(conn) => conn,
-                Err(err) => {
-                    tracing::warn!(category = category.as_str(), error = %err, "cache end: connection unavailable");
-                    metrics::record_cache_invalidation(category.as_str(), "error");
-                    continue;
-                }
-            };
             let mut invocation = self.end_script.prepare_invoke();
             for key in chunk {
                 invocation.key(key);

@@ -441,34 +441,33 @@ impl GroupMutation {
                     )
                     .await;
                 };
-                let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-                let grants_keys =
-                    authz_repo::lock_group_closures_and_collect_grants_keys(&mut tx, &[id]).await?;
-                cache
-                    .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                    .await?;
-                let outcome = repo::update_group_in_tx(
-                    &mut tx,
-                    state.config.events.enabled(),
-                    Some(auth.entity_id),
-                    id,
-                    update,
-                    "group.update",
-                    details.clone(),
+                crate::cache::invalidate::guarded_tx_mutation(
+                    cache,
+                    crate::cache::CacheCategory::Grants,
+                    &state.pool,
+                    |tx| {
+                        Box::pin(async move {
+                            authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                        })
+                    },
+                    |tx| {
+                        let events_enabled = state.config.events.enabled();
+                        let details = details.clone();
+                        Box::pin(async move {
+                            repo::update_group_in_tx(
+                                tx,
+                                events_enabled,
+                                Some(auth.entity_id),
+                                id,
+                                update,
+                                "group.update",
+                                details,
+                            )
+                            .await
+                        })
+                    },
                 )
-                .await;
-                let outcome = match outcome {
-                    Ok(value) => tx
-                        .commit()
-                        .await
-                        .map_err(crate::error::db_err)
-                        .map(|_| value),
-                    Err(err) => Err(err),
-                };
-                cache
-                    .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                    .await;
-                outcome
+                .await
             } else {
                 repo::update_group_with_audit(
                     &state.pool,
@@ -535,28 +534,30 @@ impl GroupMutation {
                 )
                 .await;
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys =
-                authz_repo::lock_group_closures_and_collect_grants_keys(&mut tx, &[id]).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = repo::set_group_parent_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                parent_id,
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::set_group_parent_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            parent_id,
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome?;
+            .await?;
             repo::get_group(&state.pool, id).await
         }
         .await;
@@ -610,27 +611,29 @@ impl GroupMutation {
                 .await?;
                 return Ok(tenant_id);
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys =
-                authz_repo::lock_group_closures_and_collect_grants_keys(&mut tx, &[id]).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = repo::remove_group_parent_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::remove_group_parent_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome?;
+            .await?;
             Ok(tenant_id)
         }
         .await;
@@ -693,28 +696,30 @@ impl GroupMutation {
                 .await?;
                 return Ok(tenant_id);
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys =
-                authz_repo::lock_group_closures_and_collect_grants_keys(&mut tx, &[id]).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = repo::delete_group_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::delete_group_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome?;
+            .await?;
             Ok(tenant_id)
         }
         .await;
@@ -762,28 +767,30 @@ impl GroupMutation {
                 )
                 .await;
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys =
-                authz_repo::lock_group_closures_and_collect_grants_keys(&mut tx, &[id]).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = repo::restore_group_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::restore_group_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome?;
+            .await?;
             // Mirrors `restore_group_with_audit`'s own post-commit audit
             // write (fire-and-forget, after the mutation durably commits) —
             // see `audit::commit_with_audit`'s doc comment. Only needed on
@@ -1027,34 +1034,33 @@ impl GroupMutation {
                 )
                 .await;
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys =
-                authz_repo::lock_group_closures_and_collect_grants_keys(&mut tx, &[id]).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = repo::update_group_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                update,
-                event,
-                details.clone(),
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    let details = details.clone();
+                    Box::pin(async move {
+                        repo::update_group_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            update,
+                            event,
+                            details,
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(value) => tx
-                    .commit()
-                    .await
-                    .map_err(crate::error::db_err)
-                    .map(|_| value),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome
+            .await
         }
         .await;
         if let Err(ref err) = result {

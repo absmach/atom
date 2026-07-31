@@ -484,28 +484,31 @@ impl PolicyMutation {
                 .await?;
                 return Ok(tenant_id);
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys =
-                authz_repo::lock_role_and_collect_grants_keys(&mut tx, role_id).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = authz_repo::replace_role_permission_block_links_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                role_id,
-                &permission_block_ids,
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_role_and_collect_grants_keys(tx, role_id).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    let permission_block_ids = permission_block_ids.clone();
+                    Box::pin(async move {
+                        authz_repo::replace_role_permission_block_links_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            role_id,
+                            &permission_block_ids,
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome?;
+            .await?;
             Ok(tenant_id)
         }
         .await;
@@ -563,27 +566,30 @@ impl PolicyMutation {
                 .await?;
                 return Ok(tenant_id);
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys = authz_repo::lock_role_and_collect_grants_keys(&mut tx, id).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = authz_repo::delete_role_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(
+                        async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
+                    )
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        authz_repo::delete_role_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome?;
+            .await?;
             Ok(tenant_id)
         }
         .await;
@@ -630,27 +636,30 @@ impl PolicyMutation {
                 )
                 .await;
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let grants_keys = authz_repo::lock_role_and_collect_grants_keys(&mut tx, id).await?;
-            cache
-                .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await?;
-            let outcome = authz_repo::restore_role_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
+                &state.pool,
+                |tx| {
+                    Box::pin(
+                        async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
+                    )
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        authz_repo::restore_role_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
             )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            cache
-                .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                .await;
-            outcome?;
+            .await?;
             // Mirrors `restore_role_with_audit`'s own post-commit audit
             // write (fire-and-forget, after the mutation durably commits) —
             // see `audit::commit_with_audit`'s doc comment. Only needed on
@@ -1180,7 +1189,6 @@ impl PolicyMutation {
                         )
                         .await;
                     };
-                    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
                     // Locks the role *before* `subject_id`'s group closure —
                     // matching `replaceRolePermissionBlocks`/`deleteRole`/
                     // `restoreRole`'s lock order exactly, since locking the
@@ -1188,34 +1196,32 @@ impl PolicyMutation {
                     // `create_role_assignment_in_tx`) can deadlock against
                     // those paths. See
                     // `authz::repo::lock_role_then_group_closure_and_collect_grants_keys`.
-                    let grants_keys =
-                        authz_repo::lock_role_then_group_closure_and_collect_grants_keys(
-                            &mut tx, role_id, subject_id,
-                        )
-                        .await?;
-                    cache
-                        .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await?;
-                    let outcome = authz_repo::create_role_assignment_in_tx(
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
                         &state.pool,
-                        &mut tx,
-                        state.config.events.enabled(),
-                        Some(auth.entity_id),
-                        req,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_role_then_group_closure_and_collect_grants_keys(
+                                    tx, role_id, subject_id,
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::create_role_assignment_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    req,
+                                )
+                                .await
+                            })
+                        },
                     )
-                    .await;
-                    let outcome = match outcome {
-                        Ok(value) => tx
-                            .commit()
-                            .await
-                            .map_err(crate::error::db_err)
-                            .map(|_| value),
-                        Err(err) => Err(err),
-                    };
-                    cache
-                        .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await;
-                    outcome
+                    .await
                 }
             }
         }
@@ -1284,30 +1290,33 @@ impl PolicyMutation {
                         .await?;
                         return Ok(tenant_id);
                     };
-                    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-                    let grants_keys = authz_repo::lock_group_closures_and_collect_grants_keys(
-                        &mut tx,
-                        &[assignment.subject_id],
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
+                        &state.pool,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_group_closures_and_collect_grants_keys(
+                                    tx,
+                                    &[assignment.subject_id],
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::delete_role_assignment_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    id,
+                                )
+                                .await
+                            })
+                        },
                     )
                     .await?;
-                    cache
-                        .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await?;
-                    let outcome = authz_repo::delete_role_assignment_in_tx(
-                        &mut tx,
-                        state.config.events.enabled(),
-                        Some(auth.entity_id),
-                        id,
-                    )
-                    .await;
-                    let outcome = match outcome {
-                        Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                        Err(err) => Err(err),
-                    };
-                    cache
-                        .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await;
-                    outcome?;
                 }
             }
             Ok(tenant_id)
@@ -1387,34 +1396,33 @@ impl PolicyMutation {
                         )
                         .await;
                     };
-                    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-                    let grants_keys = authz_repo::lock_group_closures_and_collect_grants_keys(
-                        &mut tx,
-                        &[subject_id],
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
+                        &state.pool,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_group_closures_and_collect_grants_keys(
+                                    tx,
+                                    &[subject_id],
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::create_direct_policy_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    req,
+                                )
+                                .await
+                            })
+                        },
                     )
-                    .await?;
-                    cache
-                        .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await?;
-                    let outcome = authz_repo::create_direct_policy_in_tx(
-                        &mut tx,
-                        state.config.events.enabled(),
-                        Some(auth.entity_id),
-                        req,
-                    )
-                    .await;
-                    let outcome = match outcome {
-                        Ok(value) => tx
-                            .commit()
-                            .await
-                            .map_err(crate::error::db_err)
-                            .map(|_| value),
-                        Err(err) => Err(err),
-                    };
-                    cache
-                        .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await;
-                    outcome
+                    .await
                 }
             }
         }
@@ -1483,30 +1491,33 @@ impl PolicyMutation {
                         .await?;
                         return Ok(tenant_id);
                     };
-                    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-                    let grants_keys = authz_repo::lock_group_closures_and_collect_grants_keys(
-                        &mut tx,
-                        &[policy.subject_id],
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
+                        &state.pool,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_group_closures_and_collect_grants_keys(
+                                    tx,
+                                    &[policy.subject_id],
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::delete_direct_policy_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    id,
+                                )
+                                .await
+                            })
+                        },
                     )
                     .await?;
-                    cache
-                        .begin(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await?;
-                    let outcome = authz_repo::delete_direct_policy_in_tx(
-                        &mut tx,
-                        state.config.events.enabled(),
-                        Some(auth.entity_id),
-                        id,
-                    )
-                    .await;
-                    let outcome = match outcome {
-                        Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                        Err(err) => Err(err),
-                    };
-                    cache
-                        .end(crate::cache::CacheCategory::Grants, &grants_keys)
-                        .await;
-                    outcome?;
                 }
             }
             Ok(tenant_id)

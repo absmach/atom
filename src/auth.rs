@@ -78,6 +78,28 @@ pub struct RequireManage(pub AuthContext);
 
 // ─── JWT ──────────────────────────────────────────────────────────────────────
 
+/// The parsed form of a primary key, ready to sign with. Derived from a
+/// [`LoadedKey`] via [`JwtSigner::from_key`].
+///
+/// Exists so a caller holding the `ActiveKeys` read guard can take what it
+/// needs and release the guard before doing I/O, without cloning `LoadedKey`
+/// — which would duplicate the raw PKCS8 private-key PEM on the heap for the
+/// duration. This holds only the parsed key that signing requires anyway.
+pub struct JwtSigner {
+    kid: String,
+    key: EncodingKey,
+}
+
+impl JwtSigner {
+    pub fn from_key(primary: &LoadedKey) -> Result<Self, AppError> {
+        Ok(Self {
+            kid: primary.kid.clone(),
+            key: EncodingKey::from_ec_pem(primary.private_key_pem.as_bytes())
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))?,
+        })
+    }
+}
+
 pub fn encode_jwt(
     entity_id: Uuid,
     session_id: Uuid,
@@ -87,9 +109,29 @@ pub fn encode_jwt(
     issuer: &str,
     audience: &str,
 ) -> Result<String, AppError> {
+    encode_jwt_with(
+        entity_id,
+        session_id,
+        tenant_id,
+        &JwtSigner::from_key(primary)?,
+        expiry_secs,
+        issuer,
+        audience,
+    )
+}
+
+pub fn encode_jwt_with(
+    entity_id: Uuid,
+    session_id: Uuid,
+    tenant_id: Option<Uuid>,
+    signer: &JwtSigner,
+    expiry_secs: u64,
+    issuer: &str,
+    audience: &str,
+) -> Result<String, AppError> {
     let header = Header {
         alg: Algorithm::ES256,
-        kid: Some(primary.kid.clone()),
+        kid: Some(signer.kid.clone()),
         ..Header::default()
     };
 
@@ -104,10 +146,7 @@ pub fn encode_jwt(
         exp: now + expiry_secs as usize,
     };
 
-    let encoding_key = EncodingKey::from_ec_pem(primary.private_key_pem.as_bytes())
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))?;
-
-    encode(&header, &claims, &encoding_key)
+    encode(&header, &claims, &signer.key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))
 }
 
@@ -325,19 +364,32 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
     let entity_key = cache_keys::entity_status(entity_id);
     let tenant_key = tenant_id.map(cache_keys::tenant_status);
 
+    // All three keys are known up front — the tenant key comes from the `tid`
+    // claim, not from the entity entry as it does in `auth_from_api_key` — so
+    // they are read in one pipelined round trip rather than three serial ones
+    // on three separate pooled connections, before any request work starts.
+    let mut batch_keys: Vec<&str> = vec![&session_key, &entity_key];
+    if let Some(key) = &tenant_key {
+        batch_keys.push(key);
+    }
+    let mut raw = cache.lookup_many(&batch_keys).await.into_iter();
+    let session_raw = raw.next().unwrap_or_default();
+    let entity_raw = raw.next().unwrap_or_default();
+    let tenant_raw = raw.next();
+
     let session_lookup = cache
-        .lookup::<SessionCacheEntry>(CacheCategory::Session, &session_key)
+        .decode::<SessionCacheEntry>(CacheCategory::Session, &session_key, session_raw)
         .await;
     let entity_lookup = cache
-        .lookup::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key)
+        .decode::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key, entity_raw)
         .await;
-    let tenant_lookup = match &tenant_key {
-        Some(key) => Some(
+    let tenant_lookup = match (&tenant_key, tenant_raw) {
+        (Some(key), Some(raw)) => Some(
             cache
-                .lookup::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, key)
+                .decode::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, key, raw)
                 .await,
         ),
-        None => None,
+        _ => None,
     };
 
     // Full cache hit across every key this token needs: validate entirely in
@@ -761,9 +813,20 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
             .try_populate(CacheCategory::Credential, &credential_key, version, &entry)
             .await;
     }
+    // Both keys are already known from `row`, so their version reads go out
+    // in one pipelined round trip instead of two serial ones.
     let entity_key = cache_keys::entity_status(row.entity_id);
+    let tenant_key = row.tenant_id.map(cache_keys::tenant_status);
+    let mut batch_keys: Vec<&str> = vec![&entity_key];
+    if let Some(key) = &tenant_key {
+        batch_keys.push(key);
+    }
+    let mut raw = cache.lookup_many(&batch_keys).await.into_iter();
+    let entity_raw = raw.next().unwrap_or_default();
+    let tenant_raw = raw.next();
+
     if let Lookup::Miss { version } = cache
-        .lookup::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key)
+        .decode::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key, entity_raw)
         .await
     {
         let entry = EntityStatusCacheEntry {
@@ -774,17 +837,18 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
             .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
             .await;
     }
-    if let (Some(tenant_id), Some(tenant_status)) = (row.tenant_id, &row.tenant_status) {
-        let tenant_key = cache_keys::tenant_status(tenant_id);
+    if let (Some(tenant_key), Some(tenant_raw), Some(tenant_status)) =
+        (&tenant_key, tenant_raw, &row.tenant_status)
+    {
         if let Lookup::Miss { version } = cache
-            .lookup::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, &tenant_key)
+            .decode::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, tenant_key, tenant_raw)
             .await
         {
             let entry = TenantStatusCacheEntry {
                 status: tenant_status.clone(),
             };
             cache
-                .try_populate(CacheCategory::TenantStatus, &tenant_key, version, &entry)
+                .try_populate(CacheCategory::TenantStatus, tenant_key, version, &entry)
                 .await;
         }
     }

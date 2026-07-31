@@ -4289,7 +4289,7 @@ pub async fn create_role_assignment_with_audit(
 ) -> Result<RoleAssignment, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let assignment =
-        create_role_assignment_in_tx(pool, &mut tx, events_enabled, actor_id, req).await?;
+        create_role_assignment_in_tx(&mut tx, events_enabled, actor_id, req).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(assignment)
 }
@@ -4304,7 +4304,6 @@ pub async fn create_role_assignment_with_audit(
 /// of function re-acquires (never re-validates) those locks, and the caller
 /// commits.
 pub(crate) async fn create_role_assignment_in_tx(
-    _pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
@@ -4314,6 +4313,8 @@ pub(crate) async fn create_role_assignment_in_tx(
     // Lock the role and validate under the lock so a concurrent block-link
     // mutation cannot add a prohibited block against stale state: it blocks on
     // this same lock and re-validates against the assignment we are inserting.
+    // Validation must run on `tx` for that to hold at all — the pool variant
+    // would neither see the locked state nor respect the locks.
     lock_role(tx, req.role_id).await?;
     validate_role_assignment_in_tx(tx, &req).await?;
     let assignment = sqlx::query_as::<_, RoleAssignment>(
@@ -5002,66 +5003,6 @@ async fn validate_subject_boundary_in_tx(
             )
             .bind(subject_id)
             .fetch_optional(&mut **tx)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| {
-                AppError::bad_request("assignment references unknown principal group")
-            })?;
-            if group_tenant_id != tenant_id {
-                return Err(AppError::bad_request(
-                    "assignment subject principal group must be in the same tenant",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn validate_subject_boundary(
-    pool: &PgPool,
-    tenant_id: Option<Uuid>,
-    subject_kind: &SubjectKind,
-    subject_id: Uuid,
-) -> Result<(), AppError> {
-    match subject_kind {
-        SubjectKind::Entity => {
-            let entity_tenant_id: Option<Uuid> = sqlx::query_scalar(
-                "SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(subject_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
-            if let Some(tenant_id) = tenant_id {
-                let member: bool = sqlx::query_scalar(
-                    r#"SELECT EXISTS (
-                         SELECT 1 FROM tenant_memberships
-                         WHERE tenant_id = $1 AND entity_id = $2 AND status = 'active'
-                       )"#,
-                )
-                .bind(tenant_id)
-                .bind(subject_id)
-                .fetch_one(pool)
-                .await
-                .map_err(db_err)?;
-                if entity_tenant_id != Some(tenant_id) && !member {
-                    return Err(AppError::bad_request(
-                        "tenant assignment subject entity must belong to the tenant",
-                    ));
-                }
-            } else if entity_tenant_id.is_some() {
-                return Err(AppError::bad_request(
-                    "platform assignment cannot target tenant-owned entity",
-                ));
-            }
-        }
-        SubjectKind::Group => {
-            let group_tenant_id: Option<Uuid> = sqlx::query_scalar(
-                "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(subject_id)
-            .fetch_optional(pool)
             .await
             .map_err(db_err)?
             .ok_or_else(|| {

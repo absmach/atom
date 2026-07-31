@@ -147,9 +147,15 @@ impl AuthMutation {
             ))
         })?;
         let state = ctx.data::<AppState>()?;
-        let keys = state.keys.read().await;
-        let primary_key = keys.primary.clone();
-        drop(keys);
+        // Derive the signer under the read guard and release it immediately:
+        // cloning `LoadedKey` to escape the guard would put a copy of the raw
+        // PKCS8 private-key PEM on the heap for every refresh, dropped without
+        // zeroization. Holding the guard across the mutation instead would
+        // block key rotation for the length of a DB transaction.
+        let signer = {
+            let keys = state.keys.read().await;
+            crate::auth::JwtSigner::from_key(&keys.primary).map_err(gql_error)?
+        };
 
         // Extends `expires_at` in place for the same session_id; without
         // invalidating, a stale cached (shorter) expiry could cause a
@@ -163,7 +169,7 @@ impl AuthMutation {
                 service::refresh_session(
                     &state.pool,
                     &state.config,
-                    &primary_key,
+                    &signer,
                     auth.entity_id,
                     session_id,
                 )

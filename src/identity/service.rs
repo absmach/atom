@@ -1045,7 +1045,7 @@ pub async fn oauth_exchange(
 pub async fn refresh_session(
     pool: &PgPool,
     cfg: &Config,
-    primary_key: &LoadedKey,
+    signer: &crate::auth::JwtSigner,
     entity_id: Uuid,
     session_id: Uuid,
 ) -> Result<LoginResponse, AppError> {
@@ -1057,11 +1057,11 @@ pub async fn refresh_session(
     let session =
         super::repo::refresh_session_in_tx(&mut tx, session_id, entity_id, cfg.jwt_expiry_secs)
             .await?;
-    let token = encode_jwt(
+    let token = crate::auth::encode_jwt_with(
         entity_id,
         session.id,
         tenant_id,
-        primary_key,
+        signer,
         cfg.jwt_expiry_secs,
         &cfg.jwt_issuer,
         &cfg.jwt_audience,
