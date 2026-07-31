@@ -92,9 +92,7 @@ pub async fn create_resource_with_audit(
         "alias": resource.alias,
         "attributes": resource.attributes,
     });
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(resource)
 }
 
@@ -103,11 +101,20 @@ pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resou
 }
 
 pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError> {
+    fetch_resource(pool, id).await
+}
+
+/// Executor-generic `get_resource`, so a mutation can read the row it just wrote
+/// from inside its own transaction instead of re-reading it after the commit.
+async fn fetch_resource<'e, E>(executor: E, id: Uuid) -> Result<Resource, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query_as::<_, Resource>(
         "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
@@ -645,22 +652,17 @@ pub async fn set_resource_parent_group_with_audit(
 ) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     set_resource_parent_group_in_tx(&mut tx, resource_id, group_id).await?;
-    let tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
-            .bind(resource_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db_err)?;
+    let resource = fetch_resource(&mut *tx, resource_id).await?;
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
-        tenant_id,
+        tenant_id: resource.tenant_id,
         target_kind: "resource",
         target_id: Some(resource_id),
         event: "resource.parent_group.set",
     };
     let details = serde_json::json!({ "group_id": group_id });
     crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    get_resource(pool, resource_id).await
+    Ok(resource)
 }
 
 pub async fn clear_resource_parent_group(
@@ -678,22 +680,17 @@ pub async fn clear_resource_parent_group_with_audit(
 ) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     clear_resource_parent_group_in_tx(&mut tx, resource_id).await?;
-    let tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
-            .bind(resource_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db_err)?;
+    let resource = fetch_resource(&mut *tx, resource_id).await?;
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
-        tenant_id,
+        tenant_id: resource.tenant_id,
         target_kind: "resource",
         target_id: Some(resource_id),
         event: "resource.parent_group.clear",
     };
     let details = serde_json::json!({});
     crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    get_resource(pool, resource_id).await
+    Ok(resource)
 }
 
 async fn set_resource_parent_group_in_tx(
@@ -951,10 +948,7 @@ pub async fn create_role_with_audit(
         event: "role.create",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(role)
 }
 
@@ -1267,7 +1261,9 @@ pub async fn replace_role_permission_block_links_with_audit(
     // Validate under the role lock so a concurrent role assignment cannot commit
     // a prohibited combination against stale state: any other role-link or
     // assignment mutator blocks on this lock and re-validates against our result.
-    crate::guardrails::validate_role_permission_block_links(pool, role_id, &unique_block_ids)
+    // Runs on this transaction's own connection — borrowing a second one from
+    // the pool here would deadlock a saturated pool.
+    crate::guardrails::validate_role_permission_block_links(&mut tx, role_id, &unique_block_ids)
         .await?;
     sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
         .bind(role_id)
@@ -1895,6 +1891,15 @@ pub async fn permission_block_capabilities(
 }
 
 pub async fn get_permission_block(pool: &PgPool, id: Uuid) -> Result<PermissionBlock, AppError> {
+    fetch_permission_block(pool, id).await
+}
+
+/// Executor-generic `get_permission_block`, so a mutation can read the row it
+/// just wrote from inside its own transaction instead of after the commit.
+async fn fetch_permission_block<'e, E>(executor: E, id: Uuid) -> Result<PermissionBlock, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query_as::<_, PermissionBlock>(
         r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
                   effect, conditions, created_at, updated_at
@@ -1902,7 +1907,7 @@ pub async fn get_permission_block(pool: &PgPool, id: Uuid) -> Result<PermissionB
            WHERE id = $1"#,
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("permission block {id} not found")),
@@ -2008,6 +2013,7 @@ pub async fn create_permission_block_with_audit(
         .await
         .map_err(db_err)?;
     }
+    let block = fetch_permission_block(&mut *tx, id).await?;
     crate::audit::commit_with_observation(
         tx,
         events_enabled,
@@ -2021,7 +2027,7 @@ pub async fn create_permission_block_with_audit(
         &serde_json::json!({}),
     )
     .await?;
-    get_permission_block(pool, id).await
+    Ok(block)
 }
 
 pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
@@ -2775,10 +2781,7 @@ pub async fn update_role_with_audit(
         event: "role.update",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(role)
 }
 
@@ -2823,10 +2826,7 @@ pub async fn delete_role_with_audit(
         event: "role.delete",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
@@ -3334,14 +3334,17 @@ pub async fn create_action_assignment_rule(
     pool: &PgPool,
     req: CreateActionAssignmentRule,
 ) -> Result<ActionAssignmentRule, AppError> {
-    create_action_assignment_rule_with_audit(pool, false, None, req).await
+    create_action_assignment_rule_with_audit(pool, false, None, req, "internal").await
 }
 
+/// `transport` is supplied by the caller: the repo cannot know which surface
+/// invoked it, and the audit trail records it (see `grpc.rs` / `graphql`).
 pub async fn create_action_assignment_rule_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateActionAssignmentRule,
+    transport: &str,
 ) -> Result<ActionAssignmentRule, AppError> {
     let action_name = req.action_name.trim().to_string();
     if action_name.is_empty() {
@@ -3433,7 +3436,7 @@ pub async fn create_action_assignment_rule_with_audit(
             "object_type": &rule.object_type,
             "decision": &rule.decision,
             "is_absolute": rule.is_absolute,
-            "transport": "graphql",
+            "transport": transport,
         }),
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
@@ -3444,14 +3447,16 @@ pub async fn delete_action_assignment_rule(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<ActionAssignmentRule, AppError> {
-    delete_action_assignment_rule_with_audit(pool, false, None, id).await
+    delete_action_assignment_rule_with_audit(pool, false, None, id, "internal").await
 }
 
+/// See [`create_action_assignment_rule_with_audit`] for `transport`.
 pub async fn delete_action_assignment_rule_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
+    transport: &str,
 ) -> Result<ActionAssignmentRule, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let rule = sqlx::query_as::<_, ActionAssignmentRule>(
@@ -3483,7 +3488,7 @@ pub async fn delete_action_assignment_rule_with_audit(
             "object_type": &rule.object_type,
             "decision": &rule.decision,
             "is_absolute": rule.is_absolute,
-            "transport": "graphql",
+            "transport": transport,
         }),
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
@@ -4013,10 +4018,7 @@ pub async fn create_role_assignment_with_audit(
         event: "role_assignment.create",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(assignment)
 }
 
@@ -4063,10 +4065,7 @@ pub async fn delete_role_assignment_with_audit(
         event: "role_assignment.delete",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
@@ -4225,10 +4224,7 @@ pub async fn create_direct_policy_with_audit(
         event: "direct_policy.create",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(policy)
 }
 
@@ -4343,10 +4339,7 @@ pub async fn delete_direct_policy_with_audit(
         event: "direct_policy.delete",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 

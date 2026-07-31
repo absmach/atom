@@ -25,9 +25,9 @@ pub struct AuditEvent<'a> {
     pub details: Value,
 }
 
-/// Lightweight descriptor for an operation whose outcome is derived from a
-/// `Result`. Use with [`observe_result`] so success and failure both produce a
-/// stdout observability log without per-call-site branching.
+/// Lightweight descriptor for an operation that is not part of the DB audit
+/// trail. The success path is emitted by [`commit_with_observation`] (inside the
+/// mutation's own transaction); the failure path by [`observe_error`].
 ///
 /// Forward-compat (request-id correlation, option D): add `request_id:
 /// Option<String>` here and populate it from the request span — this is the only
@@ -40,78 +40,10 @@ pub struct AuditMeta<'a> {
     pub event: &'a str,
 }
 
-/// Emit a stdout/stderr **observability log** for an operation, classified from
-/// its `Result`: `Ok` => info `allow`, `Err` => warn (`Deny`) or error (other)
-/// per [`AppError::audit_outcome`]. The error string is folded into `details`.
-///
-/// This is the observability channel — it does NOT write the `audit_logs` DB
-/// table (that persisted compliance trail is [`write`] / [`write_hot_path`]).
-/// It **does** also enqueue a domain event (see `src/events/mod.rs`) when
-/// `events_enabled` is true, since operations recorded here (e.g.
-/// `resource.create`, `tenant.create`) are exactly the events an external
-/// consumer cares about, even though they're not part of the DB audit trail.
-/// Use `observe_result` for operations that are not part of the DB audit
-/// trail (e.g. create mutations and the non-audited update/delete paths).
-///
-/// Takes `pool`/`events_enabled` rather than `&AppState` deliberately: some
-/// callers (e.g. the authz PDP's audit helpers) intentionally depend only on
-/// `PgPool` and plain config values, not the transport-level `AppState` type
-/// — threading `&AppState` through would leak a transport-level dependency
-/// into that transport-agnostic code.
-pub async fn observe_result<T>(
-    pool: &PgPool,
-    events_enabled: bool,
-    meta: AuditMeta<'_>,
-    details: Value,
-    result: &Result<T, crate::error::AppError>,
-) {
-    let outcome = match result {
-        Ok(_) => AuditOutcome::Allow,
-        Err(err) => err.audit_outcome(),
-    };
-    let details = match result {
-        Ok(_) => details,
-        Err(err) => {
-            let mut details = details;
-            if let Value::Object(map) = &mut details {
-                map.insert("error".to_string(), Value::String(err.to_string()));
-            }
-            details
-        }
-    };
-
-    let event = AuditEvent {
-        actor_entity_id: meta.actor_entity_id,
-        tenant_id: meta.tenant_id,
-        target_kind: Some(meta.target_kind),
-        target_id: meta.target_id,
-        event: meta.event,
-        outcome,
-        details,
-    };
-    log_audit_event(&event);
-
-    if let Err(err) = crate::events::enqueue(
-        pool,
-        events_enabled,
-        event.actor_entity_id,
-        event.tenant_id,
-        event.target_kind,
-        event.target_id,
-        event.event,
-        outcome_str(&event.outcome),
-        &event.details,
-    )
-    .await
-    {
-        tracing::error!("event outbox enqueue failed event={}: {err}", event.event);
-    }
-}
-
 /// Emit a structured tracing line for an operation (level keyed to outcome), so
 /// both DB-audited events and observability-only operations are tailable in
-/// stdout logs. Called from [`write`] (alongside the DB insert) and from
-/// [`observe_result`] (log only).
+/// stdout logs. Called from [`write`] (alongside the DB insert) and from the
+/// observe path (log only).
 fn log_audit_event(event: &AuditEvent<'_>) {
     // Fields use lazy Debug sigils (`?`) so the tracing macro skips evaluation —
     // and the Uuid formatting — entirely when the level is filtered out.
@@ -219,9 +151,17 @@ pub async fn write(pool: &PgPool, events_enabled: bool, event: AuditEvent<'_>) {
     }
 }
 
-/// Atomically commits a mutation and its outbox event. The compliance audit row
-/// is deliberately written afterward through [`write`] so audit storage remains
-/// fire-and-forget and can never fail an already-valid domain operation.
+/// Atomically commits a mutation and its outbox event, then writes the
+/// compliance audit row.
+///
+/// The two storage channels have deliberately different failure semantics:
+/// `event_outbox` is enqueued **inside** the caller's transaction, so a broker
+/// event can never describe a mutation that rolled back; `audit_logs` is
+/// written **after** the commit through [`write`], so audit storage stays
+/// fire-and-forget and can never fail an already-valid domain operation. The
+/// cost of that choice is that a crash between the commit and the audit insert
+/// loses the audit row — accepted, and unchanged from this codebase's original
+/// contract that audit writes never propagate failures to the caller.
 pub async fn commit_with_audit(
     pool: &PgPool,
     mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
@@ -265,7 +205,7 @@ pub async fn commit_with_audit(
 /// Enqueues a domain event outbox row inside an existing DB transaction for
 /// non-audited operations (e.g. create mutations), keeping the mutation and outbox
 /// event strictly atomic.
-pub async fn observe_in_tx(
+async fn observe_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     events_enabled: bool,
     meta: &AuditMeta<'_>,
@@ -316,7 +256,7 @@ pub async fn commit_with_observation(
 
 /// Emits an audit log tracing line for a successful non-audited operation (observe path)
 /// after its database transaction has successfully committed.
-pub fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {
+fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {
     let event = AuditEvent {
         actor_entity_id: meta.actor_entity_id,
         tenant_id: meta.tenant_id,

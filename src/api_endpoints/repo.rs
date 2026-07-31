@@ -278,15 +278,7 @@ pub async fn disable_api_endpoint(
     id: Uuid,
     updated_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
-    set_api_endpoint_status_with_audit(
-        pool,
-        false,
-        updated_by,
-        id,
-        "disabled",
-        "api_endpoint.disable",
-    )
-    .await
+    disable_api_endpoint_with_audit(pool, false, updated_by, id).await
 }
 
 pub async fn disable_api_endpoint_with_audit(

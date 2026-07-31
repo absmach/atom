@@ -276,8 +276,12 @@ pub async fn validate_role_assignment_plan(
     validate_assignments(pool, &assignments).await
 }
 
+/// Takes the caller's connection rather than the pool: every caller runs this
+/// mid-transaction, and reaching back into the pool for a second connection
+/// while holding one deadlocks a saturated pool (and hangs outright at
+/// `max_connections = 1`).
 pub async fn validate_group_member(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
@@ -285,7 +289,7 @@ pub async fn validate_group_member(
 
     let entity_kind: String = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
         .bind(entity_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(db_err)?;
 
@@ -303,7 +307,7 @@ pub async fn validate_group_member(
              AND pb.subject_id IN (SELECT group_id FROM policy_groups)"#,
     )
     .bind(group_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
 
@@ -315,8 +319,8 @@ pub async fn validate_group_member(
         let scope_kind: ScopeKind = row.try_get("scope_kind").map_err(db_err)?;
         let scope_ref: Option<String> = row.try_get("scope_ref").map_err(db_err)?;
         let capability_names = match grant_kind {
-            GrantKind::Capability => capability_names(pool, &[grant_id]).await?,
-            GrantKind::Role => role_capability_names(pool, grant_id).await?,
+            GrantKind::Capability => capability_names(&mut *conn, &[grant_id]).await?,
+            GrantKind::Role => role_capability_names(&mut *conn, grant_id).await?,
         };
         let (object_kind, object_type) = scope_to_object(scope_kind, scope_ref.as_deref());
         assignments.extend(
@@ -332,7 +336,7 @@ pub async fn validate_group_member(
         );
     }
 
-    validate_assignments(pool, &assignments).await
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 pub async fn validate_direct_policy(
@@ -357,8 +361,9 @@ pub async fn validate_direct_policy(
     validate_assignments(pool, &assignments).await
 }
 
+/// Takes the caller's connection, not the pool — see [`validate_group_member`].
 pub async fn validate_role_permission_block_links(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
@@ -380,11 +385,11 @@ pub async fn validate_role_permission_block_links(
            WHERE ra.role_id = $1"#,
     )
     .bind(role_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
 
-    let permission_blocks = permission_block_assignments(pool, permission_block_ids).await?;
+    let permission_blocks = permission_block_assignments(&mut *conn, permission_block_ids).await?;
     let mut assignments = Vec::new();
     for row in rows {
         let tenant_id: Option<Uuid> = row.try_get("tenant_id").map_err(db_err)?;
@@ -398,7 +403,7 @@ pub async fn validate_role_permission_block_links(
         }));
     }
 
-    validate_assignments(pool, &assignments).await
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 async fn assignments_for_policy(
@@ -431,21 +436,30 @@ async fn assignments_for_policy(
         .collect())
 }
 
-async fn validate_assignments(pool: &PgPool, assignments: &[Assignment]) -> Result<(), AppError> {
+async fn validate_assignments<'e, E>(
+    executor: E,
+    assignments: &[Assignment],
+) -> Result<(), AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     if assignments.is_empty() {
         return Ok(());
     }
-    let rules = load_rules(pool).await?;
+    let rules = load_rules(executor).await?;
     decide(assignments, &rules).map_err(AppError::bad_request)
 }
 
-async fn load_rules(pool: &PgPool) -> Result<Vec<Rule>, AppError> {
+async fn load_rules<'e, E>(executor: E) -> Result<Vec<Rule>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     use sqlx::Row;
     sqlx::query(
         r#"SELECT tenant_id, entity_kind, action_name AS capability_name, object_kind, object_type, decision, is_absolute
            FROM action_assignment_rules"#,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(db_err)?
     .into_iter()
@@ -494,15 +508,21 @@ async fn subject_entity_kinds(
     }
 }
 
-async fn capability_names(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<String>, AppError> {
+async fn capability_names<'e, E>(executor: E, ids: &[Uuid]) -> Result<Vec<String>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query_scalar("SELECT name FROM actions WHERE id = ANY($1::uuid[])")
         .bind(ids)
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .map_err(db_err)
 }
 
-async fn role_capability_names(pool: &PgPool, role_id: Uuid) -> Result<Vec<String>, AppError> {
+async fn role_capability_names<'e, E>(executor: E, role_id: Uuid) -> Result<Vec<String>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query_scalar(
         r#"SELECT DISTINCT c.name
            FROM (SELECT $1::uuid AS role_id) roles
@@ -510,7 +530,7 @@ async fn role_capability_names(pool: &PgPool, role_id: Uuid) -> Result<Vec<Strin
            JOIN actions c ON c.id = rc.capability_id"#,
     )
     .bind(role_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(db_err)
 }
@@ -596,10 +616,13 @@ async fn role_permission_assignments(
     .collect()
 }
 
-async fn permission_block_assignments(
-    pool: &PgPool,
+async fn permission_block_assignments<'e, E>(
+    executor: E,
     permission_block_ids: &[Uuid],
-) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
+) -> Result<Vec<RoleCapabilityAssignment>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     if permission_block_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -655,7 +678,7 @@ async fn permission_block_assignments(
            WHERE pb.id = ANY($1::uuid[])"#,
     )
     .bind(permission_block_ids)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(db_err)?
     .into_iter()

@@ -748,7 +748,6 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
             Some(auth.entity_id),
             tenant_id,
             status,
-            Some(auth.entity_id),
             event,
         )
         .await

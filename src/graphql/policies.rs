@@ -424,10 +424,14 @@ impl PolicyMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let role_id = parse_id(role_id, "roleId")?;
-        let permission_block_ids = permission_block_ids
+        let mut permission_block_ids = permission_block_ids
             .into_iter()
             .map(|id| parse_id(id, "permissionBlockId"))
             .collect::<Result<Vec<_>>>()?;
+        // Normalize here so the failure details logged below and the success
+        // details the repo records describe the same set.
+        permission_block_ids.sort_unstable();
+        permission_block_ids.dedup();
         let result = async {
             let role = authz_repo::get_role(&state.pool, role_id).await?;
             let tenant_id = role.tenant_id;
@@ -755,6 +759,7 @@ impl PolicyMutation {
                 decision: input.decision.into(),
                 is_absolute: input.is_absolute.unwrap_or(false),
             },
+            "graphql",
         )
         .await
         .map_err(gql_error)?;
@@ -781,6 +786,7 @@ impl PolicyMutation {
             state.config.events.enabled(),
             Some(auth.entity_id),
             id,
+            "graphql",
         )
         .await
         .map_err(gql_error)?;
@@ -967,7 +973,9 @@ impl PolicyMutation {
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
-                    tenant_id: result.as_ref().ok().copied().flatten(),
+                    // Unknowable on the error path: the tenant lookup is itself
+                    // one of the steps that can fail here.
+                    tenant_id: None,
                     target_kind: "permission_block",
                     target_id: Some(id),
                     event: "permission_block.delete",

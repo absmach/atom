@@ -1,5 +1,5 @@
 //! Proves the actual gap this feature closes: `resource.create` (and other
-//! `observe_result`-channeled operations) are never persisted to
+//! observe-channeled operations) are never persisted to
 //! `audit_logs` today, but must still produce a domain event when publishing
 //! is configured — since those are exactly the events an external consumer
 //! (e.g. a billing service) cares about. Also proves the reverse: with no
@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 async fn state_with_events_enabled(pool: PgPool) -> AppState {
     let mut config = Config::for_tests();
-    // Enough to make `EventsConfig::enabled()` true so `audit::observe_result`/
+    // Enough to make `EventsConfig::enabled()` true so the observe path /
     // `write` enqueue outbox rows — the poller (which would actually dial this
     // URL) is never started in this test, so no real broker is needed.
     config.events.amqp_url = Some("amqp://unused-in-this-test".to_string());
@@ -156,38 +156,75 @@ async fn no_event_outbox_rows_are_written_when_events_are_not_configured() {
     );
 }
 
+/// Installs a `BEFORE INSERT` trigger on `table` that raises for exactly one
+/// sentinel event name, so a single audit/outbox write can be forced to fail.
+///
+/// The trigger is global to the database, so it is torn down unconditionally by
+/// [`drop_rejecting_trigger`] — including on an assertion failure, which is why
+/// the callers below capture their results and clean up before asserting. The
+/// sentinel event names are unique per test, so an installed trigger cannot
+/// affect any other test's rows even in the window it is live.
+async fn install_rejecting_trigger(pool: &PgPool, name: &str, table: &str, event: &str) {
+    sqlx::query(&format!(
+        r#"CREATE OR REPLACE FUNCTION {name}()
+           RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+             IF NEW.event = '{event}' THEN
+               RAISE EXCEPTION 'forced {table} failure';
+             END IF;
+             RETURN NEW;
+           END;
+           $$"#
+    ))
+    .execute(pool)
+    .await
+    .expect("create rejection function");
+    sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON {table}"))
+        .execute(pool)
+        .await
+        .expect("drop stale rejection trigger");
+    sqlx::query(&format!(
+        r#"CREATE TRIGGER {name}
+           BEFORE INSERT ON {table}
+           FOR EACH ROW EXECUTE FUNCTION {name}()"#
+    ))
+    .execute(pool)
+    .await
+    .expect("create rejection trigger");
+}
+
+async fn drop_rejecting_trigger(pool: &PgPool, name: &str, table: &str) {
+    sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON {table}"))
+        .execute(pool)
+        .await
+        .expect("drop rejection trigger");
+    sqlx::query(&format!("DROP FUNCTION IF EXISTS {name}()"))
+        .execute(pool)
+        .await
+        .expect("drop rejection function");
+}
+
+async fn action_exists(pool: &PgPool, action_id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
+        .bind(action_id)
+        .fetch_one(pool)
+        .await
+        .expect("query action existence")
+}
+
 /// If outbox insertion fails, the domain mutation must roll back with it. This
 /// is the regression boundary that mutate-then-observe could not provide.
 #[tokio::test]
 #[ignore]
 async fn outbox_failure_rolls_back_the_domain_mutation() {
     let pool = common::pool().await;
-    sqlx::query(
-        r#"CREATE OR REPLACE FUNCTION m26_reject_atomic_test_event()
-           RETURNS trigger LANGUAGE plpgsql AS $$
-           BEGIN
-             IF NEW.event = 'test.atomic.rollback' THEN
-               RAISE EXCEPTION 'forced event_outbox failure';
-             END IF;
-             RETURN NEW;
-           END;
-           $$"#,
+    install_rejecting_trigger(
+        &pool,
+        "m26_reject_atomic_test_event",
+        "event_outbox",
+        "test.atomic.rollback",
     )
-    .execute(&pool)
-    .await
-    .expect("create rejection function");
-    sqlx::query("DROP TRIGGER IF EXISTS m26_reject_atomic_test_event ON event_outbox")
-        .execute(&pool)
-        .await
-        .expect("drop stale rejection trigger");
-    sqlx::query(
-        r#"CREATE TRIGGER m26_reject_atomic_test_event
-           BEFORE INSERT ON event_outbox
-           FOR EACH ROW EXECUTE FUNCTION m26_reject_atomic_test_event()"#,
-    )
-    .execute(&pool)
-    .await
-    .expect("create rejection trigger");
+    .await;
 
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-atomic-{action_id}");
@@ -211,30 +248,23 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
         &serde_json::json!({}),
     )
     .await;
+    let survived = action_exists(&pool, action_id).await;
+
+    drop_rejecting_trigger(&pool, "m26_reject_atomic_test_event", "event_outbox").await;
+    sqlx::query("DELETE FROM actions WHERE id = $1")
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("clean up test action");
+
     assert!(
         result.is_err(),
         "forced outbox failure must reach the caller"
     );
-
-    let action_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
-            .bind(action_id)
-            .fetch_one(&pool)
-            .await
-            .expect("query rolled-back action");
     assert!(
-        !action_exists,
+        !survived,
         "domain mutation must roll back with outbox insert"
     );
-
-    sqlx::query("DROP TRIGGER m26_reject_atomic_test_event ON event_outbox")
-        .execute(&pool)
-        .await
-        .expect("drop rejection trigger");
-    sqlx::query("DROP FUNCTION m26_reject_atomic_test_event()")
-        .execute(&pool)
-        .await
-        .expect("drop rejection function");
 }
 
 /// Persisted audit storage is a separate fire-and-forget channel: its failure
@@ -243,32 +273,13 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
 #[ignore]
 async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
     let pool = common::pool().await;
-    sqlx::query(
-        r#"CREATE OR REPLACE FUNCTION m26_reject_audit_test_event()
-           RETURNS trigger LANGUAGE plpgsql AS $$
-           BEGIN
-             IF NEW.event = 'test.audit.fire_and_forget' THEN
-               RAISE EXCEPTION 'forced audit_logs failure';
-             END IF;
-             RETURN NEW;
-           END;
-           $$"#,
+    install_rejecting_trigger(
+        &pool,
+        "m26_reject_audit_test_event",
+        "audit_logs",
+        "test.audit.fire_and_forget",
     )
-    .execute(&pool)
-    .await
-    .expect("create audit rejection function");
-    sqlx::query("DROP TRIGGER IF EXISTS m26_reject_audit_test_event ON audit_logs")
-        .execute(&pool)
-        .await
-        .expect("drop stale audit rejection trigger");
-    sqlx::query(
-        r#"CREATE TRIGGER m26_reject_audit_test_event
-           BEFORE INSERT ON audit_logs
-           FOR EACH ROW EXECUTE FUNCTION m26_reject_audit_test_event()"#,
-    )
-    .execute(&pool)
-    .await
-    .expect("create audit rejection trigger");
+    .await;
 
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-audit-{action_id}");
@@ -279,7 +290,7 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
         .execute(&mut *tx)
         .await
         .expect("insert action in transaction");
-    audit::commit_with_audit(
+    let result = audit::commit_with_audit(
         &pool,
         tx,
         false,
@@ -293,31 +304,19 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
             details: serde_json::json!({}),
         },
     )
-    .await
-    .expect("audit storage failure must not fail the mutation");
+    .await;
+    let survived = action_exists(&pool, action_id).await;
 
-    let action_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
-            .bind(action_id)
-            .fetch_one(&pool)
-            .await
-            .expect("query committed action");
-    assert!(
-        action_exists,
-        "domain mutation must survive audit storage failure"
-    );
-
-    sqlx::query("DROP TRIGGER m26_reject_audit_test_event ON audit_logs")
-        .execute(&pool)
-        .await
-        .expect("drop audit rejection trigger");
-    sqlx::query("DROP FUNCTION m26_reject_audit_test_event()")
-        .execute(&pool)
-        .await
-        .expect("drop audit rejection function");
+    drop_rejecting_trigger(&pool, "m26_reject_audit_test_event", "audit_logs").await;
     sqlx::query("DELETE FROM actions WHERE id = $1")
         .bind(action_id)
         .execute(&pool)
         .await
-        .expect("delete committed test action");
+        .expect("clean up test action");
+
+    result.expect("audit storage failure must not fail the mutation");
+    assert!(
+        survived,
+        "domain mutation must survive audit storage failure"
+    );
 }

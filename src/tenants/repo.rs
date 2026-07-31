@@ -131,10 +131,7 @@ pub async fn create_tenant_with_audit(
         "name": tenant.name,
         "alias": tenant.alias,
     });
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(tenant)
 }
 
@@ -537,10 +534,7 @@ pub async fn update_tenant_with_audit(
         event: "tenant.update",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(tenant)
 }
 
@@ -620,10 +614,7 @@ pub async fn soft_delete_tenant_with_audit(
         event: "tenant.delete",
     };
     let details = serde_json::json!({});
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(tenant)
 }
 
@@ -770,13 +761,14 @@ pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppEr
     purge_tenant_with_audit(pool, false, None, id).await
 }
 
+/// `actor_id` is both the audited actor and the row's `updated_by` — they are
+/// the same principal, so this takes it once.
 pub async fn change_tenant_status_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     status: TenantStatus,
-    updated_by: Option<Uuid>,
     event_name: &str,
 ) -> Result<Tenant, AppError> {
     if status == TenantStatus::Deleted {
@@ -793,7 +785,7 @@ pub async fn change_tenant_status_with_audit(
     ))
     .bind(id)
     .bind(&status)
-    .bind(updated_by)
+    .bind(actor_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
@@ -821,10 +813,7 @@ pub async fn change_tenant_status_with_audit(
         event: event_name,
     };
     let details = serde_json::json!({ "status": tenant.status });
-    crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
-
-    tx.commit().await.map_err(db_err)?;
-    crate::audit::log_observe_allow(&meta, &details);
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(tenant)
 }
 
@@ -834,16 +823,8 @@ pub async fn change_tenant_status(
     status: TenantStatus,
     updated_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    change_tenant_status_with_audit(
-        pool,
-        false,
-        None,
-        id,
-        status,
-        updated_by,
-        "tenant.status.update",
-    )
-    .await
+    change_tenant_status_with_audit(pool, false, updated_by, id, status, "tenant.status.update")
+        .await
 }
 
 fn search_pattern(q: Option<String>) -> Option<String> {

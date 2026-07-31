@@ -2,7 +2,7 @@
 //! delivery, redelivery after a simulated crash, and failure bookkeeping
 //! (`attempts`/`last_error`). Nothing in this file produces `event_outbox`
 //! rows via a mutation — that happens automatically now via `audit::write`/
-//! `observe_result`/`write_hot_path` (see `tests/m26_audit_event_publishing.rs`
+//! the observe path / `write_hot_path` (see `tests/m26_audit_event_publishing.rs`
 //! for that integration) — so every row here is inserted directly,
 //! exercising the poller/delivery function in isolation.
 //!
