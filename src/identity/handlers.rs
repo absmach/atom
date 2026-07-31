@@ -445,11 +445,12 @@ pub async fn delete_entity(
         )
         .await?;
     }
-    crate::cache::invalidate::guarded_mutation(
+    service::delete_entity(
+        &state.pool,
         state.cache.as_deref(),
-        crate::cache::CacheCategory::EntityStatus,
-        std::slice::from_ref(&crate::cache::keys::entity_status(id)),
-        || repo::delete_entity(&state.pool, id, Some(auth.entity_id)),
+        state.config.events.enabled(),
+        id,
+        Some(auth.entity_id),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -815,7 +816,13 @@ pub async fn add_group_member(
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    repo::add_group_member(&state.pool, group_id, req.entity_id).await?;
+    crate::cache::invalidate::guarded_mutation(
+        state.cache.as_deref(),
+        crate::cache::CacheCategory::Grants,
+        std::slice::from_ref(&crate::cache::keys::grants(req.entity_id)),
+        || repo::add_group_member(&state.pool, group_id, req.entity_id),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -843,7 +850,13 @@ pub async fn remove_group_member(
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    repo::remove_group_member(&state.pool, group_id, entity_id).await?;
+    crate::cache::invalidate::guarded_mutation(
+        state.cache.as_deref(),
+        crate::cache::CacheCategory::Grants,
+        std::slice::from_ref(&crate::cache::keys::grants(entity_id)),
+        || repo::remove_group_member(&state.pool, group_id, entity_id),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

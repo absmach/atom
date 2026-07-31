@@ -379,22 +379,33 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
     if let Lookup::Miss { version } = entity_lookup {
         let entry = EntityStatusCacheEntry {
             status: snapshot.entity_status.clone(),
-            deleted_at: None,
             tenant_id: snapshot.entity_tenant_id,
         };
         cache
             .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
             .await;
     }
+    // `tenant_key` is derived from the token's `tid` claim, but
+    // `load_session_entity_tenant` joins tenants through `e.tenant_id` — so
+    // `snapshot.tenant_status` describes the *entity's current* tenant. The
+    // two differ whenever a token outlives a tenant move, and populating the
+    // claim's key with the current tenant's payload would write one tenant's
+    // status under another tenant's key (e.g. marking a suspended tenant
+    // active for everyone, off a request that `check_session_entity_tenant`
+    // is about to reject anyway). Only populate when the version we observed
+    // belongs to the key the payload actually describes.
     if let (Some(tenant_key), Some(Lookup::Miss { version })) = (&tenant_key, tenant_lookup) {
-        if let Some(tenant_status) = &snapshot.tenant_status {
-            let entry = TenantStatusCacheEntry {
-                status: tenant_status.clone(),
-                deleted_at: None,
-            };
-            cache
-                .try_populate(CacheCategory::TenantStatus, tenant_key, version, &entry)
-                .await;
+        if let (Some(entity_tenant_id), Some(tenant_status)) =
+            (snapshot.entity_tenant_id, &snapshot.tenant_status)
+        {
+            if *tenant_key == cache_keys::tenant_status(entity_tenant_id) {
+                let entry = TenantStatusCacheEntry {
+                    status: tenant_status.clone(),
+                };
+                cache
+                    .try_populate(CacheCategory::TenantStatus, tenant_key, version, &entry)
+                    .await;
+            }
         }
     }
 
@@ -706,15 +717,21 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         // joined entity_id/tenant_id, mirroring the cold-start path exactly,
         // never off the credential entry's stale copy.
         let row = load_credential_row(&state.pool, cred_id).await?;
+        // `entity_key` (and the version observed for it) came from
+        // `cred_entry.entity_id`, which is the credential entry's own,
+        // possibly stale copy; the payload below comes from `row`. Populate
+        // only when the two agree, so entity A's key can never be given
+        // entity B's status and tenant.
         if let Lookup::Miss { version } = entity_lookup {
-            let entry = EntityStatusCacheEntry {
-                status: row.entity_status.clone(),
-                deleted_at: None,
-                tenant_id: row.tenant_id,
-            };
-            cache
-                .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
-                .await;
+            if entity_key == cache_keys::entity_status(row.entity_id) {
+                let entry = EntityStatusCacheEntry {
+                    status: row.entity_status.clone(),
+                    tenant_id: row.tenant_id,
+                };
+                cache
+                    .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
+                    .await;
+            }
         }
         if let (Some(tenant_id), Some(tenant_status)) = (row.tenant_id, &row.tenant_status) {
             let tenant_key = cache_keys::tenant_status(tenant_id);
@@ -724,7 +741,6 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
             {
                 let entry = TenantStatusCacheEntry {
                     status: tenant_status.clone(),
-                    deleted_at: None,
                 };
                 cache
                     .try_populate(CacheCategory::TenantStatus, &tenant_key, version, &entry)
@@ -752,7 +768,6 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     {
         let entry = EntityStatusCacheEntry {
             status: row.entity_status.clone(),
-            deleted_at: None,
             tenant_id: row.tenant_id,
         };
         cache
@@ -767,7 +782,6 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         {
             let entry = TenantStatusCacheEntry {
                 status: tenant_status.clone(),
-                deleted_at: None,
             };
             cache
                 .try_populate(CacheCategory::TenantStatus, &tenant_key, version, &entry)

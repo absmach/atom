@@ -37,10 +37,12 @@ jobs:
       # Cache-gated tests (src/cache/mod.rs's unit tests, tests/m25_cache_invalidation.rs)
       # are #[ignore]d specifically so they're skippable without Redis, but
       # `--include-ignored` below runs them anyway — they need a reachable
-      # Redis, unlike the Postgres-gated tests which need their own fresh
-      # database per binary, these use randomly-suffixed keys and don't share
-      # mutable state across tests/binaries, so one shared instance for the
-      # whole job is sufficient.
+      # Redis. One instance serves the whole job, but it is flushed between
+      # binaries alongside the database recreate: m25 caches under keys derived
+      # from the *fixed* seeded admin id, so without a flush the admin's grant
+      # expansion outlives the database it was derived from (and outlives a job
+      # re-run), and a later binary authorizes against a tenant/role graph that
+      # no longer exists.
       redis:
         image: redis:7-alpine
         ports:
@@ -122,13 +124,18 @@ jobs:
           ATOM_TEST_REDIS_URL: redis://localhost:6379/0
         run: |
           set -euo pipefail
-          command -v psql >/dev/null || {
-            sudo apt-get update && sudo apt-get install -y postgresql-client
+          command -v psql >/dev/null && command -v redis-cli >/dev/null || {
+            sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
           }
           psql "$MAINT_URL" -c "SELECT 1" >/dev/null
+          redis-cli -h localhost -p 6379 PING >/dev/null
           run_one() {
             psql "$MAINT_URL" -c "DROP DATABASE IF EXISTS atom_test;" >/dev/null
             psql "$MAINT_URL" -c "CREATE DATABASE atom_test;" >/dev/null
+            # Redis must be reset with the database, not just alongside it:
+            # cached entries keyed off fixed ids (the seeded admin) would
+            # otherwise describe the database this just dropped.
+            redis-cli -h localhost -p 6379 FLUSHALL >/dev/null
             DATABASE_URL="postgres://atom:atom@localhost:5432/atom_test" \
               cargo test "$@" -- --include-ignored --test-threads=1
           }

@@ -1112,8 +1112,9 @@ pub async fn create_role_with_assignments(
 
     ensure_entities_exist(pool, member_entity_ids).await?;
     if child_role_ids.is_empty() {
+        let mut conn = pool.acquire().await.map_err(db_err)?;
         crate::guardrails::validate_role_assignment_plan(
-            pool,
+            &mut conn,
             member_entity_ids,
             capability_ids,
             req.tenant_id,
@@ -1123,8 +1124,9 @@ pub async fn create_role_with_assignments(
         .await?;
     } else {
         validate_composite_children(pool, id, req.tenant_id, child_role_ids).await?;
+        let mut conn = pool.acquire().await.map_err(db_err)?;
         crate::guardrails::validate_composite_role_assignment_plan(
-            pool,
+            &mut conn,
             member_entity_ids,
             child_role_ids,
             req.tenant_id,
@@ -1347,7 +1349,6 @@ pub async fn replace_role_permission_block_links_with_audit(
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     replace_role_permission_block_links_in_tx(
-        pool,
         &mut tx,
         events_enabled,
         actor_id,
@@ -1362,8 +1363,12 @@ pub async fn replace_role_permission_block_links_with_audit(
 /// [`create_role_assignment_in_tx`]. The resolver must already hold the role
 /// lock via [`lock_role_and_collect_grants_keys`] on this `tx` — `lock_role`
 /// below just re-acquires it (same-transaction no-op).
+///
+/// Every read runs on `tx`, never on a pooled connection: the validation
+/// below is only meaningful under the role lock this transaction holds, and a
+/// second connection acquired mid-transaction is a pool-exhaustion deadlock
+/// under concurrency.
 pub(crate) async fn replace_role_permission_block_links_in_tx(
-    pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
@@ -1373,7 +1378,7 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
     let role_tenant_id: Option<Uuid> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(role_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?
             .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))?;
@@ -1391,7 +1396,7 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
         )
         .bind(&unique_block_ids)
         .bind(role_tenant_id)
-        .fetch_one(pool)
+        .fetch_one(&mut **tx)
         .await
         .map_err(db_err)?;
         if count != unique_block_ids.len() as i64 {
@@ -3169,7 +3174,9 @@ pub async fn add_role_capability(
     let scope_ref = role.tenant_id.map(|tenant_id| tenant_id.to_string());
     validate_capabilities_against_role_scope(pool, &scope_kind, scope_ref.as_deref(), &[cap_id])
         .await?;
-    crate::guardrails::validate_role_capability(pool, role_id, cap_id).await?;
+    let mut conn = pool.acquire().await.map_err(db_err)?;
+    crate::guardrails::validate_role_capability(&mut conn, role_id, cap_id).await?;
+    drop(conn);
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, role_id).await?;
     insert_role_capability_as_permission_block(
@@ -4142,7 +4149,9 @@ pub async fn create_policy(
     pool: &PgPool,
     req: CreatePolicyBinding,
 ) -> Result<PolicyBinding, AppError> {
-    crate::guardrails::validate_policy(pool, &req).await?;
+    let mut conn = pool.acquire().await.map_err(db_err)?;
+    crate::guardrails::validate_policy(&mut conn, &req).await?;
+    drop(conn);
     let id = Uuid::new_v4();
     let membership_tenant_id = req.tenant_id;
     let membership_entity_id = req.subject_id;
@@ -4562,23 +4571,22 @@ pub async fn create_direct_policy_with_audit(
     req: CreateDirectPolicy,
 ) -> Result<DirectPolicy, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let policy =
-        create_direct_policy_in_tx(pool, &mut tx, events_enabled, actor_id, req).await?;
+    let policy = create_direct_policy_in_tx(&mut tx, events_enabled, actor_id, req).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(policy)
 }
 
 /// Body of [`create_direct_policy`]; caller contract per
-/// [`create_role_assignment_in_tx`].
+/// [`create_role_assignment_in_tx`]. Validates on `tx` rather than a pooled
+/// connection — see [`replace_role_permission_block_links_in_tx`].
 pub(crate) async fn create_direct_policy_in_tx(
-    pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateDirectPolicy,
 ) -> Result<DirectPolicy, AppError> {
-    validate_direct_policy(pool, &req).await?;
-    crate::guardrails::validate_direct_policy(pool, &req).await?;
+    validate_direct_policy_in_tx(tx, &req).await?;
+    crate::guardrails::validate_direct_policy(tx, &req).await?;
     lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     let block_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
@@ -4928,11 +4936,14 @@ async fn validate_role_assignment_in_tx(
     .await
 }
 
-async fn validate_direct_policy(pool: &PgPool, req: &CreateDirectPolicy) -> Result<(), AppError> {
+async fn validate_direct_policy_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateDirectPolicy,
+) -> Result<(), AppError> {
     let block_tenant_id: Option<Uuid> =
         sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
             .bind(req.permission_block_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?
             .ok_or_else(|| {
@@ -4943,7 +4954,7 @@ async fn validate_direct_policy(pool: &PgPool, req: &CreateDirectPolicy) -> Resu
             "direct policy tenantId must match permission block tenantId",
         ));
     }
-    validate_subject_boundary(pool, req.tenant_id, &req.subject_kind, req.subject_id).await
+    validate_subject_boundary_in_tx(tx, req.tenant_id, &req.subject_kind, req.subject_id).await
 }
 
 async fn validate_subject_boundary_in_tx(

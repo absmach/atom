@@ -2385,6 +2385,94 @@ fn make_shared_key(cred_id: Uuid) -> String {
     )
 }
 
+/// Soft-deletes an entity with a cache barrier spanning the whole
+/// transaction. The one entry point for entity deletion on every caller
+/// (REST and GraphQL alike), so no caller can under-invalidate.
+///
+/// `entity_status` invalidation alone is *not* sufficient: this also revokes
+/// the entity's sessions and access-token credentials, which
+/// [`super::repo::restore_entity`] deliberately never reinstates. Without their own
+/// invalidation, a stale cached session or credential becomes a full hit
+/// again the moment a later restore repopulates `entity_status` as active —
+/// despite staying revoked in Postgres. See
+/// [`super::repo::deactivate_entity_and_collect_revocation_ids_in_tx`] for why the
+/// ids are enumerated inside the same locked transaction.
+pub async fn delete_entity(
+    pool: &PgPool,
+    cache: Option<&crate::cache::CacheClient>,
+    events_enabled: bool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(cache) = cache else {
+        return super::repo::delete_entity_with_audit(
+            pool,
+            events_enabled,
+            deleted_by,
+            id,
+            deleted_by,
+        )
+        .await;
+    };
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let (session_ids, credential_ids) =
+        super::repo::deactivate_entity_and_collect_revocation_ids_in_tx(&mut tx, id, deleted_by)
+            .await?;
+    let session_keys: Vec<String> = session_ids
+        .iter()
+        .copied()
+        .map(crate::cache::keys::session)
+        .collect();
+    let credential_keys: Vec<String> = credential_ids
+        .iter()
+        .copied()
+        .map(crate::cache::keys::credential)
+        .collect();
+    let entity_status_keys = [crate::cache::keys::entity_status(id)];
+    let groups: [(crate::cache::CacheCategory, &[String]); 3] = [
+        (
+            crate::cache::CacheCategory::EntityStatus,
+            &entity_status_keys,
+        ),
+        (crate::cache::CacheCategory::Session, &session_keys),
+        (crate::cache::CacheCategory::Credential, &credential_keys),
+    ];
+    crate::cache::invalidate::begin_all(cache, &groups).await?;
+    let outcome =
+        super::repo::finish_entity_deletion_in_tx(&mut tx, events_enabled, deleted_by, id).await;
+    let outcome = match outcome {
+        Ok(()) => tx.commit().await.map_err(db_err),
+        Err(err) => Err(err),
+    };
+    crate::cache::invalidate::end_all(cache, &groups).await;
+    outcome?;
+    // Mirrors `delete_entity_with_audit`'s own post-commit audit write
+    // (fire-and-forget, after the mutation durably commits) — see
+    // `audit::commit_with_audit`'s doc comment. Only needed on this locked
+    // path; the cache-disabled fallback above already gets it from
+    // `delete_entity_with_audit` itself.
+    let tenant_id = super::repo::get_entity(pool, id)
+        .await
+        .ok()
+        .and_then(|e| e.tenant_id);
+    crate::audit::write(
+        pool,
+        false,
+        crate::audit::AuditEvent {
+            actor_entity_id: deleted_by,
+            tenant_id,
+            target_kind: Some("entity"),
+            target_id: Some(id),
+            event: "entity.delete",
+            outcome: crate::models::enums::AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        },
+    )
+    .await;
+    Ok(())
+}
+
 pub async fn revoke_credential(
     pool: &PgPool,
     entity_id: Uuid,

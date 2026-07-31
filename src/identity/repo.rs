@@ -2537,6 +2537,13 @@ pub async fn add_group_member_with_audit(
     Ok(())
 }
 
+/// Takes the group's `principal_groups` row lock before deleting, matching
+/// [`add_group_member`]. `authz::repo::lock_group_closures_and_collect_member_ids`
+/// documents this lock as the reason a group-subject mutation may enumerate
+/// members under its own closure lock and trust the result: without it a
+/// removal is not serialized against that enumeration. Unlike `add_group_member`
+/// this deliberately does not require the group to be active or live — a
+/// membership must stay removable from a suspended or soft-deleted group.
 pub async fn remove_group_member(
     pool: &PgPool,
     group_id: Uuid,
@@ -2556,13 +2563,19 @@ pub async fn remove_group_member_with_audit(
     // Removal stays idempotent: a missing group or a missing membership row is
     // not an error. But only an actual deletion is a domain event — publishing
     // `group_member.remove` for a no-op would lie to downstream consumers.
-    let tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
-        "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(group_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_err)?;
+    //
+    // Deliberately no `deleted_at IS NULL` filter, unlike `add_group_member`
+    // — a membership must stay removable from a suspended or soft-deleted
+    // group. Takes the group's row lock, matching `add_group_member`'s —
+    // `authz::repo::lock_group_closures_and_collect_member_ids` documents
+    // this lock as the reason a group-subject mutation may enumerate members
+    // under its own closure lock and trust the result.
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM principal_groups WHERE id = $1 FOR UPDATE")
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Ok(());
     };

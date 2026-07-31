@@ -22,17 +22,27 @@ pub struct SessionCacheEntry {
 
 /// Shared between JWT and API-key authentication — one entity deactivation
 /// invalidates both paths' view of the entity at once.
+///
+/// Deliberately has no `deleted_at` field. Both miss loaders
+/// (`auth::load_session_entity_tenant`, `auth::load_credential_row`) filter
+/// `e.deleted_at IS NULL`, so an entry can only ever be populated from a
+/// live row — a cached `deleted_at` would be `None` by construction and any
+/// check against it a no-op. Denying a *subsequently* soft-deleted entity is
+/// the soft-delete path's invalidation duty (`entity_status`, plus the
+/// entity's sessions and credentials), not this entry's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityStatusCacheEntry {
     pub status: EntityStatus,
-    pub deleted_at: Option<DateTime<Utc>>,
     pub tenant_id: Option<Uuid>,
 }
 
+/// Has no `deleted_at` field, for the same reason as
+/// [`EntityStatusCacheEntry`]: both miss loaders filter `t.deleted_at IS
+/// NULL`, and denying a later-deleted tenant is the tenant delete path's
+/// invalidation duty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenantStatusCacheEntry {
     pub status: TenantStatus,
-    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 /// Never carries the plaintext API-key secret — only what

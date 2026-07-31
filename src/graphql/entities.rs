@@ -392,83 +392,14 @@ impl EntityMutation {
                 )
                 .await?;
             }
-            // `entity_status` invalidation alone is *not* sufficient: this
-            // also revokes sessions and access-token credentials, which
-            // `restoreEntity` deliberately never reinstates. Without their
-            // own invalidation, a stale cached session/credential would
-            // become a full hit again the moment `restoreEntity` repopulates
-            // entity_status as active — despite staying revoked in Postgres.
-            // See `deactivate_entity_and_collect_revocation_ids_in_tx` for
-            // why the ids are enumerated inside the same locked transaction.
-            let Some(cache) = state.cache.as_deref() else {
-                return repo::delete_entity_with_audit(
-                    &state.pool,
-                    state.config.events.enabled(),
-                    Some(auth.entity_id),
-                    id,
-                    Some(auth.entity_id),
-                )
-                .await;
-            };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let (session_ids, credential_ids) =
-                repo::deactivate_entity_and_collect_revocation_ids_in_tx(
-                    &mut tx,
-                    id,
-                    Some(auth.entity_id),
-                )
-                .await?;
-            let session_keys: Vec<String> = session_ids
-                .iter()
-                .map(|sid| crate::cache::keys::session(*sid))
-                .collect();
-            let credential_keys: Vec<String> = credential_ids
-                .iter()
-                .map(|cid| crate::cache::keys::credential(*cid))
-                .collect();
-            let entity_status_keys = [crate::cache::keys::entity_status(id)];
-            let groups: [(crate::cache::CacheCategory, &[String]); 3] = [
-                (
-                    crate::cache::CacheCategory::EntityStatus,
-                    &entity_status_keys,
-                ),
-                (crate::cache::CacheCategory::Session, &session_keys),
-                (crate::cache::CacheCategory::Credential, &credential_keys),
-            ];
-            crate::cache::invalidate::begin_all(cache, &groups).await?;
-            let outcome = repo::finish_entity_deletion_in_tx(
-                &mut tx,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-            )
-            .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            crate::cache::invalidate::end_all(cache, &groups).await;
-            outcome?;
-            // Mirrors `delete_entity_with_audit`'s own post-commit audit
-            // write (fire-and-forget, after the mutation durably commits) —
-            // see `audit::commit_with_audit`'s doc comment. Only needed on
-            // this locked path; the cache-disabled fallback above already
-            // gets it from `delete_entity_with_audit` itself.
-            audit::write(
+            crate::identity::service::delete_entity(
                 &state.pool,
-                false,
-                audit::AuditEvent {
-                    actor_entity_id: Some(auth.entity_id),
-                    tenant_id: existing.tenant_id,
-                    target_kind: Some("entity"),
-                    target_id: Some(id),
-                    event: "entity.delete",
-                    outcome: crate::models::enums::AuditOutcome::Allow,
-                    details: serde_json::json!({}),
-                },
+                state.cache.as_deref(),
+                state.config.events.enabled(),
+                id,
+                Some(auth.entity_id),
             )
-            .await;
-            Ok(())
+            .await
         }
         .await;
 

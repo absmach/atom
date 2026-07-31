@@ -86,10 +86,17 @@ end
 return 1
 "#;
 
+// Re-applies `PEXPIRE` for the same reason `begin` sets it: `HINCRBY`
+// recreates a key that has already expired, and a recreated barrier entry
+// with no TTL would never be reclaimed. An `end` that lands after its own
+// barrier expired (a long mutation, or a bulk invalidation chunking through
+// many keys) would otherwise leak an immortal hash per key.
 const END_SCRIPT_SRC: &str = r#"
+local ttl_ms = ARGV[1]
 for i, key in ipairs(KEYS) do
   redis.call('HINCRBY', key, 'v', 1)
   redis.call('HSET', key, 'dirty', '0')
+  redis.call('PEXPIRE', key, ttl_ms)
 end
 return 1
 "#;
@@ -423,6 +430,7 @@ impl CacheClient {
         if keys.is_empty() {
             return;
         }
+        let barrier_ttl = barrier_ttl(category.ttl(&self.ttl));
         for chunk in keys.chunks(BULK_CHUNK_SIZE) {
             let mut conn = match self.get_conn().await {
                 Ok(conn) => conn,
@@ -436,6 +444,7 @@ impl CacheClient {
             for key in chunk {
                 invocation.key(key);
             }
+            invocation.arg(barrier_ttl.as_millis() as i64);
             let outcome =
                 tokio::time::timeout(self.op_timeout, invocation.invoke_async::<i64>(&mut conn))
                     .await;
@@ -457,8 +466,13 @@ impl CacheClient {
 /// The barrier key's own expiry: long enough to comfortably outlast any
 /// realistic Postgres mutation + `end` call, so a lost `end` self-heals by
 /// the whole entry expiring outright rather than staying dirty forever.
+///
+/// Saturating rather than `*`: `Duration`'s multiplication panics on
+/// overflow, and this runs inside `begin`/`end` — on the mutation path, long
+/// after a nonsensically large `ATOM_CACHE_TTL_*` would have been accepted at
+/// startup. `cache_from_env` bounds those values, so this is belt-and-braces.
 fn barrier_ttl(entry_ttl: Duration) -> Duration {
-    entry_ttl * 5
+    entry_ttl.saturating_mul(5)
 }
 
 /// `get_or_load`, but tolerant of caching being disabled entirely — the

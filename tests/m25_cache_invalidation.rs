@@ -1244,6 +1244,118 @@ async fn api_key_auth_reflects_the_current_tenant_after_an_entity_moves_tenants(
     );
 }
 
+/// Mints a real session row plus a signed JWT carrying `tenant_id` as its
+/// `tid` claim, so tests can exercise `auth_from_jwt` end to end.
+async fn session_jwt(
+    state: &AppState,
+    pool: &PgPool,
+    entity_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> String {
+    let session_id = Uuid::new_v4();
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+        .bind(session_id)
+        .bind(entity_id)
+        .bind(expires_at)
+        .execute(pool)
+        .await
+        .expect("insert session");
+
+    let primary = state.keys.read().await.primary.clone();
+    auth::encode_jwt(
+        entity_id,
+        session_id,
+        tenant_id,
+        &primary,
+        state.config.jwt_expiry_secs,
+        &state.config.jwt_issuer,
+        &state.config.jwt_audience,
+    )
+    .expect("encode jwt")
+}
+
+/// JWT counterpart to
+/// `api_key_auth_reflects_the_current_tenant_after_an_entity_moves_tenants`,
+/// and a regression test for a review finding the API-key path did not have:
+/// `auth_from_jwt` built the `tenant_status` cache key from the token's `tid`
+/// claim but populated it with the payload of the *entity's current* tenant,
+/// because the miss loader joins tenants through `entities.tenant_id`. Once a
+/// token outlives a tenant move the two differ, so authenticating with the
+/// stale token wrote the new tenant's status under the old tenant's key — and
+/// since the populate ran *before* `check_session_entity_tenant`, even the
+/// request that got rejected for the tid mismatch poisoned it on the way out.
+/// A frozen tenant then read back as active for every one of its members
+/// until the TTL elapsed.
+#[tokio::test]
+#[ignore]
+async fn a_stale_jwt_from_before_a_tenant_move_cannot_poison_the_old_tenants_status() {
+    let p = pool().await;
+    let (state, cache) = state_with_cache(p.clone()).await;
+    let old_tenant = tenant(&p).await;
+    let new_tenant = tenant(&p).await;
+    // `mover` leaves `old_tenant` for `new_tenant`; `stayer` remains behind
+    // and is the one a poisoned `tenant_status:{old_tenant}` would wrongly
+    // let through.
+    let mover = active_entity_in_tenant(&p, old_tenant, "service").await;
+    let stayer = active_entity_in_tenant(&p, old_tenant, "service").await;
+
+    let mover_token = session_jwt(&state, &p, mover, Some(old_tenant)).await;
+    let stayer_token = session_jwt(&state, &p, stayer, Some(old_tenant)).await;
+
+    // Warm `stayer`'s session and entity_status entries while everything is
+    // still valid. Freezing the tenant below invalidates `tenant_status` and
+    // nothing else, so those two stay hits — which is what makes a poisoned
+    // `tenant_status` entry decisive rather than academic: with all three
+    // keys hitting, `auth_from_jwt` never consults Postgres at all.
+    auth::authenticate_token(&state, &stayer_token)
+        .await
+        .expect("initial authentication should succeed");
+
+    let schema = build_schema(state.clone());
+    let mv = schema
+        .execute(authed(
+            common::admin_id(),
+            cache.clone(),
+            format!(
+                r#"mutation {{ updateEntity(id: "{mover}", input: {{ tenantId: "{new_tenant}" }}) {{ id }} }}"#
+            ),
+        ))
+        .await;
+    assert!(mv.errors.is_empty(), "tenant move failed: {:?}", mv.errors);
+
+    let sv = schema
+        .execute(authed(
+            common::admin_id(),
+            cache.clone(),
+            format!(r#"mutation {{ freezeTenant(id: "{old_tenant}") {{ id }} }}"#),
+        ))
+        .await;
+    assert!(
+        sv.errors.is_empty(),
+        "tenant freeze failed: {:?}",
+        sv.errors
+    );
+
+    // `mover`'s token still claims `old_tenant` while the entity now lives in
+    // `new_tenant`, so this must be rejected on the tid mismatch.
+    let result = auth::authenticate_token(&state, &mover_token).await;
+    assert!(
+        result.is_err(),
+        "a JWT whose tid no longer matches the entity's tenant must be rejected"
+    );
+
+    // The interesting assertion: that rejected authentication must not have
+    // left `new_tenant`'s active status cached under `old_tenant`'s key.
+    let result = auth::authenticate_token(&state, &stayer_token).await;
+    assert!(
+        result.is_err(),
+        "a member of the frozen tenant must still be rejected — the rejected \
+         authentication above must not have populated tenant_status for the \
+         frozen tenant with the moved entity's new tenant's status"
+    );
+}
+
 // ─── Group-subject mutation vs. concurrent membership change ───────────────
 
 /// Regression test for a review finding: resolving a group-subject

@@ -36,9 +36,14 @@ pub async fn pool() -> PgPool {
     pool
 }
 
-/// Connect to the test Redis with short TTLs so invalidation-correctness
-/// tests aren't waiting on production-sized windows, and a fresh v1
-/// namespace-mate configuration otherwise identical to `CacheConfig::default`.
+/// Connect to the test Redis with `CacheConfig::default`'s production TTLs,
+/// overriding only `enabled`/`redis_url`. Deliberately *not* shortened: every
+/// invalidation-correctness test asserts immediately, with no sleep, so a
+/// short TTL could only mask a missing invalidation as a pass.
+///
+/// Assumes Redis is flushed between test binaries (see the `run_one` helper
+/// in `.github/workflows/rust.yml`) — entries keyed off fixed ids such as the
+/// seeded admin's would otherwise outlive the database they describe.
 pub async fn cache_client() -> CacheClient {
     let url = std::env::var("ATOM_TEST_REDIS_URL")
         .expect("ATOM_TEST_REDIS_URL must be set for cache-gated tests");

@@ -218,6 +218,10 @@ impl Default for DbPoolConfig {
     }
 }
 
+/// Upper bound on any single `ATOM_CACHE_TTL_*` value, enforced by
+/// [`cache_from_env`].
+const MAX_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
 /// Per-category TTLs, applied to cached entries as a defense-in-depth safety
 /// net (not the primary invalidation mechanism — see `src/cache/mod.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1249,17 +1253,25 @@ fn cache_from_env() -> Result<CacheConfig> {
             anyhow::bail!("ATOM_CACHE_OP_TIMEOUT_MS must be greater than zero");
         }
         let ttl = &cfg.ttl;
-        if [
+        let ttls = [
             ttl.session_secs,
             ttl.entity_status_secs,
             ttl.tenant_status_secs,
             ttl.credential_secs,
             ttl.credential_ceiling_secs,
             ttl.grants_secs,
-        ]
-        .contains(&0)
-        {
+        ];
+        if ttls.contains(&0) {
             anyhow::bail!("ATOM_CACHE_TTL_* values must all be greater than zero");
+        }
+        // Bounded at startup rather than left to fail on the mutation path:
+        // `cache::barrier_ttl` scales these by 5, and the resulting `Duration`
+        // has to stay representable. A day is already far beyond any sane
+        // staleness window for auth/authz state.
+        if ttls.iter().any(|secs| *secs > MAX_CACHE_TTL_SECS) {
+            anyhow::bail!(
+                "ATOM_CACHE_TTL_* values must not exceed {MAX_CACHE_TTL_SECS} seconds (24h)"
+            );
         }
     }
     Ok(cfg)

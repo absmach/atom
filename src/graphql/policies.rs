@@ -491,7 +491,6 @@ impl PolicyMutation {
                 .begin(crate::cache::CacheCategory::Grants, &grants_keys)
                 .await?;
             let outcome = authz_repo::replace_role_permission_block_links_in_tx(
-                &state.pool,
                 &mut tx,
                 state.config.events.enabled(),
                 Some(auth.entity_id),
@@ -1398,7 +1397,6 @@ impl PolicyMutation {
                         .begin(crate::cache::CacheCategory::Grants, &grants_keys)
                         .await?;
                     let outcome = authz_repo::create_direct_policy_in_tx(
-                        &state.pool,
                         &mut tx,
                         state.config.events.enabled(),
                         Some(auth.entity_id),
