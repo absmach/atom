@@ -219,6 +219,69 @@ pub async fn write(pool: &PgPool, events_enabled: bool, event: AuditEvent<'_>) {
     }
 }
 
+/// Executes audit logging and domain event outbox enqueue inside an existing DB
+/// transaction, ensuring the mutation and its outbox event commit atomically.
+pub async fn write_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    events_enabled: bool,
+    event: &AuditEvent<'_>,
+) -> Result<(), crate::error::AppError> {
+    log_audit_event(event);
+    insert_audit_log(&mut **tx, event).await?;
+    if events_enabled {
+        crate::events::enqueue(
+            &mut **tx,
+            events_enabled,
+            event.actor_entity_id,
+            event.tenant_id,
+            event.target_kind,
+            event.target_id,
+            event.event,
+            outcome_str(&event.outcome),
+            &event.details,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Enqueues a domain event outbox row inside an existing DB transaction for
+/// non-audited operations (e.g. create mutations), keeping the mutation and outbox
+/// event strictly atomic.
+pub async fn observe_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    events_enabled: bool,
+    meta: &AuditMeta<'_>,
+    details: &Value,
+) -> Result<(), crate::error::AppError> {
+    let event = AuditEvent {
+        actor_entity_id: meta.actor_entity_id,
+        tenant_id: meta.tenant_id,
+        target_kind: Some(meta.target_kind),
+        target_id: meta.target_id,
+        event: meta.event,
+        outcome: AuditOutcome::Allow,
+        details: details.clone(),
+    };
+    log_audit_event(&event);
+
+    if events_enabled {
+        crate::events::enqueue(
+            &mut **tx,
+            events_enabled,
+            event.actor_entity_id,
+            event.tenant_id,
+            event.target_kind,
+            event.target_id,
+            event.event,
+            outcome_str(&event.outcome),
+            &event.details,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn insert_audit_log<'e, E>(
     executor: E,
     event: &AuditEvent<'_>,
@@ -296,6 +359,12 @@ pub fn spawn_retention_cleanup(state: AppState) {
 
         loop {
             interval.tick().await;
+            if let Err(err) =
+                crate::events::cleanup_expired_outbox(&state.pool, cfg.days, cfg.cleanup_batch_size)
+                    .await
+            {
+                tracing::warn!("event outbox retention cleanup failed: {err}");
+            }
             match cleanup_expired(&state.pool, cfg).await {
                 Ok(summary) if summary.deleted_rows > 0 => {
                     write(

@@ -68,9 +68,10 @@ async fn insert_outbox_row(pool: &PgPool, payload: &DomainEventPayload) -> Uuid 
 async fn delivered_at(pool: &PgPool, id: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
     sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
         .bind(id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
         .expect("fetch delivered_at")
+        .flatten()
 }
 
 async fn attempts_and_error(pool: &PgPool, id: Uuid) -> (i32, Option<String>) {
@@ -113,7 +114,10 @@ impl MockPublisher {
 
 #[async_trait]
 impl EventPublisher for MockPublisher {
-    async fn publish(&self, events: &[DomainEventPayload]) -> Result<(), PublishError> {
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
         self.calls
             .lock()
             .unwrap()
@@ -124,7 +128,7 @@ impl EventPublisher for MockPublisher {
             *fail_next -= 1;
             return Err(PublishError("simulated publisher failure".to_string()));
         }
-        Ok(())
+        Ok(vec![Ok(()); events.len()])
     }
 }
 
@@ -251,11 +255,14 @@ impl FlakyPublisher {
 
 #[async_trait]
 impl EventPublisher for FlakyPublisher {
-    async fn publish(&self, _events: &[DomainEventPayload]) -> Result<(), PublishError> {
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
         if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
             Err(PublishError("simulated broker outage".to_string()))
         } else {
-            Ok(())
+            Ok(vec![Ok(()); events.len()])
         }
     }
 }
@@ -308,7 +315,10 @@ struct StallingPublisher;
 
 #[async_trait]
 impl EventPublisher for StallingPublisher {
-    async fn publish(&self, _events: &[DomainEventPayload]) -> Result<(), PublishError> {
+    async fn publish(
+        &self,
+        _events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
         std::future::pending().await
     }
 }
@@ -458,4 +468,91 @@ async fn delivering_with_no_undelivered_rows_is_a_harmless_no_op() {
         .unwrap();
     assert_eq!(delivered, 0);
     assert_eq!(publisher.call_count(), 0);
+}
+
+struct SelectivePublisher {
+    reject_id: Uuid,
+}
+
+#[async_trait]
+impl EventPublisher for SelectivePublisher {
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
+        let mut res = Vec::new();
+        for e in events {
+            if e.event_id == self.reject_id {
+                res.push(Err(PublishError(
+                    "event was returned as unroutable (no queue bound to routing key)".to_string(),
+                )));
+            } else {
+                res.push(Ok(()));
+            }
+        }
+        Ok(res)
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_single_unroutable_event_does_not_block_or_re_deliver_healthy_events() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let bad_event = sample_payload("bad.event");
+    let good_event = sample_payload("good.event");
+    let bad_id = insert_outbox_row(&pool, &bad_event).await;
+    let good_id = insert_outbox_row(&pool, &good_event).await;
+
+    let publisher = SelectivePublisher { reject_id: bad_id };
+    let delivered = deliver_outbox_batch(&pool, &publisher, &test_events_config())
+        .await
+        .expect("deliver batch");
+
+    assert_eq!(delivered, 1, "healthy event must be marked delivered");
+    assert!(delivered_at(&pool, good_id).await.is_some());
+    assert!(delivered_at(&pool, bad_id).await.is_none());
+
+    let (attempts, last_error) = attempts_and_error(&pool, bad_id).await;
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("unroutable"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn outbox_retention_cleanup_deletes_old_delivered_and_unparseable_rows() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let old_delivered_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
+         VALUES ($1, 'old.event', '{}'::jsonb, now() - interval '40 days', now() - interval '40 days')",
+    )
+    .bind(old_delivered_id)
+    .execute(&pool)
+    .await
+    .expect("insert old delivered row");
+
+    let fresh_delivered_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
+         VALUES ($1, 'fresh.event', '{}'::jsonb, now(), now())",
+    )
+    .bind(fresh_delivered_id)
+    .execute(&pool)
+    .await
+    .expect("insert fresh delivered row");
+
+    let deleted = atom::events::cleanup_expired_outbox(&pool, 30, 100)
+        .await
+        .expect("cleanup outbox");
+
+    assert_eq!(
+        deleted, 1,
+        "only outbox rows older than 30 days must be deleted"
+    );
+    assert!(delivered_at(&pool, old_delivered_id).await.is_none());
+    assert!(delivered_at(&pool, fresh_delivered_id).await.is_some());
 }

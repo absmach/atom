@@ -262,24 +262,58 @@ pub async fn deliver_outbox_batch(
         };
 
     match publish_result {
-        Ok(()) => {
-            sqlx::query("UPDATE event_outbox SET delivered_at = now() WHERE id = ANY($1)")
-                .bind(&ids)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_err)?;
+        Ok(per_event_results) => {
+            let mut delivered_ids = Vec::new();
+            let mut failed_count = 0;
+
+            for (id, res) in ids.iter().zip(per_event_results.into_iter()) {
+                match res {
+                    Ok(()) => {
+                        delivered_ids.push(*id);
+                    }
+                    Err(err) => {
+                        failed_count += 1;
+                        let is_unroutable_or_nacked =
+                            err.0.contains("unroutable") || err.0.contains("nacked");
+                        sqlx::query(
+                            "UPDATE event_outbox
+                             SET attempts = attempts + 1,
+                                 last_error = $2,
+                                 unparseable = (attempts + 1 >= $3 OR $4)
+                             WHERE id = $1",
+                        )
+                        .bind(id)
+                        .bind(&err.0)
+                        .bind(cfg.outbox_max_attempts)
+                        .bind(is_unroutable_or_nacked)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db_err)?;
+                    }
+                }
+            }
+
+            if !delivered_ids.is_empty() {
+                sqlx::query("UPDATE event_outbox SET delivered_at = now() WHERE id = ANY($1)")
+                    .bind(&delivered_ids)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+            }
+
+            if failed_count > 0 {
+                crate::metrics::record_outbox_publish_failure(failed_count as u64);
+            }
+
             tx.commit().await.map_err(db_err)?;
-            Ok(ids.len())
+            Ok(delivered_ids.len())
         }
         Err(err) => {
-            // Deliberately does not touch `unparseable` or check
-            // `outbox_max_attempts` — see the SELECT comment above. This row
-            // stays eligible for every future poll no matter how many times
-            // publishing keeps failing.
             crate::metrics::record_outbox_publish_failure(ids.len() as u64);
             sqlx::query(
                 "UPDATE event_outbox
-                 SET attempts = attempts + 1, last_error = $2
+                 SET attempts = attempts + 1,
+                     last_error = $2
                  WHERE id = ANY($1)",
             )
             .bind(&ids)
@@ -291,6 +325,45 @@ pub async fn deliver_outbox_batch(
             Ok(0)
         }
     }
+}
+
+/// Deletes delivered and exhausted/unparseable outbox rows older than the
+/// retention window (`retention_days`).
+pub async fn cleanup_expired_outbox(
+    pool: &PgPool,
+    retention_days: i64,
+    batch_size: i64,
+) -> Result<i64, AppError> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days);
+    let mut deleted_rows = 0_i64;
+
+    loop {
+        let result = sqlx::query(
+            r#"WITH doomed AS (
+                   SELECT id
+                   FROM event_outbox
+                   WHERE (delivered_at IS NOT NULL OR unparseable = true)
+                     AND created_at < $1
+                   ORDER BY created_at ASC
+                   LIMIT $2
+               )
+               DELETE FROM event_outbox
+               WHERE id IN (SELECT id FROM doomed)"#,
+        )
+        .bind(cutoff)
+        .bind(batch_size)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+
+        let batch = i64::try_from(result.rows_affected()).unwrap_or(0);
+        deleted_rows += batch;
+        if batch < batch_size {
+            break;
+        }
+    }
+
+    Ok(deleted_rows)
 }
 
 /// Increments `attempts`, records `last_error`, and marks a set of rows

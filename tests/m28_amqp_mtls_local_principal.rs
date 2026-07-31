@@ -126,10 +126,11 @@ async fn publishing_to_the_granted_target_succeeds_and_is_authenticated() {
         .await
         .expect("connect via mTLS + SASL to FluxMQ's internal listener");
 
-    publisher
+    let res = publisher
         .publish(&[sample_payload()])
         .await
         .expect("publish to the exactly-granted (default exchange, routing key) target");
+    assert!(res[0].is_ok(), "event publish should succeed");
 
     let after = fetch_stats();
     let auth_success_after = amqp_local_principal_stats(&after)["authentication"]["success"]
@@ -172,8 +173,12 @@ async fn publishing_to_a_different_routing_key_is_denied() {
         .expect("the connection itself should still succeed (auth is per-connection)");
 
     let result = publisher.publish(&[sample_payload()]).await;
+    let is_denied = match result {
+        Err(_) => true,
+        Ok(vec) => vec.iter().any(|r| r.is_err()),
+    };
     assert!(
-        result.is_err(),
+        is_denied,
         "publishing to an ungranted routing key must be denied, not silently accepted"
     );
 }

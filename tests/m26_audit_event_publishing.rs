@@ -39,6 +39,7 @@ async fn state_with_events_disabled(pool: PgPool) -> AppState {
 }
 
 async fn build_state(pool: PgPool, config: Config) -> AppState {
+    let _ = sqlx::query("TRUNCATE TABLE signing_keys CASCADE").execute(&pool).await;
     keys::bootstrap_if_needed(&pool, &config.signing_keys)
         .await
         .expect("bootstrap signing keys");

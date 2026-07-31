@@ -31,16 +31,20 @@ use crate::config::EventsConfig;
 
 use super::DomainEventPayload;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("{0}")]
 pub struct PublishError(pub String);
 
 /// Delivers a batch of domain events to wherever they're consumed.
-/// Implementations must not panic; a delivery failure is reported via `Err`
-/// so the outbox poller can retry on its next tick without losing the row.
+/// Implementations must not panic; a delivery failure is reported per event
+/// so the outbox poller can retry failing rows without losing or duplicate-delivering
+/// healthy rows.
 #[async_trait]
 pub trait EventPublisher: Send + Sync {
-    async fn publish(&self, events: &[DomainEventPayload]) -> Result<(), PublishError>;
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError>;
 }
 
 /// Default publisher: traces every event and always succeeds. Nothing is
@@ -52,7 +56,10 @@ pub struct LogPublisher;
 
 #[async_trait]
 impl EventPublisher for LogPublisher {
-    async fn publish(&self, events: &[DomainEventPayload]) -> Result<(), PublishError> {
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
         for event in events {
             tracing::info!(
                 events.event_id = %event.event_id,
@@ -63,7 +70,7 @@ impl EventPublisher for LogPublisher {
                 "domain event"
             );
         }
-        Ok(())
+        Ok(vec![Ok(()); events.len()])
     }
 }
 
@@ -205,75 +212,75 @@ fn amqp_tls_config(cfg: &EventsConfig) -> anyhow::Result<OwnedTLSConfig> {
 
 #[async_trait]
 impl EventPublisher for AmqpPublisher {
-    async fn publish(&self, events: &[DomainEventPayload]) -> Result<(), PublishError> {
-        // Two passes rather than one: sending every `basic_publish` frame
-        // before awaiting any confirm pipelines the batch into one round
-        // trip instead of `events.len()` sequential ones. The first await
-        // per event only waits for the frame to be written to the channel,
-        // not for the broker's response — that response is the second await,
-        // now deferred to its own loop below.
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
         let mut pending = Vec::with_capacity(events.len());
         for event in events {
-            let body = serde_json::to_vec(event)
-                .map_err(|e| PublishError(format!("serialize event {}: {e}", event.event_id)))?;
-            let confirm = self
+            let body = match serde_json::to_vec(event) {
+                Ok(b) => b,
+                Err(e) => {
+                    pending.push((
+                        event.event_id,
+                        Err(PublishError(format!(
+                            "serialize event {}: {e}",
+                            event.event_id
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+            match self
                 .channel
                 .basic_publish(
                     self.exchange.as_str().into(),
                     self.routing_key.as_str().into(),
-                    // `mandatory: true` asks the broker to return the message
-                    // instead of silently dropping it when the routing key
-                    // matches no queue (e.g. a misconfigured
-                    // ATOM_EVENTS_AMQP_ROUTING_KEY, or a consumer that hasn't
-                    // provisioned its queue yet). Without this, an unroutable
-                    // publish under the default exchange still resolves the
-                    // confirm as a plain ack, and the outbox row would be
-                    // marked delivered despite never having reached a queue.
                     BasicPublishOptions {
                         mandatory: true,
                         ..BasicPublishOptions::default()
                     },
                     &body,
-                    BasicProperties::default().with_content_type("application/json".into()),
+                    BasicProperties::default()
+                        .with_delivery_mode(2)
+                        .with_content_type("application/json".into()),
                 )
                 .await
-                .map_err(|e| PublishError(format!("publish event {}: {e}", event.event_id)))?;
-            pending.push((event.event_id, confirm));
-        }
-        for (event_id, confirm) in pending {
-            let confirmation = confirm
-                .await
-                .map_err(|e| PublishError(format!("confirm event {event_id}: {e}")))?;
-            match confirmation {
-                // A plain ack: the broker accepted the message and it was
-                // routed to at least one queue.
-                Confirmation::Ack(None) => {}
-                // The broker acked the publish but also returned the message
-                // as unroutable (mandatory + no matching queue) — it was
-                // never actually stored anywhere, so this must not be
-                // treated as delivered.
-                Confirmation::Ack(Some(_)) => {
-                    return Err(PublishError(format!(
-                        "event {event_id} was returned as unroutable (no queue bound to routing key {:?}); the broker never stored it",
-                        self.routing_key
-                    )));
-                }
-                Confirmation::Nack(_) => {
-                    return Err(PublishError(format!(
-                        "event {event_id} was nacked by the broker"
-                    )));
-                }
-                // confirm_select() is always called in connect(), so this
-                // should be unreachable; fail loudly rather than assume
-                // success if that invariant is ever broken.
-                Confirmation::NotRequested => {
-                    return Err(PublishError(format!(
-                        "event {event_id}: broker did not confirm (publisher confirms not active)"
-                    )));
+            {
+                Ok(confirm) => pending.push((event.event_id, Ok(confirm))),
+                Err(e) => {
+                    pending.push((
+                        event.event_id,
+                        Err(PublishError(format!(
+                            "publish event {}: {e}",
+                            event.event_id
+                        ))),
+                    ));
                 }
             }
         }
-        Ok(())
+
+        let mut results = Vec::with_capacity(pending.len());
+        for (event_id, confirm_res) in pending {
+            match confirm_res {
+                Ok(confirm) => match confirm.await {
+                    Ok(Confirmation::Ack(None)) => results.push(Ok(())),
+                    Ok(Confirmation::Ack(Some(_))) => results.push(Err(PublishError(format!(
+                        "event {event_id} was returned as unroutable (no queue bound to routing key {:?}); the broker never stored it",
+                        self.routing_key
+                    )))),
+                    Ok(Confirmation::Nack(_)) => results.push(Err(PublishError(format!(
+                        "event {event_id} was nacked by the broker"
+                    )))),
+                    Ok(Confirmation::NotRequested) => results.push(Err(PublishError(format!(
+                        "event {event_id}: broker did not confirm (publisher confirms not active)"
+                    )))),
+                    Err(e) => results.push(Err(PublishError(format!("confirm event {event_id}: {e}")))),
+                },
+                Err(err) => results.push(Err(err)),
+            }
+        }
+        Ok(results)
     }
 }
 
