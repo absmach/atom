@@ -29,6 +29,8 @@ The cache targets these hot reads specifically, keeping Postgres as the single s
 4. **Fail-refused writes.** If Redis is unreachable during a security-sensitive Postgres mutation, the mutation is refused. Committing without being able to invalidate the cache would risk serving stale grants after a revoke.
 5. **Optional at every layer.** Every call site tolerates `cache: None`. Removing Redis is a config change, not a code change.
 
+`cache: None` means *caching is not configured*, and it is the one state in which every mutation guard degrades to a pass-through. An **enabled** cache that merely cannot reach Redis is a different state and never collapses into `None` — otherwise a replica that booted during an outage would mutate grants, sessions, and credentials without invalidating entries its peers were still serving, and a revoke on one replica would stay authorized on another. Unreachable Redis is a runtime condition: the client is retained, reads degrade to misses, and `begin` fails so security-sensitive mutations are refused until Redis returns.
+
 ---
 
 ## What Is Cached
@@ -46,10 +48,12 @@ Six categories, each keyed by a UUID under the `atom:v1:` namespace.
 
 DTOs are defined in [`src/cache/entries.rs`](../src/cache/entries.rs). Key builders in [`src/cache/keys.rs`](../src/cache/keys.rs).
 
+The entity and tenant DTOs deliberately carry **no `deleted_at` field**. Both miss loaders already filter `deleted_at IS NULL`, so an entry can only ever be populated from a live row — a cached tombstone column would be `None` by construction and any check against it a no-op that merely *looked* like a tombstone check. Denying a subsequently soft-deleted entity or tenant is the delete path's invalidation duty, not the entry's.
+
 ### What is *not* cached
 
 - **Passwords** — never used on the request path. Used only during `/login`, which mints a JWT; the JWT then uses the `Session` cache.
-- **Plaintext API-key secrets** — only the hash used to verify them. See [`CredentialCacheEntry`](../src/cache/entries.rs#L49).
+- **Plaintext API-key secrets** — only the hash used to verify them. See `CredentialCacheEntry` in [`src/cache/entries.rs`](../src/cache/entries.rs).
 - **The authorization decision itself** — the PDP evaluates conditions per request against fresh (or freshly cached) grants.
 - **Audit writes** — always go to Postgres.
 
@@ -89,7 +93,12 @@ flowchart TD
 - API-key auth: [`src/auth.rs`](../src/auth.rs) around `auth_from_api_key`.
 - Grants load: [`src/auth.rs`](../src/auth.rs) `AuthContext::effective_grants` and [`src/authz/engine.rs`](../src/authz/engine.rs) inside `load_decision_context`.
 
-The auth hot path reads its independent keys (session/entity/tenant for JWT, credential/entity/tenant for API-key) in **one pipelined round trip on a single pooled connection** via `CacheClient::lookup_many` + `CacheClient::decode` — see [`src/cache/mod.rs`](../src/cache/mod.rs). Issued one at a time it would be three pool acquisitions and three serial round trips, each bounded by `op_timeout`, before any request work started.
+The auth hot path batches the keys it can into **one pipelined round trip on a single pooled connection**, via `CacheClient::lookup_many` + `CacheClient::decode` — see [`src/cache/mod.rs`](../src/cache/mod.rs). Issued one at a time these would be three pool acquisitions and three serial round trips, each bounded by `op_timeout`, before any request work started.
+
+Only keys with no data dependency on each other can share a round trip:
+
+- **JWT** — session, entity, and tenant are all known up front, since the tenant key comes from the token's `tid` claim. All three go in one round trip.
+- **API-key** — the credential key is read first and alone, because it gates everything after it; on a credential hit the entity read likewise precedes the tenant key, which is derived from the *entity's* current tenant rather than from the credential (see the note on `CredentialCacheEntry` above). On the cold path, where both are already known from the loaded row, the entity and tenant reads are batched.
 
 ---
 
@@ -101,15 +110,16 @@ Every cached entry is a Redis hash with three fields:
 - `dirty` — `"1"` while a mutation is in flight, absent otherwise.
 - `p` — the serialized payload, present only when the entry holds a valid value.
 
-Three atomic Lua scripts implement a per-key **mutation barrier** that closes three otherwise-unavoidable races.
+Four atomic Lua scripts implement a per-key **mutation barrier** that closes races a plain cache-aside plus post-commit `DEL` cannot.
 
 ### The three primitives
 
 | Primitive | When it runs | What it does |
 |---|---|---|
 | `begin` | Before a security-sensitive Postgres mutation | Bumps `v`, sets `dirty=1`, clears `p`. Fails the mutation if Redis is unreachable. |
-| `end` | After the mutation (success or failure) | Bumps `v` again, clears `dirty`. Best-effort. |
+| `end` | After the mutation (success or failure) | Bumps `v` again, clears `dirty`, clears `p`, and re-applies the entry's expiry. Best-effort. |
 | `try_populate` | After a cache-miss reader finishes loading from Postgres | Writes the payload only if `dirty=0` **and** `v` still equals what the reader observed pre-load; otherwise discards silently. |
+| `discard` | After a reader fails to deserialize a payload | Clears **only** `p`, and only if `dirty=0` and `v` still equals what that reader observed. Never touches the barrier fields. |
 
 ### Read path
 
@@ -149,7 +159,7 @@ sequenceDiagram
         W->>P: UPDATE / DELETE ...
         P-->>W: committed
         W->>C: end(keys)
-        Note over C: bump v again, clear dirty
+        Note over C: bump v again, clear dirty,<br/>clear p, re-apply expiry
     end
 ```
 
@@ -159,6 +169,7 @@ sequenceDiagram
 2. **Read-during-dirty-window.** A reader lands while `dirty=1`, observes the post-`begin` version. `end`'s **second** version bump ensures that observed version is stale by the time `try_populate` runs — rejected either by the dirty check (if still dirty) or the version check (if `end` already ran).
 3. **Lost-invalidation.** If `end` never runs (crash), the barrier TTL causes the whole entry to expire rather than being stuck dirty forever. `end` re-applies `PEXPIRE` on the entry, since `HINCRBY` would otherwise recreate an already-expired key and leave it immortal.
 4. **Cross-key poisoning during populate.** A miss loader whose returned payload describes a *different* key than the one being populated must never write across keys — e.g. the JWT miss loader joins tenants through `entities.tenant_id`, so it returns the entity's *current* tenant's status, which is not necessarily the tenant the token's `tid` claim points to when the token outlived a tenant move. Populates now write only when the observed version's key matches the key the payload describes.
+5. **Cleanup destroying a live barrier.** Discarding a corrupt payload must not take `v` and `dirty` with it. Deleting the whole hash would erase a concurrent mutation's barrier: the next reader would find an absent key, observe version `0`, load pre-commit state, and populate it successfully — the barrier defeated by a cleanup path. `discard` is version-guarded and clears only `p`; `end` also clears `p` defensively, so whatever happened to the key mid-mutation, the next reader reloads cleanly.
 
 The first primitive that fails self-heals: `begin` failing refuses the mutation; `end` failing leaves the entry dirty until barrier-TTL expiry; `try_populate` failing just leaves the entry as a miss for the next reader to reload.
 
@@ -179,13 +190,17 @@ Which mutation invalidates which category:
 | Tenant update | `TenantStatus` | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
 | Tenant delete | `TenantStatus` + child `Session`s | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
 | Tenant restore | `TenantStatus` + reactivated `Credential`s | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
-| Tenant create / purge | `Grants` (of acting subject) | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
+| Tenant create | `Grants` (of the creator) | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
 | Credential revoke / rotate | `Credential` | [`src/graphql/credentials.rs`](../src/graphql/credentials.rs), [`src/identity/handlers.rs`](../src/identity/handlers.rs) |
 | Credential scope change | `CredentialCeiling` | [`src/graphql/credentials.rs`](../src/graphql/credentials.rs) |
 | Role assignment (create / delete) | `Grants` for each affected subject | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
 | Direct policy (create / delete) | `Grants` for the subject | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
 | Role permission-block change | `Grants` for every assignee of the role | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
 | Group membership change (REST or GraphQL) | `Grants` for every member of the group closure | [`src/graphql/groups.rs`](../src/graphql/groups.rs), [`src/identity/handlers.rs`](../src/identity/handlers.rs) |
+
+Tenant creation is on this list because `create_tenant` bootstraps a tenant-admin role, role assignment, and membership for the creator in the same transaction — it grows the creator's own grant set, and the capability gate immediately above it has just warmed that exact key.
+
+`purgeTenant` performs **no** cache invalidation. It is reachable only for an already-soft-deleted tenant, and the soft delete invalidated `TenantStatus` and the members' sessions, so the tenant is already denied at the lifecycle check that runs before grant matching. Residual `Grants` entries naming the purged tenant are therefore inert rather than dangerous — but this rests on the soft delete having run first, and is worth revisiting if purge ever becomes reachable directly.
 
 The REST paths (`delete_entity`, `add_group_member`, `remove_group_member`) invalidate through the same helpers as the GraphQL resolvers — entity deletion is consolidated into a single service entry point at [`src/identity/service.rs`](../src/identity/service.rs), and both group-member handlers wrap their mutation in `guarded_mutation`.
 
@@ -282,12 +297,13 @@ outcome?
 
 | Failure | Behaviour | Impact |
 |---|---|---|
-| Redis unreachable at startup | `main.rs` decides fail-fast vs degrade (see `ATOM_CACHE_REQUIRED`). | Startup fails or logs a warning. |
+| Redis unreachable at startup | The client is retained, never downgraded to `cache: None`. `ATOM_CACHE_FAIL_FAST_ON_STARTUP` decides whether to abort startup instead of booting into the refusing state below. | Reads fall through to Postgres; security-sensitive mutations are refused until Redis recovers. |
+| Cache config invalid at startup | Fatal regardless of `ATOM_CACHE_FAIL_FAST_ON_STARTUP` — an unparseable `ATOM_CACHE_REDIS_URL` cannot recover by retrying. | Startup fails. |
 | Redis unreachable during read | Treated as `Lookup::Unavailable`. Falls through to Postgres loader. | Auth works, slower. |
 | Redis unreachable during `begin` | Mutation refused with `503 service_unavailable`. | The mutation does not commit. |
 | Redis unreachable during `end` | Best-effort — logged, not surfaced. Entry stays dirty until barrier TTL. | Entry reloads on next reader; slight perf hit until then. |
 | Redis unreachable during `try_populate` | Best-effort — dropped silently. | Next reader still gets a miss and retries. |
-| Corrupt payload | Treated as a miss and the entry is deleted so the next read reloads clean. | One extra Postgres round trip. |
+| Corrupt payload | Treated as a miss; only the payload field is cleared, version-guarded, so a concurrent mutation's barrier survives. | One extra Postgres round trip. |
 
 ---
 
@@ -300,6 +316,7 @@ Set via environment variables — see [`.env.example`](../.env.example) for the 
 | `ATOM_CACHE_ENABLED` | Master switch. `false` disables all caching (call sites pass `cache: None`). |
 | `ATOM_CACHE_REDIS_URL` | Redis connection URL. |
 | `ATOM_CACHE_POOL_MAX_SIZE` | Max Redis connections. |
+| `ATOM_CACHE_FAIL_FAST_ON_STARTUP` | `true` aborts startup when Redis is unreachable. Default `false` — boot and refuse security-sensitive mutations until Redis recovers. |
 | `ATOM_CACHE_CONNECT_TIMEOUT_MS` | Startup PING timeout. |
 | `ATOM_CACHE_OP_TIMEOUT_MS` | Per-operation timeout. |
 | `ATOM_CACHE_TTL_SESSION_SECS` | TTL for `Session` entries. |
@@ -310,6 +327,8 @@ Set via environment variables — see [`.env.example`](../.env.example) for the 
 | `ATOM_CACHE_TTL_GRANTS_SECS` | TTL for `Grants` entries. |
 
 Config struct: [`src/config.rs`](../src/config.rs) `CacheConfig` / `CacheTtlConfig`.
+
+Every `ATOM_CACHE_TTL_*` value must be greater than zero and no more than **86400 seconds (24h)**, rejected at startup otherwise. The upper bound exists because the barrier expiry is derived as `entry_ttl * 5`, which has to stay representable — without the bound, a nonsensically large TTL would boot and serve reads happily, then fail on the first security-sensitive mutation.
 
 TTLs are the residual staleness bound if invalidation is missed entirely (e.g. barrier TTL expired before `end` completed). They should be short enough that a missed invalidation is a bounded outage, not an indefinite one.
 
@@ -340,7 +359,7 @@ The cache client (Redis pool, Lua scripts, barrier, timeouts, metrics) is fully 
 3. Add a key builder to [`src/cache/keys.rs`](../src/cache/keys.rs).
 4. (Optional) add a DTO to [`src/cache/entries.rs`](../src/cache/entries.rs) — the client is generic over any `Serialize + DeserializeOwned` type, so a bespoke DTO is only needed if the DB row shape is not directly usable.
 5. At each read site: call `cached_or_load(cache, CacheCategory::<New>, &keys::<new>(id), || loader)`.
-6. At each write site that could affect the entry: wrap the mutation in `guarded_mutation` (or `begin_all` / `end_all` if the mutation owns an open `Transaction`).
+6. At each write site that could affect the entry: wrap the mutation in `guarded_mutation` — or `guarded_tx_mutation` if the affected keys can only be enumerated under the mutation's own locks, or `begin_all` / `end_all` if the mutation spans several categories on one open `Transaction`.
 
 The design is deliberately explicit — the enum is not `Other(String)` — because:
 
@@ -352,10 +371,12 @@ The design is deliberately explicit — the enum is not `Other(String)` — beca
 
 ## Testing
 
-- **Barrier semantics (Redis-gated unit tests):** [`src/cache/mod.rs`](../src/cache/mod.rs) `#[cfg(test)] mod tests`. Includes tests for both the read-before-mutation race and the read-during-dirty-window race.
-- **End-to-end invalidation matrix:** [`tests/m25_cache_invalidation.rs`](../tests/m25_cache_invalidation.rs). Covers every mutation → invalidation pairing listed above.
+- **Barrier semantics (Redis-gated unit tests):** [`src/cache/mod.rs`](../src/cache/mod.rs) `#[cfg(test)] mod tests`. Covers the read-before-mutation race, the read-during-dirty-window race, and that a corrupt-payload cleanup leaves a concurrent barrier intact.
+- **End-to-end invalidation matrix:** [`tests/m25_cache_invalidation.rs`](../tests/m25_cache_invalidation.rs). Covers every mutation → invalidation pairing listed above, plus the cross-key poisoning and enumeration races.
 
 Both suites are `#[ignore]` and require `ATOM_TEST_REDIS_URL`; run with `cargo test -- --include-ignored`.
+
+Redis must be **flushed between test binaries**, alongside the per-binary database recreate — see `run_one` in [`.github/workflows/rust.yml`](../.github/workflows/rust.yml). The suite caches under keys derived from the fixed seeded admin id, so without a flush the admin's grant expansion outlives the database it was derived from and a later binary authorizes against a tenant graph that no longer exists.
 
 ---
 
