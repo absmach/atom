@@ -4073,15 +4073,18 @@ pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppEr
     delete_role_assignment_with_audit(pool, false, None, id).await
 }
 
+/// Returns `true` when a new assignment row was actually inserted, so callers
+/// can tell a real state change from an idempotent no-op and decide whether the
+/// operation is worth publishing as a domain event.
 pub(crate) async fn create_role_assignment_if_missing_in_tx(
     pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateRoleAssignment,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     lock_role(tx, req.role_id).await?;
     validate_role_assignment_in_tx(pool, tx, req).await?;
-    sqlx::query(
+    let inserted = sqlx::query(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
            SELECT $1, $2, $3, $4
@@ -4099,8 +4102,9 @@ pub(crate) async fn create_role_assignment_if_missing_in_tx(
     .bind(req.role_id)
     .execute(&mut **tx)
     .await
-    .map_err(db_err)?;
-    Ok(())
+    .map_err(db_err)?
+    .rows_affected();
+    Ok(inserted > 0)
 }
 
 pub(crate) async fn lock_live_entity_subject_in_tx(

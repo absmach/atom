@@ -134,7 +134,7 @@ impl AmqpPublisher {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("EventsConfig.amqp_url is not set"))?;
 
-        let tls_config = amqp_tls_config(cfg)?;
+        let tls_config = amqp_tls_config(cfg).await?;
         let runtime = lapin::runtime::default_runtime()?;
         let connection = Connection::connect_with_config(
             url,
@@ -176,16 +176,24 @@ impl AmqpPublisher {
     }
 }
 
-fn amqp_tls_config(cfg: &EventsConfig) -> anyhow::Result<OwnedTLSConfig> {
+/// Reads the TLS material through `tokio::fs`, never `std::fs`.
+///
+/// This runs inside [`AmqpPublisher::connect`]'s timeout. A blocking read is
+/// not cancellable at an await point, so a cert path on a wedged network mount
+/// would pin a runtime worker and hang startup straight through the timeout
+/// that exists to prevent exactly that.
+async fn amqp_tls_config(cfg: &EventsConfig) -> anyhow::Result<OwnedTLSConfig> {
     let identity = match (
         &cfg.amqp_tls_client_cert_path,
         &cfg.amqp_tls_client_key_path,
     ) {
         (Some(cert_path), Some(key_path)) => {
-            let pem =
-                std::fs::read(cert_path).map_err(|e| anyhow::anyhow!("read {cert_path}: {e}"))?;
-            let key =
-                std::fs::read(key_path).map_err(|e| anyhow::anyhow!("read {key_path}: {e}"))?;
+            let pem = tokio::fs::read(cert_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("read {cert_path}: {e}"))?;
+            let key = tokio::fs::read(key_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("read {key_path}: {e}"))?;
             Some(OwnedIdentity::PKCS8 { pem, key })
         }
         (None, None) => None,
@@ -197,12 +205,14 @@ fn amqp_tls_config(cfg: &EventsConfig) -> anyhow::Result<OwnedTLSConfig> {
         ),
     };
 
-    let cert_chain = cfg
-        .amqp_tls_ca_path
-        .as_deref()
-        .map(std::fs::read_to_string)
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("read CA bundle: {e}"))?;
+    let cert_chain = match cfg.amqp_tls_ca_path.as_deref() {
+        Some(ca_path) => Some(
+            tokio::fs::read_to_string(ca_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("read CA bundle: {e}"))?,
+        ),
+        None => None,
+    };
 
     Ok(OwnedTLSConfig {
         identity,
@@ -319,20 +329,22 @@ mod tests {
         assert!(publisher.publish(&[]).await.is_ok());
     }
 
-    #[test]
-    fn amqp_tls_config_rejects_cert_without_key() {
+    #[tokio::test]
+    async fn amqp_tls_config_rejects_cert_without_key() {
         let cfg = EventsConfig {
             amqp_tls_client_cert_path: Some("/tmp/does-not-matter.pem".to_string()),
             amqp_tls_client_key_path: None,
             ..EventsConfig::default()
         };
-        assert!(amqp_tls_config(&cfg).is_err());
+        assert!(amqp_tls_config(&cfg).await.is_err());
     }
 
-    #[test]
-    fn amqp_tls_config_is_none_when_unconfigured() {
+    #[tokio::test]
+    async fn amqp_tls_config_is_none_when_unconfigured() {
         let cfg = EventsConfig::default();
-        let tls = amqp_tls_config(&cfg).expect("no TLS config is a valid default");
+        let tls = amqp_tls_config(&cfg)
+            .await
+            .expect("no TLS config is a valid default");
         assert!(tls.identity.is_none());
         assert!(tls.cert_chain.is_none());
     }

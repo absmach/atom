@@ -88,15 +88,21 @@ impl AuthMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
 
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|e| gql_error(crate::error::db_err(e)))?;
         if let Some(session_id) = auth.session_id {
-            repo::revoke_session(&state.pool, session_id)
+            repo::revoke_session_in_tx(&mut tx, session_id)
                 .await
                 .map_err(gql_error)?;
         }
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: auth.tenant_id,
                 target_kind: Some("entity"),
@@ -106,7 +112,8 @@ impl AuthMutation {
                 details: serde_json::json!({}),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
 
         Ok(true)
     }

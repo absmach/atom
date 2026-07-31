@@ -994,10 +994,22 @@ pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Session, AppError> {
 }
 
 pub async fn revoke_session(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    revoke_session_in_tx(&mut tx, id).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// The caller owns the commit, so a logout can bind the session revocation and
+/// its `auth.logout` event into one transaction.
+pub async fn revoke_session_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<(), AppError> {
     let result =
         sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
             .bind(id)
-            .execute(pool)
+            .execute(&mut **tx)
             .await
             .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -1798,14 +1810,22 @@ pub async fn add_group_member_with_audit(
     // On this transaction's connection: reaching into the pool for a second one
     // while holding a transaction deadlocks a saturated pool.
     crate::guardrails::validate_group_member(&mut tx, group_id, entity_id).await?;
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
     .bind(group_id)
     .bind(entity_id)
     .execute(&mut *tx)
     .await
-    .map_err(db_err)?;
+    .map_err(db_err)?
+    .rows_affected();
+    // Adding an entity that is already a member is a successful no-op, not a
+    // state change — publishing `group_member.add` for it would tell consumers
+    // membership changed when nothing did.
+    if inserted == 0 {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(());
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: group_tenant_id,

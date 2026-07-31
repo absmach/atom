@@ -38,6 +38,22 @@ pub async fn create_access_token(
     req: CreateAccessToken,
     scoped: bool,
 ) -> Result<AccessTokenResponse, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let response = create_access_token_in_tx(&mut tx, signing_keys, entity_id, req, scoped).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(response)
+}
+
+/// The caller owns the commit, so an audited caller can bind the mint and its
+/// `credential.create` event into one transaction via
+/// [`crate::audit::commit_with_audit`].
+pub async fn create_access_token_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    signing_keys: &SigningKeyConfig,
+    entity_id: Uuid,
+    req: CreateAccessToken,
+    scoped: bool,
+) -> Result<AccessTokenResponse, AppError> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::bad_request("access token name is required"));
@@ -88,8 +104,7 @@ pub async fn create_access_token(
     let key_prefix = token[..13].to_string();
     let metadata = serde_json::json!({ "name": &name, "description": &description });
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    if super::repo::lock_active_entity(&mut tx, entity_id)
+    if super::repo::lock_active_entity(tx, entity_id)
         .await?
         .is_none()
     {
@@ -112,15 +127,14 @@ pub async fn create_access_token(
     .bind(scoped)
     .bind(req.expires_at)
     .bind(metadata)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
-    let action_ids = resolve_ceiling_action_ids(&mut tx, &req.permissions).await?;
+    let action_ids = resolve_ceiling_action_ids(tx, &req.permissions).await?;
     for permission in &req.permissions {
-        write_ceiling_limit(&mut tx, cred_id, permission, &action_ids).await?;
+        write_ceiling_limit(tx, cred_id, permission, &action_ids).await?;
     }
-    tx.commit().await.map_err(db_err)?;
 
     Ok(AccessTokenResponse {
         credential_id: cred_id,
@@ -141,6 +155,20 @@ pub async fn replace_access_token_permissions(
     cred_id: Uuid,
     permissions: Vec<AccessTokenPermission>,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    replace_access_token_permissions_in_tx(&mut tx, entity_id, cred_id, permissions).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// See [`create_access_token_in_tx`] — the caller owns the commit so the
+/// ceiling rewrite and its `credential.update` event land atomically.
+pub async fn replace_access_token_permissions_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    cred_id: Uuid,
+    permissions: Vec<AccessTokenPermission>,
+) -> Result<(), AppError> {
     if permissions.is_empty() {
         return Err(AppError::bad_request(
             "access token requires at least one permission",
@@ -151,7 +179,6 @@ pub async fn replace_access_token_permissions(
             "access token supports at most {MAX_ACCESS_TOKEN_PERMISSIONS} permissions"
         )));
     }
-    let mut tx = pool.begin().await.map_err(db_err)?;
     let scoped: Option<bool> = sqlx::query_scalar(
         r#"SELECT scoped FROM credentials
            WHERE id = $1 AND entity_id = $2 AND kind = $3 AND status = 'active'
@@ -160,7 +187,7 @@ pub async fn replace_access_token_permissions(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     match scoped {
@@ -175,14 +202,13 @@ pub async fn replace_access_token_permissions(
 
     sqlx::query("DELETE FROM credential_permission_limits WHERE credential_id = $1")
         .bind(cred_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_err)?;
-    let action_ids = resolve_ceiling_action_ids(&mut tx, &permissions).await?;
+    let action_ids = resolve_ceiling_action_ids(tx, &permissions).await?;
     for permission in &permissions {
-        write_ceiling_limit(&mut tx, cred_id, permission, &action_ids).await?;
+        write_ceiling_limit(tx, cred_id, permission, &action_ids).await?;
     }
-    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -456,6 +482,19 @@ pub async fn revoke_access_token(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    revoke_access_token_in_tx(&mut tx, entity_id, cred_id).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// See [`create_access_token_in_tx`] — the caller owns the commit so the
+/// revocation and its `credential.revoke` event land atomically.
+pub async fn revoke_access_token_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    cred_id: Uuid,
+) -> Result<(), AppError> {
     let result = sqlx::query(
         r#"UPDATE credentials
            SET status = 'revoked',
@@ -471,7 +510,7 @@ pub async fn revoke_access_token(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {

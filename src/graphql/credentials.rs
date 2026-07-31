@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::{has_capability_in_scope, Scope},
+    error::db_err,
     identity::service,
     models::{enums::AuditOutcome, token as token_model},
     state::AppState,
@@ -93,13 +94,15 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let credential_id = service::create_password(&state.pool, entity_id, &password)
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let credential_id = service::create_password_in_tx(&mut tx, entity_id, &password)
             .await
             .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
                 target_kind: Some("credential"),
@@ -112,7 +115,8 @@ impl CredentialMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(true)
     }
 
@@ -154,8 +158,9 @@ impl CredentialMutation {
             .into_iter()
             .map(permission_input_into_model)
             .collect::<Result<Vec<_>>>()?;
-        let response = service::create_access_token(
-            &state.pool,
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let response = service::create_access_token_in_tx(
+            &mut tx,
             &state.config.signing_keys,
             owner_id,
             token_model::CreateAccessToken {
@@ -168,10 +173,11 @@ impl CredentialMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: audit_tenant_id,
                 target_kind: Some("credential"),
@@ -188,7 +194,8 @@ impl CredentialMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(response.into())
     }
 
@@ -209,18 +216,20 @@ impl CredentialMutation {
             .into_iter()
             .map(permission_input_into_model)
             .collect::<Result<Vec<_>>>()?;
-        service::replace_access_token_permissions(
-            &state.pool,
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        service::replace_access_token_permissions_in_tx(
+            &mut tx,
             owner_id,
             credential_id,
             permissions,
         )
         .await
         .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: audit_tenant_id,
                 target_kind: Some("credential"),
@@ -235,7 +244,8 @@ impl CredentialMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(true)
     }
 
@@ -246,13 +256,15 @@ impl CredentialMutation {
         let credential_id = parse_id(credential_id, "credentialId")?;
         let (owner_id, delegated, audit_tenant_id) =
             resolve_token_lifecycle_target(state, &auth, credential_id).await?;
-        service::revoke_access_token(&state.pool, owner_id, credential_id)
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        service::revoke_access_token_in_tx(&mut tx, owner_id, credential_id)
             .await
             .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: audit_tenant_id,
                 target_kind: Some("credential"),
@@ -267,7 +279,8 @@ impl CredentialMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(true)
     }
 
@@ -281,8 +294,9 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let response = service::create_shared_key(
-            &state.pool,
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let response = service::create_shared_key_in_tx(
+            &mut tx,
             &state.config.signing_keys,
             entity_id,
             token_model::CreateSharedKey {
@@ -293,10 +307,11 @@ impl CredentialMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
                 target_kind: Some("entity"),
@@ -309,7 +324,8 @@ impl CredentialMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(response.into())
     }
 
@@ -374,13 +390,15 @@ impl CredentialMutation {
             } else {
                 require_credential_management(state, &auth, entity_id).await?
             };
-        service::revoke_credential(&state.pool, entity_id, credential_id)
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        service::revoke_credential_in_tx(&mut tx, entity_id, credential_id)
             .await
             .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
                 target_kind: Some("entity"),
@@ -390,7 +408,8 @@ impl CredentialMutation {
                 details: serde_json::json!({"credential_id": credential_id}),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(true)
     }
 }

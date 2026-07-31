@@ -320,3 +320,66 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
         "domain mutation must survive audit storage failure"
     );
 }
+
+/// A failure event routinely carries ids that do not exist — "tenant not found"
+/// is one of the most common reasons an operation fails at all. When
+/// `event_outbox.tenant_id`/`actor_entity_id` still had foreign keys into
+/// `tenants`/`entities`, the outbox insert was rejected for exactly those rows,
+/// so invalid-target failures were the one class of event that could never be
+/// published. Migration `007` drops the constraints; this pins that.
+#[tokio::test]
+#[ignore]
+async fn failure_events_publish_even_when_the_tenant_and_actor_do_not_exist() {
+    let pool = common::pool().await;
+    let events_enabled = true;
+    let missing_tenant = Uuid::new_v4();
+    let missing_actor = Uuid::new_v4();
+    let target_id = Uuid::new_v4();
+    let event = format!("m26.unknown_tenant.{target_id}");
+
+    audit::observe_error(
+        &pool,
+        events_enabled,
+        &AuditMeta {
+            actor_entity_id: Some(missing_actor),
+            tenant_id: Some(missing_tenant),
+            target_kind: "tenant",
+            target_id: Some(target_id),
+            event: &event,
+        },
+        &serde_json::json!({}),
+        &atom::error::AppError::not_found(format!("tenant {missing_tenant} not found")),
+    )
+    .await;
+
+    let payload = outbox_row_for(&pool, &event, target_id)
+        .await
+        .expect("a failure event with unknown ids must still reach event_outbox");
+    assert_eq!(payload["outcome"], "error");
+    assert_eq!(
+        payload["tenant_id"],
+        serde_json::json!(missing_tenant.to_string()),
+        "the payload must keep the tenant id the caller actually supplied"
+    );
+    assert_eq!(
+        payload["actor_entity_id"],
+        serde_json::json!(missing_actor.to_string())
+    );
+
+    // The column copies must survive too — they are what the publisher and any
+    // operator query filter on.
+    let (row_tenant, row_actor): (Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as("SELECT tenant_id, actor_entity_id FROM event_outbox WHERE event = $1")
+            .bind(&event)
+            .fetch_one(&pool)
+            .await
+            .expect("query outbox columns");
+    assert_eq!(row_tenant, Some(missing_tenant));
+    assert_eq!(row_actor, Some(missing_actor));
+
+    sqlx::query("DELETE FROM event_outbox WHERE event = $1")
+        .bind(&event)
+        .execute(&pool)
+        .await
+        .expect("clean up test outbox row");
+}

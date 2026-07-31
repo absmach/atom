@@ -242,13 +242,15 @@ pub async fn logout(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Response, AppError> {
+    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
     if let Some(session_id) = auth.session_id {
-        repo::revoke_session(&state.pool, session_id).await?;
+        repo::revoke_session_in_tx(&mut tx, session_id).await?;
     }
-    audit::write(
+    audit::commit_with_audit(
         &state.pool,
+        tx,
         state.config.events.enabled(),
-        audit::AuditEvent {
+        &audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id: auth.tenant_id,
             target_kind: Some("entity"),
@@ -258,7 +260,7 @@ pub async fn logout(
             details: serde_json::json!({}),
         },
     )
-    .await;
+    .await?;
     let mut response = Json(serde_json::json!({"authenticated": false})).into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -499,11 +501,13 @@ pub async fn create_password(
         .get("password")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("missing 'password' field"))?;
-    let credential_id = service::create_password(&state.pool, entity_id, password).await?;
-    audit::write(
+    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+    let credential_id = service::create_password_in_tx(&mut tx, entity_id, password).await?;
+    audit::commit_with_audit(
         &state.pool,
+        tx,
         state.config.events.enabled(),
-        audit::AuditEvent {
+        &audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id,
             target_kind: Some("credential"),
@@ -516,7 +520,7 @@ pub async fn create_password(
             }),
         },
     )
-    .await;
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -544,11 +548,13 @@ pub async fn revoke_credential(
         } else {
             require_credential_management(&state, &auth, entity_id).await?
         };
-    service::revoke_credential(&state.pool, entity_id, cred_id).await?;
-    audit::write(
+    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+    service::revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
+    audit::commit_with_audit(
         &state.pool,
+        tx,
         state.config.events.enabled(),
-        audit::AuditEvent {
+        &audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
             tenant_id,
             target_kind: Some("entity"),
@@ -558,7 +564,7 @@ pub async fn revoke_credential(
             details: serde_json::json!({"credential_id": cred_id}),
         },
     )
-    .await;
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

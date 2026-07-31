@@ -1202,20 +1202,27 @@ pub async fn add_tenant_member_with_audit(
     lock_active_tenant(&mut tx, tenant_id).await?;
     crate::authz::repo::lock_live_entity_subject_in_tx(&mut tx, Some(tenant_id), entity_id).await?;
 
-    sqlx::query(
+    // The `WHERE` on the conflict branch keeps `rows_affected` honest: without
+    // it a `DO UPDATE` reports one row even when it rewrote 'active' as
+    // 'active', and re-adding an existing member would look like a change.
+    let membership_changed = sqlx::query(
         r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
            VALUES ($1, $2, 'active')
            ON CONFLICT (tenant_id, entity_id)
-           DO UPDATE SET status = 'active'"#,
+           DO UPDATE SET status = 'active'
+           WHERE tenant_memberships.status IS DISTINCT FROM 'active'"#,
     )
     .bind(tenant_id)
     .bind(entity_id)
     .execute(&mut *tx)
     .await
-    .map_err(db_err)?;
+    .map_err(db_err)?
+    .rows_affected()
+        > 0;
 
+    let mut role_assigned = false;
     if let Some(role_id) = role_id {
-        crate::authz::repo::create_role_assignment_if_missing_in_tx(
+        role_assigned = crate::authz::repo::create_role_assignment_if_missing_in_tx(
             pool,
             &mut tx,
             &CreateRoleAssignment {
@@ -1226,6 +1233,13 @@ pub async fn add_tenant_member_with_audit(
             },
         )
         .await?;
+    }
+
+    // Re-adding an already-active member with no new role assignment changed
+    // nothing; publishing `tenant_member.add` for it would be a false positive.
+    if !membership_changed && !role_assigned {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(());
     }
 
     let meta = crate::audit::AuditMeta {

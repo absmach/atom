@@ -5,6 +5,7 @@ use crate::{
     audit,
     auth::{has_capability_in_scope, AuthContext, Scope},
     certs::service,
+    error::db_err,
     models::enums::AuditOutcome,
     state::AppState,
 };
@@ -105,8 +106,9 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let issued = service::issue_certificate(
-            &state.pool,
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let issued = service::issue_certificate_in_tx(
+            &mut tx,
             &state.config,
             state.certificate_issuer.as_deref(),
             service::IssueCertificate {
@@ -119,10 +121,11 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
                 target_kind: Some("entity"),
@@ -136,7 +139,8 @@ impl CertificateMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(issued.into())
     }
 
@@ -149,8 +153,9 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let issued = service::issue_certificate_from_csr(
-            &state.pool,
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let issued = service::issue_certificate_from_csr_in_tx(
+            &mut tx,
             &state.config,
             state.certificate_issuer.as_deref(),
             service::IssueCertificateFromCsr {
@@ -161,10 +166,11 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
                 target_kind: Some("entity"),
@@ -178,7 +184,8 @@ impl CertificateMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(issued.into())
     }
 
@@ -193,8 +200,9 @@ impl CertificateMutation {
             .await
             .map_err(gql_error)?;
         require_certificate_rotate(state, &auth, &old).await?;
-        let issued = service::renew_certificate(
-            &state.pool,
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let issued = service::renew_certificate_in_tx(
+            &mut tx,
             &state.config,
             state.certificate_issuer.as_deref(),
             service::RenewCertificate {
@@ -205,10 +213,11 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: old.tenant_id,
                 target_kind: Some("credential"),
@@ -223,7 +232,8 @@ impl CertificateMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(issued.into())
     }
 
@@ -238,13 +248,16 @@ impl CertificateMutation {
             .await
             .map_err(gql_error)?;
         require_certificate_revoke(state, &auth, &cert).await?;
-        let revoked = service::revoke_certificate(&state.pool, &input.serial_number, input.reason)
-            .await
-            .map_err(gql_error)?;
-        audit::write(
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let revoked =
+            service::revoke_certificate_in_tx(&mut tx, &input.serial_number, input.reason)
+                .await
+                .map_err(gql_error)?;
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: cert.tenant_id,
                 target_kind: Some("credential"),
@@ -257,7 +270,8 @@ impl CertificateMutation {
                 }),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(revoked.into())
     }
 
@@ -271,13 +285,15 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let count = service::revoke_entity_certificates(&state.pool, entity_id, reason)
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let count = service::revoke_entity_certificates_in_tx(&mut tx, entity_id, reason)
             .await
             .map_err(gql_error)?;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
+            tx,
             state.config.events.enabled(),
-            audit::AuditEvent {
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id,
                 target_kind: Some("entity"),
@@ -287,7 +303,8 @@ impl CertificateMutation {
                 details: serde_json::json!({"count": count}),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(count as i64)
     }
 }
