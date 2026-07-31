@@ -266,7 +266,7 @@ pub async fn deliver_outbox_batch(
             let mut delivered_ids = Vec::new();
             let mut failed_count = 0;
 
-            for (id, res) in ids.iter().zip(per_event_results.into_iter()) {
+            for (id, res) in ids.iter().zip(per_event_results) {
                 match res {
                     Ok(()) => {
                         delivered_ids.push(*id);
