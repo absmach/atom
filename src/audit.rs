@@ -347,10 +347,6 @@ async fn write_and_enqueue(
 
 pub fn spawn_retention_cleanup(state: AppState) {
     let cfg = state.config.audit_retention;
-    if !cfg.enabled {
-        tracing::info!("audit retention cleanup disabled");
-        return;
-    }
 
     tokio::spawn(async move {
         let mut interval =
@@ -359,36 +355,43 @@ pub fn spawn_retention_cleanup(state: AppState) {
 
         loop {
             interval.tick().await;
-            if let Err(err) =
-                crate::events::cleanup_expired_outbox(&state.pool, cfg.days, cfg.cleanup_batch_size)
-                    .await
+            if let Err(err) = crate::events::cleanup_expired_outbox(
+                &state.pool,
+                cfg.days,
+                state.config.events.outbox_max_attempts,
+                cfg.cleanup_batch_size,
+            )
+            .await
             {
                 tracing::warn!("event outbox retention cleanup failed: {err}");
             }
-            match cleanup_expired(&state.pool, cfg).await {
-                Ok(summary) if summary.deleted_rows > 0 => {
-                    write(
-                        &state.pool,
-                        state.config.events.enabled(),
-                        AuditEvent {
-                            actor_entity_id: None,
-                            tenant_id: None,
-                            target_kind: None,
-                            target_id: None,
-                            event: "audit.retention_cleanup",
-                            outcome: AuditOutcome::Allow,
-                            details: serde_json::json!({
-                                "deleted_rows": summary.deleted_rows,
-                                "cutoff": summary.cutoff,
-                                "retention_days": cfg.days,
-                                "batch_size": cfg.cleanup_batch_size,
-                            }),
-                        },
-                    )
-                    .await;
+
+            if cfg.enabled {
+                match cleanup_expired(&state.pool, cfg).await {
+                    Ok(summary) if summary.deleted_rows > 0 => {
+                        write(
+                            &state.pool,
+                            state.config.events.enabled(),
+                            AuditEvent {
+                                actor_entity_id: None,
+                                tenant_id: None,
+                                target_kind: None,
+                                target_id: None,
+                                event: "audit.retention_cleanup",
+                                outcome: AuditOutcome::Allow,
+                                details: serde_json::json!({
+                                    "deleted_rows": summary.deleted_rows,
+                                    "cutoff": summary.cutoff,
+                                    "retention_days": cfg.days,
+                                    "batch_size": cfg.cleanup_batch_size,
+                                }),
+                            },
+                        )
+                        .await;
+                    }
+                    Ok(_) => {}
+                    Err(err) => tracing::warn!("audit retention cleanup failed: {err}"),
                 }
-                Ok(_) => {}
-                Err(err) => tracing::warn!("audit retention cleanup failed: {err}"),
             }
         }
     });

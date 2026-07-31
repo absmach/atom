@@ -545,14 +545,30 @@ async fn outbox_retention_cleanup_deletes_old_delivered_and_unparseable_rows() {
     .await
     .expect("insert fresh delivered row");
 
-    let deleted = atom::events::cleanup_expired_outbox(&pool, 30, 100)
+    let unparseable_retryable_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO event_outbox (id, event, payload, unparseable, attempts, created_at)
+         VALUES ($1, 'retryable.event', '{}'::jsonb, true, 1, now() - interval '40 days')",
+    )
+    .bind(unparseable_retryable_id)
+    .execute(&pool)
+    .await
+    .expect("insert retryable unparseable row");
+
+    let deleted = atom::events::cleanup_expired_outbox(&pool, 30, 10, 100)
         .await
         .expect("cleanup outbox");
 
     assert_eq!(
         deleted, 1,
-        "only outbox rows older than 30 days must be deleted"
+        "only outbox rows older than 30 days that are delivered or exhausted must be deleted"
     );
     assert!(delivered_at(&pool, old_delivered_id).await.is_none());
     assert!(delivered_at(&pool, fresh_delivered_id).await.is_some());
+
+    let (attempts, _) = attempts_and_error(&pool, unparseable_retryable_id).await;
+    assert_eq!(
+        attempts, 1,
+        "retryable unparseable row must not be deleted by retention cleanup"
+    );
 }

@@ -177,51 +177,36 @@ impl ResourceMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
-        let kind = input.kind.clone();
         let id = parse_optional_id(input.id, "id")?;
         let owner_id = parse_optional_id(input.owner_id, "ownerId")?;
-        let result = async {
-            crate::auth::require_any_capability(
-                &state.pool,
-                &auth,
-                &[
-                    ("manage", scope_for_tenant(tenant_id)),
-                    ("write", scope_for_tenant(tenant_id)),
-                ],
-            )
-            .await?;
-            authz_repo::create_resource(
-                &state.pool,
-                CreateResource {
-                    id,
-                    kind: input.kind,
-                    name: input.name,
-                    alias: input.alias,
-                    tenant_id,
-                    owner_id,
-                    attributes: input.attributes.unwrap_or(serde_json::Value::Null),
-                },
-            )
-            .await
-        }
-        .await;
+        crate::auth::require_any_capability(
+            &state.pool,
+            &auth,
+            &[
+                ("manage", scope_for_tenant(tenant_id)),
+                ("write", scope_for_tenant(tenant_id)),
+            ],
+        )
+        .await?;
 
-        audit::observe_result(
+        let resource = authz_repo::create_resource_with_audit(
             &state.pool,
             state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
+            Some(auth.entity_id),
+            CreateResource {
+                id,
+                kind: input.kind,
+                name: input.name,
+                alias: input.alias,
                 tenant_id,
-                target_kind: "resource",
-                target_id: result.as_ref().ok().map(|r| r.id),
-                event: "resource.create",
+                owner_id,
+                attributes: input.attributes.unwrap_or(serde_json::Value::Null),
             },
-            serde_json::json!({ "kind": kind }),
-            &result,
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
 
-        result.map(Into::into).map_err(gql_error)
+        Ok(resource.into())
     }
 
     async fn update_resource(

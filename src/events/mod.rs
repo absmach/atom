@@ -279,12 +279,11 @@ pub async fn deliver_outbox_batch(
                             "UPDATE event_outbox
                              SET attempts = attempts + 1,
                                  last_error = $2,
-                                 unparseable = (attempts + 1 >= $3 OR $4)
+                                 unparseable = (unparseable OR $3)
                              WHERE id = $1",
                         )
                         .bind(id)
                         .bind(&err.0)
-                        .bind(cfg.outbox_max_attempts)
                         .bind(is_unroutable_or_nacked)
                         .execute(&mut *tx)
                         .await
@@ -332,6 +331,7 @@ pub async fn deliver_outbox_batch(
 pub async fn cleanup_expired_outbox(
     pool: &PgPool,
     retention_days: i64,
+    max_attempts: i32,
     batch_size: i64,
 ) -> Result<i64, AppError> {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days);
@@ -342,15 +342,16 @@ pub async fn cleanup_expired_outbox(
             r#"WITH doomed AS (
                    SELECT id
                    FROM event_outbox
-                   WHERE (delivered_at IS NOT NULL OR unparseable = true)
+                   WHERE (delivered_at IS NOT NULL OR (unparseable = true AND attempts >= $2))
                      AND created_at < $1
                    ORDER BY created_at ASC
-                   LIMIT $2
+                   LIMIT $3
                )
                DELETE FROM event_outbox
                WHERE id IN (SELECT id FROM doomed)"#,
         )
         .bind(cutoff)
+        .bind(max_attempts)
         .bind(batch_size)
         .execute(pool)
         .await
