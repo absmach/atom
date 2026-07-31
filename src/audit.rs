@@ -219,18 +219,18 @@ pub async fn write(pool: &PgPool, events_enabled: bool, event: AuditEvent<'_>) {
     }
 }
 
-/// Executes audit logging and domain event outbox enqueue inside an existing DB
-/// transaction, ensuring the mutation and its outbox event commit atomically.
-pub async fn write_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+/// Atomically commits a mutation and its outbox event. The compliance audit row
+/// is deliberately written afterward through [`write`] so audit storage remains
+/// fire-and-forget and can never fail an already-valid domain operation.
+pub async fn commit_with_audit(
+    pool: &PgPool,
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
     events_enabled: bool,
     event: &AuditEvent<'_>,
 ) -> Result<(), crate::error::AppError> {
-    log_audit_event(event);
-    insert_audit_log(&mut **tx, event).await?;
     if events_enabled {
         crate::events::enqueue(
-            &mut **tx,
+            &mut *tx,
             events_enabled,
             event.actor_entity_id,
             event.tenant_id,
@@ -242,6 +242,23 @@ pub async fn write_in_tx(
         )
         .await?;
     }
+    tx.commit()
+        .await
+        .map_err(crate::error::AppError::Database)?;
+    write(
+        pool,
+        false,
+        AuditEvent {
+            actor_entity_id: event.actor_entity_id,
+            tenant_id: event.tenant_id,
+            target_kind: event.target_kind,
+            target_id: event.target_id,
+            event: event.event,
+            outcome: event.outcome.clone(),
+            details: event.details.clone(),
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -278,6 +295,22 @@ pub async fn observe_in_tx(
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Atomically commits a non-DB-audited mutation and its outbox event, then
+/// emits the structured success log after commit.
+pub async fn commit_with_observation(
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    events_enabled: bool,
+    meta: &AuditMeta<'_>,
+    details: &Value,
+) -> Result<(), crate::error::AppError> {
+    observe_in_tx(&mut tx, events_enabled, meta, details).await?;
+    tx.commit()
+        .await
+        .map_err(crate::error::AppError::Database)?;
+    log_observe_allow(meta, details);
     Ok(())
 }
 

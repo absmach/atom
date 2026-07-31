@@ -455,23 +455,34 @@ impl ResourceMutation {
                 ],
             )
             .await?;
-            authz_repo::set_resource_parent_group(&state.pool, resource_id, group_id).await
+            authz_repo::set_resource_parent_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                resource_id,
+                group_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|r| r.tenant_id),
+                tenant_id: None,
                 target_kind: "resource",
                 target_id: Some(resource_id),
                 event: "resource.parent_group.set",
-            },
-            serde_json::json!({ "group_id": group_id }),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({ "group_id": group_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Resource::from).map_err(gql_error)
     }
 
@@ -506,23 +517,33 @@ impl ResourceMutation {
                 ],
             )
             .await?;
-            authz_repo::clear_resource_parent_group(&state.pool, resource_id).await
+            authz_repo::clear_resource_parent_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                resource_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|r| r.tenant_id),
+                tenant_id: None,
                 target_kind: "resource",
                 target_id: Some(resource_id),
                 event: "resource.parent_group.clear",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({});
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Resource::from).map_err(gql_error)
     }
 

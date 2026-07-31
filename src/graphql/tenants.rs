@@ -650,23 +650,34 @@ impl TenantMutation {
                 Scope::Tenant(tenant_id),
             )
             .await?;
-            tenant_repo::remove_tenant_member(&state.pool, tenant_id, entity_id).await
+            tenant_repo::remove_tenant_member_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                tenant_id,
+                entity_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: Some(tenant_id),
                 target_kind: "tenant",
                 target_id: Some(tenant_id),
                 event: "tenant_member.remove",
-            },
-            serde_json::json!({ "entity_id": entity_id }),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({ "entity_id": entity_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -690,23 +701,35 @@ impl TenantMutation {
                 Scope::Tenant(tenant_id),
             )
             .await?;
-            tenant_repo::add_tenant_member(&state.pool, tenant_id, entity_id, role_id).await
+            tenant_repo::add_tenant_member_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                tenant_id,
+                entity_id,
+                role_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: Some(tenant_id),
                 target_kind: "tenant",
                 target_id: Some(tenant_id),
                 event: "tenant_member.add",
-            },
-            serde_json::json!({ "entity_id": entity_id, "role_id": role_id }),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({ "entity_id": entity_id, "role_id": role_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 }
@@ -719,24 +742,36 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
     let status_detail = status.clone();
     let result = async {
         crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
-        tenant_repo::change_tenant_status(&state.pool, tenant_id, status, Some(auth.entity_id))
-            .await
+        tenant_repo::change_tenant_status_with_audit(
+            &state.pool,
+            state.config.events.enabled(),
+            Some(auth.entity_id),
+            tenant_id,
+            status,
+            Some(auth.entity_id),
+            event,
+        )
+        .await
     }
     .await;
-    audit::observe_result(
-        &state.pool,
-        state.config.events.enabled(),
-        audit::AuditMeta {
+    if let Err(ref err) = result {
+        let meta = audit::AuditMeta {
             actor_entity_id: Some(auth.entity_id),
             tenant_id: Some(tenant_id),
             target_kind: "tenant",
             target_id: Some(tenant_id),
             event,
-        },
-        serde_json::json!({ "status": status_detail }),
-        &result,
-    )
-    .await;
+        };
+        let details = serde_json::json!({ "status": status_detail });
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &meta,
+            &details,
+            err,
+        )
+        .await;
+    }
     result.map(Into::into).map_err(gql_error)
 }
 

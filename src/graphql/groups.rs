@@ -392,6 +392,8 @@ impl GroupMutation {
                     status: input.status.map(Into::into),
                     attributes: input.attributes,
                 },
+                "group.update",
+                details.clone(),
             )
             .await
         }
@@ -432,23 +434,34 @@ impl GroupMutation {
         let result = async {
             let group = repo::get_group(&state.pool, id).await?;
             require_group_manage_app(&state.pool, &auth, id, group.tenant_id).await?;
-            repo::set_group_parent(&state.pool, id, parent_id).await
+            repo::set_group_parent_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                parent_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
+                tenant_id: None,
                 target_kind: "group",
                 target_id: Some(id),
                 event: "group.parent.set",
-            },
-            serde_json::json!({ "parent_id": parent_id }),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({ "parent_id": parent_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -470,24 +483,34 @@ impl GroupMutation {
             let group = repo::get_group(&state.pool, id).await?;
             let tenant_id = group.tenant_id;
             require_group_manage_app(&state.pool, &auth, id, tenant_id).await?;
-            repo::remove_group_parent(&state.pool, id).await?;
+            repo::remove_group_parent_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+            )
+            .await?;
             Ok(tenant_id)
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().copied().flatten(),
+                tenant_id: None,
                 target_kind: "group",
                 target_id: Some(id),
                 event: "group.parent.remove",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({});
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -641,24 +664,35 @@ impl GroupMutation {
                 ],
             )
             .await?;
-            repo::add_group_member(&state.pool, group_id, entity_id).await?;
+            repo::add_group_member_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                group_id,
+                entity_id,
+            )
+            .await?;
             Ok(tenant_id)
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().copied().flatten(),
+                tenant_id: None,
                 target_kind: "group",
                 target_id: Some(group_id),
                 event: "group_member.add",
-            },
-            serde_json::json!({ "entity_id": entity_id }),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({ "entity_id": entity_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -684,24 +718,35 @@ impl GroupMutation {
                 ],
             )
             .await?;
-            repo::remove_group_member(&state.pool, group_id, entity_id).await?;
+            repo::remove_group_member_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                group_id,
+                entity_id,
+            )
+            .await?;
             Ok(tenant_id)
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().copied().flatten(),
+                tenant_id: None,
                 target_kind: "group",
                 target_id: Some(group_id),
                 event: "group_member.remove",
-            },
-            serde_json::json!({ "entity_id": entity_id }),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({ "entity_id": entity_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 }
@@ -718,11 +763,21 @@ impl GroupMutation {
         let id = parse_id(id, "id")?;
         let event = group_status_event(&status);
         let status_detail = status.clone();
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "group",
+            target_id: Some(id),
+            event,
+        };
+        let details = serde_json::json!({ "status": status_detail });
         let result = async {
             let group = repo::get_group(&state.pool, id).await?;
             require_group_manage_app(&state.pool, &auth, id, group.tenant_id).await?;
-            repo::update_group(
+            repo::update_group_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 id,
                 UpdateGroup {
                     name: None,
@@ -730,24 +785,22 @@ impl GroupMutation {
                     status: Some(status),
                     attributes: None,
                 },
+                event,
+                details.clone(),
             )
             .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|g| g.tenant_id),
-                target_kind: "group",
-                target_id: Some(id),
-                event,
-            },
-            serde_json::json!({ "status": status_detail }),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 }

@@ -18,6 +18,15 @@ pub async fn create_api_endpoint(
     req: CreateApiEndpoint,
     created_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
+    create_api_endpoint_with_audit(pool, false, created_by, req).await
+}
+
+pub async fn create_api_endpoint_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreateApiEndpoint,
+) -> Result<ApiEndpoint, AppError> {
     let method = normalize_method(&req.method)?;
     validate_path(&req.path)?;
     validate_operation_kind(&req.operation_kind)?;
@@ -31,7 +40,8 @@ pub async fn create_api_endpoint(
     validate_json_object("response_mapping", &req.response_mapping)?;
 
     let id = Uuid::new_v4();
-    sqlx::query_as::<_, ApiEndpoint>(&format!(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
         r#"INSERT INTO api_endpoints
            (id, tenant_id, key, name, description, method, path, operation_kind,
             graphql, auth_mode, service_entity_id, variables_mapping, request_schema,
@@ -55,10 +65,24 @@ pub async fn create_api_endpoint(
     .bind(json_object_or_default(req.request_schema))
     .bind(json_object_or_default(req.response_mapping))
     .bind(status)
-    .bind(created_by)
-    .fetch_one(pool)
+    .bind(actor_id)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(endpoint_db_err)
+    .map_err(endpoint_db_err)?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: endpoint.tenant_id,
+            target_kind: "api_endpoint",
+            target_id: Some(endpoint.id),
+            event: "api_endpoint.create",
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
+    Ok(endpoint)
 }
 
 pub async fn get_api_endpoint(pool: &PgPool, id: Uuid) -> Result<ApiEndpoint, AppError> {
@@ -121,6 +145,16 @@ pub async fn update_api_endpoint(
     req: UpdateApiEndpoint,
     updated_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
+    update_api_endpoint_with_audit(pool, false, updated_by, id, req).await
+}
+
+pub async fn update_api_endpoint_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    req: UpdateApiEndpoint,
+) -> Result<ApiEndpoint, AppError> {
     if let Some(method) = req.method.as_deref() {
         normalize_method(method)?;
     }
@@ -154,7 +188,8 @@ pub async fn update_api_endpoint(
     let service_entity_id = req.service_entity_id.or(existing.service_entity_id);
     validate_auth_mode(&auth_mode, service_entity_id)?;
 
-    sqlx::query_as::<_, ApiEndpoint>(&format!(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET key               = COALESCE($2, key),
                name              = COALESCE($3, name),
@@ -188,13 +223,27 @@ pub async fn update_api_endpoint(
     .bind(req.request_schema.map(json_object_or_default))
     .bind(req.response_mapping.map(json_object_or_default))
     .bind(req.status)
-    .bind(updated_by)
-    .fetch_one(pool)
+    .bind(actor_id)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("api endpoint {id} not found")),
         other => endpoint_db_err(other),
-    })
+    })?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: endpoint.tenant_id,
+            target_kind: "api_endpoint",
+            target_id: Some(id),
+            event: "api_endpoint.update",
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
+    Ok(endpoint)
 }
 
 pub async fn enable_api_endpoint(
@@ -202,9 +251,26 @@ pub async fn enable_api_endpoint(
     id: Uuid,
     updated_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
+    enable_api_endpoint_with_audit(pool, false, updated_by, id).await
+}
+
+pub async fn enable_api_endpoint_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<ApiEndpoint, AppError> {
     let existing = get_api_endpoint(pool, id).await?;
     validate_graphql_endpoint(&existing.graphql)?;
-    set_api_endpoint_status(pool, id, "active", updated_by).await
+    set_api_endpoint_status_with_audit(
+        pool,
+        events_enabled,
+        actor_id,
+        id,
+        "active",
+        "api_endpoint.enable",
+    )
+    .await
 }
 
 pub async fn disable_api_endpoint(
@@ -212,7 +278,32 @@ pub async fn disable_api_endpoint(
     id: Uuid,
     updated_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
-    set_api_endpoint_status(pool, id, "disabled", updated_by).await
+    set_api_endpoint_status_with_audit(
+        pool,
+        false,
+        updated_by,
+        id,
+        "disabled",
+        "api_endpoint.disable",
+    )
+    .await
+}
+
+pub async fn disable_api_endpoint_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<ApiEndpoint, AppError> {
+    set_api_endpoint_status_with_audit(
+        pool,
+        events_enabled,
+        actor_id,
+        id,
+        "disabled",
+        "api_endpoint.disable",
+    )
+    .await
 }
 
 pub async fn find_api_endpoint(
@@ -297,14 +388,17 @@ pub async fn list_api_endpoint_executions(
     Ok(ApiEndpointExecutionList { items, total })
 }
 
-async fn set_api_endpoint_status(
+async fn set_api_endpoint_status_with_audit(
     pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     id: Uuid,
     status: &str,
-    updated_by: Option<Uuid>,
+    event: &str,
 ) -> Result<ApiEndpoint, AppError> {
     validate_status(status)?;
-    sqlx::query_as::<_, ApiEndpoint>(&format!(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET status = $2, updated_by = $3, updated_at = now()
            WHERE id = $1
@@ -312,13 +406,27 @@ async fn set_api_endpoint_status(
     ))
     .bind(id)
     .bind(status)
-    .bind(updated_by)
-    .fetch_one(pool)
+    .bind(actor_id)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("api endpoint {id} not found")),
         other => endpoint_db_err(other),
-    })
+    })?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: endpoint.tenant_id,
+            target_kind: "api_endpoint",
+            target_id: Some(id),
+            event,
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
+    Ok(endpoint)
 }
 
 fn validate_graphql_endpoint(graphql: &str) -> Result<(), AppError> {

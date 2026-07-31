@@ -7,7 +7,7 @@ use crate::{
     models::{
         action_assignment_rule::{CreateActionAssignmentRule, ListActionAssignmentRules},
         capability::{CreateCapability, ListCapabilities, UpdateCapability},
-        enums::{AuditOutcome, DeletedFilter},
+        enums::DeletedFilter,
         policy::{
             CreateDirectPolicy, CreatePermissionBlock, CreateRoleAssignment, ListDirectPolicies,
             ListPermissionBlocks, ListRoleAssignments,
@@ -438,8 +438,10 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::replace_role_permission_block_links(
+            authz_repo::replace_role_permission_block_links_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 role_id,
                 &permission_block_ids,
             )
@@ -447,20 +449,22 @@ impl PolicyMutation {
             Ok(tenant_id)
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().copied().flatten(),
-                target_kind: "role",
-                target_id: Some(role_id),
-                event: "role.permission_blocks.replace",
-            },
-            serde_json::json!({ "permission_block_ids": permission_block_ids }),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "role",
+                    target_id: Some(role_id),
+                    event: "role.permission_blocks.replace",
+                },
+                &serde_json::json!({ "permission_block_ids": permission_block_ids }),
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -606,8 +610,10 @@ impl PolicyMutation {
         });
         let result = async {
             require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
-            authz_repo::create_capability(
+            authz_repo::create_capability_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 CreateCapability {
                     name: input.name,
                     description: input.description,
@@ -617,20 +623,22 @@ impl PolicyMutation {
             .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: None,
-                target_kind: "action",
-                target_id: result.as_ref().ok().map(|a| a.id),
-                event: "action.create",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "action",
+                    target_id: None,
+                    event: "action.create",
+                },
+                &serde_json::json!({}),
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -646,8 +654,10 @@ impl PolicyMutation {
         let object_type = input.object_type;
         let result = async {
             require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
-            authz_repo::add_capability_applicability(
+            authz_repo::add_capability_applicability_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 action_id,
                 object_kind.clone(),
                 object_type.clone(),
@@ -655,20 +665,22 @@ impl PolicyMutation {
             .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: None,
-                target_kind: "action",
-                target_id: Some(action_id),
-                event: "action_applicability.add",
-            },
-            serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "action",
+                    target_id: Some(action_id),
+                    event: "action_applicability.add",
+                },
+                &serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
+                err,
+            )
+            .await;
+        }
         result.map(ActionApplicabilityEntry).map_err(gql_error)
     }
 
@@ -684,8 +696,10 @@ impl PolicyMutation {
         let object_type = input.object_type;
         let result = async {
             require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
-            authz_repo::remove_capability_applicability(
+            authz_repo::remove_capability_applicability_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 action_id,
                 object_kind.clone(),
                 object_type.clone(),
@@ -693,20 +707,22 @@ impl PolicyMutation {
             .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: None,
-                target_kind: "action",
-                target_id: Some(action_id),
-                event: "action_applicability.remove",
-            },
-            serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "action",
+                    target_id: Some(action_id),
+                    event: "action_applicability.remove",
+                },
+                &serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -726,8 +742,10 @@ impl PolicyMutation {
         )
         .await
         .map_err(gql_error)?;
-        let rule = authz_repo::create_action_assignment_rule(
+        let rule = authz_repo::create_action_assignment_rule_with_audit(
             &state.pool,
+            state.config.events.enabled(),
+            Some(auth.entity_id),
             CreateActionAssignmentRule {
                 tenant_id,
                 entity_kind: input.entity_kind.into(),
@@ -740,14 +758,6 @@ impl PolicyMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit_action_assignment_rule(
-            &state.pool,
-            state.config.events.enabled(),
-            auth.entity_id,
-            &rule,
-            "create",
-        )
-        .await;
         Ok(ActionAssignmentRule(rule))
     }
 
@@ -766,17 +776,14 @@ impl PolicyMutation {
         )
         .await
         .map_err(gql_error)?;
-        let rule = authz_repo::delete_action_assignment_rule(&state.pool, id)
-            .await
-            .map_err(gql_error)?;
-        audit_action_assignment_rule(
+        authz_repo::delete_action_assignment_rule_with_audit(
             &state.pool,
             state.config.events.enabled(),
-            auth.entity_id,
-            &rule,
-            "delete",
+            Some(auth.entity_id),
+            id,
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
         Ok(true)
     }
 
@@ -802,8 +809,10 @@ impl PolicyMutation {
         });
         let result = async {
             require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
-            authz_repo::update_capability(
+            authz_repo::update_capability_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 action_id,
                 UpdateCapability {
                     name: input.name,
@@ -814,20 +823,22 @@ impl PolicyMutation {
             .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: None,
-                target_kind: "action",
-                target_id: Some(action_id),
-                event: "action.update",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "action",
+                    target_id: Some(action_id),
+                    event: "action.update",
+                },
+                &serde_json::json!({}),
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -837,23 +848,31 @@ impl PolicyMutation {
         let action_id = parse_id(id, "id")?;
         let result = async {
             require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
-            authz_repo::delete_capability(&state.pool, action_id).await
+            authz_repo::delete_capability_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                action_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: None,
-                target_kind: "action",
-                target_id: Some(action_id),
-                event: "action.delete",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "action",
+                    target_id: Some(action_id),
+                    event: "action.delete",
+                },
+                &serde_json::json!({}),
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -880,8 +899,10 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::create_permission_block(
+            authz_repo::create_permission_block_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 CreatePermissionBlock {
                     tenant_id,
                     scope_mode: input.scope_mode,
@@ -897,20 +918,22 @@ impl PolicyMutation {
             .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: "permission_block",
-                target_id: result.as_ref().ok().map(|b| b.id),
-                event: "permission_block.create",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: "permission_block",
+                    target_id: None,
+                    event: "permission_block.create",
+                },
+                &serde_json::json!({}),
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -928,24 +951,32 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::delete_permission_block(&state.pool, id).await?;
+            authz_repo::delete_permission_block_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+            )
+            .await?;
             Ok(tenant_id)
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().copied().flatten(),
-                target_kind: "permission_block",
-                target_id: Some(id),
-                event: "permission_block.delete",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: result.as_ref().ok().copied().flatten(),
+                    target_kind: "permission_block",
+                    target_id: Some(id),
+                    event: "permission_block.delete",
+                },
+                &serde_json::json!({}),
+                err,
+            )
+            .await;
+        }
         result.map(|_| true).map_err(gql_error)
     }
 
@@ -1146,36 +1177,4 @@ impl PolicyMutation {
         }
         result.map(|_| true).map_err(gql_error)
     }
-}
-
-async fn audit_action_assignment_rule(
-    pool: &sqlx::PgPool,
-    events_enabled: bool,
-    actor_id: uuid::Uuid,
-    rule: &crate::models::action_assignment_rule::ActionAssignmentRule,
-    action: &str,
-) {
-    let event = format!("action_assignment_rule.{action}");
-    audit::write(
-        pool,
-        events_enabled,
-        audit::AuditEvent {
-            actor_entity_id: Some(actor_id),
-            tenant_id: rule.tenant_id,
-            target_kind: Some("action_assignment_rule"),
-            target_id: Some(rule.id),
-            event: &event,
-            outcome: AuditOutcome::Allow,
-            details: serde_json::json!({
-                "entity_kind": &rule.entity_kind,
-                "action_name": rule.action_name,
-                "object_kind": rule.object_kind.as_str(),
-                "object_type": &rule.object_type,
-                "decision": &rule.decision,
-                "is_absolute": rule.is_absolute,
-                "transport": "graphql",
-            }),
-        },
-    )
-    .await;
 }

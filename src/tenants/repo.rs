@@ -688,9 +688,7 @@ pub async fn restore_tenant_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(tenant)
 }
 
@@ -764,9 +762,7 @@ pub async fn purge_tenant_with_audit(
             "tenant_name": name,
         }),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(PurgedTenant { id, name })
 }
 
@@ -781,6 +777,7 @@ pub async fn change_tenant_status_with_audit(
     id: Uuid,
     status: TenantStatus,
     updated_by: Option<Uuid>,
+    event_name: &str,
 ) -> Result<Tenant, AppError> {
     if status == TenantStatus::Deleted {
         return Err(AppError::bad_request(
@@ -821,7 +818,7 @@ pub async fn change_tenant_status_with_audit(
         tenant_id: Some(id),
         target_kind: "tenant",
         target_id: Some(id),
-        event: "tenant.status.update",
+        event: event_name,
     };
     let details = serde_json::json!({ "status": tenant.status });
     crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
@@ -837,7 +834,16 @@ pub async fn change_tenant_status(
     status: TenantStatus,
     updated_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    change_tenant_status_with_audit(pool, false, None, id, status, updated_by).await
+    change_tenant_status_with_audit(
+        pool,
+        false,
+        None,
+        id,
+        status,
+        updated_by,
+        "tenant.status.update",
+    )
+    .await
 }
 
 fn search_pattern(q: Option<String>) -> Option<String> {
@@ -1130,6 +1136,16 @@ pub async fn remove_tenant_member(
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
+    remove_tenant_member_with_audit(pool, false, None, tenant_id, entity_id).await
+}
+
+pub async fn remove_tenant_member_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    tenant_id: Uuid,
+    entity_id: Uuid,
+) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     sqlx::query(
@@ -1172,12 +1188,31 @@ pub async fn remove_tenant_member(
         return Err(AppError::not_found("tenant member not found"));
     }
 
-    tx.commit().await.map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: Some(tenant_id),
+        target_kind: "tenant",
+        target_id: Some(tenant_id),
+        event: "tenant_member.remove",
+    };
+    let details = serde_json::json!({ "entity_id": entity_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
 pub async fn add_tenant_member(
     pool: &PgPool,
+    tenant_id: Uuid,
+    entity_id: Uuid,
+    role_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    add_tenant_member_with_audit(pool, false, None, tenant_id, entity_id, role_id).await
+}
+
+pub async fn add_tenant_member_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     tenant_id: Uuid,
     entity_id: Uuid,
     role_id: Option<Uuid>,
@@ -1212,7 +1247,15 @@ pub async fn add_tenant_member(
         .await?;
     }
 
-    tx.commit().await.map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: Some(tenant_id),
+        target_kind: "tenant",
+        target_id: Some(tenant_id),
+        event: "tenant_member.add",
+    };
+    let details = serde_json::json!({ "entity_id": entity_id, "role_id": role_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 

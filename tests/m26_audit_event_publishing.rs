@@ -15,10 +15,12 @@ mod common;
 
 use async_graphql::Request;
 use atom::{
+    audit::{self, AuditEvent, AuditMeta},
     auth::AuthContext,
     config::Config,
     graphql::{build_schema, AtomSchema},
     keys,
+    models::enums::AuditOutcome,
     state::AppState,
 };
 use serde_json::Value;
@@ -152,4 +154,170 @@ async fn no_event_outbox_rows_are_written_when_events_are_not_configured() {
         payload.is_none(),
         "no event_outbox row should be written when EventsConfig::enabled() is false"
     );
+}
+
+/// If outbox insertion fails, the domain mutation must roll back with it. This
+/// is the regression boundary that mutate-then-observe could not provide.
+#[tokio::test]
+#[ignore]
+async fn outbox_failure_rolls_back_the_domain_mutation() {
+    let pool = common::pool().await;
+    sqlx::query(
+        r#"CREATE OR REPLACE FUNCTION m26_reject_atomic_test_event()
+           RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+             IF NEW.event = 'test.atomic.rollback' THEN
+               RAISE EXCEPTION 'forced event_outbox failure';
+             END IF;
+             RETURN NEW;
+           END;
+           $$"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("create rejection function");
+    sqlx::query("DROP TRIGGER IF EXISTS m26_reject_atomic_test_event ON event_outbox")
+        .execute(&pool)
+        .await
+        .expect("drop stale rejection trigger");
+    sqlx::query(
+        r#"CREATE TRIGGER m26_reject_atomic_test_event
+           BEFORE INSERT ON event_outbox
+           FOR EACH ROW EXECUTE FUNCTION m26_reject_atomic_test_event()"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("create rejection trigger");
+
+    let action_id = Uuid::new_v4();
+    let action_name = format!("m26-atomic-{action_id}");
+    let mut tx = pool.begin().await.expect("begin transaction");
+    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+        .bind(action_id)
+        .bind(&action_name)
+        .execute(&mut *tx)
+        .await
+        .expect("insert action in transaction");
+    let result = audit::commit_with_observation(
+        tx,
+        true,
+        &AuditMeta {
+            actor_entity_id: Some(common::admin_id()),
+            tenant_id: None,
+            target_kind: "action",
+            target_id: Some(action_id),
+            event: "test.atomic.rollback",
+        },
+        &serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "forced outbox failure must reach the caller"
+    );
+
+    let action_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
+            .bind(action_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query rolled-back action");
+    assert!(
+        !action_exists,
+        "domain mutation must roll back with outbox insert"
+    );
+
+    sqlx::query("DROP TRIGGER m26_reject_atomic_test_event ON event_outbox")
+        .execute(&pool)
+        .await
+        .expect("drop rejection trigger");
+    sqlx::query("DROP FUNCTION m26_reject_atomic_test_event()")
+        .execute(&pool)
+        .await
+        .expect("drop rejection function");
+}
+
+/// Persisted audit storage is a separate fire-and-forget channel: its failure
+/// must not roll back a valid mutation after the outbox transaction commits.
+#[tokio::test]
+#[ignore]
+async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
+    let pool = common::pool().await;
+    sqlx::query(
+        r#"CREATE OR REPLACE FUNCTION m26_reject_audit_test_event()
+           RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+             IF NEW.event = 'test.audit.fire_and_forget' THEN
+               RAISE EXCEPTION 'forced audit_logs failure';
+             END IF;
+             RETURN NEW;
+           END;
+           $$"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("create audit rejection function");
+    sqlx::query("DROP TRIGGER IF EXISTS m26_reject_audit_test_event ON audit_logs")
+        .execute(&pool)
+        .await
+        .expect("drop stale audit rejection trigger");
+    sqlx::query(
+        r#"CREATE TRIGGER m26_reject_audit_test_event
+           BEFORE INSERT ON audit_logs
+           FOR EACH ROW EXECUTE FUNCTION m26_reject_audit_test_event()"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("create audit rejection trigger");
+
+    let action_id = Uuid::new_v4();
+    let action_name = format!("m26-audit-{action_id}");
+    let mut tx = pool.begin().await.expect("begin transaction");
+    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+        .bind(action_id)
+        .bind(&action_name)
+        .execute(&mut *tx)
+        .await
+        .expect("insert action in transaction");
+    audit::commit_with_audit(
+        &pool,
+        tx,
+        false,
+        &AuditEvent {
+            actor_entity_id: Some(common::admin_id()),
+            tenant_id: None,
+            target_kind: Some("action"),
+            target_id: Some(action_id),
+            event: "test.audit.fire_and_forget",
+            outcome: AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("audit storage failure must not fail the mutation");
+
+    let action_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
+            .bind(action_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query committed action");
+    assert!(
+        action_exists,
+        "domain mutation must survive audit storage failure"
+    );
+
+    sqlx::query("DROP TRIGGER m26_reject_audit_test_event ON audit_logs")
+        .execute(&pool)
+        .await
+        .expect("drop audit rejection trigger");
+    sqlx::query("DROP FUNCTION m26_reject_audit_test_event()")
+        .execute(&pool)
+        .await
+        .expect("drop audit rejection function");
+    sqlx::query("DELETE FROM actions WHERE id = $1")
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("delete committed test action");
 }

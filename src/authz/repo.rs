@@ -300,8 +300,7 @@ pub async fn update_resource_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({ "updated_fields": updated_fields }),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(resource)
 }
 
@@ -351,8 +350,7 @@ pub async fn delete_resource_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(())
 }
 
@@ -416,9 +414,7 @@ pub async fn restore_resource_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(())
 }
 
@@ -513,9 +509,7 @@ pub async fn purge_resource_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(tenant_id)
 }
 
@@ -639,9 +633,33 @@ pub async fn set_resource_parent_group(
     resource_id: Uuid,
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
+    set_resource_parent_group_with_audit(pool, false, None, resource_id, group_id).await
+}
+
+pub async fn set_resource_parent_group_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    resource_id: Uuid,
+    group_id: Uuid,
+) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     set_resource_parent_group_in_tx(&mut tx, resource_id, group_id).await?;
-    tx.commit().await.map_err(db_err)?;
+    let tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
+            .bind(resource_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id,
+        target_kind: "resource",
+        target_id: Some(resource_id),
+        event: "resource.parent_group.set",
+    };
+    let details = serde_json::json!({ "group_id": group_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     get_resource(pool, resource_id).await
 }
 
@@ -649,9 +667,32 @@ pub async fn clear_resource_parent_group(
     pool: &PgPool,
     resource_id: Uuid,
 ) -> Result<Resource, AppError> {
+    clear_resource_parent_group_with_audit(pool, false, None, resource_id).await
+}
+
+pub async fn clear_resource_parent_group_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    resource_id: Uuid,
+) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     clear_resource_parent_group_in_tx(&mut tx, resource_id).await?;
-    tx.commit().await.map_err(db_err)?;
+    let tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
+            .bind(resource_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id,
+        target_kind: "resource",
+        target_id: Some(resource_id),
+        event: "resource.parent_group.clear",
+    };
+    let details = serde_json::json!({});
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     get_resource(pool, resource_id).await
 }
 
@@ -1180,6 +1221,17 @@ pub async fn replace_role_permission_block_links(
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
+    replace_role_permission_block_links_with_audit(pool, false, None, role_id, permission_block_ids)
+        .await
+}
+
+pub async fn replace_role_permission_block_links_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    role_id: Uuid,
+    permission_block_ids: &[Uuid],
+) -> Result<(), AppError> {
     let role_tenant_id: Option<Uuid> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(role_id)
@@ -1223,7 +1275,7 @@ pub async fn replace_role_permission_block_links(
         .await
         .map_err(db_err)?;
 
-    for permission_block_id in unique_block_ids {
+    for permission_block_id in &unique_block_ids {
         sqlx::query(
             r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
                VALUES ($1, $2)
@@ -1236,7 +1288,19 @@ pub async fn replace_role_permission_block_links(
         .map_err(db_err)?;
     }
 
-    tx.commit().await.map_err(db_err)
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: role_tenant_id,
+            target_kind: "role",
+            target_id: Some(role_id),
+            event: "role.permission_blocks.replace",
+        },
+        &serde_json::json!({ "permission_block_ids": unique_block_ids }),
+    )
+    .await
 }
 
 async fn insert_role_permission_block(
@@ -1901,6 +1965,15 @@ pub async fn create_permission_block(
     pool: &PgPool,
     req: CreatePermissionBlock,
 ) -> Result<PermissionBlock, AppError> {
+    create_permission_block_with_audit(pool, false, None, req).await
+}
+
+pub async fn create_permission_block_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreatePermissionBlock,
+) -> Result<PermissionBlock, AppError> {
     validate_permission_block_input(pool, &req).await?;
     let conditions = normalize_conditions(req.conditions)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
@@ -1935,11 +2008,32 @@ pub async fn create_permission_block(
         .await
         .map_err(db_err)?;
     }
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: req.tenant_id,
+            target_kind: "permission_block",
+            target_id: Some(id),
+            event: "permission_block.create",
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
     get_permission_block(pool, id).await
 }
 
 pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    delete_permission_block_with_audit(pool, false, None, id).await
+}
+
+pub async fn delete_permission_block_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<(), AppError> {
     // Blocks are shared: refuse to delete one still linked to a role or attached
     // to a direct policy, so an explicit delete cannot cascade live links away.
     //
@@ -1951,8 +2045,8 @@ pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppE
     // the referenced block row, which conflicts with FOR UPDATE, so no link can
     // slip in between the reference check and the delete.
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let locked: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM permission_blocks WHERE id = $1 FOR UPDATE")
+    let locked: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await
@@ -1980,7 +2074,19 @@ pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppE
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: locked.flatten(),
+            target_kind: "permission_block",
+            target_id: Some(id),
+            event: "permission_block.delete",
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2784,9 +2890,7 @@ pub async fn restore_role_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(())
 }
 
@@ -2852,9 +2956,7 @@ pub async fn purge_role_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(tenant_id)
 }
 
@@ -2963,6 +3065,15 @@ pub async fn create_capability(
     pool: &PgPool,
     req: CreateCapability,
 ) -> Result<Capability, AppError> {
+    create_capability_with_audit(pool, false, None, req).await
+}
+
+pub async fn create_capability_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreateCapability,
+) -> Result<Capability, AppError> {
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let capability = sqlx::query_as::<_, Capability>(
@@ -2981,7 +3092,19 @@ pub async fn create_capability(
     if !applicability.is_empty() {
         replace_capability_applicability_in_tx(&mut tx, id, &applicability).await?;
     }
-    tx.commit().await.map_err(AppError::Database)?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: None,
+            target_kind: "action",
+            target_id: Some(capability.id),
+            event: "action.create",
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
     Ok(capability)
 }
 
@@ -3211,6 +3334,15 @@ pub async fn create_action_assignment_rule(
     pool: &PgPool,
     req: CreateActionAssignmentRule,
 ) -> Result<ActionAssignmentRule, AppError> {
+    create_action_assignment_rule_with_audit(pool, false, None, req).await
+}
+
+pub async fn create_action_assignment_rule_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreateActionAssignmentRule,
+) -> Result<ActionAssignmentRule, AppError> {
     let action_name = req.action_name.trim().to_string();
     if action_name.is_empty() {
         return Err(AppError::bad_request("actionName is required"));
@@ -3269,7 +3401,8 @@ pub async fn create_action_assignment_rule(
         return Err(AppError::conflict("action assignment rule already exists"));
     }
 
-    sqlx::query_as::<_, ActionAssignmentRule>(
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let rule = sqlx::query_as::<_, ActionAssignmentRule>(
         r#"INSERT INTO action_assignment_rules
              (tenant_id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -3283,34 +3416,101 @@ pub async fn create_action_assignment_rule(
     .bind(object_type)
     .bind(req.decision)
     .bind(req.is_absolute)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+    let event = crate::audit::AuditEvent {
+        actor_entity_id: actor_id,
+        tenant_id: rule.tenant_id,
+        target_kind: Some("action_assignment_rule"),
+        target_id: Some(rule.id),
+        event: "action_assignment_rule.create",
+        outcome: crate::models::enums::AuditOutcome::Allow,
+        details: serde_json::json!({
+            "entity_kind": &rule.entity_kind,
+            "action_name": &rule.action_name,
+            "object_kind": rule.object_kind.as_str(),
+            "object_type": &rule.object_type,
+            "decision": &rule.decision,
+            "is_absolute": rule.is_absolute,
+            "transport": "graphql",
+        }),
+    };
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
+    Ok(rule)
 }
 
 pub async fn delete_action_assignment_rule(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<ActionAssignmentRule, AppError> {
-    sqlx::query_as::<_, ActionAssignmentRule>(
+    delete_action_assignment_rule_with_audit(pool, false, None, id).await
+}
+
+pub async fn delete_action_assignment_rule_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<ActionAssignmentRule, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let rule = sqlx::query_as::<_, ActionAssignmentRule>(
         r#"DELETE FROM action_assignment_rules
            WHERE id = $1
            RETURNING id, tenant_id, entity_kind, action_name, object_kind, object_type,
                      decision, is_absolute, created_at"#,
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
             AppError::not_found(format!("action assignment rule {id} not found"))
         }
         other => AppError::Database(other),
-    })
+    })?;
+    let event = crate::audit::AuditEvent {
+        actor_entity_id: actor_id,
+        tenant_id: rule.tenant_id,
+        target_kind: Some("action_assignment_rule"),
+        target_id: Some(rule.id),
+        event: "action_assignment_rule.delete",
+        outcome: crate::models::enums::AuditOutcome::Allow,
+        details: serde_json::json!({
+            "entity_kind": &rule.entity_kind,
+            "action_name": &rule.action_name,
+            "object_kind": rule.object_kind.as_str(),
+            "object_type": &rule.object_type,
+            "decision": &rule.decision,
+            "is_absolute": rule.is_absolute,
+            "transport": "graphql",
+        }),
+    };
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
+    Ok(rule)
 }
 
 pub async fn add_capability_applicability(
     pool: &PgPool,
+    capability_id: Uuid,
+    object_kind: String,
+    object_type: Option<String>,
+) -> Result<CapabilityApplicabilityEntry, AppError> {
+    add_capability_applicability_with_audit(
+        pool,
+        false,
+        None,
+        capability_id,
+        object_kind,
+        object_type,
+    )
+    .await
+}
+
+pub async fn add_capability_applicability_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     capability_id: Uuid,
     object_kind: String,
     object_type: Option<String>,
@@ -3361,7 +3561,19 @@ pub async fn add_capability_applicability(
     .await
     .map_err(db_err)?;
 
-    tx.commit().await.map_err(AppError::Database)?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: None,
+            target_kind: "action",
+            target_id: Some(capability_id),
+            event: "action_applicability.add",
+        },
+        &serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
+    )
+    .await?;
     Ok(entry)
 }
 
@@ -3371,6 +3583,26 @@ pub async fn remove_capability_applicability(
     object_kind: String,
     object_type: Option<String>,
 ) -> Result<(), AppError> {
+    remove_capability_applicability_with_audit(
+        pool,
+        false,
+        None,
+        capability_id,
+        object_kind,
+        object_type,
+    )
+    .await
+}
+
+pub async fn remove_capability_applicability_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    capability_id: Uuid,
+    object_kind: String,
+    object_type: Option<String>,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let result = sqlx::query(
         r#"DELETE FROM action_applicability
            WHERE action_id = $1
@@ -3378,9 +3610,9 @@ pub async fn remove_capability_applicability(
              AND object_type IS NOT DISTINCT FROM $3"#,
     )
     .bind(capability_id)
-    .bind(object_kind)
-    .bind(object_type)
-    .execute(pool)
+    .bind(&object_kind)
+    .bind(&object_type)
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
 
@@ -3389,7 +3621,19 @@ pub async fn remove_capability_applicability(
             "capability applicability row not found",
         ));
     }
-    Ok(())
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: None,
+            target_kind: "action",
+            target_id: Some(capability_id),
+            event: "action_applicability.remove",
+        },
+        &serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
+    )
+    .await
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -3420,6 +3664,16 @@ pub async fn update_capability(
     id: Uuid,
     req: crate::models::capability::UpdateCapability,
 ) -> Result<Capability, AppError> {
+    update_capability_with_audit(pool, false, None, id, req).await
+}
+
+pub async fn update_capability_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    req: crate::models::capability::UpdateCapability,
+) -> Result<Capability, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let updated = sqlx::query_as::<_, Capability>(
         r#"UPDATE actions
@@ -3443,7 +3697,19 @@ pub async fn update_capability(
         replace_capability_applicability_in_tx(&mut tx, id, &applicability).await?;
     }
 
-    tx.commit().await.map_err(AppError::Database)?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: None,
+            target_kind: "action",
+            target_id: Some(id),
+            event: "action.update",
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
     Ok(updated)
 }
 
@@ -3480,15 +3746,37 @@ async fn replace_capability_applicability_in_tx(
 }
 
 pub async fn delete_capability(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    delete_capability_with_audit(pool, false, None, id).await
+}
+
+pub async fn delete_capability_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let result = sqlx::query("DELETE FROM actions WHERE id = $1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
     if result.rows_affected() == 0 {
         return Err(AppError::not_found(format!("capability {id} not found")));
     }
-    Ok(())
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: None,
+            target_kind: "action",
+            target_id: Some(id),
+            event: "action.delete",
+        },
+        &serde_json::json!({}),
+    )
+    .await
 }
 
 // ─── Policy Bindings ──────────────────────────────────────────────────────────
@@ -3746,8 +4034,17 @@ pub async fn delete_role_assignment_with_audit(
     id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let assignment = get_role_assignment(pool, id).await?;
-    let tenant_id = assignment.tenant_id;
+    let assignment_tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = assignment_tenant_id else {
+        return Err(AppError::not_found(format!(
+            "role assignment {id} not found"
+        )));
+    };
     let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)

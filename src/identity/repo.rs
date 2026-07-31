@@ -113,9 +113,7 @@ pub async fn create_entity_with_audit(
             "alias": entity.alias,
         }),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(entity)
 }
 
@@ -268,6 +266,8 @@ pub async fn update_entity_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
     req: UpdateEntity,
+    event_name: &str,
+    audit_details: Value,
 ) -> Result<Entity, AppError> {
     let attributes = req.attributes.clone().map(normalize_attributes);
     let parent_group_id = attributes
@@ -363,18 +363,25 @@ pub async fn update_entity_with_audit(
         tenant_id: entity.tenant_id,
         target_kind: Some("entity"),
         target_id: Some(id),
-        event: "entity.update",
+        event: event_name,
         outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
+        details: audit_details,
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(entity)
 }
 
 pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result<Entity, AppError> {
-    update_entity_with_audit(pool, false, None, id, req).await
+    update_entity_with_audit(
+        pool,
+        false,
+        None,
+        id,
+        req,
+        "entity.update",
+        serde_json::json!({}),
+    )
+    .await
 }
 
 pub async fn get_entity_parent_group(
@@ -393,16 +400,63 @@ pub async fn set_entity_parent_group(
     entity_id: Uuid,
     group_id: Uuid,
 ) -> Result<Entity, AppError> {
+    set_entity_parent_group_with_audit(pool, false, None, entity_id, group_id).await
+}
+
+pub async fn set_entity_parent_group_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    entity_id: Uuid,
+    group_id: Uuid,
+) -> Result<Entity, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     set_entity_parent_group_in_tx(&mut tx, entity_id, group_id).await?;
-    tx.commit().await.map_err(db_err)?;
+    let tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+            .bind(entity_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id,
+        target_kind: "entity",
+        target_id: Some(entity_id),
+        event: "entity.parent_group.set",
+    };
+    let details = serde_json::json!({ "group_id": group_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     get_entity(pool, entity_id).await
 }
 
 pub async fn clear_entity_parent_group(pool: &PgPool, entity_id: Uuid) -> Result<Entity, AppError> {
+    clear_entity_parent_group_with_audit(pool, false, None, entity_id).await
+}
+
+pub async fn clear_entity_parent_group_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    entity_id: Uuid,
+) -> Result<Entity, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     clear_entity_parent_group_in_tx(&mut tx, entity_id).await?;
-    tx.commit().await.map_err(db_err)?;
+    let tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+            .bind(entity_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id,
+        target_kind: "entity",
+        target_id: Some(entity_id),
+        event: "entity.parent_group.clear",
+    };
+    let details = serde_json::json!({});
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     get_entity(pool, entity_id).await
 }
 
@@ -730,9 +784,7 @@ pub async fn delete_entity_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(())
 }
 
@@ -806,9 +858,7 @@ pub async fn restore_entity_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(())
 }
 
@@ -858,9 +908,7 @@ pub async fn purge_entity_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(tenant_id)
 }
 
@@ -1149,6 +1197,16 @@ pub async fn set_group_parent(
     child_id: Uuid,
     parent_id: Uuid,
 ) -> Result<Group, AppError> {
+    set_group_parent_with_audit(pool, false, None, child_id, parent_id).await
+}
+
+pub async fn set_group_parent_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    child_id: Uuid,
+    parent_id: Uuid,
+) -> Result<Group, AppError> {
     if child_id == parent_id {
         return Err(AppError::bad_request("group cannot be its own parent"));
     }
@@ -1292,11 +1350,28 @@ pub async fn set_group_parent(
         }
     }
 
-    tx.commit().await.map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: child_tenant_id,
+        target_kind: "group",
+        target_id: Some(child_id),
+        event: "group.parent.set",
+    };
+    let details = serde_json::json!({ "parent_id": parent_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     get_group(pool, child_id).await
 }
 
 pub async fn remove_group_parent(pool: &PgPool, child_id: Uuid) -> Result<(), AppError> {
+    remove_group_parent_with_audit(pool, false, None, child_id).await
+}
+
+pub async fn remove_group_parent_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    child_id: Uuid,
+) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
@@ -1335,7 +1410,15 @@ pub async fn remove_group_parent(pool: &PgPool, child_id: Uuid) -> Result<(), Ap
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id,
+        target_kind: "group",
+        target_id: Some(child_id),
+        event: "group.parent.remove",
+    };
+    let details = serde_json::json!({});
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
@@ -1367,6 +1450,8 @@ pub async fn update_group_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
     req: UpdateGroup,
+    event_name: &str,
+    audit_details: Value,
 ) -> Result<Group, AppError> {
     let attributes = req.attributes.clone().map(normalize_attributes);
     let mut tx = pool.begin().await.map_err(db_err)?;
@@ -1426,9 +1511,9 @@ pub async fn update_group_with_audit(
         tenant_id: group.tenant_id,
         target_kind: "group",
         target_id: Some(id),
-        event: "group.update",
+        event: event_name,
     };
-    let details = serde_json::json!({});
+    let details = audit_details;
     crate::audit::observe_in_tx(&mut tx, events_enabled, &meta, &details).await?;
 
     tx.commit().await.map_err(db_err)?;
@@ -1437,7 +1522,16 @@ pub async fn update_group_with_audit(
 }
 
 pub async fn update_group(pool: &PgPool, id: Uuid, req: UpdateGroup) -> Result<Group, AppError> {
-    update_group_with_audit(pool, false, None, id, req).await
+    update_group_with_audit(
+        pool,
+        false,
+        None,
+        id,
+        req,
+        "group.update",
+        serde_json::json!({}),
+    )
+    .await
 }
 
 pub async fn delete_group_with_audit(
@@ -1564,9 +1658,7 @@ pub async fn restore_group_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(())
 }
 
@@ -1617,9 +1709,7 @@ pub async fn purge_group_with_audit(
         outcome: crate::models::enums::AuditOutcome::Allow,
         details: serde_json::json!({}),
     };
-    crate::audit::write_in_tx(&mut tx, events_enabled, &event).await?;
-
-    tx.commit().await.map_err(db_err)?;
+    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(tenant_id)
 }
 
@@ -1629,6 +1719,16 @@ pub async fn purge_group(pool: &PgPool, id: Uuid) -> Result<Option<Uuid>, AppErr
 
 pub async fn add_group_member(
     pool: &PgPool,
+    group_id: Uuid,
+    entity_id: Uuid,
+) -> Result<(), AppError> {
+    add_group_member_with_audit(pool, false, None, group_id, entity_id).await
+}
+
+pub async fn add_group_member_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
@@ -1704,7 +1804,15 @@ pub async fn add_group_member(
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: group_tenant_id,
+        target_kind: "group",
+        target_id: Some(group_id),
+        event: "group_member.add",
+    };
+    let details = serde_json::json!({ "entity_id": entity_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 
@@ -1713,12 +1821,41 @@ pub async fn remove_group_member(
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
+    remove_group_member_with_audit(pool, false, None, group_id, entity_id).await
+}
+
+pub async fn remove_group_member_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    group_id: Uuid,
+    entity_id: Uuid,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM principal_groups WHERE id = $1")
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!("group {group_id} not found")));
+    };
     sqlx::query("DELETE FROM principal_group_members WHERE group_id = $1 AND entity_id = $2")
         .bind(group_id)
         .bind(entity_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id,
+        target_kind: "group",
+        target_id: Some(group_id),
+        event: "group_member.remove",
+    };
+    let details = serde_json::json!({ "entity_id": entity_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(())
 }
 

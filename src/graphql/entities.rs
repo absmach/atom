@@ -9,7 +9,7 @@ use crate::{
     models::{
         access::AuthorizedObjectIdsQuery,
         entity as entity_model,
-        enums::{AuditOutcome, DeletedFilter, EntityStatus},
+        enums::{DeletedFilter, EntityStatus},
     },
     state::AppState,
 };
@@ -313,6 +313,8 @@ impl EntityMutation {
                     status: input.status.map(Into::into),
                     attributes: input.attributes,
                 },
+                "entity.update",
+                details.clone(),
             )
             .await
         }
@@ -498,23 +500,34 @@ impl EntityMutation {
                 ],
             )
             .await?;
-            repo::set_entity_parent_group(&state.pool, entity_id, group_id).await
+            repo::set_entity_parent_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                entity_id,
+                group_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
+                tenant_id: None,
                 target_kind: "entity",
                 target_id: Some(entity_id),
                 event: "entity.parent_group.set",
-            },
-            serde_json::json!({ "group_id": group_id }),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({ "group_id": group_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Entity::from).map_err(gql_error)
     }
 
@@ -545,23 +558,33 @@ impl EntityMutation {
                 ],
             )
             .await?;
-            repo::clear_entity_parent_group(&state.pool, entity_id).await
+            repo::clear_entity_parent_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                entity_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            &state.pool,
-            state.config.events.enabled(),
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
+                tenant_id: None,
                 target_kind: "entity",
                 target_id: Some(entity_id),
                 event: "entity.parent_group.clear",
-            },
-            serde_json::json!({}),
-            &result,
-        )
-        .await;
+            };
+            let details = serde_json::json!({});
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Entity::from).map_err(gql_error)
     }
 
@@ -627,49 +650,57 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
     let state = ctx.data::<AppState>()?;
     let entity_id = parse_id(id, "id")?;
     let event = entity_status_event(&status);
-    let existing = repo::get_entity(&state.pool, entity_id)
-        .await
-        .map_err(gql_error)?;
-    require_any_capability(
-        &state.pool,
-        &auth,
-        &[
-            ("manage", scope_for_tenant(existing.tenant_id)),
-            ("write", scope_for_tenant(existing.tenant_id)),
-        ],
-    )
-    .await?;
-    let entity = repo::update_entity(
-        &state.pool,
-        entity_id,
-        entity_model::UpdateEntity {
-            name: None,
-            kind: None,
-            alias: None,
-            tenant_id: None,
-            profile_id: None,
-            profile_version_id: None,
-            status: Some(status),
-            attributes: None,
-        },
-    )
-    .await
-    .map_err(gql_error)?;
-    audit::write(
-        &state.pool,
-        state.config.events.enabled(),
-        audit::AuditEvent {
-            actor_entity_id: Some(auth.entity_id),
-            tenant_id: entity.tenant_id,
-            target_kind: Some("entity"),
-            target_id: Some(entity_id),
+    let details = serde_json::json!({});
+    let meta = audit::AuditMeta {
+        actor_entity_id: Some(auth.entity_id),
+        tenant_id: None,
+        target_kind: "entity",
+        target_id: Some(entity_id),
+        event,
+    };
+    let result = async {
+        let existing = repo::get_entity(&state.pool, entity_id).await?;
+        crate::auth::require_any_capability(
+            &state.pool,
+            &auth,
+            &[
+                ("manage", scope_for_tenant(existing.tenant_id)),
+                ("write", scope_for_tenant(existing.tenant_id)),
+            ],
+        )
+        .await?;
+        repo::update_entity_with_audit(
+            &state.pool,
+            state.config.events.enabled(),
+            Some(auth.entity_id),
+            entity_id,
+            entity_model::UpdateEntity {
+                name: None,
+                kind: None,
+                alias: None,
+                tenant_id: None,
+                profile_id: None,
+                profile_version_id: None,
+                status: Some(status),
+                attributes: None,
+            },
             event,
-            outcome: AuditOutcome::Allow,
-            details: serde_json::json!({}),
-        },
-    )
+            details.clone(),
+        )
+        .await
+    }
     .await;
-    Ok(entity.into())
+    if let Err(ref err) = result {
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &meta,
+            &details,
+            err,
+        )
+        .await;
+    }
+    result.map(Into::into).map_err(gql_error)
 }
 
 async fn require_ownership_manage(
