@@ -8,6 +8,7 @@ pub mod api_endpoints;
 pub mod audit;
 pub mod auth;
 pub mod authz;
+pub mod build_info;
 pub mod certs;
 pub mod config;
 pub mod crypto;

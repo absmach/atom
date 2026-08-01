@@ -12,6 +12,11 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::Config::from_env()?;
     init_tracing(&cfg.logging)?;
+    tracing::info!(
+        version = atom::build_info::VERSION,
+        revision = atom::build_info::REVISION,
+        "starting atom"
+    );
 
     metrics::init(cfg.metrics.enabled);
     let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;

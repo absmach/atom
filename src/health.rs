@@ -7,7 +7,7 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    keys, rate_limit,
+    build_info, keys, rate_limit,
     state::{AppState, GrpcRuntimeState},
 };
 
@@ -58,6 +58,8 @@ pub struct SigningKeyStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemStatus {
+    pub version: &'static str,
+    pub revision: &'static str,
     pub status: ComponentStatus,
     pub http_ready: ComponentCheck,
     pub grpc_ready: ComponentCheck,
@@ -106,6 +108,8 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
         message: if ready { "ready" } else { "not ready" }.to_string(),
     };
     let response = SystemStatus {
+        version: build_info::VERSION,
+        revision: build_info::REVISION,
         status,
         http_ready,
         grpc_ready,

@@ -3,6 +3,14 @@ FROM debian:bookworm-slim
 # Build through `make docker_atom_dev`; the staged context contains only the
 # host-built atom binary plus migrations for parity with the normal image.
 
+ARG ATOM_VERSION=dev
+ARG ATOM_REVISION=unknown
+LABEL org.opencontainers.image.title="Atom" \
+    org.opencontainers.image.version="${ATOM_VERSION}" \
+    org.opencontainers.image.revision="${ATOM_REVISION}"
+ENV ATOM_VERSION=${ATOM_VERSION}
+ENV ATOM_REVISION=${ATOM_REVISION}
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates wget \
     && rm -rf /var/lib/apt/lists/* \

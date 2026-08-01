@@ -1,10 +1,13 @@
+ARG ATOM_VERSION=dev
+ARG ATOM_REVISION=unknown
+
 FROM node:24.15.0-bookworm-slim AS base
 ENV NEXT_TELEMETRY_DISABLED=1
 WORKDIR /app
 RUN corepack enable
 
 FROM base AS deps
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
@@ -12,10 +15,17 @@ COPY . .
 RUN pnpm build
 
 FROM node:24.15.0-bookworm-slim AS runner
+ARG ATOM_VERSION
+ARG ATOM_REVISION
+LABEL org.opencontainers.image.title="Atom UI" \
+  org.opencontainers.image.version="${ATOM_VERSION}" \
+  org.opencontainers.image.revision="${ATOM_REVISION}"
 ENV HOSTNAME=0.0.0.0
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
+ENV ATOM_VERSION=${ATOM_VERSION}
+ENV ATOM_REVISION=${ATOM_REVISION}
 WORKDIR /app
 
 RUN groupadd --system --gid 1001 nodejs \

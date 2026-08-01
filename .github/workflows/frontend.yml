@@ -1,0 +1,57 @@
+name: Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "docs/**"
+      - ".github/workflows/frontend.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "docs/**"
+      - ".github/workflows/frontend.yml"
+
+jobs:
+  validate:
+    name: ${{ matrix.project }} lint / test / build / audit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [app, docs]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+          cache-dependency-path: ${{ matrix.project }}/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint Atom UI
+        if: matrix.project == 'app'
+        run: pnpm lint
+
+      - name: Test Atom UI
+        if: matrix.project == 'app'
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high

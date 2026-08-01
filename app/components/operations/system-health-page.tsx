@@ -33,6 +33,8 @@ type ComponentCheck = {
 };
 
 type SystemStatus = {
+  version: string;
+  revision: string;
   status: ComponentStatus;
   httpReady: ComponentCheck;
   grpcReady: ComponentCheck;
@@ -82,6 +84,8 @@ type SystemStatusResponse = {
 const SYSTEM_STATUS_QUERY = `
   query SystemStatus {
     systemStatus {
+      version
+      revision
       status
       httpReady { status message }
       grpcReady { status message }
@@ -166,6 +170,18 @@ export function SystemHealthPage() {
 
   return (
     <div className="grid gap-6">
+      <Card>
+        <CardHeader>
+          <CardDescription>Running build</CardDescription>
+          <CardTitle className="text-base">Atom {status.version}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <code className="text-xs text-muted-foreground">
+            {status.revision}
+          </code>
+        </CardContent>
+      </Card>
+
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {checks.map((item) => (
           <Card key={item.label}>

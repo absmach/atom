@@ -9,5 +9,7 @@ export default async function AssignmentGuardrailsPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const sp = await searchParams;
-  return <CrudWorkspace resourceKey="action-assignment-rules" searchParams={sp} />;
+  return (
+    <CrudWorkspace resourceKey="action-assignment-rules" searchParams={sp} />
+  );
 }

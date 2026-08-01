@@ -92,6 +92,8 @@ pub struct GqlRateLimitStatus {
 #[derive(SimpleObject)]
 #[graphql(name = "SystemStatus")]
 pub struct GqlSystemStatus {
+    pub version: String,
+    pub revision: String,
     pub status: GqlComponentStatus,
     pub http_ready: GqlComponentCheck,
     pub grpc_ready: GqlComponentCheck,
@@ -184,6 +186,8 @@ impl OperationsMutation {
 impl From<health::SystemStatus> for GqlSystemStatus {
     fn from(status: health::SystemStatus) -> Self {
         Self {
+            version: status.version.to_string(),
+            revision: status.revision.to_string(),
             status: status.status.into(),
             http_ready: status.http_ready.into(),
             grpc_ready: status.grpc_ready.into(),

@@ -3,6 +3,7 @@ name: Publish container images
 on:
   push:
     branches: [main]
+    tags: ["v*.*.*"]
 
 concurrency:
   group: publish-container-images-${{ github.ref }}
@@ -12,10 +13,12 @@ env:
   REGISTRY: ghcr.io
   ATOM_IMAGE: ${{ github.repository_owner }}/atom
   ATOM_UI_IMAGE: ${{ github.repository_owner }}/atom-ui
+  IMAGE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+  BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
 
 jobs:
   publish:
-    name: Build and push latest images
+    name: Build and push container images
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,9 +45,13 @@ jobs:
           file: ./Dockerfile
           target: release
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.ATOM_IMAGE }}:latest
+          tags: ${{ env.REGISTRY }}/${{ env.ATOM_IMAGE }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            ATOM_VERSION=${{ env.BUILD_VERSION }}
+            ATOM_REVISION=${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.BUILD_VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=atom
           cache-to: type=gha,mode=max,scope=atom
@@ -55,9 +62,13 @@ jobs:
           context: ./app
           file: ./app/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.ATOM_UI_IMAGE }}:latest
+          tags: ${{ env.REGISTRY }}/${{ env.ATOM_UI_IMAGE }}:${{ env.IMAGE_TAG }}
+          build-args: |
+            ATOM_VERSION=${{ env.BUILD_VERSION }}
+            ATOM_REVISION=${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.BUILD_VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=atom-ui
           cache-to: type=gha,mode=max,scope=atom-ui

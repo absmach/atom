@@ -9,6 +9,12 @@ DOCKERFILE ?= Dockerfile
 BUILD_CONTEXT ?= .
 DOCKER_ATOM_DEV_IMAGE ?= $(ATOM_IMAGE)
 DOCKER_ATOM_DEV_CONTEXT ?= target/docker_atom_dev
+GIT_DESCRIBE := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_REVISION := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+ATOM_VERSION ?= $(GIT_DESCRIBE)
+ATOM_REVISION ?= $(GIT_REVISION)
+RELEASE_TAG ?= $(shell git describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null)
+DOCKER_BUILD_ARGS = --build-arg ATOM_VERSION="$(ATOM_VERSION)" --build-arg ATOM_REVISION="$(ATOM_REVISION)"
 COMPOSE ?= docker compose
 COMPOSE_PROFILES ?= --profile default --profile atom-ui
 DEV_ENV_FILE ?= .env
@@ -18,13 +24,15 @@ COMPOSE_ENV = ATOM_IMAGE="$(ATOM_IMAGE)" ATOM_UI_IMAGE="$(ATOM_UI_IMAGE)"
 DEV_HTTP_PORT ?= 8090
 DEV_UI_PORT ?= 3000
 
-.PHONY: help db dev build atom-build docker_atom_dev ui-build up down logs restart docker-build docker-build-release
+.PHONY: help db dev build latest release release-check atom-build docker_atom_dev ui-build up down logs restart docker-build docker-build-release
 
 help:
 	@echo "First run: cp .env.example .env"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  make build               Rebuild Atom backend + Atom UI images (run after code changes)"
+	@echo "  make latest              Build both images as :latest with Git-derived build metadata"
+	@echo "  make release             Build both images from a clean exact vX.Y.Z tag"
 	@echo "  make atom-build          Rebuild only the Atom backend image"
 	@echo "  make docker_atom_dev     Build Atom on the host, then copy the binary into a Docker image"
 	@echo "  make ui-build            Rebuild only the Atom UI image"
@@ -47,6 +55,8 @@ help:
 	@echo "  IMAGE_TAG=$(IMAGE_TAG)"
 	@echo "  ATOM_IMAGE=$(ATOM_IMAGE)"
 	@echo "  ATOM_UI_IMAGE=$(ATOM_UI_IMAGE)"
+	@echo "  ATOM_VERSION=$(ATOM_VERSION)"
+	@echo "  ATOM_REVISION=$(ATOM_REVISION)"
 	@echo "  BUILD_TARGET=$(BUILD_TARGET)"
 	@echo "  DOCKERFILE=$(DOCKERFILE)"
 	@echo "  BUILD_CONTEXT=$(BUILD_CONTEXT)"
@@ -71,29 +81,59 @@ dev: db
 
 build: atom-build ui-build
 
+latest:
+	$(MAKE) build IMAGE_TAG=latest ATOM_VERSION="$(ATOM_VERSION)" ATOM_REVISION="$(ATOM_REVISION)"
+
+release: release-check
+	$(MAKE) build IMAGE_TAG="$(RELEASE_TAG)" ATOM_VERSION="$(RELEASE_TAG)" ATOM_REVISION="$(ATOM_REVISION)"
+
+release-check:
+	@set -eu; \
+	tag="$(RELEASE_TAG)"; \
+	if [ -z "$$tag" ]; then \
+		echo "release requires HEAD to have an exact vX.Y.Z Git tag" >&2; \
+		exit 1; \
+	fi; \
+	if ! printf '%s\n' "$$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+		echo "release tag must use vX.Y.Z form, got $$tag" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$(git rev-list -n 1 "$$tag")" != "$$(git rev-parse HEAD)" ]; then \
+		echo "release tag $$tag does not point at HEAD" >&2; \
+		exit 1; \
+	fi; \
+	if [ -n "$$(git status --porcelain --untracked-files=normal)" ]; then \
+		echo "release requires a clean worktree, including no untracked files" >&2; \
+		git status --short >&2; \
+		exit 1; \
+	fi
+
 atom-build:
 	docker build \
 		-f $(DOCKERFILE) \
 		--target $(BUILD_TARGET) \
+		$(DOCKER_BUILD_ARGS) \
 		-t "$(ATOM_IMAGE)" \
 		$(BUILD_CONTEXT)
 
 docker_atom_dev:
 	@command -v cargo >/dev/null 2>&1 || { echo "cargo is required for 'make docker_atom_dev'"; exit 1; }
 	@test -n "$(DOCKER_ATOM_DEV_CONTEXT)" || { echo "DOCKER_ATOM_DEV_CONTEXT must not be empty"; exit 1; }
-	cargo build --release
+	ATOM_BUILD_VERSION="$(ATOM_VERSION)" ATOM_BUILD_REVISION="$(ATOM_REVISION)" cargo build --release
 	rm -rf -- "$(DOCKER_ATOM_DEV_CONTEXT)"
 	mkdir -p "$(DOCKER_ATOM_DEV_CONTEXT)"
 	install -m 0755 target/release/atom "$(DOCKER_ATOM_DEV_CONTEXT)/atom"
 	cp -R migrations "$(DOCKER_ATOM_DEV_CONTEXT)/migrations"
 	cp Dockerfile.atom-dev "$(DOCKER_ATOM_DEV_CONTEXT)/Dockerfile"
 	docker build \
+		$(DOCKER_BUILD_ARGS) \
 		-t "$(DOCKER_ATOM_DEV_IMAGE)" \
 		"$(DOCKER_ATOM_DEV_CONTEXT)"
 
 ui-build:
 	docker build \
 		-f app/Dockerfile \
+		$(DOCKER_BUILD_ARGS) \
 		-t "$(ATOM_UI_IMAGE)" \
 		app
 
@@ -112,6 +152,7 @@ docker-build:
 	docker build \
 		-f $(DOCKERFILE) \
 		--target $(BUILD_TARGET) \
+		$(DOCKER_BUILD_ARGS) \
 		-t $(IMAGE_NAME):$(IMAGE_TAG) \
 		$(BUILD_CONTEXT)
 

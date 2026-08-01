@@ -232,10 +232,25 @@ Run `make help` for the current target list.
 | `make down`                 | Stops the local Compose stack.                                                         |
 | `make restart`              | Stops and starts the Compose stack again (no rebuild).                                 |
 | `make build`                | Builds Atom backend and Atom UI images.                                                |
+| `make latest`               | Builds both `:latest` images with Git-derived version and revision metadata.           |
+| `make release`              | Builds both images from a clean exact `vX.Y.Z` tag using that versioned image tag.      |
 | `make atom-build`           | Builds only the Atom backend image.                                                    |
 | `make ui-build`             | Builds only the Atom UI image.                                                         |
 | `make docker-build`         | Builds the raw Atom Docker image using Makefile variables.                             |
 | `make docker-build-release` | Builds the raw release Docker image.                                                   |
+
+For a versioned release, tag the exact clean commit and build both images:
+
+```bash
+git tag v0.50.0
+make release
+```
+
+The result is `ghcr.io/absmach/atom:v0.50.0` and
+`ghcr.io/absmach/atom-ui:v0.50.0` in the local image store. `make release`
+does not push; pushing the Git tag triggers the image workflow. `make latest`
+uses `git describe --tags --always --dirty` for the embedded runtime version
+while keeping the mutable `latest` image tag.
 
 Common overrides:
 

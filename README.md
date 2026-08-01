@@ -406,6 +406,8 @@ Run `make help` to print the current target list from the Makefile.
 | `make db`                   | Starts only Postgres (for a host `cargo run`).                                         |
 | `make dev`                  | Host `cargo run` (:8090) + UI dev (:3000) on the shared Postgres; runs with `make up`. |
 | `make build`                | Builds and tags the Atom backend and Atom UI images for local Compose use.             |
+| `make latest`               | Builds both `:latest` images with the Git description and revision embedded.           |
+| `make release`              | Builds both images from a clean exact `vX.Y.Z` tag and uses that tag for both images.   |
 | `make atom-build`           | Builds and tags only the Atom backend image.                                           |
 | `make ui-build`             | Builds and tags only the Atom UI image.                                                |
 | `make up`                   | Starts Postgres, Atom, and Atom UI with `.env` (builds images only if missing).        |
@@ -427,6 +429,23 @@ IMAGE_TAG=2026-06-12 make build
 # Start only selected Compose profiles
 COMPOSE_PROFILES="--profile default" make up
 ```
+
+`make latest` embeds `git describe --tags --always --dirty` plus the full Git
+revision in the backend health response and in both images' OCI labels. A
+release build is stricter: commit the intended release state, tag that exact
+commit, and build from a clean worktree:
+
+```bash
+git tag v0.50.0
+make release
+```
+
+This produces `ghcr.io/absmach/atom:v0.50.0` and
+`ghcr.io/absmach/atom-ui:v0.50.0` locally; it does not push them. Pushing the
+tag triggers the image workflow, which publishes the same versioned tags. The
+Cargo manifest version remains the fallback for direct `cargo build` calls;
+the Git-derived version supplied by Make is the runtime and image release
+identity.
 
 Production builds can be made with:
 
@@ -994,6 +1013,10 @@ POST /auth/oauth/exchange
 POST /auth/keys/rotate
 ANY /api/custom/*
 ```
+
+The readiness response includes the embedded `version` and full Git
+`revision`, so operators can verify the running binary against a release tag or
+image label.
 
 Core access-model APIs should use GraphQL object names:
 

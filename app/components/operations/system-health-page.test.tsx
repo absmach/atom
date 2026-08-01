@@ -35,6 +35,8 @@ describe("SystemHealthPage", () => {
     mocks.graphqlClient.mockReset();
     mocks.graphqlClient.mockResolvedValue({
       systemStatus: {
+        version: "v0.50.0",
+        revision: "0123456789abcdef",
         status: "error",
         httpReady: { status: "error", message: "not ready" },
         grpcReady: {
@@ -90,6 +92,8 @@ describe("SystemHealthPage", () => {
   it("renders gRPC runtime errors from system status", async () => {
     renderSystemHealthPage();
 
+    expect(await screen.findByText("Atom v0.50.0")).toBeInTheDocument();
+    expect(screen.getByText("0123456789abcdef")).toBeInTheDocument();
     expect(await screen.findByText("gRPC")).toBeInTheDocument();
     expect(
       screen.getByText("gRPC server exited on 127.0.0.1:8081: bind failed"),
