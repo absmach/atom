@@ -404,7 +404,7 @@ impl CacheClient {
             metrics::record_cache_lookup(category.as_str(), "miss");
             return Lookup::Miss { version };
         };
-        match serde_json::from_slice::<T>(&payload) {
+        match rmp_serde::from_slice::<T>(&payload) {
             Ok(value) => {
                 metrics::record_cache_lookup(category.as_str(), "hit");
                 Lookup::Hit(value)
@@ -446,7 +446,7 @@ impl CacheClient {
         expected_version: i64,
         value: &T,
     ) {
-        let Ok(payload) = serde_json::to_vec(value) else {
+        let Ok(payload) = rmp_serde::to_vec(value) else {
             tracing::warn!(
                 category = category.as_str(),
                 "cache payload serialize failed"
@@ -746,15 +746,15 @@ mod tests {
         let client = test_client().await;
         let key = unique_key("corrupt");
 
-        // Write a payload that isn't valid JSON for `Payload` directly into
-        // the hash, bypassing `try_populate`, to simulate corruption.
+        // Write a payload that isn't a validly-encoded `Payload` directly
+        // into the hash, bypassing `try_populate`, to simulate corruption.
         let mut conn = client.get_conn().await.expect("conn");
         let _: () = redis::cmd("HSET")
             .arg(&key)
             .arg("v")
             .arg(1)
             .arg("p")
-            .arg("not valid json")
+            .arg("not a valid payload")
             .query_async(&mut conn)
             .await
             .expect("seed corrupt payload");
@@ -802,7 +802,7 @@ mod tests {
             .arg("v")
             .arg(1)
             .arg("p")
-            .arg("not valid json")
+            .arg("not a valid payload")
             .query_async(&mut conn)
             .await
             .expect("seed corrupt payload");
