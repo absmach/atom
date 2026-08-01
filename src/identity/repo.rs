@@ -1192,11 +1192,12 @@ pub async fn finish_entity_deletion_in_tx(
     .await
     .map_err(db_err)?;
 
-    let tenant_id: Option<Uuid> = sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-        .bind(id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(db_err)?;
+    let tenant_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(db_err)?;
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id,

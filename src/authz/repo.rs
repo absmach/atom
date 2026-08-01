@@ -4288,8 +4288,7 @@ pub async fn create_role_assignment_with_audit(
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let assignment =
-        create_role_assignment_in_tx(&mut tx, events_enabled, actor_id, req).await?;
+    let assignment = create_role_assignment_in_tx(&mut tx, events_enabled, actor_id, req).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(assignment)
 }
