@@ -251,9 +251,10 @@ The result is `ghcr.io/absmach/atom:v0.50.0` and
 `:latest` tags moved onto the same images so `make up` runs what was just
 released. `make release` does not push; pushing the Git tag triggers the image
 workflow, which runs the Rust and Frontend suites first and then publishes both
-the versioned tags and `:latest`. `make latest` uses
-`git describe --tags --always --dirty` for the embedded runtime version while
-keeping the mutable `latest` image tag.
+the versioned tags and `:latest`. Publishing is serialized across branch and
+tag events, and CI enforces the same exact `vX.Y.Z` guard as `make release`.
+`make latest` uses `git describe --tags --always --dirty` for the embedded
+runtime version while keeping the mutable `latest` image tag.
 
 Common overrides:
 

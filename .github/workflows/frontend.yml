@@ -38,7 +38,7 @@ jobs:
       # Version comes from the `packageManager` field. The path is explicit
       # because `defaults.run.working-directory` applies to `run` steps only,
       # and this repository has no package.json at its root.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: ${{ matrix.project }}/package.json
 
