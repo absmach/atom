@@ -13,13 +13,27 @@ env:
   REGISTRY: ghcr.io
   ATOM_IMAGE: ${{ github.repository_owner }}/atom
   ATOM_UI_IMAGE: ${{ github.repository_owner }}/atom-ui
-  IMAGE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
   BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
 
 jobs:
+  # Publishing is gated on the same suites that guard a pull request, so a tag
+  # pushed straight to the repository cannot ship an untested image.
+  rust:
+    name: Rust
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rust.yml
+
+  frontend:
+    name: Frontend
+    permissions:
+      contents: read
+    uses: ./.github/workflows/frontend.yml
+
   publish:
     name: Build and push container images
     runs-on: ubuntu-latest
+    needs: [rust, frontend]
     permissions:
       contents: read
       packages: write
@@ -45,7 +59,9 @@ jobs:
           file: ./Dockerfile
           target: release
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.ATOM_IMAGE }}:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.ATOM_IMAGE }}:latest
+            ${{ github.ref_type == 'tag' && format('{0}/{1}:{2}', env.REGISTRY, env.ATOM_IMAGE, github.ref_name) || '' }}
           build-args: |
             ATOM_VERSION=${{ env.BUILD_VERSION }}
             ATOM_REVISION=${{ github.sha }}
@@ -62,7 +78,9 @@ jobs:
           context: ./app
           file: ./app/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.ATOM_UI_IMAGE }}:${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.ATOM_UI_IMAGE }}:latest
+            ${{ github.ref_type == 'tag' && format('{0}/{1}:{2}', env.REGISTRY, env.ATOM_UI_IMAGE, github.ref_name) || '' }}
           build-args: |
             ATOM_VERSION=${{ env.BUILD_VERSION }}
             ATOM_REVISION=${{ github.sha }}

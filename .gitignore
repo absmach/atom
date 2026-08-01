@@ -28,6 +28,10 @@
 .DS_Store
 Thumbs.db
 
+# Local planning scratchpad — `make release` refuses to build with untracked
+# files present, and this is not part of the shipped tree
+/todo.md
+
 # Logs
 *.log
 

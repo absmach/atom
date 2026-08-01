@@ -248,9 +248,10 @@ make release
 
 The result is `ghcr.io/absmach/atom:v0.50.0` and
 `ghcr.io/absmach/atom-ui:v0.50.0` in the local image store. `make release`
-does not push; pushing the Git tag triggers the image workflow. `make latest`
-uses `git describe --tags --always --dirty` for the embedded runtime version
-while keeping the mutable `latest` image tag.
+does not push; pushing the Git tag triggers the image workflow, which runs the
+Rust and Frontend suites first and then publishes both the versioned tags and
+`:latest`. `make latest` uses `git describe --tags --always --dirty` for the
+embedded runtime version while keeping the mutable `latest` image tag.
 
 Common overrides:
 

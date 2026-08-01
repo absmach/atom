@@ -1,6 +1,6 @@
 [package]
 name = "atom"
-version = "0.1.0"
+version = "0.50.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Identity and Authorization service for IoT and cloud-native systems"

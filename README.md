@@ -442,10 +442,11 @@ make release
 
 This produces `ghcr.io/absmach/atom:v0.50.0` and
 `ghcr.io/absmach/atom-ui:v0.50.0` locally; it does not push them. Pushing the
-tag triggers the image workflow, which publishes the same versioned tags. The
-Cargo manifest version remains the fallback for direct `cargo build` calls;
-the Git-derived version supplied by Make is the runtime and image release
-identity.
+tag triggers the image workflow, which runs the Rust and Frontend suites first
+and only then publishes both the versioned tags and `:latest`, so the Compose
+defaults follow the release. The Cargo manifest version remains the fallback
+for direct `cargo build` calls; the Git-derived version supplied by Make is
+the runtime and image release identity.
 
 Production builds can be made with:
 

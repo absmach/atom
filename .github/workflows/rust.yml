@@ -1,19 +1,15 @@
 name: Rust
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "migrations/**"
-      - "proto/**"
-      - "tests/**"
-      - "build.rs"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/rust.yml"
   pull_request:
     branches: [main]
+  # Pushes to main and release tags run this through the image workflow, which
+  # gates publishing on it. Keeping a separate push trigger here would just run
+  # the same job twice for every one of those events.
+  workflow_call:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
