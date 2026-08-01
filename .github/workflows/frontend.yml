@@ -11,6 +11,10 @@ on:
   # gates publishing on it. Keeping a separate push trigger here would just run
   # the same job twice for every one of those events.
   workflow_call:
+  # Keeps the dependency audit running against main between pull requests.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,9 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Version comes from the `packageManager` field. The path is explicit
+      # because `defaults.run.working-directory` applies to `run` steps only,
+      # and this repository has no package.json at its root.
       - uses: pnpm/action-setup@v4
         with:
-          version: 10.33.0
+          package_json_file: ${{ matrix.project }}/package.json
 
       - uses: actions/setup-node@v6
         with:
@@ -54,5 +61,10 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Skipped on push, which is the path that publishes images: a CVE
+      # disclosed after the code froze would otherwise block shipping an
+      # already-tested tag. Pull requests and the weekly schedule still gate on
+      # it, and `github.event_name` on a called workflow is the caller's event.
       - name: Audit production dependencies
+        if: github.event_name != 'push'
         run: pnpm audit --prod --audit-level high

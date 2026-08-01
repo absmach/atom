@@ -35,8 +35,8 @@ ARG ATOM_REVISION
 LABEL org.opencontainers.image.title="Atom" \
     org.opencontainers.image.version="${ATOM_VERSION}" \
     org.opencontainers.image.revision="${ATOM_REVISION}"
-ENV ATOM_VERSION=${ATOM_VERSION}
-ENV ATOM_REVISION=${ATOM_REVISION}
+# No runtime ENV for these: the binary has them compiled in via build.rs, so an
+# env var here could disagree with what the process actually reports.
 RUN apk add --no-cache ca-certificates libgcc \
     && addgroup -S atom \
     && adduser -S -G atom atom
@@ -57,8 +57,8 @@ ARG ATOM_REVISION
 LABEL org.opencontainers.image.title="Atom" \
     org.opencontainers.image.version="${ATOM_VERSION}" \
     org.opencontainers.image.revision="${ATOM_REVISION}"
-ENV ATOM_VERSION=${ATOM_VERSION}
-ENV ATOM_REVISION=${ATOM_REVISION}
+# No runtime ENV for these: the binary has them compiled in via build.rs, so an
+# env var here could disagree with what the process actually reports.
 RUN apk add --no-cache ca-certificates libgcc \
     && addgroup -S atom \
     && adduser -S -G atom atom

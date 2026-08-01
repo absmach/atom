@@ -233,7 +233,7 @@ Run `make help` for the current target list.
 | `make restart`              | Stops and starts the Compose stack again (no rebuild).                                 |
 | `make build`                | Builds Atom backend and Atom UI images.                                                |
 | `make latest`               | Builds both `:latest` images with Git-derived version and revision metadata.           |
-| `make release`              | Builds both images from a clean exact `vX.Y.Z` tag using that versioned image tag.      |
+| `make release`              | Builds both images from a clean exact `vX.Y.Z` tag, tagging `vX.Y.Z` and `:latest`.    |
 | `make atom-build`           | Builds only the Atom backend image.                                                    |
 | `make ui-build`             | Builds only the Atom UI image.                                                         |
 | `make docker-build`         | Builds the raw Atom Docker image using Makefile variables.                             |
@@ -247,11 +247,13 @@ make release
 ```
 
 The result is `ghcr.io/absmach/atom:v0.50.0` and
-`ghcr.io/absmach/atom-ui:v0.50.0` in the local image store. `make release`
-does not push; pushing the Git tag triggers the image workflow, which runs the
-Rust and Frontend suites first and then publishes both the versioned tags and
-`:latest`. `make latest` uses `git describe --tags --always --dirty` for the
-embedded runtime version while keeping the mutable `latest` image tag.
+`ghcr.io/absmach/atom-ui:v0.50.0` in the local image store, with the local
+`:latest` tags moved onto the same images so `make up` runs what was just
+released. `make release` does not push; pushing the Git tag triggers the image
+workflow, which runs the Rust and Frontend suites first and then publishes both
+the versioned tags and `:latest`. `make latest` uses
+`git describe --tags --always --dirty` for the embedded runtime version while
+keeping the mutable `latest` image tag.
 
 Common overrides:
 

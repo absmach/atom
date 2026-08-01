@@ -15,6 +15,12 @@ ATOM_VERSION ?= $(GIT_DESCRIBE)
 ATOM_REVISION ?= $(GIT_REVISION)
 RELEASE_TAG ?= $(shell git describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null)
 DOCKER_BUILD_ARGS = --build-arg ATOM_VERSION="$(ATOM_VERSION)" --build-arg ATOM_REVISION="$(ATOM_REVISION)"
+# Second tag applied alongside the primary one; `release` uses it to move
+# `:latest` in the same build. Empty for every other target.
+ATOM_IMAGE_EXTRA ?=
+ATOM_UI_IMAGE_EXTRA ?=
+ATOM_EXTRA_TAG = $(if $(ATOM_IMAGE_EXTRA),-t "$(ATOM_IMAGE_EXTRA)")
+ATOM_UI_EXTRA_TAG = $(if $(ATOM_UI_IMAGE_EXTRA),-t "$(ATOM_UI_IMAGE_EXTRA)")
 COMPOSE ?= docker compose
 COMPOSE_PROFILES ?= --profile default --profile atom-ui
 DEV_ENV_FILE ?= .env
@@ -32,7 +38,7 @@ help:
 	@echo "Available targets:"
 	@echo "  make build               Rebuild Atom backend + Atom UI images (run after code changes)"
 	@echo "  make latest              Build both images as :latest with Git-derived build metadata"
-	@echo "  make release             Build both images from a clean exact vX.Y.Z tag"
+	@echo "  make release             Build both images from a clean exact vX.Y.Z tag, also tagging :latest"
 	@echo "  make atom-build          Rebuild only the Atom backend image"
 	@echo "  make docker_atom_dev     Build Atom on the host, then copy the binary into a Docker image"
 	@echo "  make ui-build            Rebuild only the Atom UI image"
@@ -84,8 +90,12 @@ build: atom-build ui-build
 latest:
 	$(MAKE) build IMAGE_TAG=latest ATOM_VERSION="$(ATOM_VERSION)" ATOM_REVISION="$(ATOM_REVISION)"
 
+# Also moves the local `:latest` tags, matching what the image workflow
+# publishes on a tag push. Without it `make release && make up` would still
+# run the previous build, since Compose defaults to `:latest`.
 release: release-check
-	$(MAKE) build IMAGE_TAG="$(RELEASE_TAG)" ATOM_VERSION="$(RELEASE_TAG)" ATOM_REVISION="$(ATOM_REVISION)"
+	$(MAKE) build IMAGE_TAG="$(RELEASE_TAG)" ATOM_VERSION="$(RELEASE_TAG)" ATOM_REVISION="$(ATOM_REVISION)" \
+		ATOM_IMAGE_EXTRA="$(IMAGE_NAME):latest" ATOM_UI_IMAGE_EXTRA="$(ATOM_UI_IMAGE_NAME):latest"
 
 release-check:
 	@set -eu; \
@@ -114,6 +124,7 @@ atom-build:
 		--target $(BUILD_TARGET) \
 		$(DOCKER_BUILD_ARGS) \
 		-t "$(ATOM_IMAGE)" \
+		$(ATOM_EXTRA_TAG) \
 		$(BUILD_CONTEXT)
 
 docker_atom_dev:
@@ -135,6 +146,7 @@ ui-build:
 		-f app/Dockerfile \
 		$(DOCKER_BUILD_ARGS) \
 		-t "$(ATOM_UI_IMAGE)" \
+		$(ATOM_UI_EXTRA_TAG) \
 		app
 
 up:

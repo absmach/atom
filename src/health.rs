@@ -58,7 +58,14 @@ pub struct SigningKeyStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemStatus {
+    // Build identity is deliberately kept out of the serialized form. The HTTP
+    // readiness endpoints are unauthenticated, and the exact commit pins a
+    // running instance to a line of public source. GraphQL `systemStatus`
+    // reads these fields directly and is gated on platform `manage`, so
+    // operators still see them.
+    #[serde(skip)]
     pub version: &'static str,
+    #[serde(skip)]
     pub revision: &'static str,
     pub status: ComponentStatus,
     pub http_ready: ComponentCheck,
@@ -309,13 +316,64 @@ async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{readiness_ok, ComponentCheck, ComponentStatus};
+    use super::{
+        readiness_ok, AuditRetentionStatus, ComponentCheck, ComponentStatus, DbPoolStatus,
+        SystemStatus,
+    };
+    use crate::rate_limit::RateLimitStatus;
 
     fn check(status: ComponentStatus) -> ComponentCheck {
         ComponentCheck {
             status,
             message: String::new(),
         }
+    }
+
+    #[test]
+    fn serialized_status_omits_build_identity() {
+        let status = SystemStatus {
+            version: "v9.9.9",
+            revision: "0badc0ffee",
+            status: ComponentStatus::Ok,
+            http_ready: check(ComponentStatus::Ok),
+            grpc_ready: check(ComponentStatus::Ok),
+            database: check(ComponentStatus::Ok),
+            migrations: check(ComponentStatus::Ok),
+            signing_keys: check(ComponentStatus::Ok),
+            certificate_issuer: check(ComponentStatus::Disabled),
+            db_pool: DbPoolStatus {
+                max_connections: 0,
+                min_connections: 0,
+                acquire_timeout_secs: 0,
+                connect_timeout_secs: 0,
+                idle_timeout_secs: 0,
+                max_lifetime_secs: 0,
+                size: 0,
+                idle: 0,
+            },
+            signing_key_state: None,
+            audit_retention: AuditRetentionStatus {
+                enabled: false,
+                days: 0,
+                cleanup_interval_secs: 0,
+                cleanup_batch_size: 0,
+                last_cleanup: None,
+            },
+            rate_limits: RateLimitStatus {
+                enabled: false,
+                policies: Vec::new(),
+                trusted_proxy_cidrs: Vec::new(),
+            },
+        };
+
+        let body = serde_json::to_value(&status).expect("system status serializes");
+
+        // `/health/ready` and `/health` are unauthenticated. Build identity
+        // stays on the `manage`-gated GraphQL `systemStatus` field only.
+        assert!(body.get("version").is_none());
+        assert!(body.get("revision").is_none());
+        assert!(!body.to_string().contains("0badc0ffee"));
+        assert!(body.get("status").is_some());
     }
 
     #[test]
