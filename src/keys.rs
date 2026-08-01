@@ -264,6 +264,18 @@ pub async fn load_active_keys(
     pool: &PgPool,
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError> {
+    fetch_active_keys(pool, cfg).await
+}
+
+/// Executor-generic [`load_active_keys`], so a rotation can read the key set it
+/// just wrote from inside its own transaction rather than after the commit.
+async fn fetch_active_keys<'e, E>(
+    executor: E,
+    cfg: &SigningKeyConfig,
+) -> Result<ActiveKeys, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     use sqlx::Row;
 
     let rows = sqlx::query(
@@ -279,7 +291,7 @@ pub async fn load_active_keys(
            WHERE status IN ('primary', 'standby')
            ORDER BY created_at DESC"#,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(db_err)?;
 
@@ -364,14 +376,25 @@ pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Resul
 /// After the JWT TTL elapses, no outstanding tokens reference the retired key.
 pub async fn rotate(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<ActiveKeys, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    let keys = rotate_in_tx(&mut tx, cfg).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(keys)
+}
 
+/// The caller owns the commit, so an audited caller can bind the rotation and
+/// its `signing_key.rotate` event into one transaction via
+/// [`crate::audit::commit_with_audit`].
+pub async fn rotate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    cfg: &SigningKeyConfig,
+) -> Result<ActiveKeys, AppError> {
     sqlx::query("UPDATE signing_keys SET status = 'retired' WHERE status = 'standby'")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_err)?;
 
     sqlx::query("UPDATE signing_keys SET status = 'standby' WHERE status = 'primary'")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_err)?;
 
@@ -396,15 +419,15 @@ pub async fn rotate(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<ActiveKeys,
     .bind(storage.nonce)
     .bind(storage.key_id)
     .bind(storage.encryption_alg)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
-    tx.commit().await.map_err(db_err)?;
-
     tracing::info!("signing key rotated, new primary kid={kid}");
 
-    load_active_keys(pool, cfg).await
+    // Read inside the transaction: loading after the commit would let a
+    // transient failure report an already-applied rotation as an error.
+    fetch_active_keys(&mut **tx, cfg).await
 }
 
 fn private_key_from_row(

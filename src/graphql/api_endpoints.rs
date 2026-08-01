@@ -111,8 +111,10 @@ impl ApiEndpointMutation {
         let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
         let result = async {
             require_platform_manage_app(state, &auth).await?;
-            api_endpoint_repo::create_api_endpoint(
+            api_endpoint_repo::create_api_endpoint_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 CreateApiEndpoint {
                     tenant_id,
                     key: input.key,
@@ -129,23 +131,27 @@ impl ApiEndpointMutation {
                     response_mapping: input.response_mapping.unwrap_or_else(|| json!({})),
                     status: input.status,
                 },
-                Some(auth.entity_id),
             )
             .await
         }
         .await;
 
-        crate::audit::observe_result(
-            crate::audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: "api_endpoint",
-                target_id: result.as_ref().ok().map(|e| e.id),
-                event: "api_endpoint.create",
-            },
-            json!({}),
-            &result,
-        );
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: "api_endpoint",
+                    target_id: None,
+                    event: "api_endpoint.create",
+                },
+                &json!({}),
+                err,
+            )
+            .await;
+        }
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -162,8 +168,10 @@ impl ApiEndpointMutation {
         let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
         let result = async {
             require_platform_manage_app(state, &auth).await?;
-            api_endpoint_repo::update_api_endpoint(
+            api_endpoint_repo::update_api_endpoint_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 endpoint_id,
                 UpdateApiEndpoint {
                     key: input.key,
@@ -180,23 +188,27 @@ impl ApiEndpointMutation {
                     response_mapping: input.response_mapping,
                     status: input.status,
                 },
-                Some(auth.entity_id),
             )
             .await
         }
         .await;
 
-        crate::audit::observe_result(
-            crate::audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
-                target_kind: "api_endpoint",
-                target_id: Some(endpoint_id),
-                event: "api_endpoint.update",
-            },
-            json!({}),
-            &result,
-        );
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "api_endpoint",
+                    target_id: Some(endpoint_id),
+                    event: "api_endpoint.update",
+                },
+                &json!({}),
+                err,
+            )
+            .await;
+        }
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -207,21 +219,31 @@ impl ApiEndpointMutation {
         let endpoint_id = parse_id(id, "id")?;
         let result = async {
             require_platform_manage_app(state, &auth).await?;
-            api_endpoint_repo::enable_api_endpoint(&state.pool, endpoint_id, Some(auth.entity_id))
-                .await
+            api_endpoint_repo::enable_api_endpoint_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                endpoint_id,
+            )
+            .await
         }
         .await;
-        crate::audit::observe_result(
-            crate::audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
-                target_kind: "api_endpoint",
-                target_id: Some(endpoint_id),
-                event: "api_endpoint.enable",
-            },
-            json!({}),
-            &result,
-        );
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "api_endpoint",
+                    target_id: Some(endpoint_id),
+                    event: "api_endpoint.enable",
+                },
+                &json!({}),
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 
@@ -231,21 +253,31 @@ impl ApiEndpointMutation {
         let endpoint_id = parse_id(id, "id")?;
         let result = async {
             require_platform_manage_app(state, &auth).await?;
-            api_endpoint_repo::disable_api_endpoint(&state.pool, endpoint_id, Some(auth.entity_id))
-                .await
+            api_endpoint_repo::disable_api_endpoint_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                endpoint_id,
+            )
+            .await
         }
         .await;
-        crate::audit::observe_result(
-            crate::audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|e| e.tenant_id),
-                target_kind: "api_endpoint",
-                target_id: Some(endpoint_id),
-                event: "api_endpoint.disable",
-            },
-            json!({}),
-            &result,
-        );
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: None,
+                    target_kind: "api_endpoint",
+                    target_id: Some(endpoint_id),
+                    event: "api_endpoint.disable",
+                },
+                &json!({}),
+                err,
+            )
+            .await;
+        }
         result.map(Into::into).map_err(gql_error)
     }
 }

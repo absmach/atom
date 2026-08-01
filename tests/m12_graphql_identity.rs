@@ -81,7 +81,6 @@ fn authed_scoped_with_credential(
         credential_id: Some(credential_id),
         scoped: true,
         ceiling: Some(std::sync::Arc::new(ceiling)),
-        ..Default::default()
     })
 }
 
@@ -231,6 +230,27 @@ async fn add_and_remove_group_member() {
     assert!(removed.errors.is_empty(), "{:?}", removed.errors);
     assert_eq!(
         removed.data.into_json().expect("json data")["removeGroupMember"],
+        true
+    );
+
+    // Removal is idempotent: repeating it on an entity that is no longer a
+    // member must still succeed rather than 404.
+    let removed_again = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              removeGroupMember(groupId: "{group_id}", entityId: "{member_id}")
+            }}
+            "#
+        )))
+        .await;
+    assert!(
+        removed_again.errors.is_empty(),
+        "repeat removal must not error: {:?}",
+        removed_again.errors
+    );
+    assert_eq!(
+        removed_again.data.into_json().expect("json data")["removeGroupMember"],
         true
     );
 }

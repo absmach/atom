@@ -35,8 +35,9 @@ use crate::{
 // Access-token lifecycle moved to `identity::access_tokens`; re-exported so
 // callers keep the one `service::` entry point for identity operations.
 pub use super::access_tokens::{
-    access_token_owner, create_access_token, list_access_tokens, replace_access_token_permissions,
-    revoke_access_token, ListAccessTokens, MAX_ACCESS_TOKEN_PERMISSIONS,
+    access_token_owner, create_access_token, create_access_token_in_tx, list_access_tokens,
+    replace_access_token_permissions, replace_access_token_permissions_in_tx, revoke_access_token,
+    revoke_access_token_in_tx, ListAccessTokens, MAX_ACCESS_TOKEN_PERMISSIONS,
 };
 
 pub fn hash_secret(secret: &[u8]) -> Result<String, AppError> {
@@ -156,6 +157,7 @@ pub async fn login_credential_with_tenant(
     audit::write_hot_path(
         pool,
         cfg.audit_policy,
+        cfg.events.enabled(),
         audit::HotPathAuditKind::AuthLogin,
         audit::AuditEvent {
             actor_entity_id: entity_id_opt,
@@ -375,41 +377,107 @@ pub async fn signup_human(
 ) -> Result<SignupResponse, AppError> {
     let name = req.name.clone();
     let email = req.email.clone();
-    let result = do_signup_human(pool, cfg, req).await;
 
-    let (entity_id_opt, outcome) = match &result {
-        Ok(r) => (Some(r.entity_id), AuditOutcome::Allow),
-        Err(AppError::Unauthorized(_) | AppError::BadRequest(_) | AppError::Forbidden) => {
-            (None, AuditOutcome::Deny)
-        }
-        Err(_) => return result,
+    // Validation, argon2 hashing and token generation all happen before any
+    // transaction is open — see `PreparedSignup`.
+    let prepared = match prepare_signup_human(cfg, req) {
+        Ok(prepared) => prepared,
+        Err(err) => return Err(record_signup_rejection(pool, cfg, &name, &email, err).await),
     };
 
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if let Err(err) = write_signup_human(&mut tx, &prepared).await {
+        drop(tx);
+        return Err(record_signup_rejection(pool, cfg, &name, &email, err).await);
+    }
+
+    let event = audit::AuditEvent {
+        actor_entity_id: Some(prepared.entity_id),
+        tenant_id: None,
+        target_kind: Some("entity"),
+        target_id: Some(prepared.entity_id),
+        event: "auth.signup",
+        outcome: AuditOutcome::Allow,
+        details: serde_json::json!({
+            "name": name,
+            "email": normalize_email_lossy(&email),
+        }),
+    };
+    // The signup writes and the `auth.signup` event commit together.
+    audit::commit_with_audit(pool, tx, cfg.events.enabled(), &event).await?;
+
+    // Only once the account is durable. Sending inside the transaction would
+    // hold a pooled connection across a blocking template read and a full SMTP
+    // round-trip on a public, unauthenticated endpoint, and would make an SMTP
+    // outage roll the account back — the caller can retry via
+    // `resend_verification` instead.
+    send_verification_email(cfg, &prepared.email, &prepared.token).await?;
+
+    Ok(SignupResponse {
+        entity_id: prepared.entity_id,
+        email: prepared.email,
+        verification_required: true,
+    })
+}
+
+/// Records a failed signup attempt and hands the error back.
+///
+/// Only authorization-shaped failures are a signup *decision* worth an
+/// `auth.signup` row; internal and database errors are surfaced without one, as
+/// they always have been. Both the pre-transaction and write phases classify
+/// through here, so a `BadRequest` raised by either is audited identically.
+async fn record_signup_rejection(
+    pool: &PgPool,
+    cfg: &Config,
+    name: &str,
+    email: &str,
+    err: AppError,
+) -> AppError {
+    if !matches!(
+        err,
+        AppError::Unauthorized(_) | AppError::BadRequest(_) | AppError::Forbidden
+    ) {
+        return err;
+    }
     audit::write(
         pool,
+        cfg.events.enabled(),
         audit::AuditEvent {
-            actor_entity_id: entity_id_opt,
+            actor_entity_id: None,
             tenant_id: None,
-            target_kind: entity_id_opt.map(|_| "entity"),
-            target_id: entity_id_opt,
+            target_kind: None,
+            target_id: None,
             event: "auth.signup",
-            outcome,
+            outcome: AuditOutcome::Deny,
             details: serde_json::json!({
                 "name": name,
-                "email": normalize_email_lossy(&email),
+                "email": normalize_email_lossy(email),
             }),
         },
     )
     .await;
-
-    result
+    err
 }
 
-async fn do_signup_human(
-    pool: &PgPool,
-    cfg: &Config,
-    req: SignupRequest,
-) -> Result<SignupResponse, AppError> {
+/// Everything a signup needs computed *before* its transaction opens.
+///
+/// Password strength checks, two argon2 hashes and token generation are
+/// deliberately slow; running them while a transaction is open would hold a
+/// pooled connection for their whole duration.
+struct PreparedSignup {
+    entity_id: Uuid,
+    email_id: Uuid,
+    email: String,
+    name: String,
+    attributes: Value,
+    password_hash: String,
+    token_id: Uuid,
+    token: String,
+    token_hash: String,
+    expires_at: DateTime<Utc>,
+}
+
+fn prepare_signup_human(cfg: &Config, req: SignupRequest) -> Result<PreparedSignup, AppError> {
     let name = req.name.trim();
     if name.is_empty() {
         return Err(AppError::bad_request("name is required"));
@@ -419,37 +487,54 @@ async fn do_signup_human(
     }
     validate_password_strength(&req.password)?;
     let email = normalize_email(&req.email)?;
+    let name = name.to_string();
     let attributes = normalize_json_object(req.attributes);
     let password_hash = hash_secret(req.password.as_bytes())?;
     let (token_id, token_secret, token) = new_secret_token("atomv");
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = Utc::now() + Duration::seconds(cfg.email_verification_expiry_secs as i64);
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let entity_id = Uuid::new_v4();
-    let email_id = Uuid::new_v4();
+    Ok(PreparedSignup {
+        entity_id: Uuid::new_v4(),
+        email_id: Uuid::new_v4(),
+        email,
+        name,
+        attributes,
+        password_hash,
+        token_id,
+        token,
+        token_hash,
+        expires_at,
+    })
+}
+
+/// SQL only — every expensive step already ran in [`prepare_signup_human`].
+async fn write_signup_human(
+    tx: &mut Transaction<'_, Postgres>,
+    prepared: &PreparedSignup,
+) -> Result<(), AppError> {
     sqlx::query(
         r#"INSERT INTO entities (id, kind, name, tenant_id, attributes)
            VALUES ($1, $2, $3, NULL, $4)"#,
     )
-    .bind(entity_id)
+    .bind(prepared.entity_id)
     .bind(EntityKind::Human)
-    .bind(name)
-    .bind(attributes)
-    .execute(&mut *tx)
+    .bind(&prepared.name)
+    .bind(&prepared.attributes)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
-    super::repo::add_authenticated_user_membership_in_tx(&mut tx, entity_id).await?;
+    super::repo::add_authenticated_user_membership_in_tx(tx, prepared.entity_id).await?;
 
     sqlx::query(
         r#"INSERT INTO entity_emails (id, entity_id, email)
            VALUES ($1, $2, $3)"#,
     )
-    .bind(email_id)
-    .bind(entity_id)
-    .bind(&email)
-    .execute(&mut *tx)
+    .bind(prepared.email_id)
+    .bind(prepared.entity_id)
+    .bind(&prepared.email)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
@@ -458,27 +543,23 @@ async fn do_signup_human(
            VALUES ($1, $2, $3, $4, $5)"#,
     )
     .bind(Uuid::new_v4())
-    .bind(entity_id)
+    .bind(prepared.entity_id)
     .bind(CredentialKind::Password)
-    .bind(&email)
-    .bind(password_hash)
-    .execute(&mut *tx)
+    .bind(&prepared.email)
+    .bind(&prepared.password_hash)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
 
     insert_email_token_in_tx(
-        &mut tx, token_id, entity_id, email_id, token_hash, expires_at,
+        tx,
+        prepared.token_id,
+        prepared.entity_id,
+        prepared.email_id,
+        prepared.token_hash.clone(),
+        prepared.expires_at,
     )
-    .await?;
-    tx.commit().await.map_err(db_err)?;
-
-    send_verification_email(cfg, &email, &token).await?;
-
-    Ok(SignupResponse {
-        entity_id,
-        email,
-        verification_required: true,
-    })
+    .await
 }
 
 pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
@@ -1903,7 +1984,20 @@ pub async fn create_password(
     password: &str,
 ) -> Result<Uuid, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let Some((kind, _)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
+    let id = create_password_in_tx(&mut tx, entity_id, password).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(id)
+}
+
+/// The caller owns the commit, so an audited caller can bind the credential
+/// write and its domain event into one transaction via
+/// [`crate::audit::commit_with_audit`] instead of publishing after the fact.
+pub async fn create_password_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    password: &str,
+) -> Result<Uuid, AppError> {
+    let Some((kind, _)) = super::repo::lock_active_entity(tx, entity_id).await? else {
         return Err(AppError::not_found(format!(
             "active entity {entity_id} not found"
         )));
@@ -1919,10 +2013,9 @@ pub async fn create_password(
     .bind(entity_id)
     .bind(CredentialKind::Password)
     .bind(hash)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
     Ok(id)
 }
 
@@ -1947,9 +2040,22 @@ pub async fn create_shared_key(
     entity_id: Uuid,
     req: CreateSharedKey,
 ) -> Result<SharedKeyResponse, AppError> {
-    let cred_id = Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let Some((kind, _)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
+    let response = create_shared_key_in_tx(&mut tx, signing_keys, entity_id, req).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(response)
+}
+
+/// See [`create_password_in_tx`] — the caller owns the commit so the credential
+/// write and its domain event land atomically.
+pub async fn create_shared_key_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    signing_keys: &SigningKeyConfig,
+    entity_id: Uuid,
+    req: CreateSharedKey,
+) -> Result<SharedKeyResponse, AppError> {
+    let cred_id = Uuid::new_v4();
+    let Some((kind, _)) = super::repo::lock_active_entity(tx, entity_id).await? else {
         return Err(AppError::not_found(format!(
             "active entity {entity_id} not found"
         )));
@@ -1991,10 +2097,9 @@ pub async fn create_shared_key(
     .bind(lookup_hash)
     .bind(req.expires_at)
     .bind(metadata)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
 
     Ok(SharedKeyResponse {
         credential_id: cred_id,
@@ -2136,6 +2241,19 @@ pub async fn revoke_credential(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
+}
+
+/// See [`create_password_in_tx`] — the caller owns the commit so the revocation
+/// and its domain event land atomically.
+pub async fn revoke_credential_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    cred_id: Uuid,
+) -> Result<(), AppError> {
     // Overwrite any prior revocation provenance (e.g. a `tenant_deleted` marker
     // from a tenant soft delete) with this explicit revocation, so a later tenant
     // restore — which only reactivates credentials still marked `tenant_deleted` —
@@ -2152,7 +2270,7 @@ pub async fn revoke_credential(
     )
     .bind(cred_id)
     .bind(entity_id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {

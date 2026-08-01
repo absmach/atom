@@ -180,3 +180,74 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     .await;
     assert!(suspended_login.is_err());
 }
+
+/// Sending the verification email must happen *after* the signup transaction
+/// commits, not inside it.
+///
+/// Two things break if the send moves back inside: the account is rolled back
+/// when SMTP is unreachable (so a broker outage blocks registration entirely),
+/// and — worse — a pooled Postgres connection is held for the whole SMTP
+/// round-trip plus a blocking template read, on a public unauthenticated
+/// endpoint. The rest of the suite runs with SMTP unconfigured, where
+/// `send_templated_email` returns early, so nothing else covers this ordering.
+#[tokio::test]
+#[ignore]
+async fn account_survives_an_unreachable_smtp_server() {
+    let pool = common::pool().await;
+    let cfg = Config {
+        // Port 1 is reserved and refuses immediately: a fast, deterministic
+        // send failure rather than a timeout.
+        smtp: Some(atom::config::SmtpConfig {
+            host: "127.0.0.1".into(),
+            port: 1,
+            username: None,
+            password: None,
+            from: "atom@example.test".into(),
+            tls: atom::config::SmtpTls::None,
+        }),
+        // Without the dev bypass an unconfigured SMTP would short-circuit
+        // before ever dialing; this forces the real send path.
+        ..config(false)
+    };
+
+    let name = format!("m15-smtp-down-{}", Uuid::new_v4());
+    let email = format!("{name}@example.test");
+    let result = service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name: name.clone(),
+            email: email.clone(),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "an unreachable SMTP server must surface as an error"
+    );
+
+    let entity_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT e.id FROM entities e JOIN entity_emails ee ON ee.entity_id = e.id WHERE ee.email = $1",
+    )
+    .bind(&email)
+    .fetch_optional(&pool)
+    .await
+    .expect("query signed-up entity");
+    let entity_id = entity_id.expect(
+        "the account and its email must be committed before the verification email is sent",
+    );
+
+    let credential_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password'",
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("credential count");
+    assert_eq!(
+        credential_count, 1,
+        "the password credential must be committed too, so resendVerification can be used"
+    );
+}

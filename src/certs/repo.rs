@@ -26,7 +26,10 @@ pub struct CrlState {
     pub dirty: bool,
 }
 
-pub async fn entity_tenant_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<Uuid>, AppError> {
+pub async fn entity_tenant_id<'e, E>(executor: E, entity_id: Uuid) -> Result<Option<Uuid>, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_scalar(
         r#"
         SELECT e.tenant_id
@@ -39,7 +42,7 @@ pub async fn entity_tenant_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<U
         "#,
     )
     .bind(entity_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::not_found("entity not found"))
@@ -69,10 +72,13 @@ pub async fn insert_certificate_credential(
     .map_err(AppError::Database)
 }
 
-pub async fn certificate_by_serial(
-    pool: &PgPool,
+pub async fn certificate_by_serial<'e, E>(
+    executor: E,
     serial_number: &str,
-) -> Result<CertificateCredential, AppError> {
+) -> Result<CertificateCredential, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, CertificateCredential>(
         r#"
         SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
@@ -83,7 +89,7 @@ pub async fn certificate_by_serial(
         "#,
     )
     .bind(serial_number)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .map_err(db_err)
 }
@@ -92,6 +98,18 @@ pub async fn certificate_by_id(
     pool: &PgPool,
     credential_id: Uuid,
 ) -> Result<CertificateCredential, AppError> {
+    fetch_certificate_by_id(pool, credential_id).await
+}
+
+/// Executor-generic `certificate_by_id`, so an issuing transaction can read the
+/// row it just wrote without committing first.
+pub async fn fetch_certificate_by_id<'e, E>(
+    executor: E,
+    credential_id: Uuid,
+) -> Result<CertificateCredential, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, CertificateCredential>(
         r#"
         SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
@@ -102,7 +120,7 @@ pub async fn certificate_by_id(
         "#,
     )
     .bind(credential_id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .map_err(db_err)
 }
@@ -148,11 +166,14 @@ pub async fn list_certificates(
         .map_err(AppError::Database)
 }
 
-pub async fn revoke_certificate(
-    pool: &PgPool,
+pub async fn revoke_certificate<'e, E>(
+    executor: E,
     credential_id: Uuid,
     metadata: Value,
-) -> Result<(), AppError> {
+) -> Result<(), AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query(
         r#"
         UPDATE credentials
@@ -162,16 +183,19 @@ pub async fn revoke_certificate(
     )
     .bind(credential_id)
     .bind(metadata)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(AppError::Database)?;
     Ok(())
 }
 
-pub async fn active_entity_certificates(
-    pool: &PgPool,
+pub async fn active_entity_certificates<'e, E>(
+    executor: E,
     entity_id: Uuid,
-) -> Result<Vec<CertificateCredential>, AppError> {
+) -> Result<Vec<CertificateCredential>, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, CertificateCredential>(
         r#"
         SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
@@ -182,7 +206,7 @@ pub async fn active_entity_certificates(
         "#,
     )
     .bind(entity_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(AppError::Database)
 }

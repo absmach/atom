@@ -1,0 +1,586 @@
+//! DB-gated tests for the event-outbox delivery mechanics: at-least-once
+//! delivery, redelivery after a simulated crash, and failure bookkeeping
+//! (`attempts`/`last_error`). Nothing in this file produces `event_outbox`
+//! rows via a mutation — that happens automatically now via `audit::write`/
+//! the observe path / `write_hot_path` (see `tests/m26_audit_event_publishing.rs`
+//! for that integration) — so every row here is inserted directly,
+//! exercising the poller/delivery function in isolation.
+//!
+//! Run with:
+//! ```bash
+//! DATABASE_URL=postgres://... cargo test --test m25_event_outbox -- --ignored
+//! ```
+
+mod common;
+
+use atom::config::EventsConfig;
+use atom::events::deliver_outbox_batch;
+use atom::events::publisher::{EventPublisher, PublishError};
+use atom::events::DomainEventPayload;
+use axum::async_trait;
+use sqlx::PgPool;
+use std::sync::Mutex;
+use uuid::Uuid;
+
+async fn truncate_event_outbox(pool: &PgPool) {
+    sqlx::query("TRUNCATE TABLE event_outbox")
+        .execute(pool)
+        .await
+        .expect("truncate event_outbox");
+}
+
+fn test_events_config() -> EventsConfig {
+    EventsConfig {
+        amqp_url: Some("amqp://ignored-in-tests".to_string()),
+        ..EventsConfig::default()
+    }
+}
+
+fn sample_payload(event: &str) -> DomainEventPayload {
+    DomainEventPayload {
+        schema_version: 1,
+        event_id: Uuid::new_v4(),
+        event: event.to_string(),
+        occurred_at: chrono::Utc::now(),
+        source: "atom".to_string(),
+        actor_entity_id: None,
+        tenant_id: None,
+        target_kind: Some("resource".to_string()),
+        target_id: Some(Uuid::new_v4()),
+        outcome: "allow".to_string(),
+        details: serde_json::json!({}),
+        request_id: None,
+    }
+}
+
+async fn insert_outbox_row(pool: &PgPool, payload: &DomainEventPayload) -> Uuid {
+    let id = payload.event_id;
+    sqlx::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(&payload.event)
+        .bind(serde_json::to_value(payload).expect("serialize payload"))
+        .execute(pool)
+        .await
+        .expect("insert event_outbox row");
+    id
+}
+
+async fn delivered_at(pool: &PgPool, id: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .expect("fetch delivered_at")
+        .flatten()
+}
+
+async fn attempts_and_error(pool: &PgPool, id: Uuid) -> (i32, Option<String>) {
+    let row: (i32, Option<String>) =
+        sqlx::query_as("SELECT attempts, last_error FROM event_outbox WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("fetch attempts/last_error");
+    row
+}
+
+/// Records every batch it was asked to publish; can be told to fail the
+/// next N calls, to simulate a redelivered/retried batch.
+#[derive(Default)]
+struct MockPublisher {
+    calls: Mutex<Vec<Vec<Uuid>>>,
+    fail_next: Mutex<usize>,
+}
+
+impl MockPublisher {
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+
+    fn event_ids_seen(&self) -> Vec<Uuid> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn fail_next_n(&self, n: usize) {
+        *self.fail_next.lock().unwrap() = n;
+    }
+}
+
+#[async_trait]
+impl EventPublisher for MockPublisher {
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(events.iter().map(|e| e.event_id).collect());
+
+        let mut fail_next = self.fail_next.lock().unwrap();
+        if *fail_next > 0 {
+            *fail_next -= 1;
+            return Err(PublishError("simulated publisher failure".to_string()));
+        }
+        Ok(vec![Ok(()); events.len()])
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn delivered_row_is_marked_delivered_exactly_once_per_call() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let payload = sample_payload("resource.create");
+    let id = insert_outbox_row(&pool, &payload).await;
+
+    let publisher = MockPublisher::default();
+    let delivered = deliver_outbox_batch(&pool, &publisher, &test_events_config())
+        .await
+        .expect("deliver batch");
+
+    assert_eq!(delivered, 1);
+    assert_eq!(publisher.call_count(), 1);
+    assert_eq!(publisher.event_ids_seen(), vec![id]);
+    assert!(delivered_at(&pool, id).await.is_some());
+}
+
+#[tokio::test]
+#[ignore]
+async fn undelivered_rows_are_not_redelivered_once_marked_delivered() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let payload = sample_payload("resource.create");
+    let id = insert_outbox_row(&pool, &payload).await;
+
+    let publisher = MockPublisher::default();
+    let cfg = test_events_config();
+
+    let first = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+    let second = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+
+    assert_eq!(first, 1);
+    assert_eq!(second, 0, "already-delivered row must not be redelivered");
+    assert_eq!(
+        publisher.call_count(),
+        1,
+        "publisher should only be invoked once"
+    );
+    assert!(delivered_at(&pool, id).await.is_some());
+}
+
+/// At-least-once, not exactly-once: a publisher that fails leaves the row
+/// undelivered so the *same* event_id is redelivered on the next tick,
+/// rather than being lost or duplicated under a new id.
+#[tokio::test]
+#[ignore]
+async fn a_failed_delivery_is_redelivered_with_the_same_event_id() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let payload = sample_payload("resource.create");
+    let id = insert_outbox_row(&pool, &payload).await;
+
+    let publisher = MockPublisher::default();
+    publisher.fail_next_n(1);
+    let cfg = test_events_config();
+
+    let first = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+    assert_eq!(first, 0, "a failed publish must not mark the row delivered");
+    assert!(delivered_at(&pool, id).await.is_none());
+
+    let (attempts, last_error) = attempts_and_error(&pool, id).await;
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("simulated publisher failure"));
+
+    let second = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+    assert_eq!(second, 1, "the retried delivery must succeed");
+    assert!(delivered_at(&pool, id).await.is_some());
+
+    // Same event_id both times — redelivery, not a duplicate-with-new-id.
+    assert_eq!(publisher.event_ids_seen(), vec![id, id]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn arbitrary_event_names_are_all_delivered_no_filtering() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let resource_create = sample_payload("resource.create");
+    let tenant_delete = sample_payload("tenant.delete");
+    let auth_login = sample_payload("auth.login");
+    let id_a = insert_outbox_row(&pool, &resource_create).await;
+    let id_b = insert_outbox_row(&pool, &tenant_delete).await;
+    let id_c = insert_outbox_row(&pool, &auth_login).await;
+
+    let publisher = MockPublisher::default();
+    let delivered = deliver_outbox_batch(&pool, &publisher, &test_events_config())
+        .await
+        .unwrap();
+
+    assert_eq!(delivered, 3);
+    let mut seen = publisher.event_ids_seen();
+    seen.sort();
+    let mut expected = vec![id_a, id_b, id_c];
+    expected.sort();
+    assert_eq!(seen, expected);
+}
+
+/// Always fails while `failing` is set, regardless of which events are in
+/// the batch — models a broker outage (a property of the connection, not of
+/// any specific event), unlike `MockPublisher::fail_next_n` (a fixed number
+/// of calls) which isn't tied to time or recovery.
+#[derive(Default)]
+struct FlakyPublisher {
+    failing: std::sync::atomic::AtomicBool,
+}
+
+impl FlakyPublisher {
+    fn new_failing() -> Self {
+        Self {
+            failing: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    fn recover(&self) {
+        self.failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl EventPublisher for FlakyPublisher {
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(PublishError("simulated broker outage".to_string()))
+        } else {
+            Ok(vec![Ok(()); events.len()])
+        }
+    }
+}
+
+/// A publish failure (unlike an unparseable payload) must never be excluded
+/// by `outbox_max_attempts`, no matter how long the outage lasts — it might
+/// still succeed once the broker recovers, and capping it would silently
+/// and permanently drop an otherwise-valid event.
+#[tokio::test]
+#[ignore]
+async fn a_publish_failure_is_retried_forever_and_recovers_after_the_outage_ends() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+
+    let publisher = FlakyPublisher::new_failing();
+    let cfg = EventsConfig {
+        outbox_max_attempts: 2,
+        ..test_events_config()
+    };
+
+    // Keep failing well past outbox_max_attempts (2 here): the row must stay
+    // eligible on every single tick regardless.
+    for _ in 0..5 {
+        let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+        assert_eq!(delivered, 0);
+    }
+    let (attempts, _) = attempts_and_error(&pool, id).await;
+    assert_eq!(
+        attempts, 5,
+        "attempts must keep climbing past max_attempts, not stop there"
+    );
+    assert!(delivered_at(&pool, id).await.is_none());
+
+    // The "outage" ends — the row must still be eligible and deliver right
+    // away, proving it was never permanently excluded.
+    publisher.recover();
+    let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+    assert_eq!(
+        delivered, 1,
+        "a row that only ever failed to publish must still be retryable after the outage ends"
+    );
+    assert!(delivered_at(&pool, id).await.is_some());
+}
+
+/// Never resolves within any reasonable test duration — models a broker
+/// that accepts the connection but stalls internally rather than erroring
+/// outright, unlike `FlakyPublisher` which fails promptly every time.
+struct StallingPublisher;
+
+#[async_trait]
+impl EventPublisher for StallingPublisher {
+    async fn publish(
+        &self,
+        _events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
+        std::future::pending().await
+    }
+}
+
+/// A publish call that never resolves must not hang `deliver_outbox_batch`
+/// forever — `publish_timeout_secs` bounds it, so the row still ends up
+/// undelivered-and-retryable (not `unparseable`) within a bounded time
+/// instead of holding the transaction, pool connection, and advisory lock
+/// indefinitely.
+#[tokio::test]
+#[ignore]
+async fn a_stalled_publish_times_out_instead_of_hanging_forever() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+
+    let publisher = StallingPublisher;
+    let cfg = EventsConfig {
+        publish_timeout_secs: 1,
+        ..test_events_config()
+    };
+
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        deliver_outbox_batch(&pool, &publisher, &cfg),
+    )
+    .await
+    .expect("deliver_outbox_batch must return well within the outer test timeout")
+    .expect("deliver batch");
+
+    assert_eq!(
+        delivered, 0,
+        "a stalled publish must not count as delivered"
+    );
+    assert!(delivered_at(&pool, id).await.is_none());
+
+    let (attempts, last_error) = attempts_and_error(&pool, id).await;
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("timed out"));
+}
+
+/// An unparseable row (unlike a publish failure) must stop being retried
+/// once it hits `outbox_max_attempts` — retrying it can never succeed — and
+/// must stop occupying batch slots once excluded, so a healthy row queued
+/// behind it (oldest first) is no longer starved forever.
+#[tokio::test]
+#[ignore]
+async fn an_unparseable_row_stops_being_retried_and_unblocks_newer_rows() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let poison_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
+        .bind(poison_id)
+        .bind("resource.create")
+        .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
+        .execute(&pool)
+        .await
+        .expect("insert malformed event_outbox row");
+    let healthy_id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
+
+    let publisher = MockPublisher::default();
+    let cfg = EventsConfig {
+        outbox_batch_size: 1,
+        outbox_max_attempts: 2,
+        ..test_events_config()
+    };
+
+    // With batch_size=1, each tick fetches only the oldest still-eligible
+    // row. Both ticks below must hit the poison row (it's older) and fail.
+    for _ in 0..2 {
+        let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+        assert_eq!(delivered, 0);
+    }
+    let (attempts, _) = attempts_and_error(&pool, poison_id).await;
+    assert_eq!(attempts, 2, "poison row should have exhausted max_attempts");
+    assert!(delivered_at(&pool, poison_id).await.is_none());
+
+    // Now that the poison row has hit the cap, it must be excluded from the
+    // SELECT entirely — this tick should reach the healthy row instead of
+    // retrying (and re-failing on) the exhausted one forever.
+    let delivered = deliver_outbox_batch(&pool, &publisher, &cfg).await.unwrap();
+    assert_eq!(delivered, 1, "the healthy row must no longer be starved");
+    assert!(delivered_at(&pool, healthy_id).await.is_some());
+
+    // And the poison row itself must never be retried past the cap.
+    let (attempts_after, _) = attempts_and_error(&pool, poison_id).await;
+    assert_eq!(
+        attempts_after, 2,
+        "an exhausted row must not be retried further"
+    );
+}
+
+/// A row whose payload doesn't deserialize into `DomainEventPayload` (e.g.
+/// left over from an older schema version) must never be marked delivered —
+/// it was never actually handed to the publisher — but a good row in the
+/// same batch must still be delivered normally.
+#[tokio::test]
+#[ignore]
+async fn a_row_with_an_unparseable_payload_is_never_marked_delivered() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let bad_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
+        .bind(bad_id)
+        .bind("resource.create")
+        .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
+        .execute(&pool)
+        .await
+        .expect("insert malformed event_outbox row");
+
+    let good_payload = sample_payload("resource.create");
+    let good_id = insert_outbox_row(&pool, &good_payload).await;
+
+    let publisher = MockPublisher::default();
+    let delivered = deliver_outbox_batch(&pool, &publisher, &test_events_config())
+        .await
+        .expect("deliver batch");
+
+    assert_eq!(delivered, 1, "only the well-formed row counts as delivered");
+    assert_eq!(
+        publisher.event_ids_seen(),
+        vec![good_id],
+        "the publisher must never see the unparseable row"
+    );
+
+    assert!(delivered_at(&pool, good_id).await.is_some());
+    assert!(
+        delivered_at(&pool, bad_id).await.is_none(),
+        "an unparseable row must not be marked delivered"
+    );
+
+    let (attempts, last_error) = attempts_and_error(&pool, bad_id).await;
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("does not deserialize"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn delivering_with_no_undelivered_rows_is_a_harmless_no_op() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+    let publisher = MockPublisher::default();
+    let delivered = deliver_outbox_batch(&pool, &publisher, &test_events_config())
+        .await
+        .unwrap();
+    assert_eq!(delivered, 0);
+    assert_eq!(publisher.call_count(), 0);
+}
+
+struct SelectivePublisher {
+    reject_id: Uuid,
+}
+
+#[async_trait]
+impl EventPublisher for SelectivePublisher {
+    async fn publish(
+        &self,
+        events: &[DomainEventPayload],
+    ) -> Result<Vec<Result<(), PublishError>>, PublishError> {
+        let mut res = Vec::new();
+        for e in events {
+            if e.event_id == self.reject_id {
+                res.push(Err(PublishError(
+                    "event was returned as unroutable (no queue bound to routing key)".to_string(),
+                )));
+            } else {
+                res.push(Ok(()));
+            }
+        }
+        Ok(res)
+    }
+}
+
+async fn unparseable_flag(pool: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT unparseable FROM event_outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch unparseable")
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_single_unroutable_event_does_not_block_or_re_deliver_healthy_events() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let bad_event = sample_payload("bad.event");
+    let good_event = sample_payload("good.event");
+    let bad_id = insert_outbox_row(&pool, &bad_event).await;
+    let good_id = insert_outbox_row(&pool, &good_event).await;
+
+    let publisher = SelectivePublisher { reject_id: bad_id };
+    let delivered = deliver_outbox_batch(&pool, &publisher, &test_events_config())
+        .await
+        .expect("deliver batch");
+
+    assert_eq!(delivered, 1, "healthy event must be marked delivered");
+    assert!(delivered_at(&pool, good_id).await.is_some());
+    assert!(delivered_at(&pool, bad_id).await.is_none());
+
+    let (attempts, last_error) = attempts_and_error(&pool, bad_id).await;
+    assert_eq!(attempts, 1);
+    assert!(last_error.unwrap().contains("unroutable"));
+    assert!(
+        !unparseable_flag(&pool, bad_id).await,
+        "an unroutable message must NOT be marked unparseable — it remains retryable"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn outbox_retention_cleanup_deletes_old_delivered_and_unparseable_rows() {
+    let pool = common::pool().await;
+    truncate_event_outbox(&pool).await;
+
+    let old_delivered_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
+         VALUES ($1, 'old.event', '{}'::jsonb, now() - interval '40 days', now() - interval '40 days')",
+    )
+    .bind(old_delivered_id)
+    .execute(&pool)
+    .await
+    .expect("insert old delivered row");
+
+    let fresh_delivered_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
+         VALUES ($1, 'fresh.event', '{}'::jsonb, now(), now())",
+    )
+    .bind(fresh_delivered_id)
+    .execute(&pool)
+    .await
+    .expect("insert fresh delivered row");
+
+    let unparseable_retryable_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO event_outbox (id, event, payload, unparseable, attempts, created_at)
+         VALUES ($1, 'retryable.event', '{}'::jsonb, true, 1, now() - interval '40 days')",
+    )
+    .bind(unparseable_retryable_id)
+    .execute(&pool)
+    .await
+    .expect("insert retryable unparseable row");
+
+    let deleted = atom::events::cleanup_expired_outbox(&pool, 30, 10, 100)
+        .await
+        .expect("cleanup outbox");
+
+    assert_eq!(
+        deleted, 1,
+        "only outbox rows older than 30 days that are delivered or exhausted must be deleted"
+    );
+    assert!(delivered_at(&pool, old_delivered_id).await.is_none());
+    assert!(delivered_at(&pool, fresh_delivered_id).await.is_some());
+
+    let (attempts, _) = attempts_and_error(&pool, unparseable_retryable_id).await;
+    assert_eq!(
+        attempts, 1,
+        "retryable unparseable row must not be deleted by retention cleanup"
+    );
+}

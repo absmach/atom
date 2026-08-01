@@ -109,8 +109,10 @@ impl ProfileMutation {
                 ],
             )
             .await?;
-            profile_repo::create_profile(
+            profile_repo::create_profile_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 CreateProfile {
                     tenant_id,
                     object_kind: input.object_kind,
@@ -125,17 +127,22 @@ impl ProfileMutation {
         }
         .await;
 
-        crate::audit::observe_result(
-            crate::audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: "profile",
-                target_id: result.as_ref().ok().map(|p| p.id),
-                event: "profile.create",
-            },
-            json!({}),
-            &result,
-        );
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: "profile",
+                    target_id: None,
+                    event: "profile.create",
+                },
+                &json!({}),
+                err,
+            )
+            .await;
+        }
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -162,8 +169,11 @@ impl ProfileMutation {
                 ],
             )
             .await?;
-            profile_repo::create_profile_version(
+            profile_repo::create_profile_version_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                profile.tenant_id,
                 profile_id,
                 CreateProfileVersion {
                     version: input.version,
@@ -176,17 +186,22 @@ impl ProfileMutation {
         }
         .await;
 
-        crate::audit::observe_result(
-            crate::audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: profile.tenant_id,
-                target_kind: "profile_version",
-                target_id: result.as_ref().ok().map(|v| v.id),
-                event: "profile_version.create",
-            },
-            json!({ "profile_id": profile_id }),
-            &result,
-        );
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: profile.tenant_id,
+                    target_kind: "profile_version",
+                    target_id: None,
+                    event: "profile_version.create",
+                },
+                &json!({ "profile_id": profile_id }),
+                err,
+            )
+            .await;
+        }
 
         result.map(Into::into).map_err(gql_error)
     }
@@ -215,8 +230,10 @@ impl ProfileMutation {
                 ],
             )
             .await?;
-            profile_repo::update_profile(
+            profile_repo::update_profile_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 id,
                 UpdateProfile {
                     display_name: input.display_name,
@@ -228,17 +245,22 @@ impl ProfileMutation {
         }
         .await;
 
-        crate::audit::observe_result(
-            crate::audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: existing.tenant_id,
-                target_kind: "profile",
-                target_id: Some(id),
-                event: "profile.update",
-            },
-            json!({}),
-            &result,
-        );
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: existing.tenant_id,
+                    target_kind: "profile",
+                    target_id: Some(id),
+                    event: "profile.update",
+                },
+                &json!({}),
+                err,
+            )
+            .await;
+        }
 
         result.map(Into::into).map_err(gql_error)
     }

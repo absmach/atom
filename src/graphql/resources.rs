@@ -8,7 +8,7 @@ use crate::{
     error::AppError,
     models::{
         access::AuthorizedObjectIdsQuery,
-        enums::{AuditOutcome, DeletedFilter},
+        enums::DeletedFilter,
         resource::{CreateResource, ListResources, UpdateResource},
     },
     state::AppState,
@@ -177,9 +177,21 @@ impl ResourceMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
-        let kind = input.kind.clone();
         let id = parse_optional_id(input.id, "id")?;
         let owner_id = parse_optional_id(input.owner_id, "ownerId")?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "resource",
+            target_id: id,
+            event: "resource.create",
+        };
+        let details = serde_json::json!({
+            "kind": input.kind,
+            "name": input.name,
+            "alias": input.alias,
+        });
+
         let result = async {
             crate::auth::require_any_capability(
                 &state.pool,
@@ -190,8 +202,11 @@ impl ResourceMutation {
                 ],
             )
             .await?;
-            authz_repo::create_resource(
+
+            authz_repo::create_resource_with_audit(
                 &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
                 CreateResource {
                     id,
                     kind: input.kind,
@@ -206,19 +221,18 @@ impl ResourceMutation {
         }
         .await;
 
-        audit::observe_result(
-            audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: "resource",
-                target_id: result.as_ref().ok().map(|r| r.id),
-                event: "resource.create",
-            },
-            serde_json::json!({ "kind": kind }),
-            &result,
-        );
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
 
-        result.map(Into::into).map_err(gql_error)
+        result.map(Resource::from).map_err(gql_error)
     }
 
     async fn update_resource(
@@ -230,85 +244,106 @@ impl ResourceMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = authz_repo::get_resource(&state.pool, id)
-            .await
-            .map_err(gql_error)?;
         let updated_fields = resource_update_fields(&input);
-        require_any_capability(
-            &state.pool,
-            &auth,
-            &[
-                ("manage", crate::auth::Scope::Object(id)),
-                ("manage", scope_for_tenant(existing.tenant_id)),
-            ],
-        )
-        .await?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "resource",
+            target_id: Some(id),
+            event: "resource.update",
+        };
+        let details = serde_json::json!({ "updated_fields": updated_fields });
 
-        let resource = authz_repo::update_resource(
-            &state.pool,
-            id,
-            UpdateResource {
-                name: input.name,
-                alias: input.alias.into(),
-                attributes: input.attributes,
-            },
-        )
-        .await
-        .map_err(gql_error)?;
+        let result = async {
+            let existing = authz_repo::get_resource(&state.pool, id).await?;
+            crate::auth::require_any_capability(
+                &state.pool,
+                &auth,
+                &[
+                    ("manage", crate::auth::Scope::Object(id)),
+                    ("manage", scope_for_tenant(existing.tenant_id)),
+                ],
+            )
+            .await?;
 
-        audit::write(
-            &state.pool,
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: resource.tenant_id,
-                target_kind: Some("resource"),
-                target_id: Some(id),
-                event: "resource.update",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({ "updated_fields": updated_fields }),
-            },
-        )
+            authz_repo::update_resource_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                UpdateResource {
+                    name: input.name,
+                    alias: input.alias.into(),
+                    attributes: input.attributes,
+                },
+                updated_fields,
+            )
+            .await
+        }
         .await;
 
-        Ok(resource.into())
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(Resource::from).map_err(gql_error)
     }
 
     async fn delete_resource(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = authz_repo::get_resource(&state.pool, id)
-            .await
-            .map_err(gql_error)?;
-        require_any_capability(
-            &state.pool,
-            &auth,
-            &[
-                ("manage", crate::auth::Scope::Object(id)),
-                ("manage", scope_for_tenant(existing.tenant_id)),
-            ],
-        )
-        .await?;
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "resource",
+            target_id: Some(id),
+            event: "resource.delete",
+        };
+        let details = serde_json::json!({});
 
-        authz_repo::delete_resource(&state.pool, id, Some(auth.entity_id))
-            .await
-            .map_err(gql_error)?;
+        let result = async {
+            let existing = authz_repo::get_resource(&state.pool, id).await?;
+            crate::auth::require_any_capability(
+                &state.pool,
+                &auth,
+                &[
+                    ("manage", crate::auth::Scope::Object(id)),
+                    ("manage", scope_for_tenant(existing.tenant_id)),
+                ],
+            )
+            .await?;
 
-        audit::write(
-            &state.pool,
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: existing.tenant_id,
-                target_kind: Some("resource"),
-                target_id: Some(id),
-                event: "resource.delete",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+            authz_repo::delete_resource_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                Some(auth.entity_id),
+            )
+            .await
+        }
         .await;
 
-        Ok(true)
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     /// Restore a soft-deleted resource within the retention window. Platform-admin
@@ -316,28 +351,42 @@ impl ResourceMutation {
     async fn restore_resource(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
-        authz_repo::restore_resource(&state.pool, id, Some(auth.entity_id))
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "resource",
+            target_id: Some(id),
+            event: "resource.restore",
+        };
+        let details = serde_json::json!({});
+
+        let result = async {
+            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
+                .await?;
+            authz_repo::restore_resource_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+                Some(auth.entity_id),
+            )
             .await
-            .map_err(gql_error)?;
-        let resource = authz_repo::get_resource(&state.pool, id)
-            .await
-            .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: resource.tenant_id,
-                target_kind: Some("resource"),
-                target_id: Some(id),
-                event: "resource.restore",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+        }
         .await;
-        Ok(true)
+
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     /// Physically purge an already-soft-deleted resource, bypassing the retention
@@ -345,25 +394,41 @@ impl ResourceMutation {
     async fn purge_resource(&self, ctx: &Context<'_>, id: ID) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
         let id = parse_id(id, "id")?;
-        let tenant_id = authz_repo::purge_resource(&state.pool, id)
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: None,
+            target_kind: "resource",
+            target_id: Some(id),
+            event: "resource.purge",
+        };
+        let details = serde_json::json!({});
+
+        let result = async {
+            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
+                .await?;
+            authz_repo::purge_resource_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                id,
+            )
             .await
-            .map_err(gql_error)?;
-        audit::write(
-            &state.pool,
-            audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: Some("resource"),
-                target_id: Some(id),
-                event: "resource.purge",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
+        }
         .await;
-        Ok(true)
+
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map(|_| true).map_err(gql_error)
     }
 
     async fn set_resource_parent_group(
@@ -390,20 +455,34 @@ impl ResourceMutation {
                 ],
             )
             .await?;
-            authz_repo::set_resource_parent_group(&state.pool, resource_id, group_id).await
+            authz_repo::set_resource_parent_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                resource_id,
+                group_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|r| r.tenant_id),
+                tenant_id: None,
                 target_kind: "resource",
                 target_id: Some(resource_id),
                 event: "resource.parent_group.set",
-            },
-            serde_json::json!({ "group_id": group_id }),
-            &result,
-        );
+            };
+            let details = serde_json::json!({ "group_id": group_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Resource::from).map_err(gql_error)
     }
 
@@ -438,20 +517,33 @@ impl ResourceMutation {
                 ],
             )
             .await?;
-            authz_repo::clear_resource_parent_group(&state.pool, resource_id).await
+            authz_repo::clear_resource_parent_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                resource_id,
+            )
+            .await
         }
         .await;
-        audit::observe_result(
-            audit::AuditMeta {
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
-                tenant_id: result.as_ref().ok().and_then(|r| r.tenant_id),
+                tenant_id: None,
                 target_kind: "resource",
                 target_id: Some(resource_id),
                 event: "resource.parent_group.clear",
-            },
-            serde_json::json!({}),
-            &result,
-        );
+            };
+            let details = serde_json::json!({});
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
         result.map(Resource::from).map_err(gql_error)
     }
 

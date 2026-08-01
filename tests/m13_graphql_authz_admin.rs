@@ -10,12 +10,13 @@ mod common;
 use async_graphql::Request;
 use atom::{
     auth::AuthContext,
+    authz::repo as authz_repo,
     config::Config,
     graphql::build_schema,
     keys::{ActiveKeys, LoadedKey},
     state::AppState,
 };
-use sqlx::PgPool;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
 fn state(pool: PgPool) -> AppState {
@@ -1107,6 +1108,17 @@ async fn entity_and_resource_lifecycle_mutations_write_audit_events() {
         entity_details["updated_fields"],
         serde_json::json!(["name"])
     );
+    let entity_update_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_logs WHERE target_id = $1 AND event = 'entity.update'",
+    )
+    .bind(device_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count entity.update audit rows");
+    assert_eq!(
+        entity_update_count, 1,
+        "status mutations must not emit duplicate generic entity.update rows"
+    );
 
     for event in [
         "entity.enable",
@@ -1129,6 +1141,41 @@ async fn entity_and_resource_lifecycle_mutations_write_audit_events() {
         let details = latest_resource_audit_details(&pool, channel_id, event).await;
         assert_eq!(details, serde_json::json!({}), "{event}");
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn deleting_role_assignment_works_with_a_single_connection_pool() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect single-connection pool");
+    let assignment_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO role_assignments (id, subject_kind, subject_id, role_id)
+           VALUES ($1, 'entity', $2, $3)"#,
+    )
+    .bind(assignment_id)
+    .bind(common::admin_id())
+    .bind(common::admin_role_id())
+    .execute(&pool)
+    .await
+    .expect("insert role assignment");
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        authz_repo::delete_role_assignment_with_audit(
+            &pool,
+            false,
+            Some(common::admin_id()),
+            assignment_id,
+        ),
+    )
+    .await
+    .expect("delete must not wait for a second pool connection")
+    .expect("delete role assignment");
 }
 
 /// Through an actual GraphQL resolver, an exact-object read deny must override a

@@ -84,5 +84,16 @@ jobs:
           }
           run_one --lib
           for f in tests/*.rs; do
-            run_one --test "$(basename "$f" .rs)"
+            name="$(basename "$f" .rs)"
+            # These two require a real AMQP broker reachable at test time (and,
+            # for the mTLS one, a FluxMQ instance with pre-provisioned
+            # local-principal certs) — infra this job doesn't provision, unlike
+            # every other #[ignore]d test here which needs only the Postgres
+            # service above. "Compile tests" still builds them, so they still
+            # fail CI on a compile error; run them manually per their own
+            # module docs when broker infra is available.
+            case "$name" in
+              m27_live_amqp_delivery|m28_amqp_mtls_local_principal) continue ;;
+            esac
+            run_one --test "$name"
           done

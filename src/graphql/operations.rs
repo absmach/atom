@@ -149,13 +149,19 @@ impl OperationsMutation {
         require_capability(&state.pool, &auth, "rotate", Scope::Platform)
             .await
             .map_err(gql_error)?;
-        let new_keys = keys::rotate(&state.pool, &state.config.signing_keys)
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|e| gql_error(crate::error::db_err(e)))?;
+        let new_keys = keys::rotate_in_tx(&mut tx, &state.config.signing_keys)
             .await
             .map_err(gql_error)?;
-        *state.keys.write().await = new_keys;
-        audit::write(
+        audit::commit_with_audit(
             &state.pool,
-            audit::AuditEvent {
+            tx,
+            state.config.events.enabled(),
+            &audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
                 tenant_id: None,
                 target_kind: Some("signing_key"),
@@ -165,7 +171,12 @@ impl OperationsMutation {
                 details: serde_json::json!({"transport": "graphql"}),
             },
         )
-        .await;
+        .await
+        .map_err(gql_error)?;
+        // Only swap the in-memory key set once the rotation is durably
+        // committed — otherwise a rolled-back rotation would leave the process
+        // signing with a primary key no longer in the database.
+        *state.keys.write().await = new_keys;
         Ok(true)
     }
 }

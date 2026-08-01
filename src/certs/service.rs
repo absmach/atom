@@ -16,6 +16,7 @@ use rcgen::{
 use ring::{digest, rand, rand::SecureRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::Acquire;
 use std::fs;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -325,8 +326,23 @@ pub async fn issue_certificate(
     issuer: Option<&CertificateIssuer>,
     input: IssueCertificate,
 ) -> Result<IssuedCertificate, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let issued = issue_certificate_in_tx(&mut tx, config, issuer, input).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(issued)
+}
+
+/// The caller owns the commit, so an audited caller can bind issuance and its
+/// `certificate.issue` event into one transaction via
+/// [`crate::audit::commit_with_audit`].
+pub async fn issue_certificate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &Config,
+    issuer: Option<&CertificateIssuer>,
+    input: IssueCertificate,
+) -> Result<IssuedCertificate, AppError> {
     let loaded = require_issuer(config, issuer)?;
-    repo::entity_tenant_id(pool, input.entity_id).await?;
+    repo::entity_tenant_id(&mut **tx, input.entity_id).await?;
     let ttl = leaf_ttl(config, input.ttl_secs)?;
     let now = OffsetDateTime::now_utc();
     let not_before = now - Duration::seconds(LEAF_CLOCK_SKEW_SECS);
@@ -371,8 +387,13 @@ pub async fn issue_certificate(
             .signed_by(&key_pair, &loaded.issuer)
             .map_err(rcgen_err)?;
         let mut private_key_pem = key_pair.serialize_pem();
-        match persist_certificate(
-            pool,
+        // Each attempt runs in a nested transaction (a SAVEPOINT): a serial
+        // collision aborts the current (sub)transaction in Postgres, so without
+        // one, retrying would run against — and the caller would later commit —
+        // a poisoned transaction.
+        let mut attempt_tx = tx.begin().await.map_err(AppError::Database)?;
+        let outcome = persist_certificate(
+            &mut attempt_tx,
             loaded,
             PersistCertificate {
                 entity_id: input.entity_id,
@@ -386,15 +407,17 @@ pub async fn issue_certificate(
                 not_after: to_chrono(not_after)?,
             },
         )
-        .await
-        {
+        .await;
+        match outcome {
             Ok(record) => {
+                attempt_tx.commit().await.map_err(AppError::Database)?;
                 return Ok(IssuedCertificate {
                     certificate: record,
                     private_key_pem: Some(private_key_pem),
                 });
             }
             Err(err) if is_unique_violation(&err) && attempt + 1 < SERIAL_INSERT_ATTEMPTS => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
                 private_key_pem.zeroize();
             }
             Err(err) => {
@@ -415,8 +438,21 @@ pub async fn issue_certificate_from_csr(
     issuer: Option<&CertificateIssuer>,
     input: IssueCertificateFromCsr,
 ) -> Result<IssuedCertificate, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let issued = issue_certificate_from_csr_in_tx(&mut tx, config, issuer, input).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(issued)
+}
+
+/// See [`issue_certificate_in_tx`] — the caller owns the commit.
+pub async fn issue_certificate_from_csr_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &Config,
+    issuer: Option<&CertificateIssuer>,
+    input: IssueCertificateFromCsr,
+) -> Result<IssuedCertificate, AppError> {
     let loaded = require_issuer(config, issuer)?;
-    repo::entity_tenant_id(pool, input.entity_id).await?;
+    repo::entity_tenant_id(&mut **tx, input.entity_id).await?;
     let ttl = leaf_ttl(config, input.ttl_secs)?;
     let now = OffsetDateTime::now_utc();
     let not_before = now - Duration::seconds(LEAF_CLOCK_SKEW_SECS);
@@ -436,8 +472,13 @@ pub async fn issue_certificate_from_csr(
         csr.params.not_before = not_before;
         csr.params.not_after = not_after;
         let cert = csr.signed_by(&loaded.issuer).map_err(rcgen_err)?;
-        match persist_certificate(
-            pool,
+        // Each attempt runs in a nested transaction (a SAVEPOINT): a serial
+        // collision aborts the current (sub)transaction in Postgres, so without
+        // one, retrying would run against — and the caller would later commit —
+        // a poisoned transaction.
+        let mut attempt_tx = tx.begin().await.map_err(AppError::Database)?;
+        let outcome = persist_certificate(
+            &mut attempt_tx,
             loaded,
             PersistCertificate {
                 entity_id: input.entity_id,
@@ -451,15 +492,18 @@ pub async fn issue_certificate_from_csr(
                 not_after: to_chrono(not_after)?,
             },
         )
-        .await
-        {
+        .await;
+        match outcome {
             Ok(record) => {
+                attempt_tx.commit().await.map_err(AppError::Database)?;
                 return Ok(IssuedCertificate {
                     certificate: record,
                     private_key_pem: None,
                 });
             }
-            Err(err) if is_unique_violation(&err) && attempt + 1 < SERIAL_INSERT_ATTEMPTS => {}
+            Err(err) if is_unique_violation(&err) && attempt + 1 < SERIAL_INSERT_ATTEMPTS => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
+            }
             Err(err) => return Err(err),
         }
     }
@@ -475,13 +519,28 @@ pub async fn renew_certificate(
     issuer: Option<&CertificateIssuer>,
     input: RenewCertificate,
 ) -> Result<IssuedCertificate, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let issued = renew_certificate_in_tx(&mut tx, config, issuer, input).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(issued)
+}
+
+/// See [`issue_certificate_in_tx`] — the caller owns the commit. Renewal issues
+/// a replacement and (optionally) revokes the old certificate, so binding both
+/// to one transaction also stops a renewal from half-applying.
+pub async fn renew_certificate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &Config,
+    issuer: Option<&CertificateIssuer>,
+    input: RenewCertificate,
+) -> Result<IssuedCertificate, AppError> {
     let serial = normalize_serial(&input.serial_number)?;
-    let old = certificate_by_serial(pool, &serial).await?;
+    let old = record_from_row(repo::certificate_by_serial(&mut **tx, &serial).await?)?;
     if old.status == "revoked" {
         return Err(AppError::bad_request("cannot renew a revoked certificate"));
     }
-    let issued = issue_certificate(
-        pool,
+    let issued = issue_certificate_in_tx(
+        tx,
         config,
         issuer,
         IssueCertificate {
@@ -498,7 +557,7 @@ pub async fn renew_certificate(
     )
     .await?;
     if input.revoke_old {
-        revoke_certificate(pool, &serial, Some("superseded".into())).await?;
+        revoke_certificate_in_tx(tx, &serial, Some("superseded".into())).await?;
     }
     Ok(issued)
 }
@@ -508,15 +567,30 @@ pub async fn revoke_certificate(
     serial_number: &str,
     reason: Option<String>,
 ) -> Result<CertificateRecord, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let record = revoke_certificate_in_tx(&mut tx, serial_number, reason).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(record)
+}
+
+/// See [`issue_certificate_in_tx`] — the caller owns the commit. The revocation
+/// and the CRL dirty flag were previously two independent pool writes; running
+/// them in one transaction means a published `certificate.revoke` can never
+/// describe a CRL that was never marked stale.
+pub async fn revoke_certificate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    serial_number: &str,
+    reason: Option<String>,
+) -> Result<CertificateRecord, AppError> {
     let serial = normalize_serial(serial_number)?;
-    let current = repo::certificate_by_serial(pool, &serial).await?;
+    let current = repo::certificate_by_serial(&mut **tx, &serial).await?;
     let mut metadata = current.metadata.clone();
     let now = Utc::now();
     metadata["revoked_at"] = json!(now);
     metadata["revocation_reason"] = json!(reason.clone().unwrap_or_else(|| "unspecified".into()));
-    repo::revoke_certificate(pool, current.id, metadata).await?;
-    repo::mark_crl_dirty(pool).await?;
-    certificate_by_serial(pool, &serial).await
+    repo::revoke_certificate(&mut **tx, current.id, metadata).await?;
+    repo::mark_crl_dirty_tx(tx).await?;
+    record_from_row(repo::certificate_by_serial(&mut **tx, &serial).await?)
 }
 
 pub async fn revoke_entity_certificates(
@@ -524,17 +598,32 @@ pub async fn revoke_entity_certificates(
     entity_id: Uuid,
     reason: Option<String>,
 ) -> Result<usize, AppError> {
-    let certs = repo::active_entity_certificates(pool, entity_id).await?;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let count = revoke_entity_certificates_in_tx(&mut tx, entity_id, reason).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(count)
+}
+
+/// See [`revoke_certificate_in_tx`] — the caller owns the commit. Revoking an
+/// entity's certificates was a write per certificate plus a CRL flag, none of
+/// them atomic with each other; one transaction makes the reported count and
+/// the published event describe the same committed state.
+pub async fn revoke_entity_certificates_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entity_id: Uuid,
+    reason: Option<String>,
+) -> Result<usize, AppError> {
+    let certs = repo::active_entity_certificates(&mut **tx, entity_id).await?;
     let count = certs.len();
     for cert in certs {
         let mut metadata = cert.metadata.clone();
         metadata["revoked_at"] = json!(Utc::now());
         metadata["revocation_reason"] =
             json!(reason.clone().unwrap_or_else(|| "entity_revoked".into()));
-        repo::revoke_certificate(pool, cert.id, metadata).await?;
+        repo::revoke_certificate(&mut **tx, cert.id, metadata).await?;
     }
     if count > 0 {
-        repo::mark_crl_dirty(pool).await?;
+        repo::mark_crl_dirty_tx(tx).await?;
     }
     Ok(count)
 }
@@ -809,7 +898,7 @@ fn require_issuer<'a>(
 }
 
 async fn persist_certificate(
-    pool: &sqlx::PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     issuer: &CertificateIssuer,
     input: PersistCertificate,
 ) -> Result<CertificateRecord, AppError> {
@@ -830,23 +919,23 @@ async fn persist_certificate(
         revoked_at: None,
         revocation_reason: None,
     };
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    if identity::repo::lock_active_entity(&mut tx, input.entity_id)
+    if identity::repo::lock_active_entity(tx, input.entity_id)
         .await?
         .is_none()
     {
         return Err(AppError::not_found("entity not found"));
     }
     let id = repo::insert_certificate_credential(
-        &mut tx,
+        tx,
         input.entity_id,
         &input.serial_number,
         serde_json::to_value(metadata).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?,
         input.not_after,
     )
     .await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    certificate_by_id(pool, id).await
+    // Read inside the transaction: re-reading after a commit would let a
+    // transient failure report an already-issued certificate as an error.
+    record_from_row(repo::fetch_certificate_by_id(&mut **tx, id).await?)
 }
 
 fn record_from_row(row: repo::CertificateCredential) -> Result<CertificateRecord, AppError> {

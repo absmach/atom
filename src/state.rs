@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    certs::service::CertificateIssuer, config::Config, keys::ActiveKeys, rate_limit::RateLimiter,
+    certs::service::CertificateIssuer, config::Config, events::publisher::EventPublisher,
+    keys::ActiveKeys, rate_limit::RateLimiter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,12 @@ pub struct AppState {
     pub keys: Arc<RwLock<ActiveKeys>>,
     pub certificate_issuer: Option<Arc<CertificateIssuer>>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Delivers domain events out of the outbox (see `src/events/mod.rs`).
+    /// `None` (the default) means no broker is configured: event publishing
+    /// is a complete no-op — no outbox rows are written, no poller runs.
+    /// Set via [`AppState::with_event_publisher`], since connecting to a
+    /// broker is an async operation `AppState::new` (sync) can't perform.
+    pub event_publisher: Option<Arc<dyn EventPublisher>>,
     grpc_status: Arc<RwLock<GrpcRuntimeStatus>>,
 }
 
@@ -72,8 +79,17 @@ impl AppState {
             keys: Arc::new(RwLock::new(keys)),
             certificate_issuer: certificate_issuer.map(Arc::new),
             rate_limiter: Arc::new(RateLimiter::default()),
+            event_publisher: None,
             grpc_status: Arc::new(RwLock::new(grpc_status)),
         }
+    }
+
+    /// Installs an event publisher (e.g. the AMQP-backed one, once connected
+    /// in `main.rs`, or a test-only mock that records calls). Does not
+    /// affect any other field.
+    pub fn with_event_publisher(mut self, publisher: Arc<dyn EventPublisher>) -> Self {
+        self.event_publisher = Some(publisher);
+        self
     }
 
     pub async fn grpc_status(&self) -> GrpcRuntimeStatus {
