@@ -822,6 +822,89 @@ async fn tenant_delete_immediately_rejects_an_existing_session_of_a_member() {
     );
 }
 
+/// Regression test for a review finding: `change_tenant_status`'s
+/// `disableTenant`/`freezeTenant` mutations bulk-revoke the tenant's
+/// members' sessions in the same transaction as the status flip, but the
+/// resolver only ever established a cache barrier on `tenant_status` — never
+/// on the sessions it was about to revoke.
+///
+/// As with `tenant_restore_clears_reactivated_credential_cache_entries`
+/// below, an end-to-end auth-behavior test can't actually isolate this: the
+/// `tenant_status` barrier's own `end` always clears that entry's payload
+/// too, so the very next authentication after `disableTenant` (or after a
+/// subsequent `enableTenant`) is forced through a fresh-Postgres-reload path
+/// regardless of whether the session was ever separately invalidated — that
+/// fresh reload sees the correctly-revoked row and denies either way, and
+/// self-heals the session cache entry in the process, masking the bug on
+/// every subsequent check too. Confirmed by trying exactly that shape of
+/// test and finding it passed even with the session invalidation reverted.
+/// So this checks the one thing that actually isolates it: that
+/// `disableTenant` clears the session's own cache entry directly, verified
+/// against Redis, independent of what any later auth attempt would do.
+#[tokio::test]
+#[ignore]
+async fn disabling_a_tenant_invalidates_its_members_session_cache_entries() {
+    let p = pool().await;
+    let (state, cache) = state_with_cache(p.clone()).await;
+    let tenant_id = tenant(&p).await;
+    let entity_id = active_entity_in_tenant(&p, tenant_id, "service").await;
+    let session_id = Uuid::new_v4();
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+        .bind(session_id)
+        .bind(entity_id)
+        .bind(expires_at)
+        .execute(&p)
+        .await
+        .expect("insert session");
+
+    let primary = state.keys.read().await.primary.clone();
+    let token = auth::encode_jwt(
+        entity_id,
+        session_id,
+        Some(tenant_id),
+        &primary,
+        state.config.jwt_expiry_secs,
+        &state.config.jwt_issuer,
+        &state.config.jwt_audience,
+    )
+    .expect("encode jwt");
+
+    // Warm the session cache as a valid, stale-able hit.
+    auth::authenticate_token(&state, &token)
+        .await
+        .expect("initial authentication should succeed");
+    let session_key = atom::cache::keys::session(session_id);
+    let (_, _, payload_before) = hmget_raw(&session_key).await;
+    assert!(
+        payload_before.is_some(),
+        "session cache should be warm before disabling the tenant"
+    );
+
+    let schema = build_schema(state.clone());
+    let resp = schema
+        .execute(authed(
+            common::admin_id(),
+            cache.clone(),
+            format!(r#"mutation {{ disableTenant(id: "{tenant_id}") {{ id }} }}"#),
+        ))
+        .await;
+    assert!(resp.errors.is_empty(), "disable failed: {:?}", resp.errors);
+
+    // `end`'s barrier always clears the payload of whatever it covers (see
+    // `src/cache/mod.rs`), so a lingering payload here means this session's
+    // key was never part of the barrier at all -- the exact gap the review
+    // found.
+    let (_, _, payload_after) = hmget_raw(&session_key).await;
+    assert!(
+        payload_after.is_none(),
+        "disabling a tenant must invalidate its members' session cache entries, not just \
+         tenant_status -- a lingering \"still valid\" session cache entry here would keep \
+         serving hits (masked only by tenant_status denying auth while the tenant stays \
+         disabled) and would resurface the instant the tenant is re-enabled"
+    );
+}
+
 /// Regression test for a review finding: `restore_tenant` reactivates
 /// credentials but the resolver originally only invalidated `tenant_status`,
 /// not the credential entries it reactivates.

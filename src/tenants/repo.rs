@@ -1066,12 +1066,47 @@ pub async fn change_tenant_status_with_audit(
     status: TenantStatus,
     event_name: &str,
 ) -> Result<Tenant, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant =
+        change_tenant_status_in_tx(&mut tx, events_enabled, actor_id, id, status, event_name)
+            .await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: Some(id),
+            target_kind: "tenant",
+            target_id: Some(id),
+            event: event_name,
+        },
+        &serde_json::json!({ "status": tenant.status }),
+    );
+    Ok(tenant)
+}
+
+/// Body of [`change_tenant_status_with_audit`]. When `status != Active`, this
+/// also bulk-revokes the tenant's members' sessions — a cache-aware caller
+/// must already have enumerated those session ids via
+/// [`lock_tenant_and_collect_session_ids_in_tx`] and established the barrier
+/// on them (alongside `tenant_status`) before calling this, the same way
+/// `deleteTenant` does: a barrier put up only after this commits would leave
+/// a window where a concurrent read still takes a full cache hit on a
+/// session this call is about to revoke, which then survives (with
+/// `revoked_at = None`) until the tenant is re-enabled and its own
+/// `tenant_status` cache entry stops masking the stale session.
+pub(crate) async fn change_tenant_status_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    status: TenantStatus,
+    event_name: &str,
+) -> Result<Tenant, AppError> {
     if status == TenantStatus::Deleted {
         return Err(AppError::bad_request(
             "use delete tenant to apply the soft-delete lifecycle",
         ));
     }
-    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = $2, updated_by = $3, updated_at = now()
@@ -1081,7 +1116,7 @@ pub async fn change_tenant_status_with_audit(
     .bind(id)
     .bind(&status)
     .bind(actor_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
@@ -1095,7 +1130,7 @@ pub async fn change_tenant_status_with_audit(
                AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
         )
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_err)?;
     }
@@ -1108,7 +1143,7 @@ pub async fn change_tenant_status_with_audit(
         event: event_name,
     };
     let details = serde_json::json!({ "status": tenant.status });
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
     Ok(tenant)
 }
 
