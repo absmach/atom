@@ -465,6 +465,14 @@ impl TenantMutation {
                 Err(err) => Err(err),
             };
             crate::cache::invalidate::end_all(cache, &groups).await;
+            // `deactivate_and_finish_tenant_soft_delete_in_tx` already
+            // enqueued the outbox row before returning — this is the
+            // post-commit stdout observability log. Only needed on this
+            // locked path; the cache-disabled branch above already gets it
+            // from `soft_delete_tenant_with_audit` itself.
+            if outcome.is_ok() {
+                audit::log_observe_allow(&meta, &details);
+            }
             outcome
         }
         .await;

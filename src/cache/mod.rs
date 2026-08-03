@@ -5,47 +5,64 @@
 //! # Consistency model
 //!
 //! Every cached entry is a Redis hash with three fields: `v` (an integer
-//! version, bumped on every mutation that can affect the entry), `dirty`
-//! (`"1"` while a mutation is in flight, absent otherwise), and `p` (the
-//! serialized payload, present only when the entry holds a valid value).
+//! version, bumped on every mutation that can affect the entry), `dirty` (an
+//! integer *nesting counter* — above zero while one or more mutations are in
+//! flight, zero or absent otherwise), and `p` (the serialized payload,
+//! present only when the entry holds a valid value).
 //!
 //! Three primitives, each a small atomic Lua script, implement a per-key
-//! mutation barrier that prevents three races that a plain cache-aside +
+//! mutation barrier that prevents four races that a plain cache-aside +
 //! post-commit `DEL` cannot: a read started *before* a mutation repopulating
 //! the cache with stale data after the mutation's invalidation ran, a read
 //! started *during* the mutation's dirty window doing the same once the
-//! mutation finishes, and a lost invalidation silently resurrecting a
-//! revoked value:
+//! mutation finishes, a lost invalidation silently resurrecting a revoked
+//! value, and — the reason `dirty` is a counter rather than a flag — two
+//! overlapping mutations on the same key finishing at different times:
 //!
-//! - `begin` — called before a security-sensitive Postgres mutation. Bumps the
-//!   version, marks the entry dirty, clears any payload, and bounds the
-//!   barrier itself with an expiry so a lost `end` call self-heals rather than
-//!   leaving the entry dirty forever.
+//! - `begin` — called before a security-sensitive Postgres mutation.
+//!   Increments the version and the dirty counter, clears any payload, and
+//!   bounds the barrier itself with an expiry so a lost `end` call self-heals
+//!   rather than leaving the entry dirty forever.
 //! - `end` — called after the mutation (success or failure). Bumps the
-//!   version *again*, clears `dirty`, and clears any payload — the next reader
-//!   does a clean reload. The second version bump (beyond the one
-//!   `begin` already did) is what closes the dirty-window race below — it is
-//!   not merely resetting a flag.
+//!   version *again*, decrements the dirty counter, and clears any payload —
+//!   the next reader does a clean reload. The second version bump (beyond the
+//!   one `begin` already did) is what closes the dirty-window race below — it
+//!   is not merely decrementing a counter.
 //! - `try_populate` — called by a cache-miss read after it finishes loading
-//!   from Postgres. Writes the payload only if the entry is not dirty and its
-//!   version still matches what the reader observed before it started
+//!   from Postgres. Writes the payload only if the dirty counter is zero and
+//!   the version still matches what the reader observed before it started
 //!   loading; otherwise the write is silently discarded.
 //!
-//! The dirty-window race this second bump defeats (found by external review,
-//! 2026-07-29 — the original `end` only cleared `dirty`, without
-//! re-bumping the version): a reader's `lookup` can land *while* a mutation
-//! is mid-flight (`dirty == "1"`), observe the *post-`begin`* version, then
-//! proceed to load from Postgres — possibly reading the pre-mutation state,
-//! since the mutation's own Postgres write may not have committed yet.  If
-//! `end` only cleared `dirty` without moving the version again, that
-//! reader's later `try_populate` call, run after `end`, would find the
-//! version *unchanged* since the moment it was observed and would succeed —
-//! re-caching a stale value for the mutation's category for a full TTL,
-//! exactly during a revoke/policy-change race. Bumping the version in `end`
-//! too means any version a reader could have observed during the dirty
-//! window is guaranteed stale by the time `end` finishes, so `try_populate`
-//! always rejects it — whether it runs while still dirty (rejected by the
-//! `dirty` check) or after `end` (rejected by the version check).
+//! The dirty-window race the version's second bump defeats (found by external
+//! review, 2026-07-29 — the original `end` only cleared `dirty`, without
+//! re-bumping the version): a reader's `lookup` can land *while* a mutation is
+//! mid-flight (`dirty > 0`), observe the *post-`begin`* version, then proceed
+//! to load from Postgres — possibly reading the pre-mutation state, since the
+//! mutation's own Postgres write may not have committed yet. If `end` only
+//! cleared `dirty` without moving the version again, that reader's later
+//! `try_populate` call, run after `end`, would find the version *unchanged*
+//! since the moment it was observed and would succeed — re-caching a stale
+//! value for the mutation's category for a full TTL, exactly during a
+//! revoke/policy-change race. Bumping the version in `end` too means any
+//! version a reader could have observed during the dirty window is
+//! guaranteed stale by the time `end` finishes, so `try_populate` always
+//! rejects it — whether it runs while still dirty (rejected by the `dirty`
+//! check) or after `end` (rejected by the version check).
+//!
+//! The overlapping-mutations race a counter (rather than a `0`/`1` flag)
+//! defeats (also found by external review, 2026-07-29): if two
+//! security-sensitive mutations both touch the same key — say, two role
+//! changes affecting the same subject's `grants` entry — and a boolean `dirty`
+//! flag is unconditionally cleared by whichever mutation's `end` runs first,
+//! a reader landing after that first `end` but before the *second* mutation's
+//! commit sees a clean, non-dirty entry and can `try_populate` a payload
+//! loaded from the pre-second-mutation database state. That entry is wrong
+//! the instant the second mutation commits, and if the second mutation's own
+//! `end` is ever delayed or lost, nothing else corrects it before the TTL.
+//! Making `dirty` a nesting counter — incremented by every `begin`,
+//! decremented by every `end` — means the barrier only reads as clean once
+//! *every* overlapping mutation on the key has called `end`, so a reader can
+//! never land in the gap between one mutation's `end` and another's commit.
 //!
 //! Reads never depend on Redis being reachable: any error (timeout,
 //! connection failure, corrupt payload) is treated as a miss and falls
@@ -78,7 +95,7 @@ const BEGIN_SCRIPT_SRC: &str = r#"
 local ttl_ms = ARGV[1]
 for i, key in ipairs(KEYS) do
   redis.call('HINCRBY', key, 'v', 1)
-  redis.call('HSET', key, 'dirty', '1')
+  redis.call('HINCRBY', key, 'dirty', 1)
   redis.call('HDEL', key, 'p')
   redis.call('PEXPIRE', key, ttl_ms)
 end
@@ -91,6 +108,14 @@ return 1
 // barrier expired (a long mutation, or a bulk invalidation chunking through
 // many keys) would otherwise leak an immortal hash per key.
 //
+// `dirty` is a nesting counter, not a flag: `begin` increments it, `end`
+// decrements it, and only 0 means "no mutation is still in flight" — see the
+// module docs for why two overlapping mutations on the same key need this.
+// The clamp back to 0 below guards against `dirty` drifting negative if `end`
+// is ever called without a matching `begin` (should not happen, but a
+// negative counter would otherwise require one *extra* `begin` to dig back
+// out of before the barrier could ever be seen as dirty again).
+//
 // `HDEL p` is defensive rather than load-bearing: `begin` already cleared the
 // payload, and `try_populate` refuses to write while dirty. It costs one call
 // and guarantees that whatever happened to the key in between — including a
@@ -101,7 +126,10 @@ const END_SCRIPT_SRC: &str = r#"
 local ttl_ms = ARGV[1]
 for i, key in ipairs(KEYS) do
   redis.call('HINCRBY', key, 'v', 1)
-  redis.call('HSET', key, 'dirty', '0')
+  local remaining = redis.call('HINCRBY', key, 'dirty', -1)
+  if remaining < 0 then
+    redis.call('HSET', key, 'dirty', 0)
+  end
   redis.call('HDEL', key, 'p')
   redis.call('PEXPIRE', key, ttl_ms)
 end
@@ -111,9 +139,8 @@ return 1
 const TRY_POPULATE_SCRIPT_SRC: &str = r#"
 local v = redis.call('HGET', KEYS[1], 'v')
 if v == false then v = '0' end
-local dirty = redis.call('HGET', KEYS[1], 'dirty')
-if dirty == false then dirty = '0' end
-if dirty == '1' or v ~= ARGV[1] then
+local dirty = tonumber(redis.call('HGET', KEYS[1], 'dirty')) or 0
+if dirty > 0 or v ~= ARGV[1] then
   return 'stale'
 end
 redis.call('HSET', KEYS[1], 'p', ARGV[2])
@@ -131,9 +158,8 @@ return 'applied'
 const DISCARD_SCRIPT_SRC: &str = r#"
 local v = redis.call('HGET', KEYS[1], 'v')
 if v == false then v = '0' end
-local dirty = redis.call('HGET', KEYS[1], 'dirty')
-if dirty == false then dirty = '0' end
-if dirty == '1' or v ~= ARGV[1] then
+local dirty = tonumber(redis.call('HGET', KEYS[1], 'dirty')) or 0
+if dirty > 0 or v ~= ARGV[1] then
   return 'skipped'
 end
 redis.call('HDEL', KEYS[1], 'p')
@@ -220,9 +246,12 @@ impl RawLookup {
         }
     }
 
-    fn from_fields(fields: (Option<i64>, Option<String>, Option<Vec<u8>>)) -> Self {
+    fn from_fields(fields: (Option<i64>, Option<i64>, Option<Vec<u8>>)) -> Self {
         let (version, dirty, payload) = fields;
-        let is_dirty = dirty.as_deref() == Some("1");
+        // `dirty` is a nesting counter (see `BEGIN_SCRIPT_SRC`/`END_SCRIPT_SRC`):
+        // any value above zero means at least one overlapping mutation on this
+        // key is still in flight.
+        let is_dirty = dirty.unwrap_or(0) > 0;
         Self {
             version: Some(version.unwrap_or(0)),
             payload: payload.filter(|_| !is_dirty),
@@ -360,7 +389,7 @@ impl CacheClient {
         }
         let result = tokio::time::timeout(
             self.op_timeout,
-            pipe.query_async::<Vec<(Option<i64>, Option<String>, Option<Vec<u8>>)>>(&mut conn),
+            pipe.query_async::<Vec<(Option<i64>, Option<i64>, Option<Vec<u8>>)>>(&mut conn),
         )
         .await;
 
@@ -521,10 +550,14 @@ impl CacheClient {
         }
     }
 
-    /// Marks `keys` dirty before a security-sensitive Postgres mutation.
-    /// **Fails the caller** if the barrier cannot be established (Redis
-    /// unreachable/timeout) — see module docs and `src/cache/invalidate.rs`.
-    /// A no-op that always succeeds when `keys` is empty.
+    /// Increments `keys`' dirty counter before a security-sensitive Postgres
+    /// mutation — safe to call while another mutation on the same key is
+    /// already in flight, since the counter (not a flag) is what lets `end`
+    /// tell "this mutation is done" apart from "every overlapping mutation on
+    /// this key is done" (see module docs). **Fails the caller** if the
+    /// barrier cannot be established (Redis unreachable/timeout) — see module
+    /// docs and `src/cache/invalidate.rs`. A no-op that always succeeds when
+    /// `keys` is empty.
     pub async fn begin(&self, category: CacheCategory, keys: &[String]) -> Result<(), AppError> {
         if keys.is_empty() {
             return Ok(());
@@ -571,12 +604,14 @@ impl CacheClient {
         Ok(())
     }
 
-    /// Bumps the version and clears the dirty marker on `keys` after the
-    /// mutation (success or failure). Always best-effort — never fails the
-    /// caller. Left dirty entries self-heal once the barrier TTL set by
-    /// `begin` expires. The version bump (not just the dirty clear) is what
-    /// stops a reader whose `lookup` landed during the dirty window from
-    /// repopulating a stale value afterward — see the module docs.
+    /// Bumps the version and decrements the dirty counter on `keys` after the
+    /// mutation (success or failure) — the entry only reads as clean once
+    /// every overlapping `begin` on the key has been matched by an `end`.
+    /// Always best-effort — never fails the caller. Left dirty entries
+    /// self-heal once the barrier TTL set by `begin` expires. The version
+    /// bump (not just the dirty decrement) is what stops a reader whose
+    /// `lookup` landed during the dirty window from repopulating a stale
+    /// value afterward — see the module docs.
     pub async fn end(&self, category: CacheCategory, keys: &[String]) {
         if keys.is_empty() {
             return;
@@ -1098,5 +1133,90 @@ mod tests {
             Lookup::Miss { .. } => {}
             Lookup::Unavailable => panic!("cache should be reachable in this test"),
         }
+    }
+
+    /// Regression test for a review finding: the two tests above only cover a
+    /// single mutation on a key. When *two* security-sensitive mutations
+    /// overlap on the same key — e.g. two role changes affecting the same
+    /// subject's `grants` entry — a `dirty` field that is a flag rather than
+    /// a nesting counter is unconditionally cleared by whichever mutation's
+    /// `end` runs first, even though the second mutation is still in flight.
+    /// A reader landing in that gap sees a clean, non-dirty entry and can
+    /// `try_populate` a payload loaded before the second mutation's own
+    /// commit — wrong the instant that commit lands, and never corrected if
+    /// the second mutation's own `end` is ever delayed or lost.
+    #[tokio::test]
+    #[ignore]
+    async fn dirty_barrier_stays_up_until_every_overlapping_mutation_ends() {
+        let client = test_client().await;
+        let key = unique_key("overlapping-mutations");
+        let keys = vec![key.clone()];
+
+        // Two mutations both touch this key concurrently — M1 begins first,
+        // then M2 begins while M1 is still in flight.
+        client
+            .begin(CacheCategory::Grants, &keys)
+            .await
+            .expect("M1 begin");
+        client
+            .begin(CacheCategory::Grants, &keys)
+            .await
+            .expect("M2 begin");
+
+        // M1 finishes first. With a flag (not a counter), this would clear
+        // `dirty` outright even though M2 hasn't committed yet.
+        client.end(CacheCategory::Grants, &keys).await;
+
+        // A reader lands in the gap between M1's `end` and M2's commit. The
+        // barrier must still read as dirty — M2 is still in flight — so this
+        // must be a miss, not a hit, and the version it observes here must
+        // never successfully populate the cache.
+        let gap_version = match client.lookup::<Payload>(CacheCategory::Grants, &key).await {
+            Lookup::Miss { version } => version,
+            other => panic!(
+                "expected a miss while M2 is still in flight (M1's end must not have cleared \
+                 the barrier), got {other:?}"
+            ),
+        };
+        let stale_value = Payload {
+            value: "STALE — read while a second overlapping mutation was still in flight".into(),
+        };
+        client
+            .try_populate(CacheCategory::Grants, &key, gap_version, &stale_value)
+            .await;
+        match client.lookup::<Payload>(CacheCategory::Grants, &key).await {
+            Lookup::Hit(got) => assert_ne!(
+                got, stale_value,
+                "a reader landing between M1's `end` and M2's commit was able to poison the \
+                 cache — this means `dirty` is being treated as a flag instead of a nesting \
+                 counter, so the first of two overlapping mutations to finish clears the \
+                 barrier the second one still needs"
+            ),
+            Lookup::Miss { .. } => {}
+            Lookup::Unavailable => panic!("cache should be reachable in this test"),
+        }
+
+        // M2 finishes. Only now should the barrier be fully clear.
+        client.end(CacheCategory::Grants, &keys).await;
+        let clean_version = match client.lookup::<Payload>(CacheCategory::Grants, &key).await {
+            Lookup::Miss { version } => version,
+            other => {
+                panic!("expected a clean miss once every overlapping mutation ended, got {other:?}")
+            }
+        };
+        let fresh_value = Payload {
+            value: "fresh, post-M2 value".into(),
+        };
+        client
+            .try_populate(CacheCategory::Grants, &key, clean_version, &fresh_value)
+            .await;
+        assert!(
+            matches!(
+                client.lookup::<Payload>(CacheCategory::Grants, &key).await,
+                Lookup::Hit(got) if got == fresh_value
+            ),
+            "once every overlapping mutation has called `end`, the barrier must clear and a \
+             fresh populate must succeed"
+        );
     }
 }

@@ -1831,10 +1831,24 @@ pub async fn update_group_with_audit(
         id,
         req,
         event_name,
-        audit_details,
+        audit_details.clone(),
     )
     .await?;
     tx.commit().await.map_err(db_err)?;
+    // `update_group_in_tx` already enqueued the outbox row via `observe_in_tx`
+    // before returning — this is the post-commit stdout observability log
+    // `commit_with_observation` would otherwise provide; calling that helper
+    // instead would enqueue the outbox row a second time.
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: group.tenant_id,
+            target_kind: "group",
+            target_id: Some(id),
+            event: event_name,
+        },
+        &audit_details,
+    );
     Ok(group)
 }
 
@@ -1856,7 +1870,18 @@ pub async fn set_group_parent_with_audit(
     let mut tx = pool.begin().await.map_err(db_err)?;
     set_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id, parent_id).await?;
     tx.commit().await.map_err(db_err)?;
-    get_group(pool, child_id).await
+    let group = get_group(pool, child_id).await?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: group.tenant_id,
+            target_kind: "group",
+            target_id: Some(child_id),
+            event: "group.parent.set",
+        },
+        &serde_json::json!({ "parent_id": parent_id }),
+    );
+    Ok(group)
 }
 
 /// Body of [`set_group_parent`] (minus its post-commit `get_group` read);
@@ -2038,18 +2063,30 @@ pub async fn remove_group_parent_with_audit(
     child_id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    remove_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id).await?;
-    tx.commit().await.map_err(db_err)
+    let tenant_id = remove_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "group",
+            target_id: Some(child_id),
+            event: "group.parent.remove",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
 }
 
 /// Body of [`remove_group_parent`]; caller contract per
-/// [`set_group_parent_in_tx`].
+/// [`set_group_parent_in_tx`]. Returns the group's `tenant_id` for the
+/// caller's post-commit observability log.
 pub(crate) async fn remove_group_parent_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     child_id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
             .bind(child_id)
@@ -2096,7 +2133,7 @@ pub(crate) async fn remove_group_parent_in_tx(
     };
     let details = serde_json::json!({});
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    Ok(tenant_id)
 }
 
 pub async fn list_child_groups(
@@ -2221,8 +2258,19 @@ pub async fn delete_group_with_audit(
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_group_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
-    tx.commit().await.map_err(db_err)
+    let tenant_id = delete_group_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "group",
+            target_id: Some(id),
+            event: "group.delete",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
 }
 
 /// Body of [`delete_group`]; caller contract per
@@ -2230,14 +2278,16 @@ pub async fn delete_group_with_audit(
 /// hold this group's closure lock via
 /// `authz::repo::lock_group_closures_and_collect_grants_keys` on this `tx` —
 /// a soft delete only sets `deleted_at`, leaving `group_hierarchy` untouched,
-/// so the closure is unaffected by this mutation's own effect.
+/// so the closure is unaffected by this mutation's own effect. Returns the
+/// group's `tenant_id` for the caller's post-commit observability log — a
+/// re-read after this commits would always miss the now-deleted row.
 pub(crate) async fn delete_group_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     deleted_by: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -2279,7 +2329,7 @@ pub(crate) async fn delete_group_in_tx(
     };
     let details = serde_json::json!({});
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    Ok(tenant_id)
 }
 
 pub async fn delete_group(

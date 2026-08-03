@@ -509,6 +509,20 @@ impl PolicyMutation {
                 },
             )
             .await?;
+            // `_in_tx` already enqueued the outbox row before returning — this
+            // is the post-commit stdout observability log. Only needed on
+            // this locked path: the cache-disabled branch above already gets
+            // it from `replace_role_permission_block_links_with_audit` itself.
+            audit::log_observe_allow(
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: "role",
+                    target_id: Some(role_id),
+                    event: "role.permission_blocks.replace",
+                },
+                &serde_json::json!({ "permission_block_ids": permission_block_ids }),
+            );
             Ok(tenant_id)
         }
         .await;
@@ -590,6 +604,18 @@ impl PolicyMutation {
                 },
             )
             .await?;
+            // Only needed on this locked path — the cache-disabled branch
+            // above already gets it from `delete_role_with_audit` itself.
+            audit::log_observe_allow(
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: "role",
+                    target_id: Some(id),
+                    event: "role.delete",
+                },
+                &details,
+            );
             Ok(tenant_id)
         }
         .await;
@@ -1222,6 +1248,22 @@ impl PolicyMutation {
                         },
                     )
                     .await
+                    .inspect(|assignment| {
+                        // Only needed on this locked path — the entity-subject
+                        // branch and the cache-disabled fallback above already
+                        // get it from `create_role_assignment_with_audit`
+                        // itself.
+                        audit::log_observe_allow(
+                            &audit::AuditMeta {
+                                actor_entity_id: Some(auth.entity_id),
+                                tenant_id: assignment.tenant_id,
+                                target_kind: "role_assignment",
+                                target_id: Some(assignment.id),
+                                event: "role_assignment.create",
+                            },
+                            &details,
+                        );
+                    })
                 }
             }
         }
@@ -1317,6 +1359,19 @@ impl PolicyMutation {
                         },
                     )
                     .await?;
+                    // Only needed on this locked path — the entity-subject
+                    // branch and the cache-disabled fallback above already
+                    // get it from `delete_role_assignment_with_audit` itself.
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id,
+                            target_kind: "role_assignment",
+                            target_id: Some(id),
+                            event: "role_assignment.delete",
+                        },
+                        &details,
+                    );
                 }
             }
             Ok(tenant_id)
@@ -1423,6 +1478,21 @@ impl PolicyMutation {
                         },
                     )
                     .await
+                    .inspect(|policy| {
+                        // Only needed on this locked path — the entity-subject
+                        // branch and the cache-disabled fallback above already
+                        // get it from `create_direct_policy_with_audit` itself.
+                        audit::log_observe_allow(
+                            &audit::AuditMeta {
+                                actor_entity_id: Some(auth.entity_id),
+                                tenant_id: policy.tenant_id,
+                                target_kind: "direct_policy",
+                                target_id: Some(policy.id),
+                                event: "direct_policy.create",
+                            },
+                            &details,
+                        );
+                    })
                 }
             }
         }
@@ -1518,6 +1588,19 @@ impl PolicyMutation {
                         },
                     )
                     .await?;
+                    // Only needed on this locked path — the entity-subject
+                    // branch and the cache-disabled fallback above already
+                    // get it from `delete_direct_policy_with_audit` itself.
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id,
+                            target_kind: "direct_policy",
+                            target_id: Some(id),
+                            event: "direct_policy.delete",
+                        },
+                        &details,
+                    );
                 }
             }
             Ok(tenant_id)

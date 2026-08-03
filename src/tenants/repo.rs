@@ -764,6 +764,16 @@ pub async fn soft_delete_tenant_with_audit(
     )
     .await?;
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: Some(id),
+            target_kind: "tenant",
+            target_id: Some(id),
+            event: "tenant.delete",
+        },
+        &serde_json::json!({}),
+    );
     Ok(tenant)
 }
 

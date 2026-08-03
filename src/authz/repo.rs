@@ -1348,7 +1348,7 @@ pub async fn replace_role_permission_block_links_with_audit(
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    replace_role_permission_block_links_in_tx(
+    let tenant_id = replace_role_permission_block_links_in_tx(
         &mut tx,
         events_enabled,
         actor_id,
@@ -1356,7 +1356,21 @@ pub async fn replace_role_permission_block_links_with_audit(
         permission_block_ids,
     )
     .await?;
-    tx.commit().await.map_err(db_err)
+    tx.commit().await.map_err(db_err)?;
+    // `_in_tx` already enqueued the outbox row via `observe_in_tx` before
+    // returning — this is the post-commit stdout observability log
+    // `commit_with_observation` would otherwise provide.
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "role",
+            target_id: Some(role_id),
+            event: "role.permission_blocks.replace",
+        },
+        &serde_json::json!({ "permission_block_ids": permission_block_ids }),
+    );
+    Ok(())
 }
 
 /// Body of [`replace_role_permission_block_links`]; caller contract per
@@ -1368,13 +1382,17 @@ pub async fn replace_role_permission_block_links_with_audit(
 /// below is only meaningful under the role lock this transaction holds, and a
 /// second connection acquired mid-transaction is a pool-exhaustion deadlock
 /// under concurrency.
+/// Returns the role's `tenant_id`, captured here rather than left for the
+/// caller to re-derive post-commit — cheaper than an extra query, and safe
+/// for any future case where the role itself stops existing by the time the
+/// caller wants to log.
 pub(crate) async fn replace_role_permission_block_links_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     role_id: Uuid,
     permission_block_ids: &[Uuid],
-) -> Result<(), AppError> {
+) -> Result<Option<Uuid>, AppError> {
     let role_tenant_id: Option<Uuid> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(role_id)
@@ -1444,7 +1462,8 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
         },
         &serde_json::json!({ "permission_block_ids": unique_block_ids }),
     )
-    .await
+    .await?;
+    Ok(role_tenant_id)
 }
 
 async fn insert_role_permission_block(
@@ -2947,20 +2966,34 @@ pub async fn delete_role_with_audit(
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_role_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
-    tx.commit().await.map_err(db_err)
+    let tenant_id = delete_role_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "role",
+            target_id: Some(id),
+            event: "role.delete",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
 }
 
 /// Body of [`delete_role`]; caller contract per
 /// [`create_role_assignment_in_tx`] — the resolver must already hold the
-/// role lock via [`lock_role_and_collect_grants_keys`] on this `tx`.
+/// role lock via [`lock_role_and_collect_grants_keys`] on this `tx`. Returns
+/// the role's `tenant_id`, captured here rather than left for the caller to
+/// re-derive post-commit — a re-read after this commits would always miss
+/// the now-deleted row.
 pub(crate) async fn delete_role_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     deleted_by: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -2991,7 +3024,7 @@ pub(crate) async fn delete_role_in_tx(
     };
     let details = serde_json::json!({});
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    Ok(tenant_id)
 }
 
 pub async fn delete_role(
@@ -4290,6 +4323,16 @@ pub async fn create_role_assignment_with_audit(
     let mut tx = pool.begin().await.map_err(db_err)?;
     let assignment = create_role_assignment_in_tx(&mut tx, events_enabled, actor_id, req).await?;
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: assignment.tenant_id,
+            target_kind: "role_assignment",
+            target_id: Some(assignment.id),
+            event: "role_assignment.create",
+        },
+        &serde_json::json!({}),
+    );
     Ok(assignment)
 }
 
@@ -4516,19 +4559,32 @@ pub async fn delete_role_assignment_with_audit(
     id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_role_assignment_in_tx(&mut tx, events_enabled, actor_id, id).await?;
-    tx.commit().await.map_err(db_err)
+    let tenant_id = delete_role_assignment_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "role_assignment",
+            target_id: Some(id),
+            event: "role_assignment.delete",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
 }
 
 /// Body of [`delete_role_assignment`]; caller contract per
 /// [`create_role_assignment_in_tx`] — the group-subject resolver path must
-/// already hold the subject's group closure lock on this `tx`.
+/// already hold the subject's group closure lock on this `tx`. Returns the
+/// assignment's `tenant_id`, captured here rather than left for the caller
+/// to re-derive post-commit — the row is gone by then.
 pub(crate) async fn delete_role_assignment_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
             .bind(id)
@@ -4561,7 +4617,7 @@ pub(crate) async fn delete_role_assignment_in_tx(
     };
     let details = serde_json::json!({});
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    Ok(tenant_id)
 }
 
 pub async fn create_direct_policy_with_audit(
@@ -4573,6 +4629,16 @@ pub async fn create_direct_policy_with_audit(
     let mut tx = pool.begin().await.map_err(db_err)?;
     let policy = create_direct_policy_in_tx(&mut tx, events_enabled, actor_id, req).await?;
     tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: policy.tenant_id,
+            target_kind: "direct_policy",
+            target_id: Some(policy.id),
+            event: "direct_policy.create",
+        },
+        &serde_json::json!({}),
+    );
     Ok(policy)
 }
 
@@ -4857,18 +4923,31 @@ pub async fn delete_direct_policy_with_audit(
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "direct_policies", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_direct_policy_in_tx(&mut tx, events_enabled, actor_id, id).await?;
-    tx.commit().await.map_err(db_err)
+    let tenant_id = delete_direct_policy_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "direct_policy",
+            target_id: Some(id),
+            event: "direct_policy.delete",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
 }
 
 /// Body of [`delete_direct_policy`]; caller contract per
-/// [`create_role_assignment_in_tx`].
+/// [`create_role_assignment_in_tx`]. Returns the policy's `tenant_id`,
+/// captured here rather than left for the caller to re-derive post-commit —
+/// the row is gone by then.
 pub(crate) async fn delete_direct_policy_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<Option<Uuid>, AppError> {
     let policy_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
             .bind(id)
@@ -4902,7 +4981,7 @@ pub(crate) async fn delete_direct_policy_in_tx(
     };
     let details = serde_json::json!({});
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    Ok(tenant_id)
 }
 
 pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
