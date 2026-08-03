@@ -585,28 +585,68 @@ pub async fn update_tenant(
     update_tenant_with_audit(pool, false, None, id, req, updated_by).await
 }
 
-/// Flips the tenant to `deleted` and, in the *same* transaction, enumerates
-/// the exact active session ids of its member entities that
-/// [`finish_tenant_soft_delete_in_tx`] is about to revoke. Callers invalidate
-/// `atom:v1:session:*` cache entries for these before calling it.
+/// Locks the tenant row and, in the *same* transaction, enumerates the exact
+/// active session ids of its member entities that a subsequent delete is
+/// about to revoke — *before* the tenant is touched. Callers establish the
+/// cache barrier on these ids (plus the tenant's own `tenant_status` key)
+/// before calling [`deactivate_and_finish_tenant_soft_delete_in_tx`]: starting
+/// the barrier only after the status flip would leave a window where a
+/// concurrent request can still take a full cache hit on the pre-delete
+/// tenant-status/session entries and keep running past the point the delete
+/// commits.
 ///
-/// The status-flip `UPDATE` below takes an exclusive row lock on the tenant —
-/// the same lock `lock_active_tenant`/`lock_optional_active_tenant` take
+/// The `SELECT ... FOR UPDATE` below takes the same exclusive row lock on the
+/// tenant that `lock_active_tenant`/`lock_optional_active_tenant` take
 /// (transitively, via `lock_active_entity`) before any session or credential
 /// can be created for an entity in this tenant. So a session created
-/// concurrently for a member entity either committed before this `UPDATE`
-/// acquired the lock (and is therefore visible to the enumeration below,
-/// which runs after it, in the same transaction) or is blocked until this
-/// transaction commits (and then fails, since the tenant is no longer
-/// active). Enumerating via a plain pre-transaction pool query — the previous
-/// shape of this code — could miss a session created in that window, leaving
-/// its cache entry uninvalidated indefinitely. See `src/cache/mod.rs`'s
+/// concurrently for a member entity either committed before this lock was
+/// acquired (and is therefore visible to the enumeration below, which runs
+/// after it, in the same transaction) or is blocked until this transaction
+/// commits (and then fails, since the tenant is no longer active by then).
+/// Enumerating via a plain pre-transaction pool query — the previous shape of
+/// this code — could miss a session created in that window, leaving its
+/// cache entry uninvalidated indefinitely. See `src/cache/mod.rs`'s
 /// consistency model.
-pub async fn deactivate_tenant_and_collect_session_ids_in_tx(
+pub async fn lock_tenant_and_collect_session_ids_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    let locked =
+        sqlx::query("SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::not_found(format!("tenant {id} not found")));
+    }
+
+    let session_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM sessions
+           WHERE revoked_at IS NULL
+             AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)"#,
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    Ok(session_ids)
+}
+
+/// Finishes the tenant soft-delete started by
+/// [`lock_tenant_and_collect_session_ids_in_tx`] in the same transaction:
+/// flips the tenant to `deleted`, and revokes every active credential and
+/// session belonging to the tenant's entities. Does not commit — the caller
+/// commits after this succeeds, once the cache barrier established on the
+/// enumerated session ids covers the whole transaction.
+pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
     deleted_by: Option<Uuid>,
-) -> Result<(Tenant, Vec<Uuid>), AppError> {
+    id: Uuid,
+) -> Result<Tenant, AppError> {
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = 'deleted', deleted_at = now(), deleted_by = $2,
@@ -623,31 +663,6 @@ pub async fn deactivate_tenant_and_collect_session_ids_in_tx(
         other => AppError::Database(other),
     })?;
 
-    let session_ids: Vec<Uuid> = sqlx::query_scalar(
-        r#"SELECT id FROM sessions
-           WHERE revoked_at IS NULL
-             AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)"#,
-    )
-    .bind(id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(db_err)?;
-
-    Ok((tenant, session_ids))
-}
-
-/// Finishes the tenant soft-delete started by
-/// [`deactivate_tenant_and_collect_session_ids_in_tx`] in the same
-/// transaction: revokes every active credential and session belonging to the
-/// tenant's entities. Does not commit — the caller commits after this
-/// succeeds, once the cache barrier established on the enumerated session ids
-/// covers the whole transaction.
-pub async fn finish_tenant_soft_delete_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-) -> Result<(), AppError> {
     // Stamp the tenant-delete marker on every revoked credential (not just
     // certificates) so restore_tenant can reverse exactly the revocations this
     // delete caused, without disturbing credentials revoked earlier for other
@@ -710,7 +725,7 @@ pub async fn finish_tenant_soft_delete_in_tx(
         }
     });
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    Ok(tenant)
 }
 
 /// Soft-delete a tenant: mark `status = deleted`, stamp the tombstone, and
@@ -727,9 +742,9 @@ pub async fn soft_delete_tenant(
 
 /// Used directly only when no cache is configured; the cache-aware path
 /// (`graphql::tenants::delete_tenant`) calls
-/// [`deactivate_tenant_and_collect_session_ids_in_tx`] and
-/// [`finish_tenant_soft_delete_in_tx`] itself so it can establish the cache
-/// barrier between them.
+/// [`lock_tenant_and_collect_session_ids_in_tx`] and
+/// [`deactivate_and_finish_tenant_soft_delete_in_tx`] itself so it can
+/// establish the cache barrier between them.
 pub async fn soft_delete_tenant_with_audit(
     pool: &PgPool,
     events_enabled: bool,
@@ -739,9 +754,15 @@ pub async fn soft_delete_tenant_with_audit(
 ) -> Result<Tenant, AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let (tenant, _session_ids) =
-        deactivate_tenant_and_collect_session_ids_in_tx(&mut tx, id, deleted_by).await?;
-    finish_tenant_soft_delete_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    lock_tenant_and_collect_session_ids_in_tx(&mut tx, id).await?;
+    let tenant = deactivate_and_finish_tenant_soft_delete_in_tx(
+        &mut tx,
+        events_enabled,
+        actor_id,
+        deleted_by,
+        id,
+    )
+    .await?;
     tx.commit().await.map_err(db_err)?;
     Ok(tenant)
 }
@@ -779,7 +800,7 @@ pub async fn soft_delete_tenant_with_audit(
 /// so the enumeration that follows it (in the same transaction) sees a
 /// consistent snapshot with respect to any concurrent restore/purge of the
 /// same tenant — mirroring the same lock-then-enumerate shape used by
-/// [`deactivate_tenant_and_collect_session_ids_in_tx`], even though (unlike
+/// [`lock_tenant_and_collect_session_ids_in_tx`], even though (unlike
 /// that case) no *new* matching credential can appear here: only
 /// `soft_delete_tenant` ever stamps the `tenant_deleted` revocation reason,
 /// and it cannot run again against an already-deleted tenant.

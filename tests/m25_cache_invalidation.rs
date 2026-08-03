@@ -1173,10 +1173,9 @@ async fn entity_delete_then_restore_immediately_rejects_a_pre_existing_access_to
 /// the_group_subject_lock` below), just previously unfixed for
 /// sessions/credentials.
 ///
-/// Fixed by moving the enumeration inside the same transaction as the
-/// status-flip `UPDATE`
-/// (`identity::repo::deactivate_entity_and_collect_revocation_ids_in_tx`),
-/// which takes an exclusive lock on the entity row — the same lock
+/// Fixed by moving the enumeration inside the same transaction as the lock
+/// (`identity::repo::lock_entity_and_collect_revocation_ids_in_tx`), which
+/// takes an exclusive lock on the entity row — the same lock
 /// `create_session`/`create_access_token` take (via `lock_active_entity`)
 /// before inserting. As with the group-membership fix, an end-to-end test
 /// racing a real `create_session` against a real `deleteEntity` mutation
@@ -1195,9 +1194,9 @@ async fn concurrent_session_creation_cannot_evade_the_entity_delete_enumeration(
 
     let mut tx = p.begin().await.expect("begin tx");
     let (session_ids, credential_ids) =
-        identity_repo::deactivate_entity_and_collect_revocation_ids_in_tx(&mut tx, entity, None)
+        identity_repo::lock_entity_and_collect_revocation_ids_in_tx(&mut tx, entity)
             .await
-            .expect("lock, deactivate, and enumerate");
+            .expect("lock and enumerate");
     assert!(
         session_ids.is_empty() && credential_ids.is_empty(),
         "no sessions/credentials exist yet for this fresh entity"
@@ -1218,6 +1217,12 @@ async fn concurrent_session_creation_cannot_evade_the_entity_delete_enumeration(
          not commit a session the enumeration has already missed"
     );
 
+    // Mirrors the production call site's order: the status-flip runs after
+    // the lock-and-enumerate step (which the barrier, in production, is
+    // established between), still inside the same transaction as the lock.
+    identity_repo::deactivate_and_finish_entity_deletion_in_tx(&mut tx, false, None, None, entity)
+        .await
+        .expect("deactivate and finish");
     tx.commit().await.expect("commit lock-holding tx");
 
     // Once committed, the entity is deactivated (the same effect
@@ -1239,11 +1244,11 @@ async fn concurrent_session_creation_cannot_evade_the_entity_delete_enumeration(
 /// transaction/lock was taken, so a session created for a member entity in
 /// the window between enumeration and the tenant's own bulk revoke was never
 /// included in the cache barrier. Fixed by moving the enumeration inside the
-/// same transaction as the tenant's status-flip `UPDATE`
-/// (`tenants::repo::deactivate_tenant_and_collect_session_ids_in_tx`), which
-/// takes an exclusive lock on the tenant row — the same lock
-/// `lock_active_entity` takes (via `lock_optional_active_tenant`) before any
-/// session/credential can be created for *any* entity in the tenant.
+/// same transaction as the lock
+/// (`tenants::repo::lock_tenant_and_collect_session_ids_in_tx`), which takes
+/// an exclusive lock on the tenant row — the same lock `lock_active_entity`
+/// takes (via `lock_optional_active_tenant`) before any session/credential
+/// can be created for *any* entity in the tenant.
 #[tokio::test]
 #[ignore]
 async fn concurrent_session_creation_cannot_evade_the_tenant_delete_enumeration() {
@@ -1252,10 +1257,9 @@ async fn concurrent_session_creation_cannot_evade_the_tenant_delete_enumeration(
     let entity = active_entity_in_tenant(&p, tenant_id, "service").await;
 
     let mut tx = p.begin().await.expect("begin tx");
-    let (_tenant, session_ids) =
-        tenant_repo::deactivate_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id, None)
-            .await
-            .expect("lock, deactivate, and enumerate");
+    let session_ids = tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id)
+        .await
+        .expect("lock and enumerate");
     assert!(
         session_ids.is_empty(),
         "no sessions exist yet for this fresh tenant's member"
@@ -1272,6 +1276,14 @@ async fn concurrent_session_creation_cannot_evade_the_tenant_delete_enumeration(
          delete's enumeration holds, not commit a session the enumeration has already missed"
     );
 
+    // Mirrors the production call site's order: the status-flip runs after
+    // the lock-and-enumerate step (which the barrier, in production, is
+    // established between), still inside the same transaction as the lock.
+    tenant_repo::deactivate_and_finish_tenant_soft_delete_in_tx(
+        &mut tx, false, None, None, tenant_id,
+    )
+    .await
+    .expect("deactivate and finish");
     tx.commit().await.expect("commit lock-holding tx");
 
     // Once committed, the tenant is deleted (so `lock_active_entity`'s own

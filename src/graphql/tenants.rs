@@ -421,8 +421,10 @@ impl TenantMutation {
             // treatment — `restore_tenant`'s own invalidation (see
             // `reactivate_tenant_and_collect_credential_ids_in_tx`) already
             // covers that side by the time a restore could matter. See
-            // `deactivate_tenant_and_collect_session_ids_in_tx` for why
-            // session ids are enumerated inside the same locked transaction.
+            // `lock_tenant_and_collect_session_ids_in_tx` for why session ids
+            // are enumerated inside the same locked transaction, and why that
+            // lock-and-enumerate step must run before the barrier below is
+            // established, not after the tenant is flipped to `deleted`.
             let Some(cache) = state.cache.as_deref() else {
                 tenant_repo::soft_delete_tenant_with_audit(
                     &state.pool,
@@ -435,13 +437,8 @@ impl TenantMutation {
                 return Ok(());
             };
             let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            let (_tenant, session_ids) =
-                tenant_repo::deactivate_tenant_and_collect_session_ids_in_tx(
-                    &mut tx,
-                    tenant_id,
-                    Some(auth.entity_id),
-                )
-                .await?;
+            let session_ids =
+                tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id).await?;
             let session_keys: Vec<String> = session_ids
                 .iter()
                 .map(|id| crate::cache::keys::session(*id))
@@ -455,15 +452,16 @@ impl TenantMutation {
                 (crate::cache::CacheCategory::Session, &session_keys),
             ];
             crate::cache::invalidate::begin_all(cache, &groups).await?;
-            let outcome = tenant_repo::finish_tenant_soft_delete_in_tx(
+            let outcome = tenant_repo::deactivate_and_finish_tenant_soft_delete_in_tx(
                 &mut tx,
                 state.config.events.enabled(),
+                Some(auth.entity_id),
                 Some(auth.entity_id),
                 tenant_id,
             )
             .await;
             let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
+                Ok(_tenant) => tx.commit().await.map_err(crate::error::db_err),
                 Err(err) => Err(err),
             };
             crate::cache::invalidate::end_all(cache, &groups).await;

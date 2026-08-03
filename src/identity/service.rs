@@ -2395,7 +2395,7 @@ fn make_shared_key(cred_id: Uuid) -> String {
 /// invalidation, a stale cached session or credential becomes a full hit
 /// again the moment a later restore repopulates `entity_status` as active —
 /// despite staying revoked in Postgres. See
-/// [`super::repo::deactivate_entity_and_collect_revocation_ids_in_tx`] for why the
+/// [`super::repo::lock_entity_and_collect_revocation_ids_in_tx`] for why the
 /// ids are enumerated inside the same locked transaction.
 pub async fn delete_entity(
     pool: &PgPool,
@@ -2416,9 +2416,16 @@ pub async fn delete_entity(
     };
 
     let mut tx = pool.begin().await.map_err(db_err)?;
+    // Lock and enumerate *before* establishing the barrier: the entity is
+    // still fully active at this point, so a concurrent cache read has
+    // nothing dirty to react to yet. Only once the barrier below is up does
+    // a concurrent read stop trusting the (about-to-be-stale) cache entries
+    // and fall through to Postgres — flipping status first would leave a
+    // window where a concurrent request keeps taking full cache hits on the
+    // pre-delete entity/session/credential entries and runs past the point
+    // this delete commits.
     let (session_ids, credential_ids) =
-        super::repo::deactivate_entity_and_collect_revocation_ids_in_tx(&mut tx, id, deleted_by)
-            .await?;
+        super::repo::lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
     let session_keys: Vec<String> = session_ids
         .iter()
         .copied()
@@ -2439,23 +2446,27 @@ pub async fn delete_entity(
         (crate::cache::CacheCategory::Credential, &credential_keys),
     ];
     crate::cache::invalidate::begin_all(cache, &groups).await?;
-    let outcome =
-        super::repo::finish_entity_deletion_in_tx(&mut tx, events_enabled, deleted_by, id).await;
+    let outcome = super::repo::deactivate_and_finish_entity_deletion_in_tx(
+        &mut tx,
+        events_enabled,
+        deleted_by,
+        deleted_by,
+        id,
+    )
+    .await;
     let outcome = match outcome {
-        Ok(()) => tx.commit().await.map_err(db_err),
+        Ok(tenant_id) => tx.commit().await.map_err(db_err).map(|_| tenant_id),
         Err(err) => Err(err),
     };
     crate::cache::invalidate::end_all(cache, &groups).await;
-    outcome?;
+    let tenant_id = outcome?;
     // Mirrors `delete_entity_with_audit`'s own post-commit audit write
     // (fire-and-forget, after the mutation durably commits) — see
     // `audit::commit_with_audit`'s doc comment. Only needed on this locked
     // path; the cache-disabled fallback above already gets it from
-    // `delete_entity_with_audit` itself.
-    let tenant_id = super::repo::get_entity(pool, id)
-        .await
-        .ok()
-        .and_then(|e| e.tenant_id);
+    // `delete_entity_with_audit` itself. `tenant_id` comes from the captured
+    // value inside the transaction — a post-commit `get_entity` would always
+    // miss the now-deleted row.
     crate::audit::write(
         pool,
         false,

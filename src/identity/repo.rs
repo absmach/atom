@@ -1079,39 +1079,38 @@ pub async fn entity_active_access_token_ids(
     .map_err(db_err)
 }
 
-/// Flips the entity to inactive/tombstoned and, in the *same* transaction,
-/// enumerates the exact session and access-token credential ids this delete
-/// is about to revoke. Callers invalidate `atom:v1:session:*` /
-/// `atom:v1:credential:*` cache entries for these before calling
-/// [`finish_entity_deletion_in_tx`].
+/// Locks the entity row and, in the *same* transaction, enumerates the exact
+/// session and access-token credential ids a subsequent delete is about to
+/// revoke — *before* the entity is touched. Callers establish the cache
+/// barrier on these ids (plus the entity's own `entity_status` key) before
+/// calling [`deactivate_and_finish_entity_deletion_in_tx`]: starting the
+/// barrier only after the status flip would leave a window where a
+/// concurrent request can still take a full cache hit on the pre-delete
+/// entity/session/credential entries and keep running past the point the
+/// delete commits.
 ///
-/// The status-flip `UPDATE` below takes an exclusive row lock on the entity —
-/// the same lock `create_session`/`create_access_token` take (via
+/// The `SELECT ... FOR UPDATE` below takes the same exclusive row lock on the
+/// entity that `create_session`/`create_access_token` take (via
 /// `lock_active_entity`) before inserting. So a session or access token
-/// created concurrently for this entity either committed before this `UPDATE`
-/// acquired the lock (and is therefore visible to the enumeration below,
-/// which runs after it, in the same transaction) or is blocked until this
-/// transaction commits (and then fails, since the entity is no longer
-/// active). Enumerating via a plain pre-transaction pool query — the previous
-/// shape of this code — could miss a session/credential created in that
-/// window, leaving its cache entry uninvalidated indefinitely. See
+/// created concurrently for this entity either committed before this lock was
+/// acquired (and is therefore visible to the enumeration below, which runs
+/// after it, in the same transaction) or is blocked until this transaction
+/// commits (and then fails, since the entity is no longer active by then).
+/// Enumerating via a plain pre-transaction pool query — the previous shape of
+/// this code — could miss a session/credential created in that window,
+/// leaving its cache entry uninvalidated indefinitely. See
 /// `src/cache/mod.rs`'s consistency model.
-pub async fn deactivate_entity_and_collect_revocation_ids_in_tx(
+pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
-    deleted_by: Option<Uuid>,
 ) -> Result<(Vec<Uuid>, Vec<Uuid>), AppError> {
-    let result = sqlx::query(
-        "UPDATE entities
-         SET status = 'inactive', deleted_at = now(), deleted_by = $2, updated_at = now()
-         WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .bind(deleted_by)
-    .execute(&mut **tx)
-    .await
-    .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+    let locked =
+        sqlx::query("SELECT id FROM entities WHERE id = $1 AND deleted_at IS NULL FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    if locked.is_none() {
         return Err(AppError::not_found(format!("entity {id} not found")));
     }
 
@@ -1137,17 +1136,37 @@ pub async fn deactivate_entity_and_collect_revocation_ids_in_tx(
 }
 
 /// Finishes the entity soft-delete started by
-/// [`deactivate_entity_and_collect_revocation_ids_in_tx`] in the same
-/// transaction: revokes active credentials (all kinds) and sessions, and
-/// tombstones the email. Does not commit — the caller commits after this
-/// succeeds, once the cache barrier established on the enumerated ids covers
-/// the whole transaction.
-pub async fn finish_entity_deletion_in_tx(
+/// [`lock_entity_and_collect_revocation_ids_in_tx`] in the same transaction:
+/// flips the entity to inactive/tombstoned, revokes active credentials (all
+/// kinds) and sessions, and tombstones the email. Does not commit — the
+/// caller commits after this succeeds, once the cache barrier established on
+/// the enumerated ids covers the whole transaction.
+///
+/// Returns the entity's `tenant_id`, captured here (before the tombstone)
+/// rather than left for the caller to re-derive post-commit: `get_entity`
+/// filters `deleted_at IS NULL`, so a re-read after this commits always
+/// misses the row and silently drops the tenant from the delete's audit
+/// trail.
+pub async fn deactivate_and_finish_entity_deletion_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
+    deleted_by: Option<Uuid>,
     id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<Option<Uuid>, AppError> {
+    let tenant_id: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE entities
+         SET status = 'inactive', deleted_at = now(), deleted_by = $2, updated_at = now()
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING tenant_id",
+    )
+    .bind(id)
+    .bind(deleted_by)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .ok_or_else(|| AppError::not_found(format!("entity {id} not found")))?;
+
     let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"WITH revoked AS (
                UPDATE credentials
@@ -1192,12 +1211,6 @@ pub async fn finish_entity_deletion_in_tx(
     .await
     .map_err(db_err)?;
 
-    let tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-            .bind(id)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(db_err)?;
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id,
@@ -1220,7 +1233,7 @@ pub async fn finish_entity_deletion_in_tx(
         }
     });
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    Ok(tenant_id)
 }
 
 pub async fn delete_entity(
@@ -1238,10 +1251,10 @@ pub async fn delete_entity(
 /// explicit.
 ///
 /// Used directly only when no cache is configured; the cache-aware path
-/// (`graphql::entities::delete_entity`) calls
-/// [`deactivate_entity_and_collect_revocation_ids_in_tx`] and
-/// [`finish_entity_deletion_in_tx`] itself so it can establish the cache
-/// barrier between them.
+/// (`identity::service::delete_entity`) calls
+/// [`lock_entity_and_collect_revocation_ids_in_tx`] and
+/// [`deactivate_and_finish_entity_deletion_in_tx`] itself so it can establish
+/// the cache barrier between them.
 pub async fn delete_entity_with_audit(
     pool: &PgPool,
     events_enabled: bool,
@@ -1250,14 +1263,22 @@ pub async fn delete_entity_with_audit(
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    deactivate_entity_and_collect_revocation_ids_in_tx(&mut tx, id, deleted_by).await?;
-    finish_entity_deletion_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
+    let tenant_id = deactivate_and_finish_entity_deletion_in_tx(
+        &mut tx,
+        events_enabled,
+        actor_id,
+        deleted_by,
+        id,
+    )
+    .await?;
     tx.commit().await.map_err(db_err)?;
     // The audit_logs row is deliberately written after commit (fire-and-forget,
     // never blocks an already-valid delete) — see `audit::commit_with_audit`'s
     // doc comment. The outbox row, by contrast, went in atomically with the
-    // mutation above via `observe_in_tx`.
-    let tenant_id = get_entity(pool, id).await.ok().and_then(|e| e.tenant_id);
+    // mutation above via `observe_in_tx`. `tenant_id` is captured inside the
+    // transaction above (before the tombstone) rather than re-read here — a
+    // post-commit `get_entity` would always miss the now-deleted row.
     crate::audit::write(
         pool,
         false,
