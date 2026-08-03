@@ -1488,13 +1488,6 @@ pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Session, AppError> {
     })
 }
 
-pub async fn revoke_session(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    revoke_session_in_tx(&mut tx, id).await?;
-    tx.commit().await.map_err(db_err)?;
-    Ok(())
-}
-
 /// The caller owns the commit, so a logout can bind the session revocation and
 /// its `auth.logout` event into one transaction.
 pub async fn revoke_session_in_tx(

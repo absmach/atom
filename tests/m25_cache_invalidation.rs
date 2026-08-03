@@ -512,6 +512,127 @@ async fn session_revoke_immediately_rejects_the_next_authentication() {
     );
 }
 
+/// Regression test for a review finding: `logout` used to clear the session's
+/// cache barrier (`cache.end`) before `audit::commit_with_audit`'s internal
+/// `tx.commit()` actually landed the revoke. In that window a concurrent
+/// authentication would see a clean (non-dirty) barrier and a Postgres row
+/// that (via MVCC, on a separate connection) still read as not revoked, and
+/// would repopulate the cache with a "still valid" entry that then survived
+/// for the full session TTL — defeating immediate revocation for exactly the
+/// operation most likely to be relied on for it.
+///
+/// A black-box race against real `authenticate_token` calls turned out not to
+/// reliably land in the gap — it's sub-millisecond, and a full auth call has
+/// too much of its own latency to consistently hit it. Instead this polls the
+/// barrier's raw `dirty` flag and a direct `revoked_at` read, on a real OS
+/// thread running in parallel with `logout` (`flavor = "multi_thread"`, not
+/// cooperative async interleaving), so it observes the transition rather than
+/// racing to beat it. The invariant: once `dirty` is observed set for this
+/// key, it must never be observed clear again while `revoked_at` is still
+/// null — that combination is only reachable if the barrier was released
+/// before the commit landed. Confirmed this fails against the pre-fix
+/// ordering (reverted locally) and passes against the fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn logout_cannot_leave_a_stale_valid_session_cached_during_the_revoke() {
+    let p = pool().await;
+    let (state, cache) = state_with_cache(p.clone()).await;
+    let entity_id = active_entity(&p, "service").await;
+    let session_id = Uuid::new_v4();
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+        .bind(session_id)
+        .bind(entity_id)
+        .bind(expires_at)
+        .execute(&p)
+        .await
+        .expect("insert session");
+
+    let primary = state.keys.read().await.primary.clone();
+    let token = auth::encode_jwt(
+        entity_id,
+        session_id,
+        None,
+        &primary,
+        state.config.jwt_expiry_secs,
+        &state.config.jwt_issuer,
+        &state.config.jwt_audience,
+    )
+    .expect("encode jwt");
+
+    // Warm the session/entity-status cache.
+    auth::authenticate_token(&state, &token)
+        .await
+        .expect("initial authentication should succeed");
+
+    let logout_auth = AuthContext {
+        session_id: Some(session_id),
+        ..auth_context(entity_id, cache.clone())
+    };
+    let schema = build_schema(state.clone());
+    let session_key = atom::cache::keys::session(session_id);
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let p_poll = p.clone();
+    let key_poll = session_key.clone();
+    let poller = tokio::spawn(async move {
+        let mut conn = raw_redis_conn().await;
+        let mut saw_dirty = false;
+        loop {
+            let dirty: Option<String> = redis::cmd("HGET")
+                .arg(&key_poll)
+                .arg("dirty")
+                .query_async(&mut conn)
+                .await
+                .unwrap_or(None);
+            let is_dirty = dirty.as_deref() == Some("1");
+            if is_dirty {
+                saw_dirty = true;
+            }
+            if saw_dirty && !is_dirty {
+                let revoked_at: Option<chrono::DateTime<chrono::Utc>> =
+                    sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
+                        .bind(session_id)
+                        .fetch_one(&p_poll)
+                        .await
+                        .expect("read revoked_at");
+                // Barrier just went clean; if the row isn't committed as
+                // revoked yet, that's the bug. If it's already revoked, the
+                // ordering was correct — nothing more to catch.
+                return revoked_at.is_none();
+            }
+            if stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                return false;
+            }
+        }
+    });
+
+    let logout_result = schema
+        .execute(Request::new("mutation { logout }").data(logout_auth))
+        .await;
+    assert!(
+        logout_result.errors.is_empty(),
+        "logout failed: {:?}",
+        logout_result.errors
+    );
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let violation = poller.await.expect("join poller");
+    assert!(
+        !violation,
+        "observed the session cache barrier clear (dirty -> clean) while the session row still \
+         read as un-revoked — a concurrent reader landing at that exact moment would repopulate \
+         the cache with a stale \"still valid\" entry, exactly the bug this regresses"
+    );
+
+    let result = auth::authenticate_token(&state, &token).await;
+    assert!(
+        result.is_err(),
+        "revoked session must be rejected on the very next authentication, not after a TTL"
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn entity_deactivation_immediately_rejects_an_existing_valid_session() {

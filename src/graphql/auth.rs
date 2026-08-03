@@ -88,53 +88,55 @@ impl AuthMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
 
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|e| gql_error(crate::error::db_err(e)))?;
-        if let Some(session_id) = auth.session_id {
-            // The revoke must stay inside `tx` so it commits atomically with
-            // the audit event/outbox row below, but it also needs the cache
-            // barrier around it so a concurrent reader can't repopulate a
-            // stale (not-yet-revoked) session entry — see `src/cache/mod.rs`.
-            let session_key = crate::cache::keys::session(session_id);
-            if let Some(cache) = state.cache.as_deref() {
-                cache
-                    .begin(
-                        crate::cache::CacheCategory::Session,
-                        std::slice::from_ref(&session_key),
-                    )
+        let event = audit::AuditEvent {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: auth.tenant_id,
+            target_kind: Some("entity"),
+            target_id: Some(auth.entity_id),
+            event: "auth.logout",
+            outcome: AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        };
+
+        match auth.session_id {
+            Some(session_id) => {
+                // The barrier must span the revoke *and* its commit, not just
+                // the revoke: releasing it before `commit_with_audit`'s
+                // internal `tx.commit()` lets a concurrent reader load the
+                // still-uncommitted (pre-revoke) row from Postgres and
+                // repopulate the cache with it, right after the barrier
+                // that was supposed to block exactly that — see
+                // `src/cache/mod.rs`.
+                crate::cache::invalidate::guarded_mutation(
+                    state.cache.as_deref(),
+                    crate::cache::CacheCategory::Session,
+                    std::slice::from_ref(&crate::cache::keys::session(session_id)),
+                    || async {
+                        let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+                        repo::revoke_session_in_tx(&mut tx, session_id).await?;
+                        audit::commit_with_audit(
+                            &state.pool,
+                            tx,
+                            state.config.events.enabled(),
+                            &event,
+                        )
+                        .await
+                    },
+                )
+                .await
+                .map_err(gql_error)?;
+            }
+            None => {
+                let tx = state
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|e| gql_error(crate::error::db_err(e)))?;
+                audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
                     .await
                     .map_err(gql_error)?;
             }
-            let result = repo::revoke_session_in_tx(&mut tx, session_id).await;
-            if let Some(cache) = state.cache.as_deref() {
-                cache
-                    .end(
-                        crate::cache::CacheCategory::Session,
-                        std::slice::from_ref(&session_key),
-                    )
-                    .await;
-            }
-            result.map_err(gql_error)?;
         }
-        audit::commit_with_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: auth.tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(auth.entity_id),
-                event: "auth.logout",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
 
         Ok(true)
     }
