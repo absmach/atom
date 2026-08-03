@@ -74,9 +74,14 @@ use crate::config::SigningKeyConfig;
 use crate::identity;
 use crate::models::alias::validate_alias_opt;
 use crate::models::enums::{
-    CredentialKind, Effect, EntityKind, EntityStatus, SubjectKind, TenantStatus,
+    ActionAssignmentDecision, CredentialKind, Effect, EntityKind, EntityStatus, ObjectKind,
+    SubjectKind, TenantStatus,
 };
 use crate::models::token::CreateSharedKey;
+
+/// Sentinel written to `managed_by` columns for rows provisioned from a
+/// bootstrap file. Mutation endpoints refuse to touch rows carrying this tag.
+pub const MANAGED_BY_CONFIG: &str = "config";
 
 /// Root of the bootstrap document. Every section is optional.
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -100,6 +105,16 @@ pub struct BootstrapConfig {
     pub role_assignments: Vec<BootstrapRoleAssignment>,
     #[serde(default)]
     pub direct_policies: Vec<BootstrapDirectPolicy>,
+    /// Additional action names (capabilities) beyond the built-in vocabulary,
+    /// e.g. product-specific verbs like `publish` or `alarm.acknowledge`. Each
+    /// entry may also declare the object kinds/types it applies to.
+    #[serde(default)]
+    pub capabilities: Vec<BootstrapCapability>,
+    /// Guardrail rules constraining which entity kinds may perform which
+    /// actions on which object kinds — the platform-wide "device cannot manage
+    /// resources" style rails.
+    #[serde(default)]
+    pub action_assignment_rules: Vec<BootstrapActionAssignmentRule>,
 }
 
 /// A tenant (domain). `None` `tenant_id` on other records means platform scope.
@@ -446,6 +461,45 @@ pub struct BootstrapDirectPolicy {
     pub permission_block_id: Uuid,
 }
 
+/// A capability (action) to ensure exists. Keyed on `name` (the unique column
+/// on `actions`), so re-running the bootstrap file is a no-op. The optional
+/// `applicability` block lists object kinds/types this action can target;
+/// entries are additive (existing applicability rows are not removed).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapCapability {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub applicability: Vec<BootstrapCapabilityApplicability>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapCapabilityApplicability {
+    pub object_kind: ObjectKind,
+    #[serde(default)]
+    pub object_type: Option<String>,
+}
+
+/// A guardrail rule. Same shape as the `action_assignment_rules` row, minus
+/// the auto-generated id.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapActionAssignmentRule {
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
+    pub entity_kind: EntityKind,
+    pub action_name: String,
+    pub object_kind: ObjectKind,
+    #[serde(default)]
+    pub object_type: Option<String>,
+    pub decision: ActionAssignmentDecision,
+    #[serde(default)]
+    pub is_absolute: bool,
+}
+
 impl BootstrapConfig {
     /// Structural validation performed before touching the database, so a
     /// malformed file aborts startup with a clear message instead of a partial,
@@ -524,6 +578,52 @@ impl BootstrapConfig {
         for role in &self.roles {
             if role.name.trim().is_empty() {
                 bail!("bootstrap role {} has an empty name", role.id);
+            }
+        }
+
+        let mut seen_names = HashSet::new();
+        for capability in &self.capabilities {
+            let name = capability.name.trim();
+            if name.is_empty() {
+                bail!("bootstrap capability has an empty name");
+            }
+            if !seen_names.insert(name.to_string()) {
+                bail!("duplicate bootstrap capability name {name}");
+            }
+            let mut seen_apps = HashSet::new();
+            for app in &capability.applicability {
+                let key = (app.object_kind, app.object_type.clone());
+                if !seen_apps.insert(key) {
+                    bail!(
+                        "capability {name} declares duplicate applicability {}:{}",
+                        app.object_kind.as_str(),
+                        app.object_type.as_deref().unwrap_or("")
+                    );
+                }
+            }
+        }
+
+        let mut seen_rules = HashSet::new();
+        for rule in &self.action_assignment_rules {
+            let action = rule.action_name.trim();
+            if action.is_empty() {
+                bail!("bootstrap action_assignment_rule has an empty action_name");
+            }
+            let key = (
+                rule.tenant_id,
+                format!("{:?}", rule.entity_kind),
+                action.to_string(),
+                rule.object_kind,
+                rule.object_type.clone(),
+            );
+            if !seen_rules.insert(key) {
+                bail!(
+                    "duplicate bootstrap action_assignment_rule for {} {} on {}:{}",
+                    format!("{:?}", rule.entity_kind).to_lowercase(),
+                    action,
+                    rule.object_kind.as_str(),
+                    rule.object_type.as_deref().unwrap_or("")
+                );
             }
         }
         Ok(())
@@ -642,6 +742,12 @@ pub async fn apply(
     }
     for policy in &cfg.direct_policies {
         ensure_direct_policy(pool, policy).await?;
+    }
+    for capability in &cfg.capabilities {
+        ensure_capability(pool, capability).await?;
+    }
+    for rule in &cfg.action_assignment_rules {
+        ensure_action_assignment_rule(pool, rule).await?;
     }
     Ok(())
 }
@@ -1016,6 +1122,147 @@ async fn ensure_role_assignment(pool: &PgPool, assignment: &BootstrapRoleAssignm
         )
     })?;
     log_upsert(result.rows_affected(), "role assignment", assignment.id);
+    Ok(())
+}
+
+/// Upsert a capability by name. The row is stamped `managed_by='config'` so
+/// mutation endpoints (`update_capability`, `delete_capability`) refuse to
+/// touch it out of band. Existing description is overwritten by config —
+/// config is authoritative for anything it declares.
+async fn ensure_capability(pool: &PgPool, capability: &BootstrapCapability) -> Result<()> {
+    let name = capability.name.trim().to_string();
+    let action_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO actions (name, description, managed_by)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (name) DO UPDATE
+               SET description = EXCLUDED.description,
+                   managed_by  = $3,
+                   updated_at  = now()
+           RETURNING id"#,
+    )
+    .bind(&name)
+    .bind(&capability.description)
+    .bind(MANAGED_BY_CONFIG)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to upsert bootstrap capability {name}"))?;
+    tracing::info!(action = %name, id = %action_id, "bootstrap: capability upserted");
+
+    for app in &capability.applicability {
+        ensure_capability_applicability(pool, action_id, &name, app).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_capability_applicability(
+    pool: &PgPool,
+    action_id: Uuid,
+    action_name: &str,
+    app: &BootstrapCapabilityApplicability,
+) -> Result<()> {
+    // Two-step upsert: the unique index on this table is functional
+    // (`COALESCE(object_type, '')`), which makes ON CONFLICT target awkward.
+    // Insert-then-update is simpler and equally atomic per row.
+    sqlx::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type, managed_by)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT DO NOTHING"#,
+    )
+    .bind(action_id)
+    .bind(app.object_kind.as_str())
+    .bind(&app.object_type)
+    .bind(MANAGED_BY_CONFIG)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert bootstrap applicability for capability {action_name}")
+    })?;
+
+    sqlx::query(
+        r#"UPDATE action_applicability
+              SET managed_by = $4
+            WHERE action_id = $1
+              AND object_kind = $2
+              AND object_type IS NOT DISTINCT FROM $3"#,
+    )
+    .bind(action_id)
+    .bind(app.object_kind.as_str())
+    .bind(&app.object_type)
+    .bind(MANAGED_BY_CONFIG)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to stamp bootstrap applicability for capability {action_name}")
+    })?;
+    Ok(())
+}
+
+async fn ensure_action_assignment_rule(
+    pool: &PgPool,
+    rule: &BootstrapActionAssignmentRule,
+) -> Result<()> {
+    let action = rule.action_name.trim().to_string();
+
+    // Guardrails reference actions by name — refuse to apply a rule whose
+    // action doesn't exist, otherwise the DB would happily store a permanently
+    // dead rule.
+    let action_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE name = $1)")
+            .bind(&action)
+            .fetch_one(pool)
+            .await
+            .with_context(|| {
+                format!("failed to look up action for bootstrap assignment rule {action}")
+            })?;
+    if !action_exists {
+        bail!(
+            "bootstrap action_assignment_rule references unknown action {action}; \
+             declare the capability earlier in the file or via migration"
+        );
+    }
+
+    sqlx::query(
+        r#"INSERT INTO action_assignment_rules
+               (tenant_id, entity_kind, action_name, object_kind, object_type,
+                decision, is_absolute, managed_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT DO NOTHING"#,
+    )
+    .bind(rule.tenant_id)
+    .bind(&rule.entity_kind)
+    .bind(&action)
+    .bind(rule.object_kind.as_str())
+    .bind(&rule.object_type)
+    .bind(&rule.decision)
+    .bind(rule.is_absolute)
+    .bind(MANAGED_BY_CONFIG)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to insert bootstrap assignment rule for action {action}"))?;
+
+    // Stamp `managed_by` even if the row already existed (e.g. carried over
+    // from a fresh-db seed) so the API guard fires on subsequent mutations.
+    sqlx::query(
+        r#"UPDATE action_assignment_rules
+              SET managed_by = $7
+            WHERE tenant_id IS NOT DISTINCT FROM $1
+              AND entity_kind = $2
+              AND action_name = $3
+              AND object_kind = $4
+              AND object_type IS NOT DISTINCT FROM $5
+              AND decision = $6"#,
+    )
+    .bind(rule.tenant_id)
+    .bind(&rule.entity_kind)
+    .bind(&action)
+    .bind(rule.object_kind.as_str())
+    .bind(&rule.object_type)
+    .bind(&rule.decision)
+    .bind(MANAGED_BY_CONFIG)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to stamp bootstrap assignment rule for action {action}"))?;
+    tracing::info!(action = %action, "bootstrap: assignment rule upserted");
     Ok(())
 }
 

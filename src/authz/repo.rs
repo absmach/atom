@@ -3458,6 +3458,7 @@ pub async fn delete_action_assignment_rule_with_audit(
     id: Uuid,
     transport: &str,
 ) -> Result<ActionAssignmentRule, AppError> {
+    ensure_not_config_managed_rule(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let rule = sqlx::query_as::<_, ActionAssignmentRule>(
         r#"DELETE FROM action_assignment_rules
@@ -3493,6 +3494,72 @@ pub async fn delete_action_assignment_rule_with_audit(
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(rule)
+}
+
+async fn ensure_not_config_managed_capability(
+    pool: &PgPool,
+    capability_id: Uuid,
+) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM actions WHERE id = $1")
+            .bind(capability_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found(format!(
+            "capability {capability_id} not found"
+        ))),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "capability is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
+}
+
+async fn ensure_not_config_managed_applicability(
+    pool: &PgPool,
+    capability_id: Uuid,
+    object_kind: &str,
+    object_type: Option<&str>,
+) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> = sqlx::query_scalar(
+        r#"SELECT managed_by FROM action_applicability
+           WHERE action_id = $1
+             AND object_kind = $2
+             AND object_type IS NOT DISTINCT FROM $3"#,
+    )
+    .bind(capability_id)
+    .bind(object_kind)
+    .bind(object_type)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    match managed_by {
+        None => Ok(()),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "capability applicability is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
+}
+
+async fn ensure_not_config_managed_rule(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM action_assignment_rules WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found(format!(
+            "action assignment rule {id} not found"
+        ))),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "action assignment rule is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub async fn add_capability_applicability(
@@ -3607,6 +3674,13 @@ pub async fn remove_capability_applicability_with_audit(
     object_kind: String,
     object_type: Option<String>,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_applicability(
+        pool,
+        capability_id,
+        &object_kind,
+        object_type.as_deref(),
+    )
+    .await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let result = sqlx::query(
         r#"DELETE FROM action_applicability
@@ -3679,6 +3753,7 @@ pub async fn update_capability_with_audit(
     id: Uuid,
     req: crate::models::capability::UpdateCapability,
 ) -> Result<Capability, AppError> {
+    ensure_not_config_managed_capability(pool, id).await?;
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let updated = sqlx::query_as::<_, Capability>(
         r#"UPDATE actions
@@ -3723,6 +3798,23 @@ async fn replace_capability_applicability_in_tx(
     capability_id: Uuid,
     applicability: &[CapabilityApplicabilityInput],
 ) -> Result<(), AppError> {
+    // Refuse to blow away applicability rows that were declared in the
+    // bootstrap config, even when the parent capability itself is API-managed.
+    let has_managed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM action_applicability
+                        WHERE action_id = $1 AND managed_by = 'config')",
+    )
+    .bind(capability_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if has_managed {
+        return Err(AppError::conflict(
+            "capability has applicability rows managed by the bootstrap config file; \
+             use addCapabilityApplicability / removeCapabilityApplicability instead",
+        ));
+    }
+
     sqlx::query("DELETE FROM action_applicability WHERE action_id = $1")
         .bind(capability_id)
         .execute(&mut **tx)
@@ -3760,6 +3852,7 @@ pub async fn delete_capability_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_capability(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let result = sqlx::query("DELETE FROM actions WHERE id = $1")
         .bind(id)

@@ -8,13 +8,13 @@
 mod common;
 
 use atom::bootstrap::{
-    apply, BootstrapConfig, BootstrapCredential, BootstrapDirectPolicy, BootstrapEntity,
-    BootstrapGroup, BootstrapObjectGroup, BootstrapPermissionBlock, BootstrapResource,
-    BootstrapRole, BootstrapRoleAssignment, BootstrapScope, BootstrapSubject, BootstrapTenant,
-    ScopeMode,
+    apply, BootstrapCapability, BootstrapCapabilityApplicability, BootstrapConfig,
+    BootstrapCredential, BootstrapDirectPolicy, BootstrapEntity, BootstrapGroup,
+    BootstrapObjectGroup, BootstrapPermissionBlock, BootstrapResource, BootstrapRole,
+    BootstrapRoleAssignment, BootstrapScope, BootstrapSubject, BootstrapTenant, ScopeMode,
 };
 use atom::config::Config;
-use atom::models::enums::{EntityKind, EntityStatus, SubjectKind, TenantStatus};
+use atom::models::enums::{EntityKind, EntityStatus, ObjectKind, SubjectKind, TenantStatus};
 use atom::models::policy::AuthzRequest;
 use common::pool;
 use serde_json::json;
@@ -460,6 +460,17 @@ async fn bootstrap_provisions_resources_and_object_group_scoped_grant() {
                 id: device,
             },
             role_id: role,
+        }],
+        // `publish` applicability on `resource:channel` is product-specific
+        // and no longer seeded by the migration; declare it here so the PDP
+        // can find the capability for the channel object type.
+        capabilities: vec![BootstrapCapability {
+            name: "publish".to_string(),
+            description: None,
+            applicability: vec![BootstrapCapabilityApplicability {
+                object_kind: ObjectKind::Resource,
+                object_type: Some("resource:channel".to_string()),
+            }],
         }],
         ..Default::default()
     };

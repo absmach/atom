@@ -204,6 +204,27 @@ async fn channel_scoped_role_rejects_rule_only_capability() {
     let publish_id = capability_id(&p, "publish").await;
     let execute_id = capability_id(&p, "execute").await;
 
+    // Applicability for `publish` on `resource:channel` and `execute` on
+    // `resource:rule` is product-specific and provisioned via the deployment's
+    // bootstrap config, not seeded by the migration. Add the applicability
+    // inline so this test is self-contained.
+    atom::authz::repo::add_capability_applicability(
+        &p,
+        publish_id,
+        "resource".to_string(),
+        Some("resource:channel".to_string()),
+    )
+    .await
+    .expect("seed publish applicability");
+    atom::authz::repo::add_capability_applicability(
+        &p,
+        execute_id,
+        "resource".to_string(),
+        Some("resource:rule".to_string()),
+    )
+    .await
+    .expect("seed execute applicability");
+
     atom::authz::repo::create_role_with_permission_blocks(
         &p,
         CreateRole {
@@ -258,6 +279,25 @@ async fn exact_object_permission_block_uses_real_object_type() {
     let rule_id = resource(&p, tenant_id, "rule").await;
     let publish_id = capability_id(&p, "publish").await;
     let execute_id = capability_id(&p, "execute").await;
+
+    // See sibling test — product-specific applicability is added inline
+    // instead of relying on migration-time seeding.
+    atom::authz::repo::add_capability_applicability(
+        &p,
+        publish_id,
+        "resource".to_string(),
+        Some("resource:channel".to_string()),
+    )
+    .await
+    .expect("seed publish applicability");
+    atom::authz::repo::add_capability_applicability(
+        &p,
+        execute_id,
+        "resource".to_string(),
+        Some("resource:rule".to_string()),
+    )
+    .await
+    .expect("seed execute applicability");
 
     atom::authz::repo::create_role_with_permission_blocks(
         &p,

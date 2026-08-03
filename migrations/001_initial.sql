@@ -1238,17 +1238,11 @@ FROM actions
 WHERE actions.name = 'rotate'
 ON CONFLICT DO NOTHING;
 
-INSERT INTO action_applicability (action_id, object_kind, object_type)
-SELECT id, 'resource', 'resource:channel'
-FROM actions
-WHERE name IN ('publish', 'subscribe')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO action_applicability (action_id, object_kind, object_type)
-SELECT id, 'resource', 'resource:rule'
-FROM actions
-WHERE name = 'execute'
-ON CONFLICT DO NOTHING;
+-- Product-specific applicability (e.g. `publish` on `resource:channel`,
+-- `execute` on `resource:rule`) is provisioned by the deployment's bootstrap
+-- config file (see src/bootstrap.rs `capabilities` section), not seeded here.
+-- The `publish`, `subscribe`, `execute` actions themselves remain seeded above
+-- because they are used by `tenant_admin_bootstrap` in src/tenants/repo.rs.
 
 INSERT INTO entities (id, kind, name, status, attributes)
 VALUES
