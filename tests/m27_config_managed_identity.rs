@@ -1,6 +1,6 @@
 //! Bootstrap-managed entities, credentials and access tokens.
 //!
-//! Covers migration 005: entities and credentials created from the bootstrap
+//! Covers migration 006: entities and credentials created from the bootstrap
 //! YAML are stamped `managed_by='config'`, blocking API mutation and hiding
 //! credentials from list/read responses.
 //!

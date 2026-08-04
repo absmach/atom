@@ -1,4 +1,4 @@
--- Extends the `managed_by` marker from 004 to identity tables. Entities and
+-- Extends the `managed_by` marker from 005 to identity tables. Entities and
 -- credentials created from a bootstrap file (`src/bootstrap.rs`) are stamped
 -- 'config' so the API refuses to update, delete, revoke, or rotate them.
 -- Config-managed credentials are additionally hidden from list/read responses
