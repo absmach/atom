@@ -12,9 +12,7 @@
 mod common;
 
 use atom::auth::make_api_key;
-use atom::bootstrap::{
-    apply, BootstrapConfig, BootstrapCredential, BootstrapEntity,
-};
+use atom::bootstrap::{apply, BootstrapConfig, BootstrapCredential, BootstrapEntity};
 use atom::config::Config;
 use atom::identity::{access_tokens, repo, service};
 use atom::models::entity::UpdateEntity;
@@ -71,9 +69,14 @@ async fn bootstrap_entity_is_stamped_and_rejects_api_mutations() {
     let entity_id = Uuid::new_v4();
     let cfg = service_entity(entity_id, vec![]);
 
-    apply(&p, &signing_keys, &cfg).await.expect("apply bootstrap");
+    apply(&p, &signing_keys, &cfg)
+        .await
+        .expect("apply bootstrap");
 
-    assert_eq!(managed_by_entity(&p, entity_id).await.as_deref(), Some("config"));
+    assert_eq!(
+        managed_by_entity(&p, entity_id).await.as_deref(),
+        Some("config")
+    );
 
     let err = repo::update_entity(
         &p,
@@ -121,7 +124,9 @@ async fn bootstrap_access_token_is_hidden_and_rejects_revoke() {
         }],
     );
 
-    apply(&p, &signing_keys, &cfg).await.expect("apply bootstrap");
+    apply(&p, &signing_keys, &cfg)
+        .await
+        .expect("apply bootstrap");
 
     // The credential row exists and is stamped.
     assert_eq!(
@@ -213,7 +218,9 @@ async fn bootstrap_access_token_authenticates_at_runtime() {
         }],
     );
 
-    apply(&p, &signing_keys, &cfg).await.expect("apply bootstrap");
+    apply(&p, &signing_keys, &cfg)
+        .await
+        .expect("apply bootstrap");
 
     let entity_ok: Option<Uuid> = sqlx::query_scalar(
         r#"SELECT c.entity_id
@@ -237,12 +244,14 @@ async fn api_created_entity_and_credential_are_not_stamped() {
     let p = pool().await;
 
     let entity_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-        .bind(entity_id)
-        .bind(format!("runtime-{entity_id}"))
-        .execute(&p)
-        .await
-        .expect("insert entity");
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+    )
+    .bind(entity_id)
+    .bind(format!("runtime-{entity_id}"))
+    .execute(&p)
+    .await
+    .expect("insert entity");
     assert!(managed_by_entity(&p, entity_id).await.is_none());
 
     let cred_id = Uuid::new_v4();
@@ -257,6 +266,8 @@ async fn api_created_entity_and_credential_are_not_stamped() {
     assert!(managed_by_credential(&p, cred_id).await.is_none());
 
     // The API mutation guard lets these through.
-    let creds = service::list_credentials(&p, entity_id).await.expect("list");
+    let creds = service::list_credentials(&p, entity_id)
+        .await
+        .expect("list");
     assert!(creds.iter().any(|c| c.id == cred_id));
 }

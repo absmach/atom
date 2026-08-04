@@ -16,9 +16,7 @@ use atom::bootstrap::{
     BootstrapConfig,
 };
 use atom::config::Config;
-use atom::models::capability::{
-    CapabilityApplicabilityInput, CreateCapability, UpdateCapability,
-};
+use atom::models::capability::{CapabilityApplicabilityInput, CreateCapability, UpdateCapability};
 use atom::models::enums::{ActionAssignmentDecision, EntityKind, ObjectKind};
 use common::pool;
 use uuid::Uuid;
@@ -62,7 +60,9 @@ async fn capability_bootstrap_stamps_managed_by_config() {
     let object_type = format!("resource:bootstrap-{}", Uuid::new_v4());
     let cfg = capability_config(&name, &object_type);
 
-    apply(&p, &signing_keys, &cfg).await.expect("apply bootstrap");
+    apply(&p, &signing_keys, &cfg)
+        .await
+        .expect("apply bootstrap");
 
     assert_eq!(managed_by(&p, &name).await.as_deref(), Some("config"));
 
@@ -178,14 +178,9 @@ async fn api_can_add_but_not_remove_config_managed_applicability() {
     // Adding a new applicability entry alongside a config-managed one is
     // allowed — API extensions are additive.
     let extra_type = format!("resource:api-{}", Uuid::new_v4());
-    repo::add_capability_applicability(
-        &p,
-        id,
-        "resource".to_string(),
-        Some(extra_type.clone()),
-    )
-    .await
-    .expect("add applicability");
+    repo::add_capability_applicability(&p, id, "resource".to_string(), Some(extra_type.clone()))
+        .await
+        .expect("add applicability");
 
     // Removing the config-managed row must be rejected.
     let err = repo::remove_capability_applicability(
@@ -237,7 +232,9 @@ async fn assignment_rule_bootstrap_stamps_managed_by_and_guards_delete() {
         ..Default::default()
     };
 
-    apply(&p, &signing_keys, &cfg).await.expect("apply bootstrap");
+    apply(&p, &signing_keys, &cfg)
+        .await
+        .expect("apply bootstrap");
 
     let (rule_id, rule_managed_by): (Uuid, Option<String>) = sqlx::query_as(
         r#"SELECT id, managed_by
@@ -286,4 +283,3 @@ async fn api_created_capability_stays_api_managed() {
         .await
         .expect("delete api-managed capability");
 }
-

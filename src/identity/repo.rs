@@ -53,9 +53,7 @@ pub async fn ensure_not_config_managed_credential(
             .map_err(db_err)?;
     match managed_by {
         None => Err(AppError::not_found("credential not found")),
-        Some(Some(value)) if value == "config" => {
-            Err(AppError::not_found("credential not found"))
-        }
+        Some(Some(value)) if value == "config" => Err(AppError::not_found("credential not found")),
         _ => Ok(()),
     }
 }

@@ -976,7 +976,9 @@ async fn ensure_bootstrap_access_token(
             .bind(MANAGED_BY_CONFIG)
             .execute(pool)
             .await
-            .with_context(|| format!("failed to stamp existing bootstrap access token {cred_id}"))?;
+            .with_context(|| {
+                format!("failed to stamp existing bootstrap access token {cred_id}")
+            })?;
         tracing::info!(entity_id = %entity.id, credential_id = %cred_id, "bootstrap: access token already present, skipped");
         return Ok(());
     }
