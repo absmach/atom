@@ -1160,7 +1160,7 @@ where
 {
     sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
-                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at
+                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at, g.managed_by
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
            WHERE g.id = $1 AND g.deleted_at IS NULL"#,
@@ -1181,7 +1181,7 @@ pub async fn list_groups_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Group
 
     sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
-                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at
+                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at, g.managed_by
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
            WHERE g.id = ANY($1::uuid[]) AND g.deleted_at IS NULL
@@ -1203,7 +1203,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
 
     let items = sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
-                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at
+                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at, g.managed_by
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
            WHERE ($1::uuid IS NULL OR g.tenant_id = $1)
@@ -1521,6 +1521,7 @@ pub async fn update_group_with_audit(
     event_name: &str,
     audit_details: Value,
 ) -> Result<Group, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let attributes = req.attributes.clone().map(normalize_attributes);
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
@@ -1606,6 +1607,7 @@ pub async fn delete_group_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
@@ -1666,6 +1668,7 @@ pub async fn restore_group_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 

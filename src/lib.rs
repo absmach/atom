@@ -24,6 +24,7 @@ pub mod health;
 pub mod identity;
 pub mod keys;
 pub mod mail;
+pub mod managed_by;
 pub mod metrics;
 pub mod models;
 pub mod purge;

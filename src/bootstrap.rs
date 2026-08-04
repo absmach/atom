@@ -811,6 +811,7 @@ async fn ensure_tenant(pool: &PgPool, tenant: &BootstrapTenant) -> Result<()> {
     .await
     .with_context(|| format!("failed to insert bootstrap tenant {}", tenant.id))?;
 
+    stamp_managed_by_config(pool, "tenants", tenant.id).await?;
     log_upsert(result.rows_affected(), "tenant", tenant.id);
     Ok(())
 }
@@ -1043,6 +1044,7 @@ async fn ensure_group(pool: &PgPool, group: &BootstrapGroup) -> Result<()> {
     .execute(pool)
     .await
     .with_context(|| format!("failed to insert bootstrap group {}", group.id))?;
+    stamp_managed_by_config(pool, "principal_groups", group.id).await?;
     log_upsert(result.rows_affected(), "group", group.id);
 
     for entity_id in &group.members {
@@ -1088,6 +1090,7 @@ async fn ensure_resource(pool: &PgPool, resource: &BootstrapResource) -> Result<
     .execute(pool)
     .await
     .with_context(|| format!("failed to insert bootstrap resource {}", resource.id))?;
+    stamp_managed_by_config(pool, "resources", resource.id).await?;
     log_upsert(result.rows_affected(), "resource", resource.id);
     Ok(())
 }
@@ -1114,6 +1117,7 @@ async fn ensure_object_group(pool: &PgPool, group: &BootstrapObjectGroup) -> Res
     .execute(pool)
     .await
     .with_context(|| format!("failed to insert bootstrap object group {}", group.id))?;
+    stamp_managed_by_config(pool, "object_groups", group.id).await?;
     log_upsert(result.rows_affected(), "object group", group.id);
     Ok(())
 }
@@ -1206,6 +1210,7 @@ async fn ensure_permission_block(pool: &PgPool, block: &BootstrapPermissionBlock
     .execute(pool)
     .await
     .with_context(|| format!("failed to insert bootstrap permission block {}", block.id))?;
+    stamp_managed_by_config(pool, "permission_blocks", block.id).await?;
     log_upsert(result.rows_affected(), "permission block", block.id);
 
     for action_name in &block.actions {
@@ -1252,6 +1257,7 @@ async fn ensure_role(pool: &PgPool, role: &BootstrapRole) -> Result<()> {
     .execute(pool)
     .await
     .with_context(|| format!("failed to insert bootstrap role {}", role.id))?;
+    stamp_managed_by_config(pool, "roles", role.id).await?;
     log_upsert(result.rows_affected(), "role", role.id);
 
     for block_id in &role.permission_blocks {
@@ -1293,6 +1299,7 @@ async fn ensure_role_assignment(pool: &PgPool, assignment: &BootstrapRoleAssignm
             assignment.id
         )
     })?;
+    stamp_managed_by_config(pool, "role_assignments", assignment.id).await?;
     log_upsert(result.rows_affected(), "role assignment", assignment.id);
     Ok(())
 }
@@ -1452,7 +1459,41 @@ async fn ensure_direct_policy(pool: &PgPool, policy: &BootstrapDirectPolicy) -> 
     .execute(pool)
     .await
     .with_context(|| format!("failed to insert bootstrap direct policy {}", policy.id))?;
+    stamp_managed_by_config(pool, "direct_policies", policy.id).await?;
     log_upsert(result.rows_affected(), "direct policy", policy.id);
+    Ok(())
+}
+
+/// Stamp `managed_by='config'` on a bootstrap-touched row of a known RBAC
+/// table. Called from `ensure_*` after the row's INSERT so both newly-created
+/// rows and rows that already existed (e.g. from the initial migration) end
+/// up flagged. The table name is closed over a static match, not
+/// interpolated, so a caller cannot inject arbitrary SQL.
+async fn stamp_managed_by_config(pool: &PgPool, table: &'static str, id: Uuid) -> Result<()> {
+    let sql = match table {
+        "tenants" => "UPDATE tenants SET managed_by = 'config' WHERE id = $1",
+        "resources" => "UPDATE resources SET managed_by = 'config' WHERE id = $1",
+        "principal_groups" => {
+            "UPDATE principal_groups SET managed_by = 'config' WHERE id = $1"
+        }
+        "object_groups" => "UPDATE object_groups SET managed_by = 'config' WHERE id = $1",
+        "roles" => "UPDATE roles SET managed_by = 'config' WHERE id = $1",
+        "permission_blocks" => {
+            "UPDATE permission_blocks SET managed_by = 'config' WHERE id = $1"
+        }
+        "role_assignments" => {
+            "UPDATE role_assignments SET managed_by = 'config' WHERE id = $1"
+        }
+        "direct_policies" => {
+            "UPDATE direct_policies SET managed_by = 'config' WHERE id = $1"
+        }
+        _ => bail!("unknown managed_by table {table}"),
+    };
+    sqlx::query(sql)
+        .bind(id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to stamp bootstrap {table} {id}"))?;
     Ok(())
 }
 

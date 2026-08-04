@@ -397,6 +397,11 @@ impl Tenant {
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct TenantInvitation(pub tenant_model::TenantInvitation);
@@ -510,6 +515,11 @@ impl Resource {
 
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -681,6 +691,11 @@ impl Group {
 
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -953,6 +968,11 @@ impl Role {
 
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -1393,6 +1413,11 @@ impl PermissionBlock {
     async fn updated_at(&self) -> String {
         timestamp(self.0.updated_at)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 impl From<policy_model::PermissionBlock> for PermissionBlock {
@@ -1436,6 +1461,11 @@ impl RoleAssignment {
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 impl From<policy_model::RoleAssignment> for RoleAssignment {
@@ -1478,6 +1508,11 @@ impl DirectPolicy {
 
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 

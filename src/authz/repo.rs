@@ -111,7 +111,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query_as::<_, Resource>(
-        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at FROM resources WHERE id = $1 AND deleted_at IS NULL",
+        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_one(executor)
@@ -164,7 +164,7 @@ pub async fn list_resources(
                WHERE $5::boolean
            )
            SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes,
-                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at
+                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at, r.managed_by
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE ($1::text IS NULL OR r.kind = $1)
@@ -234,6 +234,7 @@ pub async fn update_resource_with_audit(
     req: UpdateResource,
     updated_fields: Vec<&'static str>,
 ) -> Result<Resource, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let parent_group_id = req
         .attributes
         .as_ref()
@@ -326,6 +327,7 @@ pub async fn delete_resource_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
@@ -376,6 +378,7 @@ pub async fn restore_resource_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
@@ -1923,7 +1926,7 @@ pub async fn list_permission_blocks(
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, PermissionBlock>(
         r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
-                  effect, conditions, created_at, updated_at
+                  effect, conditions, created_at, updated_at, managed_by
            FROM permission_blocks
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR scope_mode = $2)
@@ -2040,6 +2043,7 @@ pub async fn delete_permission_block_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "permission_blocks", id).await?;
     // Blocks are shared: refuse to delete one still linked to a role or attached
     // to a direct policy, so an explicit delete cannot cascade live links away.
     //
@@ -2253,7 +2257,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     }
 
     let items = sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
+        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
@@ -2796,6 +2800,7 @@ pub async fn delete_role_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
@@ -2845,6 +2850,7 @@ pub async fn restore_role_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
@@ -4130,6 +4136,7 @@ pub async fn delete_role_assignment_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "role_assignments", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let assignment_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
@@ -4217,7 +4224,7 @@ pub async fn list_role_assignments(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, RoleAssignment>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
+        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at, managed_by
            FROM role_assignments
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4341,7 +4348,7 @@ pub async fn list_direct_policies(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, DirectPolicy>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
+        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at, managed_by
            FROM direct_policies
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4408,6 +4415,7 @@ pub async fn delete_direct_policy_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "direct_policies", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let policy_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
@@ -4740,6 +4748,10 @@ pub async fn subject_role_assignments(
                     deleted_by: None,
                     created_at: row.try_get("role_created_at").map_err(db_err)?,
                     updated_at: row.try_get("role_updated_at").map_err(db_err)?,
+                    // Explain view; only surfaces role identity, not lifecycle
+                    // metadata. Leave managed_by unset — the UI reads it via
+                    // list_roles / get_role, not this SELECT.
+                    managed_by: None,
                 },
             })
         })
