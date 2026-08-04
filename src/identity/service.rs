@@ -2284,11 +2284,9 @@ pub async fn revoke_credential_in_tx(
     .map_err(db_err)?;
     match managed_by {
         None => return Err(AppError::not_found("credential not found")),
-        Some(Some(value)) if value == "config" => {
-            return Err(AppError::conflict(
-                "credential is managed by the bootstrap config file and cannot be revoked via the API",
-            ))
-        }
+        Some(Some(value)) if value == "config" => return Err(AppError::conflict(
+            "credential is managed by the bootstrap config file and cannot be revoked via the API",
+        )),
         _ => {}
     }
     // Overwrite any prior revocation provenance (e.g. a `tenant_deleted` marker

@@ -1473,20 +1473,12 @@ async fn stamp_managed_by_config(pool: &PgPool, table: &'static str, id: Uuid) -
     let sql = match table {
         "tenants" => "UPDATE tenants SET managed_by = 'config' WHERE id = $1",
         "resources" => "UPDATE resources SET managed_by = 'config' WHERE id = $1",
-        "principal_groups" => {
-            "UPDATE principal_groups SET managed_by = 'config' WHERE id = $1"
-        }
+        "principal_groups" => "UPDATE principal_groups SET managed_by = 'config' WHERE id = $1",
         "object_groups" => "UPDATE object_groups SET managed_by = 'config' WHERE id = $1",
         "roles" => "UPDATE roles SET managed_by = 'config' WHERE id = $1",
-        "permission_blocks" => {
-            "UPDATE permission_blocks SET managed_by = 'config' WHERE id = $1"
-        }
-        "role_assignments" => {
-            "UPDATE role_assignments SET managed_by = 'config' WHERE id = $1"
-        }
-        "direct_policies" => {
-            "UPDATE direct_policies SET managed_by = 'config' WHERE id = $1"
-        }
+        "permission_blocks" => "UPDATE permission_blocks SET managed_by = 'config' WHERE id = $1",
+        "role_assignments" => "UPDATE role_assignments SET managed_by = 'config' WHERE id = $1",
+        "direct_policies" => "UPDATE direct_policies SET managed_by = 'config' WHERE id = $1",
         _ => bail!("unknown managed_by table {table}"),
     };
     sqlx::query(sql)
