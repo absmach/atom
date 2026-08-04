@@ -179,8 +179,11 @@ pub async fn replace_access_token_permissions_in_tx(
             "access token supports at most {MAX_ACCESS_TOKEN_PERMISSIONS} permissions"
         )));
     }
-    let scoped: Option<bool> = sqlx::query_scalar(
-        r#"SELECT scoped FROM credentials
+    // Bootstrap-managed tokens are invisible to the API. Fold the guard into
+    // the FOR UPDATE lookup so a config-managed row is treated as not-found —
+    // the API must never acknowledge that a matching row exists.
+    let row: Option<(bool, Option<String>)> = sqlx::query_as(
+        r#"SELECT scoped, managed_by FROM credentials
            WHERE id = $1 AND entity_id = $2 AND kind = $3 AND status = 'active'
            FOR UPDATE"#,
     )
@@ -190,6 +193,11 @@ pub async fn replace_access_token_permissions_in_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
+    let scoped = match row {
+        Some((_, Some(mgr))) if mgr == "config" => None,
+        Some((scoped, _)) => Some(scoped),
+        None => None,
+    };
     match scoped {
         None => return Err(AppError::not_found("access token not found")),
         Some(false) => {
@@ -346,11 +354,14 @@ pub async fn list_access_tokens(
 
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
+    // `managed_by IS NULL` hides bootstrap-provisioned tokens from every
+    // listing — see `revoke_access_token` for the mutation-side counterpart.
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
+             AND managed_by IS NULL
              AND ($3::text IS NULL OR status = $3::text)"#,
     )
     .bind(entity_id)
@@ -373,6 +384,7 @@ pub async fn list_access_tokens(
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
+             AND managed_by IS NULL
              AND ($3::text IS NULL OR status = $3::text)
            ORDER BY created_at DESC
            LIMIT $4 OFFSET $5"#,
@@ -490,6 +502,11 @@ pub async fn revoke_access_token(
 
 /// See [`create_access_token_in_tx`] — the caller owns the commit so the
 /// revocation and its `credential.revoke` event land atomically.
+///
+/// Bootstrap-provisioned tokens (`managed_by='config'`) are invisible to the
+/// API: the WHERE clause excludes them so revoke returns not_found rather
+/// than acknowledging the row exists. Rotation of those tokens lives in the
+/// YAML.
 pub async fn revoke_access_token_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
@@ -505,7 +522,8 @@ pub async fn revoke_access_token_in_tx(
                           )
            WHERE id = $1
              AND entity_id = $2
-             AND kind = $3"#,
+             AND kind = $3
+             AND managed_by IS NULL"#,
     )
     .bind(cred_id)
     .bind(entity_id)

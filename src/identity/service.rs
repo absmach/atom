@@ -2116,6 +2116,10 @@ pub async fn reveal_shared_key(
 ) -> Result<SharedKeyResponse, AppError> {
     use sqlx::Row;
 
+    // Bootstrap-provisioned shared keys are invisible to the API. Return
+    // not_found so a caller cannot even confirm the credential exists.
+    super::repo::ensure_not_config_managed_credential(pool, credential_id).await?;
+
     let row = sqlx::query(
         r#"SELECT c.expires_at,
                   c.status,
@@ -2249,6 +2253,10 @@ pub async fn revoke_credential(
 
 /// See [`create_password_in_tx`] — the caller owns the commit so the revocation
 /// and its domain event land atomically.
+///
+/// Config-managed credentials (`managed_by='config'`) are hidden from the API:
+/// the WHERE clause below excludes them so revoke returns not_found rather
+/// than acknowledging the row exists.
 pub async fn revoke_credential_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
@@ -2266,7 +2274,7 @@ pub async fn revoke_credential_in_tx(
                               'revoked_at', now(),
                               'revocation_reason', 'manual'
                           )
-           WHERE id = $1 AND entity_id = $2"#,
+           WHERE id = $1 AND entity_id = $2 AND managed_by IS NULL"#,
     )
     .bind(cred_id)
     .bind(entity_id)
@@ -2285,8 +2293,15 @@ pub async fn list_credentials(
 ) -> Result<Vec<CredentialSummary>, AppError> {
     use sqlx::Row;
 
+    // `managed_by IS NULL` hides bootstrap-provisioned credentials: they must
+    // not surface through introspection so the operator's declared secrets
+    // never leak through a runtime API response.
     let rows = sqlx::query(
-        "SELECT id, kind, identifier, status, expires_at, created_at FROM credentials WHERE entity_id = $1 ORDER BY created_at DESC",
+        "SELECT id, kind, identifier, status, expires_at, created_at
+         FROM credentials
+         WHERE entity_id = $1
+           AND managed_by IS NULL
+         ORDER BY created_at DESC",
     )
     .bind(entity_id)
     .fetch_all(pool)

@@ -173,6 +173,21 @@ pub enum BootstrapCredential {
         #[serde(default)]
         description: Option<String>,
     },
+    /// A pre-provisioned unscoped access token (`atom_<id_hex>_<secret_hex>`).
+    /// The operator generates the token once (e.g. from `openssl rand`) and
+    /// splices the same value into both this YAML *and* the env file consumed
+    /// by downstream services — so `docker compose up` needs no round-trip
+    /// between an atom-bootstrap init container and services waiting on it.
+    /// The credential row is stamped `managed_by='config'`, so the API refuses
+    /// to revoke it and hides it from list/read responses.
+    AccessToken {
+        /// Full `atom_<id_hex>_<secret_hex>` token string.
+        token: String,
+        /// Human label for the token, surfaced in audit logs.
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+    },
 }
 
 /// A protected resource object (e.g. a `channel`). `kind` is a free-form label.
@@ -639,6 +654,7 @@ impl BootstrapEntity {
 
         let mut passwords = 0;
         let mut shared_keys = 0;
+        let mut access_tokens = HashSet::new();
         for cred in &self.credentials {
             match cred {
                 BootstrapCredential::Password { .. } => passwords += 1,
@@ -647,6 +663,26 @@ impl BootstrapEntity {
                     if !CredentialKind::SharedKey.allowed_for(&self.kind) {
                         bail!(
                             "bootstrap entity {} is a human; shared keys are only valid for machine entities",
+                            self.id
+                        );
+                    }
+                }
+                BootstrapCredential::AccessToken { token, name, .. } => {
+                    if name.trim().is_empty() {
+                        bail!(
+                            "bootstrap entity {} declares an access token with an empty name",
+                            self.id
+                        );
+                    }
+                    let (cred_id, _) = crate::auth::parse_api_key(token.trim()).ok_or_else(
+                        || anyhow!(
+                            "bootstrap entity {} declares an access token that is not a valid atom_<id>_<secret> string",
+                            self.id
+                        ),
+                    )?;
+                    if !access_tokens.insert(cred_id) {
+                        bail!(
+                            "bootstrap entity {} declares more than one access token with credential id {cred_id}",
                             self.id
                         );
                     }
@@ -780,7 +816,9 @@ async fn ensure_tenant(pool: &PgPool, tenant: &BootstrapTenant) -> Result<()> {
 }
 
 /// Create the entity if its UUID is not already present. Existing rows are left
-/// untouched, so a bootstrap re-run never overwrites runtime edits.
+/// untouched, so a bootstrap re-run never overwrites runtime edits. The row is
+/// stamped `managed_by='config'` so update/delete/restore endpoints refuse to
+/// touch it via the API.
 async fn ensure_entity(pool: &PgPool, entity: &BootstrapEntity) -> Result<()> {
     let alias = validate_alias_opt(entity.alias.clone())
         .map_err(|e| anyhow!("bootstrap entity {}: {e}", entity.id))?;
@@ -790,8 +828,8 @@ async fn ensure_entity(pool: &PgPool, entity: &BootstrapEntity) -> Result<()> {
         .unwrap_or_else(|| serde_json::json!({}));
 
     let result = sqlx::query(
-        r#"INSERT INTO entities (id, kind, name, alias, tenant_id, status, attributes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+        r#"INSERT INTO entities (id, kind, name, alias, tenant_id, status, attributes, managed_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (id) DO NOTHING"#,
     )
     .bind(entity.id)
@@ -801,9 +839,19 @@ async fn ensure_entity(pool: &PgPool, entity: &BootstrapEntity) -> Result<()> {
     .bind(entity.tenant_id)
     .bind(&entity.status)
     .bind(attributes)
+    .bind(MANAGED_BY_CONFIG)
     .execute(pool)
     .await
     .with_context(|| format!("failed to insert bootstrap entity {}", entity.id))?;
+
+    // Stamp even when the row already existed, so an entity created earlier via
+    // the API becomes protected once it appears in the bootstrap file.
+    sqlx::query("UPDATE entities SET managed_by = $2 WHERE id = $1")
+        .bind(entity.id)
+        .bind(MANAGED_BY_CONFIG)
+        .execute(pool)
+        .await
+        .with_context(|| format!("failed to stamp bootstrap entity {}", entity.id))?;
 
     log_upsert(result.rows_affected(), "entity", entity.id);
     Ok(())
@@ -811,7 +859,9 @@ async fn ensure_entity(pool: &PgPool, entity: &BootstrapEntity) -> Result<()> {
 
 /// Create the credential only if the entity has no active credential of that
 /// kind yet. Reuses the identity service so hashing, strength validation and
-/// shared-key envelope encryption stay identical to the API path.
+/// shared-key envelope encryption stay identical to the API path. Every
+/// bootstrap-created credential is stamped `managed_by='config'`, which both
+/// blocks API mutations and hides the row from list/read responses.
 async fn ensure_credential(
     pool: &PgPool,
     signing_keys: &SigningKeyConfig,
@@ -827,6 +877,7 @@ async fn ensure_credential(
             identity::service::create_password(pool, entity.id, secret)
                 .await
                 .map_err(|e| anyhow!("bootstrap password for entity {}: {e}", entity.id))?;
+            stamp_managed_credentials(pool, entity.id, CredentialKind::Password).await?;
             tracing::info!(entity_id = %entity.id, "bootstrap: password credential created");
         }
         BootstrapCredential::SharedKey { key, description } => {
@@ -846,9 +897,128 @@ async fn ensure_credential(
             )
             .await
             .map_err(|e| anyhow!("bootstrap shared key for entity {}: {e}", entity.id))?;
+            stamp_managed_credentials(pool, entity.id, CredentialKind::SharedKey).await?;
             tracing::info!(entity_id = %entity.id, "bootstrap: shared key credential created");
         }
+        BootstrapCredential::AccessToken {
+            token,
+            name,
+            description,
+        } => {
+            ensure_bootstrap_access_token(pool, signing_keys, entity, token, name, description)
+                .await?;
+        }
     }
+    Ok(())
+}
+
+/// Stamp every active credential of the given kind on the entity as
+/// config-managed. Used for Password and SharedKey where the shared identity
+/// service creates the row without a `managed_by` opinion.
+async fn stamp_managed_credentials(
+    pool: &PgPool,
+    entity_id: Uuid,
+    kind: CredentialKind,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE credentials SET managed_by = $3
+         WHERE entity_id = $1 AND kind = $2 AND status = 'active'",
+    )
+    .bind(entity_id)
+    .bind(kind)
+    .bind(MANAGED_BY_CONFIG)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to stamp bootstrap credential on entity {entity_id}"))?;
+    Ok(())
+}
+
+/// Provision an unscoped access token from operator-supplied material. Parses
+/// the full `atom_<id>_<secret>` string (same format `make_api_key` emits),
+/// then inserts the credential row directly — no ceiling, no expiry. Idempotent
+/// on the credential id.
+async fn ensure_bootstrap_access_token(
+    pool: &PgPool,
+    signing_keys: &SigningKeyConfig,
+    entity: &BootstrapEntity,
+    token: &str,
+    name: &str,
+    description: &Option<String>,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!(
+            "bootstrap access token for entity {} has an empty name",
+            entity.id
+        );
+    }
+    let (cred_id, secret_bytes) = crate::auth::parse_api_key(token.trim()).ok_or_else(|| {
+        anyhow!(
+            "bootstrap access token for entity {} is not a valid atom_<id>_<secret> string",
+            entity.id
+        )
+    })?;
+
+    // Skip if the credential row is already present — bootstrap is idempotent.
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM credentials WHERE id = $1)")
+            .bind(cred_id)
+            .fetch_one(pool)
+            .await
+            .with_context(|| {
+                format!("failed to look up bootstrap access token credential {cred_id}")
+            })?;
+    if exists {
+        // Ensure the marker sticks even if the row was created by an earlier
+        // bootstrap run against an older Atom without the `managed_by` column.
+        sqlx::query("UPDATE credentials SET managed_by = $2 WHERE id = $1")
+            .bind(cred_id)
+            .bind(MANAGED_BY_CONFIG)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to stamp existing bootstrap access token {cred_id}"))?;
+        tracing::info!(entity_id = %entity.id, credential_id = %cred_id, "bootstrap: access token already present, skipped");
+        return Ok(());
+    }
+
+    // Verifier layout mirrors `identity::access_tokens::create_access_token`:
+    // keyed HMAC-SHA256 under the deployment KEK when present, argon2 fallback
+    // otherwise. Same lookup semantics as API-minted tokens.
+    let (secret_hash, secret_lookup_hash) = match signing_keys.key_encryption_key.as_ref() {
+        Some(kek) => (
+            None::<String>,
+            Some(crate::crypto::hmac_sha256(kek.expose(), &secret_bytes)),
+        ),
+        None => (
+            Some(
+                identity::service::hash_secret(&secret_bytes)
+                    .map_err(|e| anyhow!("bootstrap access token hash for {}: {e}", entity.id))?,
+            ),
+            None,
+        ),
+    };
+    let identifier = token.trim().chars().take(13).collect::<String>();
+    let metadata = serde_json::json!({ "name": name, "description": description });
+
+    sqlx::query(
+        r#"INSERT INTO credentials
+             (id, entity_id, kind, identifier, secret_hash, secret_lookup_hash,
+              scoped, expires_at, metadata, managed_by)
+           VALUES ($1, $2, $3, $4, $5, $6, false, NULL, $7, $8)"#,
+    )
+    .bind(cred_id)
+    .bind(entity.id)
+    .bind(CredentialKind::AccessToken)
+    .bind(identifier)
+    .bind(secret_hash)
+    .bind(secret_lookup_hash)
+    .bind(metadata)
+    .bind(MANAGED_BY_CONFIG)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to insert bootstrap access token {cred_id}"))?;
+
+    tracing::info!(entity_id = %entity.id, credential_id = %cred_id, "bootstrap: access token credential created");
     Ok(())
 }
 

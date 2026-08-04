@@ -109,6 +109,19 @@ async fn channel(pool: &PgPool) -> Uuid {
     .execute(pool)
     .await
     .expect("insert channel");
+    // `publish`/`subscribe` applicability on `resource:channel` is now
+    // product-specific and provisioned via the deployment bootstrap YAML;
+    // tests that model a channel need to declare it inline so the guardrail
+    // check on `createPermissionBlock` passes.
+    sqlx::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           SELECT id, 'resource', 'resource:channel'
+             FROM actions WHERE name IN ('publish', 'subscribe')
+           ON CONFLICT DO NOTHING"#,
+    )
+    .execute(pool)
+    .await
+    .expect("seed channel applicability");
     id
 }
 

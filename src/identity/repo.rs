@@ -18,6 +18,48 @@ use crate::{
 
 pub const AUTHENTICATED_USERS_GROUP_ID: Uuid = Uuid::from_u128(5);
 
+/// Refuse mutations against an entity provisioned from the bootstrap config
+/// file. Config-managed entities can only be reshaped by editing the YAML and
+/// restarting Atom, so all API-facing update/delete/restore paths funnel
+/// through this guard.
+pub async fn ensure_not_config_managed_entity(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found(format!("entity {id} not found"))),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "entity is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Companion for credential mutations. Config-managed credentials are also
+/// hidden from list/read responses, so the API pretends they don't exist —
+/// both the missing-row and the config-managed cases return `not_found`.
+pub async fn ensure_not_config_managed_credential(
+    pool: &PgPool,
+    cred_id: Uuid,
+) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM credentials WHERE id = $1")
+            .bind(cred_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found("credential not found")),
+        Some(Some(value)) if value == "config" => {
+            Err(AppError::not_found("credential not found"))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub async fn lock_active_entity(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
@@ -278,6 +320,7 @@ pub async fn update_entity_with_audit(
     event_name: &str,
     audit_details: Value,
 ) -> Result<Entity, AppError> {
+    ensure_not_config_managed_entity(pool, id).await?;
     let attributes = req.attributes.clone().map(normalize_attributes);
     let parent_group_id = attributes
         .as_ref()
@@ -707,6 +750,7 @@ pub async fn delete_entity_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_entity(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     let tenant_id: Option<Option<Uuid>> =
@@ -802,6 +846,7 @@ pub async fn restore_entity_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_entity(pool, id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
