@@ -1,7 +1,6 @@
 {
   "title": "User Guide",
   "pages": [
-    "index",
     "quick-start",
     "dashboard",
     "tenants",
