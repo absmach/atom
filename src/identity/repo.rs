@@ -38,9 +38,14 @@ pub async fn ensure_not_config_managed_entity(pool: &PgPool, id: Uuid) -> Result
     }
 }
 
-/// Companion for credential mutations. Config-managed credentials are also
-/// hidden from list/read responses, so the API pretends they don't exist —
-/// both the missing-row and the config-managed cases return `not_found`.
+/// Companion for credential mutations. Config-managed credentials are visible
+/// in list/read responses (so the UI can flag them read-only), but mutation
+/// endpoints (revoke, replace ceiling) reject them with 409 conflict so the
+/// operator's declared row can only be reshaped by editing the YAML.
+///
+/// `reveal_shared_key` uses a different guard — it must not return the
+/// plaintext key of a config-managed row and returns not_found instead, per
+/// its own module.
 pub async fn ensure_not_config_managed_credential(
     pool: &PgPool,
     cred_id: Uuid,
@@ -53,7 +58,9 @@ pub async fn ensure_not_config_managed_credential(
             .map_err(db_err)?;
     match managed_by {
         None => Err(AppError::not_found("credential not found")),
-        Some(Some(value)) if value == "config" => Err(AppError::not_found("credential not found")),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "credential is managed by the bootstrap config file and cannot be modified via the API",
+        )),
         _ => Ok(()),
     }
 }
@@ -119,7 +126,7 @@ pub async fn create_entity_with_audit(
            (id, kind, name, alias, tenant_id, profile_id, profile_version_id, attributes)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at"#,
+                     status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by"#,
     )
     .bind(id)
     .bind(kind)
@@ -190,7 +197,7 @@ where
 {
     sqlx::query_as::<_, Entity>(
         r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                  status, attributes, deleted_at, deleted_by, created_at, updated_at
+                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM entities
            WHERE id = $1 AND deleted_at IS NULL"#,
     )
@@ -210,7 +217,7 @@ pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Ent
 
     sqlx::query_as::<_, Entity>(
         r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                  status, attributes, deleted_at, deleted_by, created_at, updated_at
+                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM entities
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY array_position($1::uuid[], id)"#,
@@ -380,7 +387,7 @@ pub async fn update_entity_with_audit(
                updated_at         = now()
            WHERE id = $1 AND deleted_at IS NULL
            RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at"#,
+                     status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by"#,
     )
     .bind(id)
     .bind(req.name)

@@ -1,3 +1,4 @@
+import { ManagedByBadge } from "@/components/crud/managed-by-badge";
 import { StatusBadge } from "@/components/crud/status-badge";
 import { DisplayTimeCell } from "@/components/display-time";
 import { DisplayTags } from "@/components/view-tags";
@@ -17,6 +18,9 @@ export function renderCell(
   key?: string,
   nameMap?: Map<string, string>,
 ) {
+  if (key === "managedBy") {
+    return <ManagedByBadge managedBy={value as string | null | undefined} />;
+  }
   if (value === null || value === undefined || value === "") {
     return <span className="text-muted-foreground">-</span>;
   }

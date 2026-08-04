@@ -2116,9 +2116,19 @@ pub async fn reveal_shared_key(
 ) -> Result<SharedKeyResponse, AppError> {
     use sqlx::Row;
 
-    // Bootstrap-provisioned shared keys are invisible to the API. Return
-    // not_found so a caller cannot even confirm the credential exists.
-    super::repo::ensure_not_config_managed_credential(pool, credential_id).await?;
+    // Reveal exposes the plaintext key. Config-managed rows must never leak
+    // that material, so this endpoint (unlike revoke) returns not_found for
+    // config-managed rows — even the existence of the credential must not be
+    // acknowledged through the reveal path.
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM credentials WHERE id = $1")
+            .bind(credential_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    if !matches!(managed_by, Some(None)) {
+        return Err(AppError::not_found("shared key not found"));
+    }
 
     let row = sqlx::query(
         r#"SELECT c.expires_at,
@@ -2254,14 +2264,33 @@ pub async fn revoke_credential(
 /// See [`create_password_in_tx`] — the caller owns the commit so the revocation
 /// and its domain event land atomically.
 ///
-/// Config-managed credentials (`managed_by='config'`) are hidden from the API:
-/// the WHERE clause below excludes them so revoke returns not_found rather
-/// than acknowledging the row exists.
+/// Config-managed credentials (`managed_by='config'`) are visible via the
+/// list APIs so the UI can flag them read-only; this mutation refuses with
+/// 409 conflict so rotation stays in the YAML.
 pub async fn revoke_credential_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT managed_by FROM credentials
+         WHERE id = $1 AND entity_id = $2
+         FOR UPDATE",
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    match managed_by {
+        None => return Err(AppError::not_found("credential not found")),
+        Some(Some(value)) if value == "config" => {
+            return Err(AppError::conflict(
+                "credential is managed by the bootstrap config file and cannot be revoked via the API",
+            ))
+        }
+        _ => {}
+    }
     // Overwrite any prior revocation provenance (e.g. a `tenant_deleted` marker
     // from a tenant soft delete) with this explicit revocation, so a later tenant
     // restore — which only reactivates credentials still marked `tenant_deleted` —
@@ -2274,7 +2303,7 @@ pub async fn revoke_credential_in_tx(
                               'revoked_at', now(),
                               'revocation_reason', 'manual'
                           )
-           WHERE id = $1 AND entity_id = $2 AND managed_by IS NULL"#,
+           WHERE id = $1 AND entity_id = $2"#,
     )
     .bind(cred_id)
     .bind(entity_id)
@@ -2293,14 +2322,15 @@ pub async fn list_credentials(
 ) -> Result<Vec<CredentialSummary>, AppError> {
     use sqlx::Row;
 
-    // `managed_by IS NULL` hides bootstrap-provisioned credentials: they must
-    // not surface through introspection so the operator's declared secrets
-    // never leak through a runtime API response.
+    // Config-managed credentials are surfaced with `managed_by='config'` so
+    // the UI can flag them read-only. The metadata below carries no secret
+    // material. Mutation endpoints (revoke/reveal/replace) still refuse to
+    // touch them, and `reveal_shared_key` in particular refuses to read the
+    // plaintext key out of a config-managed row.
     let rows = sqlx::query(
-        "SELECT id, kind, identifier, status, expires_at, created_at
+        "SELECT id, kind, identifier, status, expires_at, created_at, managed_by
          FROM credentials
          WHERE entity_id = $1
-           AND managed_by IS NULL
          ORDER BY created_at DESC",
     )
     .bind(entity_id)
@@ -2318,6 +2348,7 @@ pub async fn list_credentials(
                 status: r.try_get("status").map_err(db_err)?,
                 expires_at: r.try_get("expires_at").map_err(db_err)?,
                 created_at: r.try_get("created_at").map_err(db_err)?,
+                managed_by: r.try_get("managed_by").map_err(db_err)?,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -2333,4 +2364,5 @@ pub struct CredentialSummary {
     pub status: CredentialStatus,
     pub expires_at: Option<chrono::DateTime<Utc>>,
     pub created_at: chrono::DateTime<Utc>,
+    pub managed_by: Option<String>,
 }

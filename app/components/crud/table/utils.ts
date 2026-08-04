@@ -5,6 +5,16 @@ export function isDeletedRow(row: Row) {
   return Boolean(row.deletedAt) || String(row.status ?? "") === "deleted";
 }
 
+/**
+ * A row is "config-managed" when it was provisioned from the Atom bootstrap
+ * YAML file. The API rejects update/delete/restore on these rows with 409
+ * conflict, so the UI hides mutation buttons — see
+ * `components/crud/managed-by-badge.tsx` for the shared badge.
+ */
+export function isConfigManagedRow(row: Row) {
+  return String(row.managedBy ?? "") === "config";
+}
+
 export function tenantActionPastTense(
   action: keyof typeof TENANT_STATUS_MUTATIONS,
 ) {

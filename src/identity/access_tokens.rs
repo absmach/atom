@@ -179,9 +179,8 @@ pub async fn replace_access_token_permissions_in_tx(
             "access token supports at most {MAX_ACCESS_TOKEN_PERMISSIONS} permissions"
         )));
     }
-    // Bootstrap-managed tokens are invisible to the API. Fold the guard into
-    // the FOR UPDATE lookup so a config-managed row is treated as not-found —
-    // the API must never acknowledge that a matching row exists.
+    // Look the token up once and reject config-managed rows with a 409
+    // conflict — the same shape as the entity/capability guards.
     let row: Option<(bool, Option<String>)> = sqlx::query_as(
         r#"SELECT scoped, managed_by FROM credentials
            WHERE id = $1 AND entity_id = $2 AND kind = $3 AND status = 'active'
@@ -193,19 +192,19 @@ pub async fn replace_access_token_permissions_in_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
-    let scoped = match row {
-        Some((_, Some(mgr))) if mgr == "config" => None,
-        Some((scoped, _)) => Some(scoped),
-        None => None,
-    };
-    match scoped {
+    match row {
         None => return Err(AppError::not_found("access token not found")),
-        Some(false) => {
+        Some((_, Some(mgr))) if mgr == "config" => {
+            return Err(AppError::conflict(
+                "access token is managed by the bootstrap config file and cannot be modified via the API",
+            ))
+        }
+        Some((false, _)) => {
             return Err(AppError::bad_request(
                 "cannot set permissions on an unscoped access token",
             ))
         }
-        Some(true) => {}
+        Some((true, _)) => {}
     }
 
     sqlx::query("DELETE FROM credential_permission_limits WHERE credential_id = $1")
@@ -354,14 +353,14 @@ pub async fn list_access_tokens(
 
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    // `managed_by IS NULL` hides bootstrap-provisioned tokens from every
-    // listing — see `revoke_access_token` for the mutation-side counterpart.
+    // Config-managed tokens are surfaced with `managed_by='config'` so the
+    // UI can flag them read-only; the mutation endpoints refuse to touch
+    // them with 409 conflict.
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
-             AND managed_by IS NULL
              AND ($3::text IS NULL OR status = $3::text)"#,
     )
     .bind(entity_id)
@@ -380,11 +379,11 @@ pub async fn list_access_tokens(
                   scoped,
                   expires_at,
                   last_used_at,
-                  created_at
+                  created_at,
+                  managed_by
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
-             AND managed_by IS NULL
              AND ($3::text IS NULL OR status = $3::text)
            ORDER BY created_at DESC
            LIMIT $4 OFFSET $5"#,
@@ -419,6 +418,7 @@ pub async fn list_access_tokens(
                 expires_at: row.try_get("expires_at").map_err(db_err)?,
                 last_used_at: row.try_get("last_used_at").map_err(db_err)?,
                 created_at: row.try_get("created_at").map_err(db_err)?,
+                managed_by: row.try_get("managed_by").map_err(db_err)?,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -503,15 +503,34 @@ pub async fn revoke_access_token(
 /// See [`create_access_token_in_tx`] — the caller owns the commit so the
 /// revocation and its `credential.revoke` event land atomically.
 ///
-/// Bootstrap-provisioned tokens (`managed_by='config'`) are invisible to the
-/// API: the WHERE clause excludes them so revoke returns not_found rather
-/// than acknowledging the row exists. Rotation of those tokens lives in the
-/// YAML.
+/// Bootstrap-provisioned tokens (`managed_by='config'`) are visible via the
+/// list APIs so the UI can flag them read-only, but revoke returns 409
+/// conflict — rotation lives in the YAML.
 pub async fn revoke_access_token_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> = sqlx::query_scalar(
+        r#"SELECT managed_by FROM credentials
+           WHERE id = $1 AND entity_id = $2 AND kind = $3
+           FOR UPDATE"#,
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .bind(CredentialKind::AccessToken)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    match managed_by {
+        None => return Err(AppError::not_found("access token not found")),
+        Some(Some(value)) if value == "config" => {
+            return Err(AppError::conflict(
+                "access token is managed by the bootstrap config file and cannot be revoked via the API",
+            ))
+        }
+        _ => {}
+    }
     let result = sqlx::query(
         r#"UPDATE credentials
            SET status = 'revoked',
@@ -522,8 +541,7 @@ pub async fn revoke_access_token_in_tx(
                           )
            WHERE id = $1
              AND entity_id = $2
-             AND kind = $3
-             AND managed_by IS NULL"#,
+             AND kind = $3"#,
     )
     .bind(cred_id)
     .bind(entity_id)

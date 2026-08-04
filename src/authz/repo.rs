@@ -3110,7 +3110,7 @@ pub async fn create_capability_with_audit(
 
 pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppError> {
     sqlx::query_as::<_, Capability>(
-        "SELECT id, name, description, created_at, updated_at FROM actions WHERE id = $1",
+        "SELECT id, name, description, created_at, updated_at, managed_by FROM actions WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
@@ -3129,7 +3129,7 @@ pub async fn list_capabilities(
     let offset = params.offset.max(0);
 
     let items = sqlx::query_as::<_, Capability>(
-        r#"SELECT id, name, description, created_at, updated_at FROM actions c
+        r#"SELECT id, name, description, created_at, updated_at, managed_by FROM actions c
            WHERE (
                $1::text IS NULL
                OR EXISTS (
@@ -3177,7 +3177,7 @@ pub async fn capability_applicability(
     capability_id: Uuid,
 ) -> Result<Vec<CapabilityApplicability>, AppError> {
     sqlx::query_as::<_, CapabilityApplicability>(
-        r#"SELECT object_kind, object_type
+        r#"SELECT object_kind, object_type, managed_by
            FROM action_applicability
            WHERE action_id = $1
            ORDER BY object_kind, object_type NULLS FIRST"#,
@@ -3215,7 +3215,8 @@ pub async fn list_capability_applicability(
                   c.description,
                   ca.object_kind,
                   ca.object_type,
-                  ca.created_at
+                  ca.created_at,
+                  ca.managed_by
            FROM action_applicability ca
            JOIN actions c ON c.id = ca.action_id
            WHERE ($3::text IS NULL OR c.name ILIKE $3)
@@ -3257,7 +3258,7 @@ pub async fn get_action_assignment_rule(
 ) -> Result<ActionAssignmentRule, AppError> {
     sqlx::query_as::<_, ActionAssignmentRule>(
         r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                  decision, is_absolute, created_at
+                  decision, is_absolute, created_at, managed_by
            FROM action_assignment_rules
            WHERE id = $1"#,
     )
@@ -3284,7 +3285,7 @@ pub async fn list_action_assignment_rules(
 
     let items = sqlx::query_as::<_, ActionAssignmentRule>(
         r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                  decision, is_absolute, created_at
+                  decision, is_absolute, created_at, managed_by
            FROM action_assignment_rules
            WHERE tenant_id IS NOT DISTINCT FROM $3
              AND ($4::text IS NULL OR entity_kind = $4)
@@ -3619,7 +3620,8 @@ pub async fn add_capability_applicability_with_audit(
                   c.description,
                   ca.object_kind,
                   ca.object_type,
-                  ca.created_at
+                  ca.created_at,
+                  ca.managed_by
            FROM action_applicability ca
            JOIN actions c ON c.id = ca.action_id
            WHERE ca.action_id = $1

@@ -110,7 +110,7 @@ async fn bootstrap_entity_is_stamped_and_rejects_api_mutations() {
 
 #[tokio::test]
 #[ignore]
-async fn bootstrap_access_token_is_hidden_and_rejects_revoke() {
+async fn bootstrap_access_token_is_visible_read_only() {
     let p = pool().await;
     let signing_keys = Config::for_tests().signing_keys;
     let entity_id = Uuid::new_v4();
@@ -134,16 +134,19 @@ async fn bootstrap_access_token_is_hidden_and_rejects_revoke() {
         Some("config")
     );
 
-    // list_credentials must NOT surface it.
+    // list_credentials surfaces it (with managed_by='config') so the UI can
+    // render it read-only. This is a deliberate reversal of the earlier
+    // "hidden" posture — no secret material leaks through the metadata.
     let creds = service::list_credentials(&p, entity_id)
         .await
         .expect("list");
-    assert!(
-        creds.iter().all(|c| c.id != cred_id),
-        "bootstrap-managed credential leaked to list_credentials"
-    );
+    let cred = creds
+        .iter()
+        .find(|c| c.id == cred_id)
+        .expect("bootstrap credential must appear in list");
+    assert_eq!(cred.managed_by.as_deref(), Some("config"));
 
-    // list_access_tokens must NOT surface it either.
+    // list_access_tokens surfaces the token with the same marker.
     let (tokens, total) = access_tokens::list_access_tokens(
         &p,
         entity_id,
@@ -155,18 +158,19 @@ async fn bootstrap_access_token_is_hidden_and_rejects_revoke() {
     )
     .await
     .expect("list access tokens");
-    assert_eq!(total, 0, "bootstrap tokens should not appear in count");
-    assert!(
-        tokens.is_empty(),
-        "bootstrap tokens should not appear in list"
-    );
+    assert_eq!(total, 1);
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].credential_id, cred_id);
+    assert_eq!(tokens[0].managed_by.as_deref(), Some("config"));
 
-    // Revoke must return not_found — the API pretends the row does not exist.
+    // Revoke must be rejected with 409 conflict — the UI reads the marker
+    // and disables the button, but a direct API call still gets a clear
+    // "managed by bootstrap config" reason.
     let err = access_tokens::revoke_access_token(&p, entity_id, cred_id)
         .await
         .expect_err("revoke must be rejected");
     assert!(
-        format!("{err:?}").contains("not found") || format!("{err:?}").contains("NotFound"),
+        format!("{err:?}").contains("bootstrap config"),
         "unexpected: {err:?}"
     );
 }

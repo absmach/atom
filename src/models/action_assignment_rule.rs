@@ -15,6 +15,11 @@ pub struct ActionAssignmentRule {
     pub decision: ActionAssignmentDecision,
     pub is_absolute: bool,
     pub created_at: DateTime<Utc>,
+    /// `Some("config")` when provisioned from the bootstrap YAML. The UI
+    /// uses this to render the row read-only; the API rejects delete with
+    /// 409 conflict.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
