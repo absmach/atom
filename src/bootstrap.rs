@@ -1405,7 +1405,7 @@ async fn ensure_action_assignment_rule(
     .bind(&action)
     .bind(rule.object_kind.as_str())
     .bind(&rule.object_type)
-    .bind(&rule.decision)
+    .bind(rule.decision)
     .bind(rule.is_absolute)
     .bind(MANAGED_BY_CONFIG)
     .execute(pool)
@@ -1429,7 +1429,7 @@ async fn ensure_action_assignment_rule(
     .bind(&action)
     .bind(rule.object_kind.as_str())
     .bind(&rule.object_type)
-    .bind(&rule.decision)
+    .bind(rule.decision)
     .bind(MANAGED_BY_CONFIG)
     .execute(pool)
     .await
