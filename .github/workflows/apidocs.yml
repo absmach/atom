@@ -10,7 +10,7 @@ on:
       - "buf.gen.yaml"
       - ".github/workflows/apidocs.yml"
   pull_request:
-    branches: [main]
+    branches: [main, certificates]
 
 jobs:
   proto:
