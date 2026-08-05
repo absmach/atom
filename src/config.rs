@@ -4,6 +4,7 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use std::{fmt, str::FromStr};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 // 00000000-0000-0000-0000-000000000001
 pub const ADMIN_ENTITY_ID: Uuid =
@@ -22,6 +23,7 @@ pub struct Config {
     /// must then be secured by the deployment: private network / service mesh).
     pub grpc_tls: Option<GrpcTlsConfig>,
     pub signing_keys: SigningKeyConfig,
+    pub pki_ca_keys: PkiCaKeyConfig,
     pub audit_policy: AuditPolicyConfig,
     pub audit_retention: AuditRetentionConfig,
     pub purge: PurgeConfig,
@@ -122,6 +124,12 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningKeyConfig {
     pub key_encryption_key: Option<SecretBytes>,
@@ -135,6 +143,25 @@ impl Default for SigningKeyConfig {
             key_encryption_key: None,
             key_encryption_key_id: "local:v1".to_string(),
             allow_plaintext_signing_keys: false,
+        }
+    }
+}
+
+/// Dedicated key-encryption-key configuration for managed CA private keys.
+///
+/// This is intentionally separate from [`SigningKeyConfig`]: compromise or
+/// rotation of JWT/credential encryption must not grant access to CA keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkiCaKeyConfig {
+    pub key_encryption_key: Option<SecretBytes>,
+    pub key_encryption_key_id: String,
+}
+
+impl Default for PkiCaKeyConfig {
+    fn default() -> Self {
+        Self {
+            key_encryption_key: None,
+            key_encryption_key_id: "local-ca:v1".to_string(),
         }
     }
 }
@@ -465,6 +492,7 @@ impl Config {
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             grpc_tls: grpc_tls_from_env()?,
             signing_keys: signing_keys_from_env()?,
+            pki_ca_keys: pki_ca_keys_from_env()?,
             audit_policy: AuditPolicyConfig {
                 hot_path_allow_db_enabled: env_bool_default(
                     "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
@@ -559,6 +587,10 @@ impl Config {
                 // for recoverable secrets (shared keys).
                 key_encryption_key: SecretBytes::new(vec![7u8; 32]).ok(),
                 ..SigningKeyConfig::default()
+            },
+            pki_ca_keys: PkiCaKeyConfig {
+                key_encryption_key: SecretBytes::new(vec![8u8; 32]).ok(),
+                ..PkiCaKeyConfig::default()
             },
             audit_policy: AuditPolicyConfig::default(),
             audit_retention: AuditRetentionConfig::default(),
@@ -739,6 +771,33 @@ fn parse_key_encryption_key() -> Result<Option<SecretBytes>> {
     SecretBytes::new(bytes)
         .map(Some)
         .context("ATOM_KEY_ENCRYPTION_KEY must decode to exactly 32 bytes")
+}
+
+fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
+    let default = PkiCaKeyConfig::default();
+    let key_encryption_key = parse_secret_key_env("ATOM_PKI_CA_KEY_ENCRYPTION_KEY")?;
+    let key_encryption_key_id = std::env::var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID")
+        .unwrap_or(default.key_encryption_key_id);
+    if key_encryption_key.is_some() && key_encryption_key_id.trim().is_empty() {
+        anyhow::bail!("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID must not be blank when the CA KEK is set");
+    }
+    Ok(PkiCaKeyConfig {
+        key_encryption_key,
+        key_encryption_key_id,
+    })
+}
+
+fn parse_secret_key_env(name: &str) -> Result<Option<SecretBytes>> {
+    let value = match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return Ok(None),
+    };
+    let bytes = STANDARD
+        .decode(value.trim())
+        .with_context(|| format!("{name} must be base64 encoded"))?;
+    SecretBytes::new(bytes)
+        .map(Some)
+        .with_context(|| format!("{name} must decode to exactly 32 bytes"))
 }
 
 fn audit_retention_from_env() -> Result<AuditRetentionConfig> {
@@ -1065,6 +1124,7 @@ mod tests {
         assert_eq!(cfg.db_pool.acquire_timeout_secs, 30);
         assert!(!cfg.signing_keys.allow_plaintext_signing_keys);
         assert!(cfg.signing_keys.key_encryption_key.is_none());
+        assert!(cfg.pki_ca_keys.key_encryption_key.is_none());
         assert!(!cfg.audit_policy.hot_path_allow_db_enabled);
         assert_eq!(cfg.audit_retention.days, 365);
         assert_eq!(cfg.login_failure_limit, 5);
@@ -1213,6 +1273,39 @@ mod tests {
     }
 
     #[test]
+    fn pki_ca_key_is_separate_and_must_be_base64_32_bytes() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var(
+            "ATOM_KEY_ENCRYPTION_KEY",
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        );
+
+        let cfg = Config::from_env().expect("config");
+        assert!(cfg.signing_keys.key_encryption_key.is_some());
+        assert!(cfg.pki_ca_keys.key_encryption_key.is_none());
+
+        std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY", "too-short");
+        let err = Config::from_env().expect_err("invalid CA key");
+        assert!(err
+            .to_string()
+            .contains("ATOM_PKI_CA_KEY_ENCRYPTION_KEY"));
+
+        std::env::set_var(
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        );
+        std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID", " ");
+        let err = Config::from_env().expect_err("blank CA key id");
+        assert!(err
+            .to_string()
+            .contains("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn trusted_proxy_cidrs_must_be_valid() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -1288,6 +1381,8 @@ mod tests {
             "ATOM_KEY_ENCRYPTION_KEY",
             "ATOM_KEY_ENCRYPTION_KEY_ID",
             "ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS",
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID",
             "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
             "ATOM_AUDIT_RETENTION_DAYS",
             "ATOM_AUDIT_RETENTION_ENABLED",
