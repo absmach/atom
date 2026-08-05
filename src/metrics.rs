@@ -36,6 +36,9 @@ pub const EVENT_OUTBOX_PUBLISH_FAILURES: &str = "atom_event_outbox_publish_failu
 pub const EVENT_OUTBOX_EXHAUSTED: &str = "atom_event_outbox_exhausted_total";
 /// Gauge of DB pool connections, labelled by `state` (total|idle).
 pub const DB_POOL_CONNECTIONS: &str = "atom_db_pool_connections";
+/// Counter of CA key-provider operations. Labels are bounded to provider,
+/// operation, and outcome; authority and tenant identifiers are never labels.
+pub const PKI_KEY_PROVIDER_OPERATIONS: &str = "atom_pki_key_provider_operations_total";
 
 #[cfg(feature = "metrics")]
 mod backend {
@@ -102,6 +105,20 @@ mod backend {
     pub fn record_outbox_exhausted() {
         metrics::counter!(EVENT_OUTBOX_EXHAUSTED).increment(1);
     }
+
+    pub fn record_pki_key_provider_operation(
+        provider: &'static str,
+        operation: &'static str,
+        outcome: &'static str,
+    ) {
+        metrics::counter!(
+            PKI_KEY_PROVIDER_OPERATIONS,
+            "provider" => provider,
+            "operation" => operation,
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -130,9 +147,17 @@ mod backend {
     pub fn record_outbox_publish_failure(_rows: u64) {}
     #[inline]
     pub fn record_outbox_exhausted() {}
+    #[inline]
+    pub fn record_pki_key_provider_operation(
+        _provider: &'static str,
+        _operation: &'static str,
+        _outcome: &'static str,
+    ) {
+    }
 }
 
 pub use backend::{
     enabled, init, record_audit_db_suppressed, record_audit_failure, record_decision,
-    record_outbox_exhausted, record_outbox_publish_failure, record_rate_limit_rejection, render,
+    record_outbox_exhausted, record_outbox_publish_failure, record_pki_key_provider_operation,
+    record_rate_limit_rejection, render,
 };
