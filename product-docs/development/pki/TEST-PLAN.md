@@ -25,10 +25,13 @@ Cover:
 
 Cover:
 
-- one active leaf issuer per tenant;
+- one active leaf issuer per tenant, and one active platform leaf issuer globally;
 - authority version uniqueness;
-- entity/issuer tenant equality;
-- root/platform issuer rejection for leaf credentials;
+- entity/issuer scope equality, for tenant-owned and global entities;
+- parent-kind rejection and parent/child validity containment;
+- root/platform-intermediate issuer rejection for leaf credentials;
+- authority deletion blocked while its certificates exist;
+- entity tenant reassignment blocked while issuer-bound certificates exist;
 - credential fingerprint uniqueness;
 - legacy `issuer_id = NULL` behavior;
 - serial uniqueness before resolver-v2 cutover;
@@ -55,14 +58,18 @@ For GraphQL/gRPC/public routes verify:
 Use OpenSSL or another independent implementation to verify:
 
 - complete chain;
-- tenant CA `CA=true`, `keyCertSign`, `cRLSign`, `pathLen=0`;
+- tenant CA and platform leaf issuer `CA=true`, `keyCertSign`, `cRLSign`, `pathLen=0`;
 - leaf `CA=false`;
 - client leaf contains `clientAuth` only by default;
-- URI SAN contains canonical tenant and entity IDs;
+- a combined client/server leaf is produced only from an explicit profile;
+- URI SAN contains canonical tenant and entity IDs, or the global form;
+- AIA and CRL distribution point extensions resolve to the issuing authority's routes;
 - certificate signature and validity;
 - CSR signature verification;
-- CRL signature, number, update times, and revoked serial;
-- OCSP good/revoked/unknown responses and signature.
+- CRL signature, number, update times, reason codes, and revoked serial;
+- OCSP good/revoked/unknown responses, reason codes, nonce, and signature **under
+  every supported issuer key algorithm** — an algorithm identifier that does not
+  match the signing key produces responses that verify only by accident.
 
 ### Runtime tests
 
@@ -75,7 +82,12 @@ Verify:
 - revocation-pending and revoked are denied immediately;
 - old issuer certificates remain valid during rotation;
 - retired issuer cannot issue new leaves;
-- Magistrala domain mismatch is denied before authorization.
+- a global entity resolves with no tenant and does not acquire tenant scope;
+- a relying party's tenant-scope mismatch is denied before authorization;
+- a subject can re-enroll using only the certificate being replaced;
+- an expired subject cannot re-enroll and follows the documented recovery path;
+- a certificate entering its renewal window emits exactly one event per window,
+  across restarts and concurrent replicas.
 
 ### Failure-injection tests
 
@@ -99,9 +111,12 @@ Maintain deterministic public certificate fixtures only. Never commit production
 Required scenarios:
 
 - legacy global issuer and leaf;
-- root plus platform plus tenant A/B intermediates;
+- root plus platform intermediate plus tenant A/B intermediates plus platform leaf issuer;
+- an ECDSA issuer and an RSA issuer, so algorithm-identifier defects cannot hide
+  behind a single development CA;
 - tenant A issuer v1 and v2 rotation;
 - same serial under tenant A and tenant B issuers;
+- a global entity and its certificate;
 - revoked and expired leaves;
 - malformed and privilege-escalating CSRs.
 

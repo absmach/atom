@@ -7,6 +7,9 @@ A PKI PR is ready for merge only when every applicable item is complete.
 - The implementation matches one numbered PR specification.
 - Dependencies are merged.
 - Out-of-scope work is not included.
+- The capability falls inside the PRD's scope section, or product review has approved widening it.
+- No downstream product's vocabulary appears in schema, code, configuration, API fields, profile names, or tests.
+- Consumer-specific behavior is expressed as profile data, not as a code branch.
 - Architecture changes are reflected in the PRD and roadmap.
 - Security-sensitive decisions are explained in the PR description.
 
@@ -41,7 +44,9 @@ A PKI PR is ready for merge only when every applicable item is complete.
 ## Security testing
 
 - Caller cannot choose another tenant's issuer.
-- Root/platform authority cannot issue leaves through normal leaf APIs.
+- A global entity is issued only by the platform leaf issuer, and a tenant-owned entity only by its own tenant intermediate.
+- Root and platform intermediate cannot issue leaves through normal leaf APIs.
+- Deleting an authority cannot delete the certificates it issued.
 - CSR cannot elevate constraints or identity.
 - Expired, revoked, disabled, unknown, or mismatched authorities fail closed.
 - Error paths do not leak private key material.

@@ -11,7 +11,11 @@ PR-007, PR-008, PR-009, and PR-010.
 ## Scope
 
 - Add versioned gRPC resolver accepting leaf DER/fingerprint and optionally issuer fingerprint plus serial.
-- Return entity ID, tenant ID, credential ID, issuer ID, expiry, and status.
+- Return entity ID, tenant ID, credential ID, issuer ID, expiry, and status. A
+  global entity resolves with an empty tenant and must not acquire tenant scope.
+- Publish certificate lifecycle events consumers can use to invalidate cached
+  resolutions, so a relying party is not forced to choose between polling and a
+  long revocation lag.
 - Validate tenant/entity/credential/issuer lifecycle and optional expected tenant.
 - Migrate GraphQL, renewal, revocation, CRL, OCSP, and identity paths away from serial-only lookup.
 - Only after all live readers are migrated, replace global serial uniqueness with issuer-plus-serial uniqueness.
@@ -19,7 +23,7 @@ PR-007, PR-008, PR-009, and PR-010.
 
 ## Non-goals
 
-Magistrala adapter wiring, which belongs to PR-012.
+Relying-party adapter wiring, which belongs to PR-012.
 
 ## Acceptance criteria
 
@@ -37,4 +41,4 @@ Duplicate serials, fingerprint mismatch, issuer mismatch, DER-derived fingerprin
 
 ## AI execution prompt
 
-Treat this as a cutover PR. Inventory every serial-only reader before changing uniqueness. Add tests proving no ambiguous path remains. Do not wire Magistrala yet.
+Treat this as a cutover PR. Inventory every serial-only reader before changing uniqueness. Add tests proving no ambiguous path remains. Do not wire any consuming platform yet.

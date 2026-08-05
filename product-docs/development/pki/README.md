@@ -42,8 +42,11 @@ Acceptance criteria are contractual. A PR is incomplete when one criterion is de
 
 ## Numbering
 
-- PR-001 is the authority registry foundation contained in PR #44.
+- PR-000 fixes defects in the live v1 certificate runtime and has no dependencies. It may land before or alongside PR-001.
+- PR-001 is the authority registry foundation contained in PR #44. It carries outstanding required corrections; read its specification before building on it.
 - PR-002 through PR-013 are follow-up delivery units.
+- PR-014 and PR-015 cover subject enrollment and lifecycle automation. They are numbered after PR-013 but are **not** optional extras: the short-lifetime revocation strategy in the PRD does not work without them.
+- PR-014b is specified but deliberately unscheduled. It is built on its stated trigger condition, not as a matter of course.
 - Additional work discovered later must receive a new numbered specification; do not silently expand an existing PR beyond its security boundary.
 
 ## Security escalation
@@ -55,6 +58,9 @@ Stop implementation and request architectural review when a change would:
 - permit caller-selected issuers;
 - weaken tenant isolation;
 - change certificate identity semantics before resolver v2;
-- delete issuer artifacts before dependent certificates expire;
+- delete issuer artifacts before dependent certificates expire, or delete an authority in a way that removes the certificates it issued;
+- issue a certificate for a subject that is not an Atom entity;
+- introduce a downstream product's concept into Atom's model;
+- move Atom toward general secret management, arbitrary PKI-as-a-service, or public/WebPKI issuance;
 - introduce a new cryptographic algorithm or ASN.1 implementation;
 - bypass transactional event or audit behavior.
