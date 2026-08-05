@@ -16,12 +16,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{
-    config::PkiCaKeyConfig,
-    crypto,
-    error::AppError,
-    metrics,
-};
+use crate::{config::PkiCaKeyConfig, crypto, error::AppError, metrics};
 
 use super::{repo, AuthorityKeyBackend, AuthorityRecord};
 
@@ -170,10 +165,7 @@ impl EncryptedAuthorityKey {
             private_key_nonce: required(private_key_nonce, "private_key_nonce")?,
             wrapped_dek: required(wrapped_dek, "wrapped_dek")?,
             wrapped_dek_nonce: required(wrapped_dek_nonce, "wrapped_dek_nonce")?,
-            key_encryption_key_id: required(
-                key_encryption_key_id,
-                "key_encryption_key_id",
-            )?,
+            key_encryption_key_id: required(key_encryption_key_id, "key_encryption_key_id")?,
             encryption_algorithm: required(encryption_algorithm, "encryption_algorithm")?,
             key_algorithm: AuthorityKeyAlgorithm::EcdsaP256Sha256,
             destroyed: false,
@@ -312,12 +304,8 @@ impl EncryptedDatabaseKeyProvider {
         let mut dek = Zeroizing::new(vec![0_u8; DEK_LEN]);
         OsRng.fill_bytes(dek.as_mut_slice());
 
-        let private = crypto::encrypt(
-            dek.as_slice(),
-            &context.aad("private-key"),
-            private_key,
-        )
-        .map_err(|_| AuthorityKeyProviderError::CryptographicFailure)?;
+        let private = crypto::encrypt(dek.as_slice(), &context.aad("private-key"), private_key)
+            .map_err(|_| AuthorityKeyProviderError::CryptographicFailure)?;
         let wrapped = crypto::encrypt(kek, &context.aad("wrapped-dek"), dek.as_slice())
             .map_err(|_| AuthorityKeyProviderError::CryptographicFailure)?;
 
@@ -481,10 +469,7 @@ impl AuthorityKeyProvider for EncryptedDatabaseKeyProvider {
         Self::observe("retire", result)
     }
 
-    fn destroy(
-        &self,
-        key: &mut EncryptedAuthorityKey,
-    ) -> Result<(), AuthorityKeyProviderError> {
+    fn destroy(&self, key: &mut EncryptedAuthorityKey) -> Result<(), AuthorityKeyProviderError> {
         let result = (|| {
             key.ensure_usable()?;
             key.destroy();
@@ -530,9 +515,7 @@ mod tests {
 
     fn config(byte: u8, id: &str) -> PkiCaKeyConfig {
         PkiCaKeyConfig {
-            key_encryption_key: Some(
-                SecretBytes::new(vec![byte; DEK_LEN]).expect("test CA KEK"),
-            ),
+            key_encryption_key: Some(SecretBytes::new(vec![byte; DEK_LEN]).expect("test CA KEK")),
             key_encryption_key_id: id.to_string(),
         }
     }
@@ -604,9 +587,8 @@ mod tests {
             .expect("public key");
         assert_eq!(public, generated.public_key);
 
-        let verifying_key =
-            VerifyingKey::from_public_key_der(&public.subject_public_key_info_der)
-                .expect("public key DER");
+        let verifying_key = VerifyingKey::from_public_key_der(&public.subject_public_key_info_der)
+            .expect("public key DER");
         let signature = Signature::from_der(&signature.bytes).expect("signature DER");
         verifying_key
             .verify(message, &signature)
@@ -743,8 +725,8 @@ mod tests {
         assert!(!debug.contains(&ciphertext));
         assert!(!debug.contains(&wrapped_dek));
 
-        let serialized = serde_json::to_string(&generated.key.metadata())
-            .expect("safe metadata serialization");
+        let serialized =
+            serde_json::to_string(&generated.key.metadata()).expect("safe metadata serialization");
         assert!(!serialized.contains(&ciphertext));
         assert!(!serialized.contains(&wrapped_dek));
     }
@@ -754,16 +736,12 @@ mod tests {
         let provider = EncryptedDatabaseKeyProvider::new(config(7, "ca:v1"));
         let context = context();
         let mut generated = generated(&provider, context);
-        provider
-            .retire(&generated.key)
-            .expect("retire retains key");
+        provider.retire(&generated.key).expect("retire retains key");
         provider
             .sign(context, &generated.key, b"crl")
             .expect("retired key remains usable for artifacts");
 
-        provider
-            .destroy(&mut generated.key)
-            .expect("destroy");
+        provider.destroy(&mut generated.key).expect("destroy");
         assert_eq!(
             provider
                 .sign(context, &generated.key, b"message")
