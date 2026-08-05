@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -64,7 +66,7 @@ impl AuthorityKeyBackend {
 
 /// Persisted CA metadata. Private-key columns are intentionally represented as
 /// opaque encrypted bytes; plaintext key material must never enter this model.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct AuthorityRecord {
     pub id: Uuid,
     pub tenant_id: Option<Uuid>,
@@ -95,6 +97,36 @@ pub struct AuthorityRecord {
     pub activated_at: Option<DateTime<Utc>>,
     pub retiring_at: Option<DateTime<Utc>>,
     pub retired_at: Option<DateTime<Utc>>,
+}
+
+impl fmt::Debug for AuthorityRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthorityRecord")
+            .field("id", &self.id)
+            .field("tenant_id", &self.tenant_id)
+            .field("parent_id", &self.parent_id)
+            .field("kind", &self.kind)
+            .field("version", &self.version)
+            .field("status", &self.status)
+            .field("issuance_enabled", &self.issuance_enabled)
+            .field("subject", &self.subject)
+            .field("serial_number", &self.serial_number)
+            .field("fingerprint_sha256", &self.fingerprint_sha256)
+            .field("subject_key_id", &self.subject_key_id)
+            .field("authority_key_id", &self.authority_key_id)
+            .field("certificate_pem", &self.certificate_pem)
+            .field("chain_pem", &self.chain_pem)
+            .field("not_before", &self.not_before)
+            .field("not_after", &self.not_after)
+            .field("key_backend", &self.key_backend)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("activated_at", &self.activated_at)
+            .field("retiring_at", &self.retiring_at)
+            .field("retired_at", &self.retired_at)
+            .field("key_material", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl AuthorityRecord {
