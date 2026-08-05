@@ -221,8 +221,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let invalid_parent_error = insert_authority(&pool, &invalid_parent).await.unwrap_err();
     assert!(is_database_code(&invalid_parent_error, "23514"));
 
-    let duplicate_global_issuer =
-        TestAuthority::platform_leaf(Uuid::new_v4(), root_id, 2, 32);
+    let duplicate_global_issuer = TestAuthority::platform_leaf(Uuid::new_v4(), root_id, 2, 32);
     let duplicate_global_error = insert_authority(&pool, &duplicate_global_issuer)
         .await
         .unwrap_err();
@@ -280,8 +279,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let purge_authority =
         TestAuthority::tenant(Uuid::new_v4(), purge_tenant_id, platform_id, 1, 41);
     insert_authority(&pool, &purge_authority).await.unwrap();
-    let purge_entity =
-        create_entity(&pool, Some(purge_tenant_id), "pki-purge-device").await;
+    let purge_entity = create_entity(&pool, Some(purge_tenant_id), "pki-purge-device").await;
     insert_certificate(
         &pool,
         purge_entity,
@@ -291,13 +289,11 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1",
-    )
-    .bind(purge_tenant_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
+        .bind(purge_tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     atom::tenants::repo::purge_tenant(&pool, purge_tenant_id)
         .await
@@ -347,9 +343,7 @@ async fn insert_authority(pool: &PgPool, authority: &TestAuthority) -> Result<()
     let now = Utc::now();
     let (not_before, not_after) = match authority.kind {
         "root" => (now - Duration::hours(3), now + Duration::days(400)),
-        "platform_intermediate" => {
-            (now - Duration::hours(2), now + Duration::days(390))
-        }
+        "platform_intermediate" => (now - Duration::hours(2), now + Duration::days(390)),
         _ => (now - Duration::hours(1), now + Duration::days(365)),
     };
     sqlx::query(
