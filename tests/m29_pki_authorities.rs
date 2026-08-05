@@ -82,7 +82,6 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
         .await
         .unwrap();
 
-    // The application validation mirrors the database CHECK constraints.
     assert!(authority::validate_authority_shape(AuthorityKind::Root, None, None).is_ok());
     assert!(authority::validate_leaf_issuance(
         AuthorityKind::TenantIntermediate,
@@ -103,12 +102,10 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
     assert_eq!(active_a.id, tenant_a_v1.id);
     assert!(active_a.can_issue_leaves_at(Utc::now()));
 
-    // A tenant cannot have two authorities enabled for new leaf issuance.
     let conflicting_v2 = TestAuthority::tenant(Uuid::new_v4(), tenant_a, platform_id, 2, 12);
     let conflict = insert_authority(&pool, &conflicting_v2).await.unwrap_err();
     assert!(is_database_code(&conflict, "23505"));
 
-    // Rotation is an explicit handover: retire issuance on v1, then activate v2.
     sqlx::query(
         "UPDATE pki_authorities SET status = 'retiring', issuance_enabled = false, \
          retiring_at = now(), updated_at = now() WHERE id = $1",
@@ -145,7 +142,10 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
     )
     .await
     .unwrap();
-    insert_certificate(
+
+    // Global serial uniqueness remains until resolver v2 migrates every live
+    // serial-only reader. PR-011 will replace this with issuer-plus-serial.
+    let duplicate_across_issuers = insert_certificate(
         &pool,
         entity_b,
         tenant_b_v1.id,
@@ -153,7 +153,8 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
         &fingerprint(102),
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert!(is_database_code(&duplicate_across_issuers, "23505"));
 
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM credentials WHERE kind = 'certificate' AND identifier = $1",
@@ -162,21 +163,22 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(count, 2, "serials are scoped to their issuing authority");
+    assert_eq!(count, 1, "serial-only readers remain unambiguous before PR-011");
 
-    // The same issuer cannot reuse a serial even for another entity.
-    let duplicate_serial = insert_certificate(
+    // Database enforcement prevents cross-tenant issuer attachment even when
+    // imports, fixtures, or operator SQL bypass the service layer.
+    let cross_tenant_issuer = insert_certificate(
         &pool,
         entity_b,
         conflicting_v2.id,
-        shared_serial,
+        "02030405",
         &fingerprint(103),
     )
     .await
     .unwrap_err();
-    assert!(is_database_code(&duplicate_serial, "23505"));
+    assert!(is_database_code(&cross_tenant_issuer, "23514"));
 
-    // Fingerprint remains globally unique and is the preferred runtime lookup key.
+    // Fingerprint remains globally unique and is the preferred runtime identity.
     let duplicate_fingerprint = insert_certificate(
         &pool,
         entity_b,
@@ -188,7 +190,6 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
     .unwrap_err();
     assert!(is_database_code(&duplicate_fingerprint, "23505"));
 
-    // Static constraints also prevent a platform CA from being enabled as a leaf issuer.
     let invalid_platform = TestAuthority {
         id: Uuid::new_v4(),
         version: 2,
