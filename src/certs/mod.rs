@@ -1,3 +1,4 @@
+pub mod authority;
 pub mod graphql;
 pub mod http;
 pub mod repo;
