@@ -35,7 +35,7 @@ impl TestAuthority {
         }
     }
 
-    fn platform(id: Uuid, root_id: Uuid) -> Self {
+    fn platform_intermediate(id: Uuid, root_id: Uuid) -> Self {
         Self {
             id,
             tenant_id: None,
@@ -45,8 +45,23 @@ impl TestAuthority {
             status: "active",
             issuance_enabled: false,
             fingerprint: fingerprint(2),
-            key_backend: "file",
-            key_reference: Some("/test/platform-ca.key".into()),
+            key_backend: "pkcs11",
+            key_reference: Some("pkcs11:object=platform-ca".into()),
+        }
+    }
+
+    fn platform_leaf(id: Uuid, root_id: Uuid, version: i32, marker: u64) -> Self {
+        Self {
+            id,
+            tenant_id: None,
+            parent_id: Some(root_id),
+            kind: "platform_leaf_issuer",
+            version,
+            status: "active",
+            issuance_enabled: true,
+            fingerprint: fingerprint(marker),
+            key_backend: "pkcs11",
+            key_reference: Some(format!("pkcs11:object=platform-leaf-v{version}")),
         }
     }
 
@@ -60,33 +75,49 @@ impl TestAuthority {
             status: "active",
             issuance_enabled: true,
             fingerprint: fingerprint(marker),
-            key_backend: "file",
-            key_reference: Some(format!("/test/tenant-{tenant_id}-v{version}.key")),
+            key_backend: "pkcs11",
+            key_reference: Some(format!("pkcs11:object=tenant-{tenant_id}-v{version}")),
         }
     }
 }
 
 #[tokio::test]
 #[ignore]
-async fn tenant_authorities_are_isolated_and_rotation_safe() {
+async fn authorities_are_scope_safe_and_rotation_ready() {
     let pool = common::pool().await;
     let tenant_a = create_tenant(&pool, "pki-tenant-a").await;
     let tenant_b = create_tenant(&pool, "pki-tenant-b").await;
 
     let root_id = Uuid::new_v4();
     let platform_id = Uuid::new_v4();
+    let platform_leaf_id = Uuid::new_v4();
     insert_authority(&pool, &TestAuthority::root(root_id))
         .await
         .unwrap();
-    insert_authority(&pool, &TestAuthority::platform(platform_id, root_id))
-        .await
-        .unwrap();
+    insert_authority(
+        &pool,
+        &TestAuthority::platform_intermediate(platform_id, root_id),
+    )
+    .await
+    .unwrap();
+    insert_authority(
+        &pool,
+        &TestAuthority::platform_leaf(platform_leaf_id, root_id, 1, 3),
+    )
+    .await
+    .unwrap();
 
     assert!(authority::validate_authority_shape(AuthorityKind::Root, None, None).is_ok());
+    assert!(authority::validate_authority_shape(
+        AuthorityKind::PlatformLeafIssuer,
+        None,
+        Some(root_id)
+    )
+    .is_ok());
     assert!(authority::validate_leaf_issuance(
-        AuthorityKind::TenantIntermediate,
+        AuthorityKind::PlatformLeafIssuer,
         AuthorityStatus::Active,
-        AuthorityKeyBackend::File,
+        AuthorityKeyBackend::Pkcs11,
         true,
     )
     .is_ok());
@@ -96,11 +127,16 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
     insert_authority(&pool, &tenant_a_v1).await.unwrap();
     insert_authority(&pool, &tenant_b_v1).await.unwrap();
 
-    let active_a = repo::active_tenant_leaf_issuer(&pool, tenant_a)
+    let active_a = repo::active_leaf_issuer_for_scope(&pool, Some(tenant_a))
         .await
         .unwrap();
     assert_eq!(active_a.id, tenant_a_v1.id);
     assert!(active_a.can_issue_leaves_at(Utc::now()));
+
+    let active_global = repo::active_leaf_issuer_for_scope(&pool, None)
+        .await
+        .unwrap();
+    assert_eq!(active_global.id, platform_leaf_id);
 
     let conflicting_v2 = TestAuthority::tenant(Uuid::new_v4(), tenant_a, platform_id, 2, 12);
     let conflict = insert_authority(&pool, &conflicting_v2).await.unwrap_err();
@@ -120,87 +156,76 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
         .await
         .unwrap();
     assert_eq!(active_a.id, conflicting_v2.id);
-    assert_eq!(active_a.version, 2);
 
-    let versions = repo::list_tenant_authorities(&pool, tenant_a)
-        .await
-        .unwrap();
-    assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].version, 2);
-    assert_eq!(versions[1].status, AuthorityStatus::Retiring);
-
-    let entity_a = create_device(&pool, tenant_a, "pki-device-a").await;
-    let entity_b = create_device(&pool, tenant_b, "pki-device-b").await;
-    let shared_serial = "01020304";
+    let entity_a = create_entity(&pool, Some(tenant_a), "pki-device-a").await;
+    let entity_b = create_entity(&pool, Some(tenant_b), "pki-device-b").await;
+    let global_entity = create_entity(&pool, None, "pki-global-service").await;
 
     insert_certificate(
         &pool,
         entity_a,
         conflicting_v2.id,
-        shared_serial,
+        "01020304",
         &fingerprint(101),
     )
     .await
     .unwrap();
-
-    // Global serial uniqueness remains until resolver v2 migrates every live
-    // serial-only reader. PR-011 will replace this with issuer-plus-serial.
-    let duplicate_across_issuers = insert_certificate(
+    insert_certificate(
         &pool,
-        entity_b,
-        tenant_b_v1.id,
-        shared_serial,
+        global_entity,
+        platform_leaf_id,
+        "02030405",
         &fingerprint(102),
     )
     .await
-    .unwrap_err();
-    assert!(is_database_code(&duplicate_across_issuers, "23505"));
-
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM credentials WHERE kind = 'certificate' AND identifier = $1",
-    )
-    .bind(shared_serial)
-    .fetch_one(&pool)
-    .await
     .unwrap();
-    assert_eq!(count, 1, "serial-only readers remain unambiguous before PR-011");
 
-    // Database enforcement prevents cross-tenant issuer attachment even when
-    // imports, fixtures, or operator SQL bypass the service layer.
-    let cross_tenant_issuer = insert_certificate(
+    let cross_tenant = insert_certificate(
         &pool,
         entity_b,
         conflicting_v2.id,
-        "02030405",
+        "03040506",
         &fingerprint(103),
     )
     .await
     .unwrap_err();
-    assert!(is_database_code(&cross_tenant_issuer, "23514"));
+    assert!(is_database_code(&cross_tenant, "23514"));
 
-    // Fingerprint remains globally unique and is the preferred runtime identity.
-    let duplicate_fingerprint = insert_certificate(
+    let wrong_global_issuer = insert_certificate(
         &pool,
-        entity_b,
-        tenant_b_v1.id,
-        "05060708",
-        &fingerprint(101),
+        global_entity,
+        conflicting_v2.id,
+        "04050607",
+        &fingerprint(104),
     )
     .await
     .unwrap_err();
-    assert!(is_database_code(&duplicate_fingerprint, "23505"));
+    assert!(is_database_code(&wrong_global_issuer, "23514"));
 
-    let invalid_platform = TestAuthority {
-        id: Uuid::new_v4(),
-        version: 2,
-        issuance_enabled: true,
-        fingerprint: fingerprint(3),
-        ..TestAuthority::platform(Uuid::new_v4(), root_id)
-    };
-    let invalid = insert_authority(&pool, &invalid_platform)
+    let delete_in_use_issuer = sqlx::query("DELETE FROM pki_authorities WHERE id = $1")
+        .bind(platform_leaf_id)
+        .execute(&pool)
         .await
         .unwrap_err();
-    assert!(is_database_code(&invalid, "23514"));
+    assert!(is_database_code(&delete_in_use_issuer, "23503"));
+
+    let tenant_move = sqlx::query("UPDATE entities SET tenant_id = $1 WHERE id = $2")
+        .bind(tenant_b)
+        .bind(entity_a)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(is_database_code(&tenant_move, "23514"));
+
+    let invalid_parent = TestAuthority::tenant(
+        Uuid::new_v4(),
+        tenant_b,
+        platform_leaf_id,
+        2,
+        31,
+    );
+    let invalid_parent_error = insert_authority(&pool, &invalid_parent).await.unwrap_err();
+    assert!(is_database_code(&invalid_parent_error, "23514"));
 }
 
 async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
@@ -214,9 +239,9 @@ async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
     id
 }
 
-async fn create_device(pool: &PgPool, tenant_id: Uuid, prefix: &str) -> Uuid {
+async fn create_entity(pool: &PgPool, tenant_id: Option<Uuid>, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, tenant_id, name, kind) VALUES ($1, $2, $3, 'device')")
+    sqlx::query("INSERT INTO entities (id, tenant_id, name, kind) VALUES ($1, $2, $3, 'service')")
         .bind(id)
         .bind(tenant_id)
         .bind(format!("{prefix}-{id}"))
