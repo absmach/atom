@@ -217,13 +217,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         .unwrap_err();
     assert!(is_database_code(&tenant_move, "23514"));
 
-    let invalid_parent = TestAuthority::tenant(
-        Uuid::new_v4(),
-        tenant_b,
-        platform_leaf_id,
-        2,
-        31,
-    );
+    let invalid_parent = TestAuthority::tenant(Uuid::new_v4(), tenant_b, platform_leaf_id, 2, 31);
     let invalid_parent_error = insert_authority(&pool, &invalid_parent).await.unwrap_err();
     assert!(is_database_code(&invalid_parent_error, "23514"));
 }

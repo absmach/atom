@@ -138,9 +138,7 @@ pub fn validate_authority_shape(
             Err(AuthorityInvariantError::PlatformIntermediateScope)
         }
         AuthorityKind::PlatformLeafIssuer if tenant_id.is_none() && parent_id.is_some() => Ok(()),
-        AuthorityKind::PlatformLeafIssuer => {
-            Err(AuthorityInvariantError::PlatformLeafIssuerScope)
-        }
+        AuthorityKind::PlatformLeafIssuer => Err(AuthorityInvariantError::PlatformLeafIssuerScope),
         AuthorityKind::TenantIntermediate if tenant_id.is_some() && parent_id.is_some() => Ok(()),
         AuthorityKind::TenantIntermediate => Err(AuthorityInvariantError::TenantIntermediateScope),
     }
@@ -182,12 +180,10 @@ mod tests {
             Some(parent_id)
         )
         .is_ok());
-        assert!(validate_authority_shape(
-            AuthorityKind::PlatformLeafIssuer,
-            None,
-            Some(parent_id)
-        )
-        .is_ok());
+        assert!(
+            validate_authority_shape(AuthorityKind::PlatformLeafIssuer, None, Some(parent_id))
+                .is_ok()
+        );
         assert!(validate_authority_shape(
             AuthorityKind::TenantIntermediate,
             Some(tenant_id),
