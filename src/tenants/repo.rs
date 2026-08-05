@@ -750,6 +750,36 @@ pub(crate) async fn tenant_purge_object_ids(
     .map_err(db_err)
 }
 
+pub(crate) async fn purge_tenant_pki_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_ids: &[Uuid],
+) -> Result<(), AppError> {
+    if tenant_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Credentials restrict authority deletion, and authorities belong to the
+    // tenant being purged. Remove them in dependency order before the tenant.
+    sqlx::query(
+        r#"DELETE FROM credentials
+           WHERE issuer_id IN (
+               SELECT id FROM pki_authorities WHERE tenant_id = ANY($1)
+           )"#,
+    )
+    .bind(tenant_ids)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    sqlx::query("DELETE FROM pki_authorities WHERE tenant_id = ANY($1)")
+        .bind(tenant_ids)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+
+    Ok(())
+}
+
 pub async fn purge_tenant_with_audit(
     pool: &PgPool,
     events_enabled: bool,
@@ -759,6 +789,7 @@ pub async fn purge_tenant_with_audit(
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     let doomed = tenant_purge_object_ids(&mut tx, &[id]).await?;
+    purge_tenant_pki_in_tx(&mut tx, &[id]).await?;
 
     let purged = sqlx::query_as::<_, (Uuid, String)>(
         "DELETE FROM tenants

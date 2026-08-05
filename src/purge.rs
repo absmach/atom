@@ -128,6 +128,7 @@ pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSumma
     let tenant_ids = select_doomed(&mut tx, "tenants", cutoff, cfg.batch_size).await?;
     if !tenant_ids.is_empty() {
         let child_ids = crate::tenants::repo::tenant_purge_object_ids(&mut tx, &tenant_ids).await?;
+        crate::tenants::repo::purge_tenant_pki_in_tx(&mut tx, &tenant_ids).await?;
         deleted_rows += delete_by_ids(&mut tx, "tenants", &tenant_ids).await?;
         doomed_ids.extend(child_ids); // already includes the tenant ids themselves
     }
