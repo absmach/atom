@@ -220,6 +220,104 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let invalid_parent = TestAuthority::tenant(Uuid::new_v4(), tenant_b, platform_leaf_id, 2, 31);
     let invalid_parent_error = insert_authority(&pool, &invalid_parent).await.unwrap_err();
     assert!(is_database_code(&invalid_parent_error, "23514"));
+
+    let duplicate_global_issuer =
+        TestAuthority::platform_leaf(Uuid::new_v4(), root_id, 2, 32);
+    let duplicate_global_error = insert_authority(&pool, &duplicate_global_issuer)
+        .await
+        .unwrap_err();
+    assert!(is_database_code(&duplicate_global_error, "23505"));
+
+    let outside_parent_validity = sqlx::query(
+        "UPDATE pki_authorities SET not_after = now() + interval '500 days' WHERE id = $1",
+    )
+    .bind(conflicting_v2.id)
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(is_database_code(&outside_parent_validity, "23514"));
+
+    let duplicate_fingerprint = insert_certificate(
+        &pool,
+        entity_b,
+        tenant_b_v1.id,
+        "05060708",
+        &fingerprint(101),
+    )
+    .await
+    .unwrap_err();
+    assert!(is_database_code(&duplicate_fingerprint, "23505"));
+
+    // Serial-only v1 readers remain safe until resolver-v2: the existing global
+    // uniqueness rule still rejects the same serial under a different issuer.
+    let duplicate_serial = insert_certificate(
+        &pool,
+        entity_b,
+        tenant_b_v1.id,
+        "01020304",
+        &fingerprint(105),
+    )
+    .await
+    .unwrap_err();
+    assert!(is_database_code(&duplicate_serial, "23505"));
+
+    let null_entity = sqlx::query(
+        r#"INSERT INTO credentials
+             (id, entity_id, kind, identifier, issuer_id, metadata, expires_at)
+           VALUES ($1, NULL, 'certificate', $2, $3, $4, $5)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind("06070809")
+    .bind(platform_leaf_id)
+    .bind(json!({"fingerprint_sha256": fingerprint(106)}))
+    .bind(Utc::now() + Duration::days(30))
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(is_database_code(&null_entity, "23514"));
+
+    let purge_tenant_id = create_tenant(&pool, "pki-purge").await;
+    let purge_authority =
+        TestAuthority::tenant(Uuid::new_v4(), purge_tenant_id, platform_id, 1, 41);
+    insert_authority(&pool, &purge_authority).await.unwrap();
+    let purge_entity =
+        create_entity(&pool, Some(purge_tenant_id), "pki-purge-device").await;
+    insert_certificate(
+        &pool,
+        purge_entity,
+        purge_authority.id,
+        "0708090a",
+        &fingerprint(107),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1",
+    )
+    .bind(purge_tenant_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    atom::tenants::repo::purge_tenant(&pool, purge_tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tenants WHERE id = $1")
+            .bind(purge_tenant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pki_authorities WHERE id = $1")
+            .bind(purge_authority.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
@@ -247,6 +345,13 @@ async fn create_entity(pool: &PgPool, tenant_id: Option<Uuid>, prefix: &str) -> 
 
 async fn insert_authority(pool: &PgPool, authority: &TestAuthority) -> Result<(), sqlx::Error> {
     let now = Utc::now();
+    let (not_before, not_after) = match authority.kind {
+        "root" => (now - Duration::hours(3), now + Duration::days(400)),
+        "platform_intermediate" => {
+            (now - Duration::hours(2), now + Duration::days(390))
+        }
+        _ => (now - Duration::hours(1), now + Duration::days(365)),
+    };
     sqlx::query(
         r#"
         INSERT INTO pki_authorities (
@@ -273,8 +378,8 @@ async fn insert_authority(pool: &PgPool, authority: &TestAuthority) -> Result<()
     .bind(&authority.fingerprint)
     .bind("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n")
     .bind("-----BEGIN CERTIFICATE-----\ntest-chain\n-----END CERTIFICATE-----\n")
-    .bind(now - Duration::hours(1))
-    .bind(now + Duration::days(365))
+    .bind(not_before)
+    .bind(not_after)
     .bind(authority.key_backend)
     .bind(&authority.key_reference)
     .bind((authority.status == "active").then_some(now))
