@@ -776,8 +776,8 @@ fn parse_key_encryption_key() -> Result<Option<SecretBytes>> {
 fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
     let default = PkiCaKeyConfig::default();
     let key_encryption_key = parse_secret_key_env("ATOM_PKI_CA_KEY_ENCRYPTION_KEY")?;
-    let key_encryption_key_id = std::env::var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID")
-        .unwrap_or(default.key_encryption_key_id);
+    let key_encryption_key_id =
+        std::env::var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID").unwrap_or(default.key_encryption_key_id);
     if key_encryption_key.is_some() && key_encryption_key_id.trim().is_empty() {
         anyhow::bail!("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID must not be blank when the CA KEK is set");
     }
@@ -1288,9 +1288,7 @@ mod tests {
 
         std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY", "too-short");
         let err = Config::from_env().expect_err("invalid CA key");
-        assert!(err
-            .to_string()
-            .contains("ATOM_PKI_CA_KEY_ENCRYPTION_KEY"));
+        assert!(err.to_string().contains("ATOM_PKI_CA_KEY_ENCRYPTION_KEY"));
 
         std::env::set_var(
             "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
