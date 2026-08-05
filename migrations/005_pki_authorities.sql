@@ -221,6 +221,11 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    IF NEW.entity_id IS NULL THEN
+        RAISE EXCEPTION 'issuer-bound certificate requires an entity'
+            USING ERRCODE = '23514';
+    END IF;
+
     SELECT e.tenant_id, a.tenant_id, a.kind
       INTO entity_tenant_id, authority_tenant_id, authority_kind
       FROM entities e
