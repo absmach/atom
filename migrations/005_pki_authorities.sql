@@ -1,13 +1,17 @@
 -- Atom-native multi-tenant PKI authority registry.
 --
 -- This migration is deliberately backward-compatible with the v1 file issuer:
--- existing certificate credentials keep issuer_id = NULL and remain unique in
--- the legacy global serial namespace. New tenant issuers receive a stable row
--- and certificates issued by them are unique by (issuer_id, serial_number).
+-- existing certificate credentials keep issuer_id = NULL and retain the legacy
+-- global serial-number uniqueness rule. Issuer-scoped duplicate serials are not
+-- enabled until every live serial-only reader is migrated to issuer/fingerprint
+-- identity in the resolver-v2 delivery PR.
 
 CREATE TABLE pki_authorities (
     id                      UUID        PRIMARY KEY,
-    tenant_id               UUID        REFERENCES tenants(id) ON DELETE RESTRICT,
+    -- A hard tenant purge removes its tenant-scoped authorities. Soft delete
+    -- keeps them intact, so chains and revocation artifacts remain available
+    -- throughout the configured retention period.
+    tenant_id               UUID        REFERENCES tenants(id) ON DELETE CASCADE,
     parent_id               UUID        REFERENCES pki_authorities(id) ON DELETE RESTRICT,
     kind                    TEXT        NOT NULL
                                         CHECK (kind IN (
@@ -150,22 +154,19 @@ CREATE UNIQUE INDEX idx_pki_authorities_one_leaf_issuer_per_tenant
     WHERE kind = 'tenant_intermediate' AND issuance_enabled = true;
 
 ALTER TABLE credentials
-    ADD COLUMN issuer_id UUID REFERENCES pki_authorities(id) ON DELETE RESTRICT;
+    ADD COLUMN issuer_id UUID REFERENCES pki_authorities(id) ON DELETE CASCADE;
 
 ALTER TABLE credentials
     ADD CONSTRAINT chk_credentials_issuer_certificate_only
     CHECK (issuer_id IS NULL OR kind = 'certificate');
 
-DROP INDEX IF EXISTS idx_credentials_certificate_serial;
-
--- NULL issuer_id is the legacy v1 file issuer. Coalescing it to a reserved UUID
--- preserves the existing global uniqueness rule while allowing the same serial
--- number to occur under two independent tenant issuers.
-CREATE UNIQUE INDEX idx_credentials_certificate_issuer_serial
-    ON credentials(
-        COALESCE(issuer_id, '00000000-0000-0000-0000-000000000000'::uuid),
-        identifier
-    )
+-- Keep idx_credentials_certificate_serial from migration 001. The current
+-- GraphQL, renewal, revocation, OCSP, and gRPC paths still resolve by serial
+-- alone. Allowing duplicate serials across issuers before those readers become
+-- issuer-aware could select the wrong credential. This lookup index prepares the
+-- next phase without weakening the live runtime contract.
+CREATE INDEX idx_credentials_certificate_issuer_serial_lookup
+    ON credentials(issuer_id, identifier)
     WHERE kind = 'certificate' AND identifier IS NOT NULL;
 
 CREATE INDEX idx_credentials_certificate_issuer
@@ -179,10 +180,53 @@ CREATE UNIQUE INDEX idx_credentials_certificate_fingerprint
     WHERE kind = 'certificate'
       AND NULLIF(metadata->>'fingerprint_sha256', '') IS NOT NULL;
 
+-- A non-legacy certificate can only reference a tenant intermediate belonging
+-- to the credential entity's own tenant. The trigger repeats the service-layer
+-- invariant so imports, migrations, fixtures, and operator SQL cannot create a
+-- cross-tenant or root/platform-issued leaf mapping.
+CREATE OR REPLACE FUNCTION enforce_certificate_issuer_tenant() RETURNS trigger AS $$
+DECLARE
+    entity_tenant_id    UUID;
+    authority_tenant_id UUID;
+    authority_kind      TEXT;
+BEGIN
+    IF NEW.kind <> 'certificate' OR NEW.issuer_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT e.tenant_id, a.tenant_id, a.kind
+      INTO entity_tenant_id, authority_tenant_id, authority_kind
+      FROM entities e
+      JOIN pki_authorities a ON a.id = NEW.issuer_id
+     WHERE e.id = NEW.entity_id;
+
+    -- Let the existing entity/authority foreign keys produce their normal error
+    -- when either referenced row does not exist.
+    IF NOT FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    IF entity_tenant_id IS NULL
+       OR authority_kind <> 'tenant_intermediate'
+       OR authority_tenant_id IS DISTINCT FROM entity_tenant_id THEN
+        RAISE EXCEPTION
+            'certificate issuer must be a tenant intermediate for the credential entity tenant'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_credentials_certificate_issuer_tenant
+    BEFORE INSERT OR UPDATE OF entity_id, kind, issuer_id ON credentials
+    FOR EACH ROW EXECUTE FUNCTION enforce_certificate_issuer_tenant();
+
 -- v1 CRL state remains keyed by issuer fingerprint. issuer_id is nullable for
 -- the legacy file issuer and will be populated by tenant-aware CRL generation.
+-- Hard-purging an authority removes its cached public artifact as well.
 ALTER TABLE certificate_crl_state
-    ADD COLUMN issuer_id UUID REFERENCES pki_authorities(id) ON DELETE RESTRICT;
+    ADD COLUMN issuer_id UUID REFERENCES pki_authorities(id) ON DELETE CASCADE;
 
 CREATE UNIQUE INDEX idx_certificate_crl_state_issuer
     ON certificate_crl_state(issuer_id)
