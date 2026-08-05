@@ -59,20 +59,21 @@ where
         .map_err(db_err)
 }
 
-/// Return the one tenant intermediate that may receive new leaf issuance.
+/// Return the active leaf issuer for a stored entity scope.
 ///
-/// Rotation keeps old versions in `retiring`/`retired` state, so callers must
-/// use this selector rather than ordering all tenant authorities themselves.
-pub async fn active_tenant_leaf_issuer(
+/// Tenant entities use their tenant intermediate. Global entities use the one
+/// active platform leaf issuer. Callers derive this scope from the stored entity;
+/// public requests never choose an issuer.
+pub async fn active_leaf_issuer_for_scope(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: Option<Uuid>,
 ) -> Result<AuthorityRecord, AppError> {
-    fetch_active_tenant_leaf_issuer(pool, tenant_id).await
+    fetch_active_leaf_issuer_for_scope(pool, tenant_id).await
 }
 
-pub async fn fetch_active_tenant_leaf_issuer<'e, E>(
+pub async fn fetch_active_leaf_issuer_for_scope<'e, E>(
     executor: E,
-    tenant_id: Uuid,
+    tenant_id: Option<Uuid>,
 ) -> Result<AuthorityRecord, AppError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
@@ -81,8 +82,12 @@ where
         r#"
         SELECT {AUTHORITY_COLUMNS}
         FROM pki_authorities
-        WHERE tenant_id = $1
-          AND kind = 'tenant_intermediate'
+        WHERE (($1::uuid IS NULL
+                AND tenant_id IS NULL
+                AND kind = 'platform_leaf_issuer')
+            OR ($1::uuid IS NOT NULL
+                AND tenant_id = $1
+                AND kind = 'tenant_intermediate'))
           AND status = 'active'
           AND issuance_enabled = true
           AND not_before <= now()
@@ -94,6 +99,24 @@ where
         .fetch_one(executor)
         .await
         .map_err(db_err)
+}
+
+/// Backward-compatible tenant-only selector for current call sites.
+pub async fn active_tenant_leaf_issuer(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> Result<AuthorityRecord, AppError> {
+    active_leaf_issuer_for_scope(pool, Some(tenant_id)).await
+}
+
+pub async fn fetch_active_tenant_leaf_issuer<'e, E>(
+    executor: E,
+    tenant_id: Uuid,
+) -> Result<AuthorityRecord, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    fetch_active_leaf_issuer_for_scope(executor, Some(tenant_id)).await
 }
 
 pub async fn list_tenant_authorities(
