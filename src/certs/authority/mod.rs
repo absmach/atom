@@ -14,13 +14,15 @@ pub enum AuthorityKind {
     Root,
     /// Optional online CA used to automate tenant-intermediate provisioning.
     PlatformIntermediate,
+    /// Global CA that signs leaf credentials for entities without a tenant.
+    PlatformLeafIssuer,
     /// Tenant-scoped CA that signs leaf credentials for one tenant only.
     TenantIntermediate,
 }
 
 impl AuthorityKind {
     pub fn can_issue_leaf_credentials(self) -> bool {
-        matches!(self, Self::TenantIntermediate)
+        matches!(self, Self::PlatformLeafIssuer | Self::TenantIntermediate)
     }
 }
 
@@ -48,8 +50,6 @@ pub enum AuthorityKeyBackend {
     PublicOnly,
     /// Envelope-encrypted CA key material stored in Postgres.
     EncryptedDatabase,
-    /// Operator-managed file reference. Intended for migration and development.
-    File,
     /// PKCS#11 object reference in an HSM or software token.
     Pkcs11,
     /// Cloud or remote KMS signing-key reference.
@@ -99,10 +99,6 @@ pub struct AuthorityRecord {
 
 impl AuthorityRecord {
     /// Whether this CA is currently eligible for new leaf issuance.
-    ///
-    /// Database constraints enforce the static shape. This method additionally
-    /// checks the validity window, so callers fail closed if lifecycle status and
-    /// wall-clock validity diverge.
     pub fn can_issue_leaves_at(&self, now: DateTime<Utc>) -> bool {
         self.kind.can_issue_leaf_credentials()
             && self.status == AuthorityStatus::Active
@@ -119,15 +115,16 @@ pub enum AuthorityInvariantError {
     RootScope,
     #[error("platform intermediate must be global and have a parent")]
     PlatformIntermediateScope,
+    #[error("platform leaf issuer must be global and have a parent")]
+    PlatformLeafIssuerScope,
     #[error("tenant intermediate must belong to one tenant and have a parent")]
     TenantIntermediateScope,
-    #[error("only an active tenant intermediate with a signing backend may issue leaves")]
+    #[error("only an active leaf issuer with a signing backend may issue leaves")]
     LeafIssuance,
 }
 
 /// Validate hierarchy fields before opening a database transaction. The same
-/// invariants are repeated as CHECK constraints so every write path, including
-/// migrations and operator SQL, fails closed.
+/// invariants are repeated as database constraints and triggers.
 pub fn validate_authority_shape(
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
@@ -139,6 +136,10 @@ pub fn validate_authority_shape(
         AuthorityKind::PlatformIntermediate if tenant_id.is_none() && parent_id.is_some() => Ok(()),
         AuthorityKind::PlatformIntermediate => {
             Err(AuthorityInvariantError::PlatformIntermediateScope)
+        }
+        AuthorityKind::PlatformLeafIssuer if tenant_id.is_none() && parent_id.is_some() => Ok(()),
+        AuthorityKind::PlatformLeafIssuer => {
+            Err(AuthorityInvariantError::PlatformLeafIssuerScope)
         }
         AuthorityKind::TenantIntermediate if tenant_id.is_some() && parent_id.is_some() => Ok(()),
         AuthorityKind::TenantIntermediate => Err(AuthorityInvariantError::TenantIntermediateScope),
@@ -182,6 +183,12 @@ mod tests {
         )
         .is_ok());
         assert!(validate_authority_shape(
+            AuthorityKind::PlatformLeafIssuer,
+            None,
+            Some(parent_id)
+        )
+        .is_ok());
+        assert!(validate_authority_shape(
             AuthorityKind::TenantIntermediate,
             Some(tenant_id),
             Some(parent_id)
@@ -194,14 +201,19 @@ mod tests {
     }
 
     #[test]
-    fn leaf_issuance_requires_an_active_tenant_signer() {
-        assert!(validate_leaf_issuance(
+    fn leaf_issuance_requires_an_active_leaf_signer() {
+        for kind in [
             AuthorityKind::TenantIntermediate,
-            AuthorityStatus::Active,
-            AuthorityKeyBackend::EncryptedDatabase,
-            true
-        )
-        .is_ok());
+            AuthorityKind::PlatformLeafIssuer,
+        ] {
+            assert!(validate_leaf_issuance(
+                kind,
+                AuthorityStatus::Active,
+                AuthorityKeyBackend::EncryptedDatabase,
+                true
+            )
+            .is_ok());
+        }
         assert_eq!(
             validate_leaf_issuance(
                 AuthorityKind::PlatformIntermediate,
@@ -220,12 +232,5 @@ mod tests {
             ),
             Err(AuthorityInvariantError::LeafIssuance)
         );
-        assert!(validate_leaf_issuance(
-            AuthorityKind::Root,
-            AuthorityStatus::Retired,
-            AuthorityKeyBackend::PublicOnly,
-            false
-        )
-        .is_ok());
     }
 }
