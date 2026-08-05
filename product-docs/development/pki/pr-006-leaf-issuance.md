@@ -10,13 +10,20 @@ PR-005.
 
 ## Scope
 
-- Generate leaf key using approved algorithm and secure randomness.
+- Generate leaf key using an algorithm permitted by the profile and secure
+  randomness. The algorithm is a profile field, not a hardcoded choice: subjects
+  with constrained or legacy TLS stacks do not all accept the same one.
 - Build canonical client profile.
 - Sign with active tenant issuer.
 - Persist certificate only; return private key once.
 - Zeroize key material after response construction where possible.
 - Ensure key never enters database, audit, event, tracing, or error output.
 - Reuse authorization, issuer selection, verification, and transaction behavior from CSR signing.
+- Ship behind a flag that stays off in production deployments until PR-010
+  completes. Until per-issuer CRL and OCSP exist, revoking a certificate issued by
+  a tenant CA writes it into a CRL signed by a different CA, and the OCSP
+  responder answers for serials its queried authority never issued. See the
+  roadmap's sequencing hazard section.
 
 ## Non-goals
 

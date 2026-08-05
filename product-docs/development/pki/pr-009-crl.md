@@ -13,8 +13,14 @@ PR-008.
 - CRL cache/state keyed by issuer ID.
 - Issuer-specific route: `/certs/issuers/{issuer_id}/crl`.
 - Include only certificates issued by that authority.
-- Increment CRL number monotonically.
-- Set thisUpdate/nextUpdate and revocation reasons.
+- Increment CRL number monotonically, **continuing from the value already
+  published by the fingerprint-keyed state row for the same physical CA**.
+  Restarting at 1 makes CRL numbers move backwards, which conforming verifiers
+  treat as a rollback attack.
+- Set thisUpdate/nextUpdate and revocation reasons taken from the stored
+  revocation record rather than a fixed `unspecified`.
+- Serve validator-friendly caching so a polling fleet does not take the
+  regeneration lock on every fetch.
 - Sign through the authority key provider.
 - Use issuer-scoped locking to avoid duplicate concurrent generation.
 - Preserve old issuer CRLs until retention permits removal.
@@ -30,7 +36,12 @@ Delta CRLs unless separately approved; OCSP.
 - Root/platform authorities do not expose leaf CRLs unless their role requires it.
 - Retiring/retired issuer can publish CRL but cannot issue new leaves.
 - Cache invalidation and regeneration survive restart.
+- CRL numbers never decrease across the state-representation cutover.
+- Recorded revocation reasons appear in CRL entries.
 - Legacy global route remains until documented cutover.
+- CRL is documented to operators as a compliance and interoperability artifact,
+  not as the platform's primary revocation control — that role belongs to short
+  lifetimes plus resolver denial.
 
 ## Mandatory tests
 

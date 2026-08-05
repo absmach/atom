@@ -12,6 +12,12 @@ PR-006.
 
 - Renew by exact credential identity, not ambiguous serial-only selection.
 - Support CSR-based renewal and explicitly controlled generated-key renewal.
+- Support renewal **authenticated by the certificate being replaced**, so a
+  subject can renew itself with no operator and no second credential. This is the
+  mechanism the ephemeral lifetime tier depends on; the subject-facing transport
+  for it is PR-014's scope, but the service path belongs here.
+- Take the renewal threshold from the certificate's profile rather than a global
+  constant, so a subject can be told when renewal is due.
 - Link new credential to previous credential in metadata or a dedicated relation.
 - Issue under current active tenant issuer, including v1-to-v2 migration.
 - Policy for old credential: overlap window, optional immediate revocation, and audit.
@@ -19,7 +25,8 @@ PR-006.
 
 ## Non-goals
 
-Bulk fleet automation and ACME.
+Bulk fleet automation, expiry sweeping and notification (PR-015), and the
+subject-facing enrollment transport (PR-014).
 
 ## Acceptance criteria
 
@@ -28,7 +35,12 @@ Bulk fleet automation and ACME.
 - Expired/revoked credentials follow explicit policy and cannot bypass authorization.
 - New certificate has a new serial/fingerprint and correct issuer ID.
 - Both old and new credentials remain unambiguously resolvable during overlap.
-- Legacy global certificate can renew into tenant issuer.
+- Legacy global certificate can renew into the issuer for its subject's scope —
+  tenant intermediate for tenant-owned entities, platform leaf issuer for global
+  entities. This is the only migration path off the legacy issuer.
+- A certificate presented for its own renewal is accepted while valid and rejected
+  once expired or revoked, and the recovery path for an expired subject is
+  documented.
 
 ## Mandatory tests
 

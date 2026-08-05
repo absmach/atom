@@ -27,7 +27,7 @@ No root-key storage, CA provisioning API, tenant issuance, PKCS#11, or KMS.
 - Encrypted provider never persists plaintext key bytes.
 - CA KEK is mandatory only when encrypted authorities are used.
 - Wrong KEK, corrupted ciphertext, missing fields, and unsupported algorithms fail closed.
-- Key material is excluded from debug/serde/log/audit/event output.
+- Key material — including wrapped material — is excluded from debug/serde/log/audit/event output. Types holding key columns implement a redacting `Debug` rather than deriving one.
 - Provider interface can support file, PKCS#11, and KMS implementations later.
 - Existing v1 signer behavior remains unchanged.
 
