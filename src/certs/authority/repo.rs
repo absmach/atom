@@ -51,13 +51,12 @@ pub async fn fetch_authority_by_id<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as::<_, AuthorityRecord>(&format!(
-        "SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1"
-    ))
-    .bind(authority_id)
-    .fetch_one(executor)
-    .await
-    .map_err(db_err)
+    let query = format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1");
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(authority_id)
+        .fetch_one(executor)
+        .await
+        .map_err(db_err)
 }
 
 /// Return the one tenant intermediate that may receive new leaf issuance.
@@ -78,7 +77,7 @@ pub async fn fetch_active_tenant_leaf_issuer<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as::<_, AuthorityRecord>(&format!(
+    let query = format!(
         r#"
         SELECT {AUTHORITY_COLUMNS}
         FROM pki_authorities
@@ -89,27 +88,29 @@ where
           AND not_before <= now()
           AND not_after > now()
         "#
-    ))
-    .bind(tenant_id)
-    .fetch_one(executor)
-    .await
-    .map_err(db_err)
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(tenant_id)
+        .fetch_one(executor)
+        .await
+        .map_err(db_err)
 }
 
 pub async fn list_tenant_authorities(
     pool: &PgPool,
     tenant_id: Uuid,
 ) -> Result<Vec<AuthorityRecord>, AppError> {
-    sqlx::query_as::<_, AuthorityRecord>(&format!(
+    let query = format!(
         r#"
         SELECT {AUTHORITY_COLUMNS}
         FROM pki_authorities
         WHERE tenant_id = $1
         ORDER BY version DESC, created_at DESC
         "#
-    ))
-    .bind(tenant_id)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)
 }
