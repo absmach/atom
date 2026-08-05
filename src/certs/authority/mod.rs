@@ -141,9 +141,7 @@ pub fn validate_authority_shape(
             Err(AuthorityInvariantError::PlatformIntermediateScope)
         }
         AuthorityKind::TenantIntermediate if tenant_id.is_some() && parent_id.is_some() => Ok(()),
-        AuthorityKind::TenantIntermediate => {
-            Err(AuthorityInvariantError::TenantIntermediateScope)
-        }
+        AuthorityKind::TenantIntermediate => Err(AuthorityInvariantError::TenantIntermediateScope),
     }
 }
 

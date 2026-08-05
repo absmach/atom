@@ -105,9 +105,7 @@ async fn tenant_authorities_are_isolated_and_rotation_safe() {
 
     // A tenant cannot have two authorities enabled for new leaf issuance.
     let conflicting_v2 = TestAuthority::tenant(Uuid::new_v4(), tenant_a, platform_id, 2, 12);
-    let conflict = insert_authority(&pool, &conflicting_v2)
-        .await
-        .unwrap_err();
+    let conflict = insert_authority(&pool, &conflicting_v2).await.unwrap_err();
     assert!(is_database_code(&conflict, "23505"));
 
     // Rotation is an explicit handover: retire issuance on v1, then activate v2.
@@ -227,10 +225,7 @@ async fn create_device(pool: &PgPool, tenant_id: Uuid, prefix: &str) -> Uuid {
     id
 }
 
-async fn insert_authority(
-    pool: &PgPool,
-    authority: &TestAuthority,
-) -> Result<(), sqlx::Error> {
+async fn insert_authority(pool: &PgPool, authority: &TestAuthority) -> Result<(), sqlx::Error> {
     let now = Utc::now();
     sqlx::query(
         r#"
