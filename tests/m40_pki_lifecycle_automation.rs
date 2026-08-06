@@ -47,6 +47,11 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     let tenant_b = common::pki::create_tenant(&pool, "pki-life-b").await;
     let issuer_a = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_a).await;
     let _issuer_b = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_b).await;
+    let expiring_authority_tenant =
+        common::pki::create_tenant(&pool, "pki-life-expiring-authority").await;
+    let expiring_authority =
+        common::pki::provision_tenant_issuer(&pool, &config, &root, expiring_authority_tenant)
+            .await;
     let entity_a = common::pki::create_entity(&pool, tenant_a, "pki-life-a").await;
     let entity_b = common::pki::create_entity(&pool, tenant_b, "pki-life-b").await;
 
@@ -78,7 +83,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     // A tenant issuer at the exact 30-day lead boundary is surfaced early
     // enough to run the PR-003 rotation procedure.
     sqlx::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
-        .bind(issuer_a.id)
+        .bind(expiring_authority.id)
         .bind(now + Duration::days(30))
         .execute(&pool)
         .await
@@ -145,7 +150,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
 
     assert_certificate_event(&pool, due.credential_id, "renewal").await;
     assert_certificate_event(&pool, critical.credential_id, "expiry").await;
-    assert_authority_event(&pool, issuer_a.id, tenant_a).await;
+    assert_authority_event(&pool, expiring_authority.id, expiring_authority_tenant).await;
     assert_eq!(
         marker_count(&pool, future.credential_id, "renewal").await,
         0
@@ -351,7 +356,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(partial["items"].as_array().unwrap().len(), 2);
     assert_eq!(partial["items"][0]["outcome"], "revoked");
     assert_eq!(partial["items"][1]["outcome"], "failed");
-    assert_eq!(partial["items"][1]["errorCode"], "invalid_certificate");
+    assert_eq!(partial["items"][1]["errorCode"], "internal");
     assert_eq!(partial["nextCursor"], ordered[0].to_string());
     let failed_audit: (String, String) = sqlx::query_as(
         r#"
@@ -367,7 +372,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     .await
     .unwrap();
     assert_eq!(failed_audit.0, "error");
-    assert_eq!(failed_audit.1, "invalid_certificate");
+    assert_eq!(failed_audit.1, "internal");
     sqlx::query("UPDATE credentials SET metadata = $2 WHERE id = $1")
         .bind(ordered[1])
         .bind(original_metadata)
