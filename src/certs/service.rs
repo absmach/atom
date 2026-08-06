@@ -1036,7 +1036,7 @@ pub async fn renew_certificate_v2_in_tx(
                     let mut metadata = old.metadata.clone();
                     metadata["revoked_at"] = json!(Utc::now());
                     metadata["revocation_reason"] = json!("superseded");
-                    repo::revoke_certificate(&mut **attempt_tx, old.id, metadata).await?;
+                    repo::revoke_certificate(&mut *attempt_tx, old.id, metadata).await?;
                     // PR-008 replaces this global dirty mark with an exact
                     // issuer-keyed update. Credential status is still changed
                     // atomically and is immediately authoritative in Atom.
