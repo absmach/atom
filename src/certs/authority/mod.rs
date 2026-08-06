@@ -99,6 +99,9 @@ pub struct AuthorityRecord {
     pub provisioning_mode: String,
     pub csr_pem: Option<String>,
     pub failure_reason: Option<String>,
+    pub ocsp_url: Option<String>,
+    pub ca_issuers_url: Option<String>,
+    pub crl_distribution_point_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub activated_at: Option<DateTime<Utc>>,
@@ -129,6 +132,12 @@ impl fmt::Debug for AuthorityRecord {
             .field("provisioning_mode", &self.provisioning_mode)
             .field("csr_present", &self.csr_pem.is_some())
             .field("failure_reason", &self.failure_reason)
+            .field("ocsp_url", &self.ocsp_url)
+            .field("ca_issuers_url", &self.ca_issuers_url)
+            .field(
+                "crl_distribution_point_url",
+                &self.crl_distribution_point_url,
+            )
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .field("activated_at", &self.activated_at)
