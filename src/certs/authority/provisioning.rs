@@ -918,6 +918,7 @@ mod tests {
         let key = KeyPair::generate().expect("key");
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
         params.distinguished_name.push(DnType::CommonName, "Not CA");
+        params.is_ca = IsCa::ExplicitNoCa;
         let certificate = params.self_signed(&key).expect("certificate");
         assert!(parse_authority_certificate(&certificate.pem())
             .expect_err("CA=false")
