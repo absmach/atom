@@ -1,4 +1,5 @@
 pub mod authority;
+pub mod enrollment;
 pub mod graphql;
 pub mod http;
 pub mod pki_core;
