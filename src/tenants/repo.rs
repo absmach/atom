@@ -572,6 +572,7 @@ pub async fn soft_delete_tenant_with_audit(
         other => AppError::Database(other),
     })?;
 
+    let revocation_actor_id = actor_id.or(deleted_by);
     let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"WITH revoked AS (
                UPDATE credentials c
@@ -590,7 +591,7 @@ pub async fn soft_delete_tenant_with_audit(
            SELECT id, issuer_id FROM revoked WHERE kind = 'certificate'"#,
     )
     .bind(id)
-    .bind(actor_id)
+    .bind(revocation_actor_id)
     .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;

@@ -733,6 +733,7 @@ pub async fn delete_entity_with_audit(
         return Err(AppError::not_found(format!("entity {id} not found")));
     }
 
+    let revocation_actor_id = actor_id.or(deleted_by);
     let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"WITH revoked AS (
                UPDATE credentials
@@ -752,7 +753,7 @@ pub async fn delete_entity_with_audit(
            SELECT id, issuer_id FROM revoked WHERE kind = 'certificate'"#,
     )
     .bind(id)
-    .bind(actor_id)
+    .bind(revocation_actor_id)
     .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;
