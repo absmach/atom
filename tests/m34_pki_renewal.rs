@@ -127,6 +127,8 @@ async fn issuer_aware_renewal_enforces_the_pr007_contract() {
 
     // A leaf issued by v1 renews under v2 after the one-active-issuer handover.
     let old_rotation = issue_managed(&pool, &config, tenant_a, entity_a, "old-rotation").await;
+    let old_retiring_self =
+        issue_managed(&pool, &config, tenant_a, entity_a, "old-retiring-self").await;
     let issuer_v2 = common::pki::rotate_tenant_issuer(&pool, &config, &root, tenant_a).await;
     assert_ne!(issuer_v1.id, issuer_v2.id);
     let retired_v1 = atom::certs::authority::repo::authority_by_id(&pool, issuer_v1.id)
@@ -148,6 +150,27 @@ async fn issuer_aware_renewal_enforces_the_pr007_contract() {
     let rotated = rotated.data.into_json().unwrap()["renewCertificateFromCsrV2"].clone();
     assert_eq!(rotated["certificate"]["issuerId"], issuer_v2.id.to_string());
     assert_eq!(old_rotation.issuer_id, Some(issuer_v1.id));
+    let retiring_self = service::renew_certificate_v2(
+        &pool,
+        &config,
+        service::CertificateRenewalAuthorization::PresentedCertificate {
+            credential_id: old_retiring_self.credential_id,
+        },
+        service::RenewCertificateV2 {
+            credential_id: old_retiring_self.credential_id,
+            ttl_secs: Some(3600),
+            key_source: service::RenewalKeySource::Csr(csr()),
+            revoke_old: false,
+            idempotency_key: "retiring-self".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(retiring_self.certificate.issuer_id, Some(issuer_v2.id));
+    assert_eq!(
+        retiring_self.certificate.renewed_from_credential_id,
+        Some(old_retiring_self.credential_id)
+    );
 
     // Generated renewal is a separate explicit API. Its key is returned only
     // on the first response and immediate revocation is atomic with linkage.

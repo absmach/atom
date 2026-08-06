@@ -1706,7 +1706,12 @@ async fn validate_renewal_source(
             }
             None => issuer.kind == AuthorityKind::PlatformLeafIssuer && issuer.tenant_id.is_none(),
         };
+        let issuer_is_current = matches!(
+            (issuer.not_before.as_ref(), issuer.not_after.as_ref()),
+            (Some(not_before), Some(not_after)) if not_before <= &now && &now < not_after
+        );
         if !scope_matches
+            || !issuer_is_current
             || !matches!(
                 issuer.status,
                 AuthorityStatus::Active | AuthorityStatus::Retiring
