@@ -27,8 +27,8 @@ use der::{
 };
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
-    SignatureAlgorithm, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ECDSA_P521_SHA512,
-    PKCS_ED25519, PKCS_RSA_SHA256,
+    SignatureAlgorithm, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519,
+    PKCS_RSA_SHA256,
 };
 use ring::digest;
 use spki::AlgorithmIdentifierOwned;
@@ -365,11 +365,11 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
 #[ignore]
 async fn legacy_ocsp_verifies_every_supported_issuer_key_algorithm() {
     let pool = common::pool().await;
-    // These are the five signing policies rcgen can recover unambiguously
-    // from Atom's persisted PEM key material. RSA and P-521 keys are also
-    // compatible with other digests, whose identifier mappings are covered
-    // in pki_core unit tests, but the persisted keys do not encode that choice.
-    let cases: [(&SignatureAlgorithm, ObjectIdentifier); 5] = [
+    // These are the four issuer-key families accepted by Atom's persisted-key
+    // loader and certificate-chain verifier. RSA keys are compatible with
+    // other digests, whose identifier mappings are covered in pki_core unit
+    // tests, but persisted RSA key material does not encode a digest choice.
+    let cases: [(&SignatureAlgorithm, ObjectIdentifier); 4] = [
         (
             &PKCS_RSA_SHA256,
             ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
@@ -378,10 +378,6 @@ async fn legacy_ocsp_verifies_every_supported_issuer_key_algorithm() {
         (
             &PKCS_ECDSA_P384_SHA384,
             ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"),
-        ),
-        (
-            &PKCS_ECDSA_P521_SHA512,
-            ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4"),
         ),
         (&PKCS_ED25519, ObjectIdentifier::new_unwrap("1.3.101.112")),
     ];

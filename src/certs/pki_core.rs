@@ -1256,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_signature_algorithm_is_derived_for_every_supported_key() {
+    fn artifact_signature_algorithm_maps_every_rcgen_variant() {
         let cases = [
             (&PKCS_RSA_SHA256, PkiSignatureAlgorithm::RsaPkcs1Sha256),
             (&PKCS_RSA_SHA384, PkiSignatureAlgorithm::RsaPkcs1Sha384),
