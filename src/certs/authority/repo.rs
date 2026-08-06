@@ -153,6 +153,28 @@ pub async fn lock_active_leaf_issuer_for_scope(
         })
 }
 
+/// Hold a shared lock while an already-issued certificate is used as renewal
+/// authentication. Lifecycle transitions may wait, but they cannot revoke or
+/// retire the presented issuer between validation and renewal commit.
+pub async fn lock_authority_for_certificate_authentication(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_id: Uuid,
+) -> Result<AuthorityRecord, AppError> {
+    let query = format!(
+        r#"
+        SELECT {AUTHORITY_COLUMNS}
+        FROM pki_authorities
+        WHERE id = $1
+        FOR SHARE
+        "#
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(authority_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_err)
+}
+
 /// Backward-compatible tenant-only selector for current call sites.
 pub async fn active_tenant_leaf_issuer(
     pool: &PgPool,

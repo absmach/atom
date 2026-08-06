@@ -276,6 +276,8 @@ mod tests {
             "issueCertificateFromCsr",
             "issueCertificateFromCsrV2",
             "renewCertificate",
+            "renewCertificateFromCsrV2",
+            "renewGeneratedCertificateV2",
             "revokeCertificate",
             "revokeEntityCertificates",
             "addOwnership",
