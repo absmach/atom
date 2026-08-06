@@ -41,6 +41,9 @@ pub const DB_POOL_CONNECTIONS: &str = "atom_db_pool_connections";
 pub const CALLOUT_CALLS: &str = "atom_callout_calls_total";
 /// Histogram (seconds) of end-to-end callout latency per endpoint.
 pub const CALLOUT_DURATION: &str = "atom_callout_call_duration_seconds";
+/// Counter of CA key-provider operations. Labels are bounded to provider,
+/// operation, and outcome; authority and tenant identifiers are never labels.
+pub const PKI_KEY_PROVIDER_OPERATIONS: &str = "atom_pki_key_provider_operations_total";
 
 #[cfg(feature = "metrics")]
 mod backend {
@@ -133,6 +136,20 @@ mod backend {
         )
         .record(elapsed.as_secs_f64());
     }
+
+    pub fn record_pki_key_provider_operation(
+        provider: &'static str,
+        operation: &'static str,
+        outcome: &'static str,
+    ) {
+        metrics::counter!(
+            PKI_KEY_PROVIDER_OPERATIONS,
+            "provider" => provider,
+            "operation" => operation,
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -170,10 +187,17 @@ mod backend {
         _elapsed: Duration,
     ) {
     }
+    #[inline]
+    pub fn record_pki_key_provider_operation(
+        _provider: &'static str,
+        _operation: &'static str,
+        _outcome: &'static str,
+    ) {
+    }
 }
 
 pub use backend::{
     enabled, init, record_audit_db_suppressed, record_audit_failure, record_callout,
     record_decision, record_outbox_exhausted, record_outbox_publish_failure,
-    record_rate_limit_rejection, render,
+    record_pki_key_provider_operation, record_rate_limit_rejection, render,
 };
