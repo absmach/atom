@@ -189,6 +189,83 @@ impl CertificateMutation {
         Ok(issued.into())
     }
 
+    /// Explicitly versioned managed-issuer path.  The v1 mutation above keeps
+    /// its file-issuer behavior for compatibility.
+    async fn issue_certificate_from_csr_v2(
+        &self,
+        ctx: &Context<'_>,
+        input: IssueCertificateFromCsrV2Input,
+    ) -> Result<IssuedCertificate> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let entity_id = parse_id(input.entity_id, "entityId")?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
+        let issued = service::issue_certificate_from_csr_v2_in_tx(
+            &mut tx,
+            &state.config,
+            tenant_id,
+            service::IssueCertificateFromCsrV2 {
+                entity_id,
+                ttl_secs: input.ttl_secs,
+                csr_pem: input.csr_pem,
+                idempotency_key: input.idempotency_key,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        let details = serde_json::json!({
+            "credential_id": issued.certificate.credential_id,
+            "serial_number": issued.certificate.serial_number,
+            "issuer_id": issued.certificate.issuer_id,
+            "profile_id": issued.certificate.profile_id,
+            "csr": true,
+            "managed": true,
+            "replay": issued.idempotent_replay,
+        });
+        if issued.idempotent_replay {
+            tx.commit()
+                .await
+                .map_err(|error| gql_error(db_err(error)))?;
+            audit::write(
+                &state.pool,
+                false,
+                audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: Some("entity"),
+                    target_id: Some(entity_id),
+                    event: "certificate.issue_replayed",
+                    outcome: AuditOutcome::Allow,
+                    details,
+                },
+            )
+            .await;
+        } else {
+            audit::commit_with_audit(
+                &state.pool,
+                tx,
+                state.config.events.enabled(),
+                &audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: Some("entity"),
+                    target_id: Some(entity_id),
+                    event: "certificate.issue",
+                    outcome: AuditOutcome::Allow,
+                    details,
+                },
+            )
+            .await
+            .map_err(gql_error)?;
+        }
+        Ok(issued.into())
+    }
+
     async fn renew_certificate(
         &self,
         ctx: &Context<'_>,
@@ -326,6 +403,14 @@ pub struct IssueCertificateFromCsrInput {
 }
 
 #[derive(InputObject)]
+pub struct IssueCertificateFromCsrV2Input {
+    pub entity_id: ID,
+    pub ttl_secs: Option<u64>,
+    pub csr_pem: String,
+    pub idempotency_key: String,
+}
+
+#[derive(InputObject)]
 pub struct RenewCertificateInput {
     pub serial_number: String,
     pub ttl_secs: Option<u64>,
@@ -357,6 +442,8 @@ impl CertificateList {
 pub struct IssuedCertificate {
     pub certificate: Certificate,
     pub private_key_pem: Option<String>,
+    pub chain_pem: Option<String>,
+    pub idempotent_replay: bool,
 }
 
 #[Object]
@@ -367,6 +454,14 @@ impl IssuedCertificate {
 
     async fn private_key_pem(&self) -> Option<&str> {
         self.private_key_pem.as_deref()
+    }
+
+    async fn chain_pem(&self) -> Option<&str> {
+        self.chain_pem.as_deref()
+    }
+
+    async fn idempotent_replay(&self) -> bool {
+        self.idempotent_replay
     }
 }
 
@@ -380,6 +475,10 @@ impl Certificate {
 
     async fn entity_id(&self) -> ID {
         ID(self.0.entity_id.to_string())
+    }
+
+    async fn issuer_id(&self) -> Option<ID> {
+        self.0.issuer_id.map(|id| ID(id.to_string()))
     }
 
     async fn tenant_id(&self) -> Option<ID> {
@@ -414,6 +513,18 @@ impl Certificate {
         &self.0.fingerprint_sha256
     }
 
+    async fn profile_id(&self) -> Option<ID> {
+        self.0.profile_id.map(|id| ID(id.to_string()))
+    }
+
+    async fn profile_name(&self) -> Option<&str> {
+        self.0.profile_name.as_deref()
+    }
+
+    async fn identity_uri(&self) -> Option<&str> {
+        self.0.identity_uri.as_deref()
+    }
+
     async fn expires_at(&self) -> Option<String> {
         self.0.expires_at.map(|ts| ts.to_rfc3339())
     }
@@ -436,6 +547,8 @@ impl From<service::IssuedCertificate> for IssuedCertificate {
         IssuedCertificate {
             certificate: Certificate(value.certificate),
             private_key_pem: value.private_key_pem,
+            chain_pem: value.chain_pem,
+            idempotent_replay: value.idempotent_replay,
         }
     }
 }

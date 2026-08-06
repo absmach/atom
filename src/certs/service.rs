@@ -29,7 +29,10 @@ use crate::{
     identity,
 };
 
-use super::repo;
+use super::{
+    authority::{repo as authority_repo, AuthorityKind, AuthorityRecord},
+    pki_core, profile, repo,
+};
 
 const CRL_REGEN_LOCK_ID: i64 = 0x0041_544f_4d43_524c;
 const LEAF_CLOCK_SKEW_SECS: i64 = 300;
@@ -53,6 +56,14 @@ pub struct IssueCertificateFromCsr {
 }
 
 #[derive(Debug, Clone)]
+pub struct IssueCertificateFromCsrV2 {
+    pub entity_id: Uuid,
+    pub ttl_secs: Option<u64>,
+    pub csr_pem: String,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct RenewCertificate {
     pub serial_number: String,
     pub ttl_secs: Option<u64>,
@@ -62,6 +73,8 @@ pub struct RenewCertificate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CertificateMetadata {
     pub certificate_pem: String,
+    #[serde(default)]
+    pub chain_pem: Option<String>,
     pub subject: Value,
     pub dns_names: Vec<String>,
     pub ip_addresses: Vec<String>,
@@ -70,6 +83,12 @@ pub struct CertificateMetadata {
     pub issuer_serial_number: String,
     pub issuer_fingerprint_sha256: String,
     pub fingerprint_sha256: String,
+    #[serde(default)]
+    pub profile_id: Option<Uuid>,
+    #[serde(default)]
+    pub profile_name: Option<String>,
+    #[serde(default)]
+    pub identity_uri: Option<String>,
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
     pub issued_from_csr: bool,
@@ -80,15 +99,20 @@ pub struct CertificateMetadata {
 #[derive(Debug, Clone)]
 pub struct CertificateRecord {
     pub credential_id: Uuid,
+    pub issuer_id: Option<Uuid>,
     pub entity_id: Uuid,
     pub tenant_id: Option<Uuid>,
     pub serial_number: String,
     pub status: String,
     pub certificate_pem: String,
+    pub chain_pem: Option<String>,
     pub subject: Value,
     pub dns_names: Vec<String>,
     pub ip_addresses: Vec<String>,
     pub fingerprint_sha256: String,
+    pub profile_id: Option<Uuid>,
+    pub profile_name: Option<String>,
+    pub identity_uri: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -99,6 +123,8 @@ pub struct CertificateRecord {
 pub struct IssuedCertificate {
     pub certificate: CertificateRecord,
     pub private_key_pem: Option<String>,
+    pub chain_pem: Option<String>,
+    pub idempotent_replay: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +440,8 @@ pub async fn issue_certificate_in_tx(
                 return Ok(IssuedCertificate {
                     certificate: record,
                     private_key_pem: Some(private_key_pem),
+                    chain_pem: Some(loaded.chain_pem.clone()),
+                    idempotent_replay: false,
                 });
             }
             Err(err) if is_unique_violation(&err) && attempt + 1 < SERIAL_INSERT_ATTEMPTS => {
@@ -499,12 +527,133 @@ pub async fn issue_certificate_from_csr_in_tx(
                 return Ok(IssuedCertificate {
                     certificate: record,
                     private_key_pem: None,
+                    chain_pem: Some(loaded.chain_pem.clone()),
+                    idempotent_replay: false,
                 });
             }
             Err(err) if is_unique_violation(&err) && attempt + 1 < SERIAL_INSERT_ATTEMPTS => {
                 attempt_tx.rollback().await.map_err(AppError::Database)?;
             }
             Err(err) => return Err(err),
+        }
+    }
+
+    Err(AppError::conflict(
+        "failed to allocate a unique certificate serial number",
+    ))
+}
+
+/// Explicitly versioned, managed-issuer CSR path introduced by PR-005.
+///
+/// `authorized_tenant_id` is produced by the transport authorization layer;
+/// it is not a public request field.  Rechecking it after locking the entity
+/// closes the authorization-to-issuance race without accepting caller scope.
+pub async fn issue_certificate_from_csr_v2(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    authorized_tenant_id: Option<Uuid>,
+    input: IssueCertificateFromCsrV2,
+) -> Result<IssuedCertificate, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let issued =
+        issue_certificate_from_csr_v2_in_tx(&mut tx, config, authorized_tenant_id, input).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(issued)
+}
+
+/// Managed CSR issuance using only the caller's existing transaction and
+/// nested savepoints for serial retries.
+pub async fn issue_certificate_from_csr_v2_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &Config,
+    authorized_tenant_id: Option<Uuid>,
+    input: IssueCertificateFromCsrV2,
+) -> Result<IssuedCertificate, AppError> {
+    validate_idempotency_key(&input.idempotency_key)?;
+    let (_, stored_tenant_id) = identity::repo::lock_active_entity(tx, input.entity_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("entity not found"))?;
+    if stored_tenant_id != authorized_tenant_id {
+        return Err(AppError::Forbidden);
+    }
+    let subject = profile::load_subject(&mut **tx, input.entity_id).await?;
+    if subject.tenant_id() != stored_tenant_id {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "locked entity scope changed during certificate issuance"
+        )));
+    }
+
+    let request_key_hash = issuance_request_key_hash(&input.idempotency_key);
+    let request_fingerprint =
+        issuance_request_fingerprint(input.entity_id, input.ttl_secs, input.csr_pem.as_bytes());
+    let request_id = match repo::claim_certificate_issuance_request(
+        tx,
+        input.entity_id,
+        &request_key_hash,
+        &request_fingerprint,
+    )
+    .await?
+    {
+        repo::CertificateIssuanceRequestClaim::New { request_id } => request_id,
+        repo::CertificateIssuanceRequestClaim::Replay { credential_id } => {
+            let certificate =
+                record_from_row(repo::fetch_certificate_by_id(&mut **tx, credential_id).await?)?;
+            return Ok(IssuedCertificate {
+                chain_pem: certificate.chain_pem.clone(),
+                certificate,
+                private_key_pem: None,
+                idempotent_replay: true,
+            });
+        }
+    };
+
+    let certificate_profile = profile::resolve_for_subject_in_tx(tx, &subject, "client").await?;
+    let authority = authority_repo::lock_active_leaf_issuer_for_scope(tx, stored_tenant_id).await?;
+    validate_issuer_scope(&authority, stored_tenant_id)?;
+    let issuer = pki_core::PkiIssuer::from_managed_authority(&authority, &config.pki_ca_keys)?;
+
+    for attempt in 0..SERIAL_INSERT_ATTEMPTS {
+        let issued = pki_core::issue_from_csr(
+            &certificate_profile,
+            &subject,
+            &issuer,
+            pki_core::IssueFromCsr {
+                csr_pem: &input.csr_pem,
+                requested_ttl_seconds: input.ttl_secs,
+            },
+        )?;
+        let chain_pem = issued.chain_pem.clone();
+        let mut attempt_tx = tx.begin().await.map_err(AppError::Database)?;
+        let outcome =
+            persist_managed_certificate(&mut attempt_tx, input.entity_id, &authority, issued).await;
+        match outcome {
+            Ok(certificate) => {
+                repo::complete_certificate_issuance_request(
+                    &mut attempt_tx,
+                    request_id,
+                    certificate.credential_id,
+                )
+                .await?;
+                attempt_tx.commit().await.map_err(AppError::Database)?;
+                return Ok(IssuedCertificate {
+                    certificate,
+                    private_key_pem: None,
+                    chain_pem: Some(chain_pem),
+                    idempotent_replay: false,
+                });
+            }
+            Err(error) if is_unique_violation(&error) => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
+                if attempt + 1 == SERIAL_INSERT_ATTEMPTS {
+                    return Err(AppError::conflict(
+                        "failed to allocate a unique certificate serial number",
+                    ));
+                }
+            }
+            Err(error) => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
+                return Err(error);
+            }
         }
     }
 
@@ -905,6 +1054,7 @@ async fn persist_certificate(
     let fingerprint_sha256 = certificate_fingerprint_sha256(&input.certificate_pem)?;
     let metadata = CertificateMetadata {
         certificate_pem: input.certificate_pem,
+        chain_pem: Some(issuer.chain_pem.clone()),
         subject: input.subject,
         dns_names: input.dns_names,
         ip_addresses: input.ip_addresses,
@@ -913,6 +1063,9 @@ async fn persist_certificate(
         issuer_serial_number: issuer.issuer_serial_number.clone(),
         issuer_fingerprint_sha256: issuer.issuer_fingerprint_sha256.clone(),
         fingerprint_sha256,
+        profile_id: None,
+        profile_name: None,
+        identity_uri: None,
         not_before: input.not_before,
         not_after: input.not_after,
         issued_from_csr: input.issued_from_csr,
@@ -938,24 +1091,146 @@ async fn persist_certificate(
     record_from_row(repo::fetch_certificate_by_id(&mut **tx, id).await?)
 }
 
+async fn persist_managed_certificate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entity_id: Uuid,
+    authority: &AuthorityRecord,
+    issued: pki_core::IssuedCertificate,
+) -> Result<CertificateRecord, AppError> {
+    let issuer_serial_number = authority.serial_number.clone().ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!("managed issuer serial number is missing"))
+    })?;
+    let issuer_fingerprint_sha256 = authority.fingerprint_sha256.clone().ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!("managed issuer fingerprint is missing"))
+    })?;
+    let metadata = CertificateMetadata {
+        certificate_pem: issued.certificate_pem,
+        chain_pem: Some(issued.chain_pem),
+        subject: json!({
+            "common_name": entity_id,
+            "identity_uri": issued.identity_uri.clone(),
+        }),
+        dns_names: issued.dns_names,
+        ip_addresses: issued
+            .ip_addresses
+            .into_iter()
+            .map(|address| address.to_string())
+            .collect(),
+        issuer_kind: authority_kind_name(authority.kind).to_string(),
+        issuer_subject: authority.subject.clone(),
+        issuer_serial_number,
+        issuer_fingerprint_sha256,
+        fingerprint_sha256: issued.fingerprint_sha256,
+        profile_id: Some(issued.profile_id),
+        profile_name: Some(issued.profile_name),
+        identity_uri: Some(issued.identity_uri),
+        not_before: issued.not_before,
+        not_after: issued.not_after,
+        issued_from_csr: true,
+        revoked_at: None,
+        revocation_reason: None,
+    };
+    let id = repo::insert_managed_certificate_credential(
+        tx,
+        entity_id,
+        authority.id,
+        &issued.serial_number,
+        serde_json::to_value(metadata).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!(
+                "failed to encode certificate metadata: {error}"
+            ))
+        })?,
+        issued.not_after,
+    )
+    .await?;
+    record_from_row(repo::fetch_certificate_by_id(&mut **tx, id).await?)
+}
+
 fn record_from_row(row: repo::CertificateCredential) -> Result<CertificateRecord, AppError> {
     let metadata = metadata_from_value(&row.metadata)?;
     Ok(CertificateRecord {
         credential_id: row.id,
+        issuer_id: row.issuer_id,
         entity_id: row.entity_id,
         tenant_id: row.tenant_id,
         serial_number: row.identifier,
         status: row.status,
         certificate_pem: metadata.certificate_pem,
+        chain_pem: metadata.chain_pem,
         subject: metadata.subject,
         dns_names: metadata.dns_names,
         ip_addresses: metadata.ip_addresses,
         fingerprint_sha256: metadata.fingerprint_sha256,
+        profile_id: metadata.profile_id,
+        profile_name: metadata.profile_name,
+        identity_uri: metadata.identity_uri,
         expires_at: row.expires_at,
         created_at: row.created_at,
         revoked_at: metadata.revoked_at,
         revocation_reason: metadata.revocation_reason,
     })
+}
+
+fn validate_issuer_scope(
+    authority: &AuthorityRecord,
+    tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let matches = match tenant_id {
+        Some(tenant_id) => {
+            authority.kind == AuthorityKind::TenantIntermediate
+                && authority.tenant_id == Some(tenant_id)
+        }
+        None => {
+            authority.kind == AuthorityKind::PlatformLeafIssuer && authority.tenant_id.is_none()
+        }
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(AppError::Internal(anyhow::anyhow!(
+            "selected issuing authority does not match the locked entity scope"
+        )))
+    }
+}
+
+fn authority_kind_name(kind: AuthorityKind) -> &'static str {
+    match kind {
+        AuthorityKind::Root => "root",
+        AuthorityKind::PlatformIntermediate => "platform_intermediate",
+        AuthorityKind::PlatformLeafIssuer => "platform_leaf_issuer",
+        AuthorityKind::TenantIntermediate => "tenant_intermediate",
+    }
+}
+
+fn validate_idempotency_key(value: &str) -> Result<(), AppError> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(AppError::bad_request(
+            "idempotency key must contain 1 to 256 non-control UTF-8 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn issuance_request_key_hash(value: &str) -> String {
+    let mut context = digest::Context::new(&digest::SHA256);
+    context.update(b"atom:pki:csr-issuance-key:v1\0");
+    context.update(value.as_bytes());
+    hex::encode(context.finish())
+}
+
+fn issuance_request_fingerprint(entity_id: Uuid, ttl_secs: Option<u64>, csr_pem: &[u8]) -> String {
+    let mut context = digest::Context::new(&digest::SHA256);
+    context.update(b"atom:pki:csr-issuance-request:v1\0");
+    context.update(entity_id.as_bytes());
+    match ttl_secs {
+        Some(ttl) => {
+            context.update(&[1]);
+            context.update(&ttl.to_be_bytes());
+        }
+        None => context.update(&[0]),
+    }
+    context.update(csr_pem);
+    hex::encode(context.finish())
 }
 
 fn metadata_from_value(value: &Value) -> Result<CertificateMetadata, AppError> {
