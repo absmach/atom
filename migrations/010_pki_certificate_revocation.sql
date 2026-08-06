@@ -44,6 +44,8 @@ INSERT INTO certificate_revocations (
 SELECT c.id,
        c.issuer_id,
        CASE
+           WHEN a.fingerprint_sha256 ~ '^[0-9a-f]{64}$'
+           THEN a.fingerprint_sha256
            WHEN c.metadata->>'issuer_fingerprint_sha256' ~ '^[0-9a-f]{64}$'
            THEN c.metadata->>'issuer_fingerprint_sha256'
        END,
@@ -60,6 +62,7 @@ SELECT c.id,
            ELSE c.created_at
        END
   FROM credentials c
+  LEFT JOIN pki_authorities a ON a.id = c.issuer_id
  WHERE c.kind = 'certificate'
    AND c.status = 'revoked'
    AND c.identifier IS NOT NULL
@@ -114,7 +117,16 @@ BEGIN
         128
     );
     event_actor := NULLIF(NEW.metadata->>'revoked_by_entity_id', '')::uuid;
-    issuer_fingerprint := NULLIF(NEW.metadata->>'issuer_fingerprint_sha256', '');
+    IF NEW.issuer_id IS NOT NULL THEN
+        SELECT a.fingerprint_sha256
+          INTO issuer_fingerprint
+          FROM pki_authorities a
+         WHERE a.id = NEW.issuer_id;
+    END IF;
+    issuer_fingerprint := COALESCE(
+        issuer_fingerprint,
+        NULLIF(NEW.metadata->>'issuer_fingerprint_sha256', '')
+    );
 
     INSERT INTO certificate_revocations (
         credential_id, issuer_id, issuer_fingerprint_sha256, serial_number,
