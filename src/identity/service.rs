@@ -2254,6 +2254,19 @@ pub async fn revoke_credential_in_tx(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
+    let kind: String = sqlx::query_scalar(
+        "SELECT kind FROM credentials WHERE id = $1 AND entity_id = $2 FOR UPDATE",
+    )
+    .bind(cred_id)
+    .bind(entity_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if kind == "certificate" {
+        return Err(AppError::bad_request(
+            "use the exact certificate revocation API for certificate credentials",
+        ));
+    }
     // Overwrite any prior revocation provenance (e.g. a `tenant_deleted` marker
     // from a tenant soft delete) with this explicit revocation, so a later tenant
     // restore — which only reactivates credentials still marked `tenant_deleted` —

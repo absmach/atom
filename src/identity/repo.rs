@@ -733,7 +733,7 @@ pub async fn delete_entity_with_audit(
         return Err(AppError::not_found(format!("entity {id} not found")));
     }
 
-    let revoked_certificates: i64 = sqlx::query_scalar(
+    let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"WITH revoked AS (
                UPDATE credentials
                SET status = 'revoked',
@@ -741,22 +741,21 @@ pub async fn delete_entity_with_audit(
                        WHEN kind = 'certificate'
                        THEN metadata || jsonb_build_object(
                            'revoked_at', now(),
-                           'revocation_reason', 'entity_deleted'
+                           'revocation_reason', 'entity_deleted',
+                           'revoked_by_entity_id', $2::uuid
                        )
                        ELSE metadata
                    END
                WHERE entity_id = $1 AND status = 'active'
-               RETURNING kind
+               RETURNING id, kind, issuer_id
            )
-           SELECT COUNT(*) FILTER (WHERE kind = 'certificate') FROM revoked"#,
+           SELECT id, issuer_id FROM revoked WHERE kind = 'certificate'"#,
     )
     .bind(id)
-    .fetch_one(&mut *tx)
+    .bind(actor_id)
+    .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;
-    if revoked_certificates > 0 {
-        crate::certs::repo::mark_crl_dirty_tx(&mut tx).await?;
-    }
     sqlx::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )
@@ -781,7 +780,20 @@ pub async fn delete_entity_with_audit(
         target_id: Some(id),
         event: "entity.delete",
         outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
+        details: serde_json::json!({
+            "certificate_revocations": {
+                "count": revoked_certificates.len(),
+                "credential_ids": revoked_certificates
+                    .iter()
+                    .map(|(credential_id, _)| credential_id)
+                    .collect::<Vec<_>>(),
+                "issuer_ids": revoked_certificates
+                    .iter()
+                    .filter_map(|(_, issuer_id)| *issuer_id)
+                    .collect::<Vec<_>>(),
+                "reason": "entity_deleted",
+            }
+        }),
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(())

@@ -103,12 +103,59 @@ pub struct RenewCertificateV2 {
 #[derive(Debug, Clone, Copy)]
 pub enum CertificateRenewalAuthorization {
     Operator {
+        actor_entity_id: Option<Uuid>,
         expected_entity_id: Uuid,
         expected_tenant_id: Option<Uuid>,
     },
     PresentedCertificate {
         credential_id: Uuid,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum CertificateRevocationSelector {
+    CredentialId(Uuid),
+    FingerprintSha256(String),
+    IssuerSerial {
+        issuer_id: Uuid,
+        serial_number: String,
+    },
+}
+
+impl CertificateRevocationSelector {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::CredentialId(_) => "credential_id",
+            Self::FingerprintSha256(_) => "fingerprint_sha256",
+            Self::IssuerSerial { .. } => "issuer_serial",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RevokeCertificateV2 {
+    pub selector: CertificateRevocationSelector,
+    pub reason: Option<String>,
+    pub actor_entity_id: Option<Uuid>,
+    pub expected_entity_id: Uuid,
+    pub expected_tenant_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CertificateRevocationResult {
+    pub certificate: CertificateRecord,
+    pub reason: String,
+    pub actor_entity_id: Option<Uuid>,
+    pub revoked_at: DateTime<Utc>,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BulkCertificateRevocationResult {
+    pub count: usize,
+    pub credential_ids: Vec<Uuid>,
+    pub issuer_ids: Vec<Uuid>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1023,14 +1070,27 @@ pub async fn renew_certificate_v2_in_tx(
         match outcome {
             Ok(certificate) => {
                 if input.revoke_old {
-                    let mut metadata = old.metadata.clone();
-                    metadata["revoked_at"] = json!(Utc::now());
-                    metadata["revocation_reason"] = json!("superseded");
-                    repo::revoke_certificate(&mut *attempt_tx, old.id, metadata).await?;
-                    // PR-008 replaces this global dirty mark with an exact
-                    // issuer-keyed update. Credential status is still changed
-                    // atomically and is immediately authoritative in Atom.
-                    repo::mark_crl_dirty_tx(&mut attempt_tx).await?;
+                    let actor_entity_id = match authorization {
+                        CertificateRenewalAuthorization::Operator {
+                            actor_entity_id, ..
+                        } => actor_entity_id,
+                        CertificateRenewalAuthorization::PresentedCertificate { .. } => {
+                            Some(old.entity_id)
+                        }
+                    };
+                    let metadata = revocation_metadata(
+                        old.metadata.clone(),
+                        "superseded",
+                        actor_entity_id,
+                        Utc::now(),
+                    );
+                    if !repo::revoke_certificate_if_active(&mut attempt_tx, old.id, metadata)
+                        .await?
+                    {
+                        return Err(AppError::conflict(
+                            "renewal source revocation state changed concurrently",
+                        ));
+                    }
                 }
                 repo::complete_certificate_renewal(
                     &mut attempt_tx,
@@ -1118,13 +1178,124 @@ pub async fn revoke_certificate_in_tx(
 ) -> Result<CertificateRecord, AppError> {
     let serial = normalize_serial(serial_number)?;
     let current = repo::certificate_by_serial(&mut **tx, &serial).await?;
-    let mut metadata = current.metadata.clone();
+    if current.issuer_id.is_some() {
+        return Err(AppError::bad_request(
+            "managed certificate revocation requires an exact v2 selector",
+        ));
+    }
+    let result = revoke_certificate_v2_in_tx(
+        tx,
+        RevokeCertificateV2 {
+            selector: CertificateRevocationSelector::CredentialId(current.id),
+            reason,
+            actor_entity_id: None,
+            expected_entity_id: current.entity_id,
+            expected_tenant_id: current.tenant_id,
+        },
+    )
+    .await?;
+    Ok(result.certificate)
+}
+
+pub async fn certificate_by_revocation_selector(
+    pool: &sqlx::PgPool,
+    selector: &CertificateRevocationSelector,
+) -> Result<CertificateRecord, AppError> {
+    let row = match selector {
+        CertificateRevocationSelector::CredentialId(credential_id) => {
+            repo::certificate_by_id(pool, *credential_id).await?
+        }
+        CertificateRevocationSelector::FingerprintSha256(fingerprint) => {
+            let fingerprint = validated_fingerprint(fingerprint)?;
+            repo::certificate_by_fingerprint(pool, &fingerprint).await?
+        }
+        CertificateRevocationSelector::IssuerSerial {
+            issuer_id,
+            serial_number,
+        } => {
+            let serial = normalize_serial(serial_number)?;
+            repo::certificate_by_issuer_serial(pool, *issuer_id, &serial).await?
+        }
+    };
+    record_from_row(row)
+}
+
+pub async fn revoke_certificate_v2(
+    pool: &sqlx::PgPool,
+    input: RevokeCertificateV2,
+) -> Result<CertificateRevocationResult, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let result = revoke_certificate_v2_in_tx(&mut tx, input).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(result)
+}
+
+/// Revoke one exact certificate. The row lock makes first-write semantics and
+/// idempotent replay deterministic. The database trigger records immutable
+/// revocation evidence and dirties only this certificate's issuer artifacts in
+/// the same transaction.
+pub async fn revoke_certificate_v2_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: RevokeCertificateV2,
+) -> Result<CertificateRevocationResult, AppError> {
+    let current = match &input.selector {
+        CertificateRevocationSelector::CredentialId(credential_id) => {
+            repo::lock_certificate_by_id(tx, *credential_id).await?
+        }
+        CertificateRevocationSelector::FingerprintSha256(fingerprint) => {
+            let fingerprint = validated_fingerprint(fingerprint)?;
+            repo::lock_certificate_by_fingerprint(tx, &fingerprint).await?
+        }
+        CertificateRevocationSelector::IssuerSerial {
+            issuer_id,
+            serial_number,
+        } => {
+            let serial = normalize_serial(serial_number)?;
+            repo::lock_certificate_by_issuer_serial(tx, *issuer_id, &serial).await?
+        }
+    };
+    if current.entity_id != input.expected_entity_id
+        || current.tenant_id != input.expected_tenant_id
+    {
+        return Err(AppError::Forbidden);
+    }
+
+    if current.status == "revoked" {
+        let revocation = repo::certificate_revocation_by_id(&mut **tx, current.id).await?;
+        return Ok(CertificateRevocationResult {
+            certificate: record_from_row(current)?,
+            reason: revocation.reason,
+            actor_entity_id: revocation.actor_entity_id,
+            revoked_at: revocation.revoked_at,
+            idempotent_replay: true,
+        });
+    }
+    if current.status != "active" {
+        return Err(AppError::Unauthorized("certificate is not active".into()));
+    }
+
+    let reason = normalize_revocation_reason(input.reason.as_deref())?;
     let now = Utc::now();
-    metadata["revoked_at"] = json!(now);
-    metadata["revocation_reason"] = json!(reason.clone().unwrap_or_else(|| "unspecified".into()));
-    repo::revoke_certificate(&mut **tx, current.id, metadata).await?;
-    repo::mark_crl_dirty_tx(tx).await?;
-    record_from_row(repo::certificate_by_serial(&mut **tx, &serial).await?)
+    let metadata = revocation_metadata(
+        current.metadata.clone(),
+        &reason,
+        input.actor_entity_id,
+        now,
+    );
+    if !repo::revoke_certificate_if_active(tx, current.id, metadata).await? {
+        return Err(AppError::conflict(
+            "certificate revocation state changed concurrently",
+        ));
+    }
+    let revocation = repo::certificate_revocation_by_id(&mut **tx, current.id).await?;
+    let certificate = record_from_row(repo::fetch_certificate_by_id(&mut **tx, current.id).await?)?;
+    Ok(CertificateRevocationResult {
+        certificate,
+        reason: revocation.reason,
+        actor_entity_id: revocation.actor_entity_id,
+        revoked_at: revocation.revoked_at,
+        idempotent_replay: false,
+    })
 }
 
 pub async fn revoke_entity_certificates(
@@ -1147,19 +1318,45 @@ pub async fn revoke_entity_certificates_in_tx(
     entity_id: Uuid,
     reason: Option<String>,
 ) -> Result<usize, AppError> {
+    Ok(
+        revoke_entity_certificates_v2_in_tx(tx, entity_id, reason, None)
+            .await?
+            .count,
+    )
+}
+
+pub async fn revoke_entity_certificates_v2_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entity_id: Uuid,
+    reason: Option<String>,
+    actor_entity_id: Option<Uuid>,
+) -> Result<BulkCertificateRevocationResult, AppError> {
+    // Serializes explicit entity-wide revocation with issuance paths, which
+    // also lock the active entity before inserting a certificate.
+    identity::repo::lock_active_entity(tx, entity_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("entity not found"))?;
+    let reason = normalize_revocation_reason(reason.as_deref().or(Some("entity_revoked")))?;
     let certs = repo::active_entity_certificates(&mut **tx, entity_id).await?;
-    let count = certs.len();
+    let mut credential_ids = Vec::with_capacity(certs.len());
+    let mut issuer_ids = Vec::new();
     for cert in certs {
-        let mut metadata = cert.metadata.clone();
-        metadata["revoked_at"] = json!(Utc::now());
-        metadata["revocation_reason"] =
-            json!(reason.clone().unwrap_or_else(|| "entity_revoked".into()));
-        repo::revoke_certificate(&mut **tx, cert.id, metadata).await?;
+        let metadata = revocation_metadata(cert.metadata, &reason, actor_entity_id, Utc::now());
+        if repo::revoke_certificate_if_active(tx, cert.id, metadata).await? {
+            credential_ids.push(cert.id);
+            if let Some(issuer_id) = cert.issuer_id {
+                if !issuer_ids.contains(&issuer_id) {
+                    issuer_ids.push(issuer_id);
+                }
+            }
+        }
     }
-    if count > 0 {
-        repo::mark_crl_dirty_tx(tx).await?;
-    }
-    Ok(count)
+    Ok(BulkCertificateRevocationResult {
+        count: credential_ids.len(),
+        credential_ids,
+        issuer_ids,
+        reason,
+    })
 }
 
 pub async fn certificate_by_serial(
@@ -1372,6 +1569,43 @@ pub fn normalize_serial(serial_number: &str) -> Result<String, AppError> {
         return Err(AppError::bad_request("invalid certificate serial number"));
     }
     Ok(normalized)
+}
+
+fn validated_fingerprint(value: &str) -> Result<String, AppError> {
+    let normalized = normalize_fingerprint(value);
+    if normalized.len() != 64 || hex::decode(&normalized).is_err() {
+        return Err(AppError::bad_request(
+            "invalid certificate SHA-256 fingerprint",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_revocation_reason(value: Option<&str>) -> Result<String, AppError> {
+    let reason = value.unwrap_or("unspecified").trim().to_ascii_lowercase();
+    if reason.is_empty()
+        || reason.len() > 64
+        || !reason
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Err(AppError::bad_request(
+            "revocation reason must be a 1-64 character reason code",
+        ));
+    }
+    Ok(reason)
+}
+
+fn revocation_metadata(
+    mut metadata: Value,
+    reason: &str,
+    actor_entity_id: Option<Uuid>,
+    revoked_at: DateTime<Utc>,
+) -> Value {
+    metadata["revoked_at"] = json!(revoked_at);
+    metadata["revocation_reason"] = json!(reason);
+    metadata["revoked_by_entity_id"] = json!(actor_entity_id);
+    metadata
 }
 
 fn validate_file_issuer_config(config: &Config) -> Result<(), AppError> {
@@ -1639,6 +1873,7 @@ fn validate_renewal_authorization(
 ) -> Result<(), AppError> {
     let authorized = match authorization {
         CertificateRenewalAuthorization::Operator {
+            actor_entity_id: _,
             expected_entity_id,
             expected_tenant_id,
         } => old.entity_id == expected_entity_id && old.tenant_id == expected_tenant_id,
