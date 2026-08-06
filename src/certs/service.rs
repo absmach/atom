@@ -928,7 +928,12 @@ pub async fn renew_certificate_v2_in_tx(
 
     let old_metadata = metadata_from_value(&old.metadata)?;
     let now = Utc::now();
-    validate_renewal_source(tx, &old, &old_metadata, authorization, now).await?;
+    if matches!(
+        authorization,
+        CertificateRenewalAuthorization::PresentedCertificate { .. }
+    ) {
+        validate_renewal_source(tx, &old, &old_metadata, authorization, now).await?;
+    }
 
     let key_mode = input.key_source.mode();
     let request_key_hash = renewal_request_key_hash(&input.idempotency_key);
@@ -968,6 +973,13 @@ pub async fn renew_certificate_v2_in_tx(
             });
         }
     };
+
+    if matches!(
+        authorization,
+        CertificateRenewalAuthorization::Operator { .. }
+    ) {
+        validate_renewal_source(tx, &old, &old_metadata, authorization, now).await?;
+    }
 
     let subject = profile::load_subject(&mut **tx, old.entity_id).await?;
     if subject.tenant_id() != stored_tenant_id {

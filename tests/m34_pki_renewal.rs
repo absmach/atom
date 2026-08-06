@@ -182,17 +182,38 @@ async fn issuer_aware_renewal_enforces_the_pr007_contract() {
         audit_details(&pool, "certificate.renew", old_generated.credential_id).await;
     assert_eq!(generated_audit["key_mode"], "generated");
     assert_eq!(generated_audit["revoke_old"], true);
+    let generated_replay = schema
+        .execute(renew_generated_request(
+            common::admin_id(),
+            None,
+            old_generated.credential_id,
+            "renew-generated",
+            true,
+        ))
+        .await;
+    assert!(
+        generated_replay.errors.is_empty(),
+        "{:?}",
+        generated_replay.errors
+    );
+    let generated_replay =
+        generated_replay.data.into_json().unwrap()["renewGeneratedCertificateV2"].clone();
+    assert_eq!(generated_replay["idempotentReplay"], true);
+    assert!(generated_replay["privateKeyPem"].is_null());
+    assert_eq!(uuid_field(&generated_replay, "credentialId"), generated_id);
 
     // A revoked certificate is never renewal authentication and cannot be
     // recovered through operator renewal; it must follow fresh enrollment.
+    let old_revoked = issue_managed(&pool, &config, tenant_a, entity_a, "old-revoked").await;
+    revoke_certificate(&pool, old_revoked.credential_id).await;
     let revoked_self = service::renew_certificate_v2(
         &pool,
         &config,
         service::CertificateRenewalAuthorization::PresentedCertificate {
-            credential_id: old_generated.credential_id,
+            credential_id: old_revoked.credential_id,
         },
         service::RenewCertificateV2 {
-            credential_id: old_generated.credential_id,
+            credential_id: old_revoked.credential_id,
             ttl_secs: Some(3600),
             key_source: service::RenewalKeySource::Csr(csr()),
             revoke_old: false,
@@ -206,7 +227,7 @@ async fn issuer_aware_renewal_enforces_the_pr007_contract() {
         .execute(renew_csr_request(
             common::admin_id(),
             None,
-            old_generated.credential_id,
+            old_revoked.credential_id,
             &csr(),
             "revoked-operator",
             false,
@@ -597,6 +618,23 @@ async fn expire_certificate(pool: &PgPool, credential_id: Uuid) {
                    metadata,
                    '{not_after}',
                    to_jsonb(now() - interval '1 minute')
+               )
+           WHERE id = $1"#,
+    )
+    .bind(credential_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn revoke_certificate(pool: &PgPool, credential_id: Uuid) {
+    sqlx::query(
+        r#"UPDATE credentials
+           SET status = 'revoked',
+               metadata = jsonb_set(
+                   jsonb_set(metadata, '{revoked_at}', to_jsonb(now())),
+                   '{revocation_reason}',
+                   '"test_revocation"'::jsonb
                )
            WHERE id = $1"#,
     )
