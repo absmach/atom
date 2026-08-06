@@ -127,6 +127,29 @@ DECLARE
     san_type TEXT;
 BEGIN
     IF NEW.tenant_id IS NULL THEN
+        IF EXISTS (
+            SELECT 1
+              FROM certificate_profiles child
+             WHERE child.base_profile_id = NEW.id
+               AND (
+                    child.name <> NEW.name
+                    OR child.default_ttl_seconds > NEW.default_ttl_seconds
+                    OR child.maximum_ttl_seconds > NEW.maximum_ttl_seconds
+                    OR child.renewal_threshold_seconds > NEW.renewal_threshold_seconds
+                    OR child.permitted_key_algorithms <> NEW.permitted_key_algorithms
+                    OR NOT child.key_usages <@ NEW.key_usages
+                    OR NOT child.extended_key_usages <@ NEW.extended_key_usages
+                    OR child.identity_uri_template <> NEW.identity_uri_template
+                    OR child.basic_constraints <> NEW.basic_constraints
+                    OR NOT pki_san_rule_is_subset(child.san_policy -> 'dns', NEW.san_policy -> 'dns')
+                    OR NOT pki_san_rule_is_subset(child.san_policy -> 'ip', NEW.san_policy -> 'ip')
+                    OR NOT pki_san_rule_is_subset(child.san_policy -> 'email', NEW.san_policy -> 'email')
+                    OR NOT pki_san_rule_is_subset(child.san_policy -> 'uri', NEW.san_policy -> 'uri')
+               )
+        ) THEN
+            RAISE EXCEPTION 'platform certificate profile update would exceed a tenant ceiling'
+                USING ERRCODE = '23514';
+        END IF;
         RETURN NEW;
     END IF;
 

@@ -83,6 +83,8 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     assert_eku(&client_cert, true, false);
     assert_eku(&server_cert, false, true);
     assert_eku(&combined_cert, true, true);
+    assert_eq!(client_cert.identity_uri, server_cert.identity_uri);
+    assert_issuer_san_not_copied(&client_cert);
     assert_eq!(
         client_cert.identity_uri,
         format!("urn:atom:tenant:{tenant_id}:entity:{tenant_entity_id}")
@@ -122,8 +124,10 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     });
     assert!(issue(&client, &tenant_subject, &issuer, &ca_csr, None, now).is_err());
-    let ca_usage_csr = csr(|params| params.key_usages = vec![KeyUsagePurpose::KeyCertSign]);
-    assert!(issue(&client, &tenant_subject, &issuer, &ca_usage_csr, None, now).is_err());
+    for usage in [KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign] {
+        let ca_usage_csr = csr(|params| params.key_usages = vec![usage]);
+        assert!(issue(&client, &tenant_subject, &issuer, &ca_usage_csr, None, now).is_err());
+    }
 
     let substituted_identity = csr(|params| {
         params.subject_alt_names = vec![SanType::URI(
@@ -141,6 +145,13 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         now
     )
     .is_err());
+    let ed25519_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let ed25519_csr = CertificateParams::default()
+        .serialize_request(&ed25519_key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    assert!(issue(&client, &tenant_subject, &issuer, &ed25519_csr, None, now).is_err());
     let arbitrary_eku =
         csr(|params| params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth]);
     assert!(issue(&client, &tenant_subject, &issuer, &arbitrary_eku, None, now).is_err());
@@ -312,6 +323,14 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         .await
         .unwrap();
     assert_eq!(tenant_override.maximum_ttl_seconds, 3600);
+    let narrowed_platform = sqlx::query(
+        "UPDATE certificate_profiles SET default_ttl_seconds = 3000, maximum_ttl_seconds = 3500 WHERE id = $1",
+    )
+    .bind(ceiling_id)
+    .execute(&pool)
+    .await
+    .map(|_| ());
+    assert_check_violation(narrowed_platform);
     assert!(issue(
         &tenant_override,
         &tenant_subject,
@@ -403,6 +422,9 @@ fn test_issuer(now: DateTime<Utc>, validity_seconds: i64) -> PkiIssuer {
     params
         .distinguished_name
         .push(DnType::CommonName, "PR-004 Test Issuer");
+    params.subject_alt_names = vec![SanType::DnsName(
+        "issuer-only.example.test".try_into().unwrap(),
+    )];
     params.serial_number = Some(SerialNumber::from(1_u64));
     params.not_before = now - Duration::minutes(5);
     params.not_after = now + Duration::seconds(validity_seconds);
@@ -457,6 +479,17 @@ fn assert_eku(certificate: &IssuedCertificate, client: bool, server: bool) {
     let eku = parsed.extended_key_usage().unwrap().unwrap();
     assert_eq!(eku.value.client_auth, client);
     assert_eq!(eku.value.server_auth, server);
+}
+
+fn assert_issuer_san_not_copied(certificate: &IssuedCertificate) {
+    let (_, parsed) = x509_parser::parse_x509_certificate(&certificate.certificate_der).unwrap();
+    let names = parsed.subject_alternative_name().unwrap().unwrap();
+    assert!(!names.value.general_names.iter().any(|name| {
+        matches!(
+            name,
+            x509_parser::extensions::GeneralName::DNSName("issuer-only.example.test")
+        )
+    }));
 }
 
 fn assert_discovery_extensions(certificate: &IssuedCertificate) {
