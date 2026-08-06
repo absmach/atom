@@ -84,6 +84,18 @@ pub struct CertificateRevocationRecord {
     pub revoked_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CertificateListFilter {
+    pub entity_id: Option<Uuid>,
+    pub tenant_id: Option<Uuid>,
+    pub issuer_id: Option<Uuid>,
+    pub status: Option<String>,
+    pub expires_from: Option<DateTime<Utc>>,
+    pub expires_before: Option<DateTime<Utc>>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 pub async fn entity_tenant_id<'e, E>(executor: E, entity_id: Uuid) -> Result<Option<Uuid>, AppError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
@@ -599,6 +611,24 @@ pub async fn list_certificates(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<CertificateCredential>, AppError> {
+    list_certificates_filtered(
+        pool,
+        &CertificateListFilter {
+            entity_id,
+            tenant_id,
+            status: status.map(str::to_string),
+            limit,
+            offset,
+            ..CertificateListFilter::default()
+        },
+    )
+    .await
+}
+
+pub async fn list_certificates_filtered(
+    pool: &PgPool,
+    filter: &CertificateListFilter,
+) -> Result<Vec<CertificateCredential>, AppError> {
     let mut query = QueryBuilder::<Postgres>::new(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
@@ -608,26 +638,85 @@ pub async fn list_certificates(
         WHERE c.kind = 'certificate'
         "#,
     );
-    if let Some(entity_id) = entity_id {
+    if let Some(entity_id) = filter.entity_id {
         query.push(" AND c.entity_id = ");
         query.push_bind(entity_id);
     }
-    if let Some(tenant_id) = tenant_id {
+    if let Some(tenant_id) = filter.tenant_id {
         query.push(" AND e.tenant_id = ");
         query.push_bind(tenant_id);
     }
-    if let Some(status) = status {
+    if let Some(issuer_id) = filter.issuer_id {
+        query.push(" AND c.issuer_id = ");
+        query.push_bind(issuer_id);
+    }
+    if let Some(status) = filter.status.as_deref() {
         query.push(" AND c.status = ");
         query.push_bind(status);
     }
-    query.push(" ORDER BY c.created_at DESC LIMIT ");
-    query.push_bind(limit);
+    if let Some(expires_from) = filter.expires_from.as_ref() {
+        query.push(" AND c.expires_at >= ");
+        query.push_bind(expires_from);
+    }
+    if let Some(expires_before) = filter.expires_before.as_ref() {
+        query.push(" AND c.expires_at < ");
+        query.push_bind(expires_before);
+    }
+    if filter.expires_from.is_some() || filter.expires_before.is_some() {
+        query.push(" ORDER BY c.expires_at ASC NULLS LAST, c.id ASC LIMIT ");
+    } else {
+        query.push(" ORDER BY c.created_at DESC, c.id ASC LIMIT ");
+    }
+    query.push_bind(filter.limit);
     query.push(" OFFSET ");
-    query.push_bind(offset);
+    query.push_bind(filter.offset);
 
     query
         .build_query_as::<CertificateCredential>()
         .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)
+}
+
+pub async fn count_certificates(
+    pool: &PgPool,
+    filter: &CertificateListFilter,
+) -> Result<i64, AppError> {
+    let mut query = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.kind = 'certificate'
+        "#,
+    );
+    if let Some(entity_id) = filter.entity_id {
+        query.push(" AND c.entity_id = ");
+        query.push_bind(entity_id);
+    }
+    if let Some(tenant_id) = filter.tenant_id {
+        query.push(" AND e.tenant_id = ");
+        query.push_bind(tenant_id);
+    }
+    if let Some(issuer_id) = filter.issuer_id {
+        query.push(" AND c.issuer_id = ");
+        query.push_bind(issuer_id);
+    }
+    if let Some(status) = filter.status.as_deref() {
+        query.push(" AND c.status = ");
+        query.push_bind(status);
+    }
+    if let Some(expires_from) = filter.expires_from.as_ref() {
+        query.push(" AND c.expires_at >= ");
+        query.push_bind(expires_from);
+    }
+    if let Some(expires_before) = filter.expires_before.as_ref() {
+        query.push(" AND c.expires_at < ");
+        query.push_bind(expires_before);
+    }
+    query
+        .build_query_scalar()
+        .fetch_one(pool)
         .await
         .map_err(AppError::Database)
 }

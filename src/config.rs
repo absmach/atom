@@ -25,6 +25,9 @@ pub struct Config {
     /// Dedicated public TLS listener for subject certificate enrollment.
     /// Disabled by default; when enabled, TLS is always terminated in process.
     pub enrollment: EnrollmentConfig,
+    /// Replica-safe certificate expiry visibility and bounded fleet operations.
+    /// Background automation is opt-in; query and mutation APIs remain usable.
+    pub pki_lifecycle: PkiLifecycleConfig,
     pub signing_keys: SigningKeyConfig,
     pub pki_ca_keys: PkiCaKeyConfig,
     pub audit_policy: AuditPolicyConfig,
@@ -264,6 +267,29 @@ impl Default for EnrollmentConfig {
             max_csr_bytes: 64 * 1024,
             max_connections: 256,
             trust_bundle_refresh_secs: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PkiLifecycleConfig {
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub batch_size: i64,
+    pub expiry_warning_secs: u64,
+    pub authority_warning_secs: u64,
+}
+
+impl Default for PkiLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 60,
+            batch_size: 250,
+            expiry_warning_secs: 86_400,
+            // Thirty days leaves time for the documented PR-003 rotation
+            // procedure and a controlled rollout of the successor chain.
+            authority_warning_secs: 30 * 86_400,
         }
     }
 }
@@ -549,6 +575,7 @@ impl Config {
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             grpc_tls: grpc_tls_from_env()?,
             enrollment: enrollment_from_env()?,
+            pki_lifecycle: pki_lifecycle_from_env()?,
             signing_keys,
             pki_ca_keys,
             audit_policy: AuditPolicyConfig {
@@ -644,6 +671,7 @@ impl Config {
             grpc_addr: "127.0.0.1:0".into(),
             grpc_tls: None,
             enrollment: EnrollmentConfig::default(),
+            pki_lifecycle: PkiLifecycleConfig::default(),
             signing_keys: SigningKeyConfig {
                 allow_plaintext_signing_keys: true,
                 // Provide a deterministic KEK so tests exercise encryption at rest
@@ -1137,6 +1165,36 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
     Ok(cfg)
 }
 
+fn pki_lifecycle_from_env() -> Result<PkiLifecycleConfig> {
+    let default = PkiLifecycleConfig::default();
+    let cfg = PkiLifecycleConfig {
+        enabled: env_bool_default("ATOM_PKI_LIFECYCLE_ENABLED", default.enabled),
+        interval_secs: env_parse("ATOM_PKI_LIFECYCLE_INTERVAL_SECS", default.interval_secs)?,
+        batch_size: env_parse("ATOM_PKI_LIFECYCLE_BATCH_SIZE", default.batch_size)?,
+        expiry_warning_secs: env_parse(
+            "ATOM_PKI_EXPIRY_WARNING_SECS",
+            default.expiry_warning_secs,
+        )?,
+        authority_warning_secs: env_parse(
+            "ATOM_PKI_AUTHORITY_WARNING_SECS",
+            default.authority_warning_secs,
+        )?,
+    };
+    if cfg.interval_secs == 0 {
+        anyhow::bail!("ATOM_PKI_LIFECYCLE_INTERVAL_SECS must be greater than zero");
+    }
+    if !(1..=1_000).contains(&cfg.batch_size) {
+        anyhow::bail!("ATOM_PKI_LIFECYCLE_BATCH_SIZE must be between 1 and 1000");
+    }
+    if cfg.expiry_warning_secs == 0 {
+        anyhow::bail!("ATOM_PKI_EXPIRY_WARNING_SECS must be greater than zero");
+    }
+    if cfg.authority_warning_secs == 0 {
+        anyhow::bail!("ATOM_PKI_AUTHORITY_WARNING_SECS must be greater than zero");
+    }
+    Ok(cfg)
+}
+
 fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -1519,6 +1577,31 @@ mod tests {
         clear_hardening_env();
     }
 
+    #[test]
+    fn pki_lifecycle_automation_is_opt_in_and_bounded() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert!(!cfg.pki_lifecycle.enabled);
+        assert_eq!(cfg.pki_lifecycle.authority_warning_secs, 30 * 86_400);
+
+        std::env::set_var("ATOM_PKI_LIFECYCLE_ENABLED", "true");
+        std::env::set_var("ATOM_PKI_LIFECYCLE_BATCH_SIZE", "75");
+        std::env::set_var("ATOM_PKI_EXPIRY_WARNING_SECS", "3600");
+        let cfg = Config::from_env().expect("lifecycle config");
+        assert!(cfg.pki_lifecycle.enabled);
+        assert_eq!(cfg.pki_lifecycle.batch_size, 75);
+        assert_eq!(cfg.pki_lifecycle.expiry_warning_secs, 3600);
+
+        std::env::set_var("ATOM_PKI_LIFECYCLE_BATCH_SIZE", "1001");
+        let error = Config::from_env().expect_err("oversized lifecycle batch");
+        assert!(error.to_string().contains("between 1 and 1000"));
+
+        clear_hardening_env();
+    }
+
     /// Sets `DATABASE_URL` to a fixture value for config-parsing tests and
     /// restores the prior value (or unsets it) on drop, so DB-gated tests that
     /// share the same test binary keep the real `DATABASE_URL`.
@@ -1609,6 +1692,11 @@ mod tests {
             "ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES",
             "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
+            "ATOM_PKI_LIFECYCLE_ENABLED",
+            "ATOM_PKI_LIFECYCLE_INTERVAL_SECS",
+            "ATOM_PKI_LIFECYCLE_BATCH_SIZE",
+            "ATOM_PKI_EXPIRY_WARNING_SECS",
+            "ATOM_PKI_AUTHORITY_WARNING_SECS",
             "ATOM_EMAIL_TEMPLATES_DIR",
         ] {
             std::env::remove_var(name);
