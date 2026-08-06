@@ -636,8 +636,14 @@ async fn issuance_request_count(pool: &PgPool, entity_id: Uuid) -> i64 {
 }
 
 async fn event_count(pool: &PgPool, table: &str, event: &str, target_id: Uuid) -> i64 {
-    let query = format!("SELECT COUNT(*) FROM {table} WHERE event = $1 AND target_id = $2");
-    sqlx::query_scalar(&query)
+    let query = match table {
+        "audit_logs" => "SELECT COUNT(*) FROM audit_logs WHERE event = $1 AND target_id = $2",
+        "event_outbox" => {
+            "SELECT COUNT(*) FROM event_outbox WHERE event = $1 AND (payload->>'target_id')::uuid = $2"
+        }
+        _ => panic!("unsupported event table"),
+    };
+    sqlx::query_scalar(query)
         .bind(event)
         .bind(target_id)
         .fetch_one(pool)
