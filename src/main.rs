@@ -24,6 +24,8 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
+    certs::authority::key_provider::validate_startup(&pool, &cfg.pki_ca_keys).await?;
+
     if let Some(ref secret) = cfg.admin_secret {
         bootstrap_admin_credentials(&pool, cfg.admin_entity_id, secret).await?;
     }

@@ -1,5 +1,9 @@
 # PR-002 — CA Key Provider Abstraction
 
+## Status
+
+Implemented by the PR-002 delivery branch.
+
 ## Objective
 
 Introduce an Atom-owned signing/key-provider interface and an encrypted-database implementation without changing certificate issuance routing.
@@ -38,6 +42,19 @@ Encrypt/decrypt round trip, AAD mismatch, wrong KEK, ciphertext corruption, key-
 ## Rollback
 
 No encrypted authority may be activated until this PR is deployed everywhere. Rollback is safe while no production rows use the new backend.
+
+## Operator configuration
+
+- `ATOM_PKI_CA_KEY_ENCRYPTION_KEY` is the dedicated, base64-encoded 32-byte CA
+  KEK. It must not reuse `ATOM_KEY_ENCRYPTION_KEY`.
+- `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID` is the operator-visible key identifier
+  written with encrypted authority material. Its default is `local-ca:v1`.
+- The CA KEK may be omitted while no `encrypted_database` authority exists.
+  Startup fails closed when an encrypted authority references a missing key,
+  another key ID, or an unsupported encryption algorithm.
+- Changing the configured key ID does not silently decrypt old rows. Operators
+  must retain/reconfigure the matching KEK until a reviewed rewrap procedure is
+  available; a mismatch stops startup and signing.
 
 ## AI execution prompt
 

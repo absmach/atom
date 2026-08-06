@@ -5,6 +5,12 @@ use crate::error::{db_err, AppError};
 
 use super::AuthorityRecord;
 
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct EncryptedKeyRequirement {
+    pub key_encryption_key_id: String,
+    pub encryption_algorithm: String,
+}
+
 const AUTHORITY_COLUMNS: &str = r#"
     id,
     tenant_id,
@@ -136,4 +142,21 @@ pub async fn list_tenant_authorities(
         .fetch_all(pool)
         .await
         .map_err(AppError::Database)
+}
+
+/// Return only non-secret metadata needed to validate the encrypted CA provider
+/// before the process starts serving. Private-key columns are deliberately not
+/// selected, so startup validation cannot preload tenant keys.
+pub async fn encrypted_key_requirements(
+    pool: &PgPool,
+) -> Result<Vec<EncryptedKeyRequirement>, AppError> {
+    sqlx::query_as::<_, EncryptedKeyRequirement>(
+        r#"SELECT DISTINCT key_encryption_key_id, encryption_algorithm
+           FROM pki_authorities
+           WHERE key_backend = 'encrypted_database'
+           ORDER BY key_encryption_key_id, encryption_algorithm"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
