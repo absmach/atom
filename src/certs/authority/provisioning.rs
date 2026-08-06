@@ -46,6 +46,7 @@ pub struct TrustBundle {
     pub version: String,
 }
 
+#[derive(Debug)]
 struct ParsedAuthorityCertificate {
     der: Vec<u8>,
     pem: String,
