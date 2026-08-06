@@ -56,10 +56,11 @@ impl CredentialKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CredentialStatus {
     Active,
+    RevocationPending,
     Revoked,
 }
 

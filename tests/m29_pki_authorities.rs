@@ -247,9 +247,9 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     .unwrap_err();
     assert!(is_database_code(&duplicate_fingerprint, "23505"));
 
-    // Serial-only v1 readers remain safe until resolver-v2: the existing global
-    // uniqueness rule still rejects the same serial under a different issuer.
-    let duplicate_serial = insert_certificate(
+    // Resolver v2 scopes managed serials by issuer, so a second issuer may use
+    // the same serial while each issuer-local key remains unique.
+    insert_certificate(
         &pool,
         entity_b,
         tenant_b_v1.id,
@@ -257,8 +257,15 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         &fingerprint(105),
     )
     .await
-    .unwrap_err();
-    assert!(is_database_code(&duplicate_serial, "23505"));
+    .unwrap();
+    let shared_serial_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credentials WHERE kind = 'certificate' AND identifier = $1",
+    )
+    .bind("01020304")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(shared_serial_count, 2);
 
     let null_entity = sqlx::query(
         r#"INSERT INTO credentials

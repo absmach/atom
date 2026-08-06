@@ -18,7 +18,7 @@ Runtime services should call Atom over the service network. The default containe
 
 ### Authentication Metadata
 
-`AuthzService.Check`, `AliasService.ResolveAlias`, `CertificateService.ResolveCertificate`, and `CertificateService.RevokeEntityCertificates` require gRPC metadata:
+`AuthzService.Check`, `AliasService.ResolveAlias`, both certificate resolver versions, and `CertificateService.RevokeEntityCertificates` require gRPC metadata:
 
 ```text
 authorization: Bearer <jwt-or-api-key>
@@ -205,13 +205,71 @@ grpcurl -plaintext \
 
 Certificate runtime lookup and entity-wide certificate revocation for services that terminate mTLS outside Atom.
 
+#### `ResolveCertificateV2`
+
+```text
+rpc ResolveCertificateV2(ResolveCertificateV2Request) returns (ResolveCertificateV2Response)
+```
+
+Resolves an authoritative certificate identity without relying on a globally unique serial. Supply at least one of leaf DER, leaf SHA-256 fingerprint, or the managed issuer-fingerprint/serial pair. If more than one selector is supplied, every selector must identify the same credential.
+
+Atom denies credentials that are unknown, `revocation_pending`, revoked, expired, owned by an inactive/deleted entity, owned by a frozen/deleted tenant, or issued by an authority that is unavailable for verification. Certificates from retiring and retained retired issuers continue to verify until expiry. An optional expected tenant is compared before the caller proceeds to authorization; a global entity always returns an empty tenant.
+
+Requires `authorization: Bearer <token>` metadata. The caller must have `authz.check` permission for the resolved certificate tenant or platform.
+
+**Request: `ResolveCertificateV2Request`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `certificate_der` | `bytes` | conditional | Complete leaf certificate DER, limited to 64 KiB. Atom derives its SHA-256 fingerprint. |
+| `fingerprint_sha256` | `string` | conditional | SHA-256 over leaf DER; separators and case are normalized. |
+| `issuer_fingerprint_sha256` | `string` | conditional | Managed issuer certificate SHA-256. Must be paired with `serial_number`. |
+| `serial_number` | `string` | conditional | Normalized certificate serial. Must be paired with `issuer_fingerprint_sha256`. |
+| `expected_tenant_id` | `string` UUID | no | Tenant the relying party expects. A mismatch, including global versus tenant-owned, is denied. |
+
+**Response: `ResolveCertificateV2Response`**
+
+| Field | Type | Description |
+|---|---|---|
+| `entity_id` | `string` UUID | Entity that owns the certificate. |
+| `tenant_id` | `string` UUID | Owning tenant; empty for a global entity. |
+| `credential_id` | `string` UUID | Exact certificate credential. |
+| `issuer_id` | `string` UUID | Exact managed issuer; empty only for a legacy file-issuer credential resolved by DER/fingerprint. |
+| `expires_at` | `string` RFC3339 | Certificate expiry. |
+| `status` | `string` | Verified credential status (`active`). |
+
+**gRPC status codes**
+
+| Code | Condition |
+|---|---|
+| `OK` | All selectors agree, every lifecycle check passes, and the caller is authorized. |
+| `INVALID_ARGUMENT` | Selector shape, UUID, fingerprint, serial, or DER is invalid or oversized. |
+| `NOT_FOUND` | The sole exact selector does not identify a credential. |
+| `UNAUTHENTICATED` | Caller metadata is invalid, selectors disagree, or certificate lifecycle validation fails. |
+| `PERMISSION_DENIED` | Expected tenant mismatches or the caller lacks `authz.check` authority. |
+| `INTERNAL` | Database or internal error. |
+
+**Example**
+
+```bash
+grpcurl -plaintext \
+  -H 'authorization: Bearer '"$ATOM_TOKEN" \
+  -d '{
+    "fingerprint_sha256": "0f2d...",
+    "issuer_fingerprint_sha256": "8a91...",
+    "serial_number": "01af23",
+    "expected_tenant_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+  }' \
+  atom:8081 atom.v1.CertificateService/ResolveCertificateV2
+```
+
 #### `ResolveCertificate`
 
 ```text
 rpc ResolveCertificate(ResolveCertificateRequest) returns (ResolveCertificateResponse)
 ```
 
-Resolves an active Atom certificate credential by serial number, optionally checking the SHA-256 certificate fingerprint. Use this after a runtime service extracts a client certificate from mTLS.
+Deprecated compatibility API for the legacy file issuer only. It resolves by serial inside the separately unique `issuer_id IS NULL` namespace and optionally corroborates the SHA-256 certificate fingerprint. Managed credentials are never returned; new consumers must use `ResolveCertificateV2`.
 
 Requires `authorization: Bearer <token>` metadata. The caller must have `authz.check` permission for the resolved certificate tenant or platform.
 
@@ -236,9 +294,9 @@ Requires `authorization: Bearer <token>` metadata. The caller must have `authz.c
 | Code | Condition |
 |---|---|
 | `OK` | Certificate resolved and caller is authorized. |
-| `UNAUTHENTICATED` | Authorization metadata is missing, malformed, expired, or invalid. |
+| `UNAUTHENTICATED` | Authorization metadata is invalid, the credential is inactive/expired, its owner scope is inactive, or the fingerprint does not match. |
 | `PERMISSION_DENIED` | Caller lacks `authz.check` authority for the resolved tenant or platform. |
-| `NOT_FOUND` | Certificate serial is unknown, revoked, expired, or fingerprint does not match. |
+| `NOT_FOUND` | The legacy serial is unknown. |
 | `INTERNAL` | Database or internal error. |
 
 **Example**
@@ -252,6 +310,10 @@ grpcurl -plaintext \
   }' \
   atom:8081 atom.v1.CertificateService/ResolveCertificate
 ```
+
+#### Cache invalidation events
+
+When event publishing is configured, the existing `certificate.issue`, `certificate.renew`, `certificate.revoke`, and `certificate.revoke_entity` outbox events are the resolver cache-invalidation contract. Resolver caches should store the returned `credential_id`, `issuer_id`, and tenant alongside their lookup key so these exact lifecycle events can evict entries. Entity, tenant, and authority lifecycle events must also invalidate entries for their affected scope. Event delivery is at least once; consumers must make invalidation idempotent.
 
 #### `RevokeEntityCertificates`
 

@@ -216,12 +216,27 @@ Public PKI endpoints expose standard unauthenticated artifacts:
 
 Runtime services use Atom gRPC:
 
-- `CertificateService.ResolveCertificate`
+- `CertificateService.ResolveCertificateV2`
+- `CertificateService.ResolveCertificate` (deprecated legacy file-issuer namespace only)
 - `CertificateService.RevokeEntityCertificates`
 
-HTTP GraphQL remains bearer-token based. Client TLS termination and certificate extraction are handled by the runtime service, which then asks Atom to resolve the serial and optional fingerprint.
+HTTP GraphQL remains bearer-token based. Client TLS termination and certificate extraction are handled by the runtime service, which passes the leaf DER/fingerprint and, when available, the issuer fingerprint plus serial to Atom.
 
-Runtime certificate lookup is authorization-gated. A caller of `ResolveCertificate` must authenticate to Atom and hold `authz.check` on the resolved certificate tenant or platform.
+`ResolveCertificateV2` treats the SHA-256 fingerprint over leaf DER as the preferred runtime identity. A managed issuer fingerprint plus normalized serial is an exact alternative. Multiple supplied selectors must all identify the same credential. The response includes entity, tenant, credential, issuer, expiry, and status; a global entity returns an empty tenant and does not acquire tenant scope.
+
+Runtime resolution fails closed for `revocation_pending`, revoked, expired, inactive/deleted-entity, frozen/deleted-tenant, and unavailable-issuer state. Retiring and retained retired issuers remain valid for verification until certificate expiry. The optional expected tenant is compared before authorization. The authenticated caller must then hold `authz.check` on the resolved tenant or platform.
+
+The deprecated `ResolveCertificate` method can resolve only `issuer_id IS NULL` legacy file-issuer credentials. Its serial-only query is isolated by a dedicated legacy unique index and can never select a managed credential.
+
+### Runtime identity and serial uniqueness
+
+Independent issuers may reuse a serial. Managed certificate identity is therefore `(issuer_id, normalized serial_number)`, with a separate unique constraint for each issuer. Legacy file-issuer credentials retain one unique global namespace where `issuer_id IS NULL`. Fingerprints remain globally unique.
+
+No managed GraphQL, renewal, revocation, CRL, OCSP, or identity path selects a certificate by serial alone. Compatibility GraphQL/renewal/revocation and the global CRL/OCSP routes are explicitly limited to the legacy namespace.
+
+### Resolver cache invalidation
+
+When event publishing is configured, consumers use `certificate.issue`, `certificate.renew`, `certificate.revoke`, and `certificate.revoke_entity` outbox events to invalidate cached resolutions. Cache entries should retain the returned credential, issuer, entity, and tenant identifiers so invalidation is exact. Entity, tenant, and authority lifecycle events invalidate their affected scope. Delivery is at least once, so invalidation is idempotent; polling is not the revocation strategy.
 
 ---
 

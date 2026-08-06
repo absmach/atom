@@ -15,6 +15,8 @@
     - [ResolveAliasResponse](#atom-v1-ResolveAliasResponse)
     - [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest)
     - [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse)
+    - [ResolveCertificateV2Request](#atom-v1-ResolveCertificateV2Request)
+    - [ResolveCertificateV2Response](#atom-v1-ResolveCertificateV2Response)
     - [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest)
     - [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse)
   
@@ -223,6 +225,47 @@
 
 
 
+<a name="atom-v1-ResolveCertificateV2Request"></a>
+
+### ResolveCertificateV2Request
+Unambiguous runtime resolution. At least one of certificate_der,
+fingerprint_sha256, or the issuer-fingerprint/serial pair is required. When
+multiple selectors are supplied they must all identify the same credential.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| certificate_der | [bytes](#bytes) |  |  |
+| fingerprint_sha256 | [string](#string) |  |  |
+| issuer_fingerprint_sha256 | [string](#string) |  |  |
+| serial_number | [string](#string) |  |  |
+| expected_tenant_id | [string](#string) |  | Optional tenant binding. Empty means no expected tenant; a global entity still resolves with an empty tenant_id and never acquires tenant scope. |
+
+
+
+
+
+
+<a name="atom-v1-ResolveCertificateV2Response"></a>
+
+### ResolveCertificateV2Response
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entity_id | [string](#string) |  |  |
+| tenant_id | [string](#string) |  |  |
+| credential_id | [string](#string) |  |  |
+| issuer_id | [string](#string) |  |  |
+| expires_at | [string](#string) |  |  |
+| status | [string](#string) |  |  |
+
+
+
+
+
+
 <a name="atom-v1-RevokeEntityCertificatesRequest"></a>
 
 ### RevokeEntityCertificatesRequest
@@ -305,7 +348,8 @@ runtime services that terminate mTLS outside Atom.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| ResolveCertificate | [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest) | [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse) |  |
+| ResolveCertificate | [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest) | [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse) | Legacy file-issuer resolver. Managed issuers must use ResolveCertificateV2. |
+| ResolveCertificateV2 | [ResolveCertificateV2Request](#atom-v1-ResolveCertificateV2Request) | [ResolveCertificateV2Response](#atom-v1-ResolveCertificateV2Response) |  |
 | RevokeEntityCertificates | [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest) | [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse) |  |
 
  
