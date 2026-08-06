@@ -252,18 +252,20 @@ certificate's profile threshold, never from a global renewal constant.
 
 By default the old and new credentials overlap and remain independently
 resolvable. Set `revokeOld: true` for immediate, atomic revocation of the old
-credential. The replacement, history link, optional revocation, audit record,
-and outbox event commit together.
+credential. The replacement, history link, optional revocation, and outbox
+event commit together; the compliance audit row follows the repository's
+existing post-commit, best-effort policy.
 
 The service boundary also accepts renewal authorization from the exact
 certificate being replaced so the enrollment transport in PR-014 can attach
-without changing renewal policy. Certificate-authenticated renewal is accepted
-only when the credential is active, unexpired, within its profile renewal
-window, and issued by a legacy, active, or retiring issuer. It is rejected once
-expired or revoked. A normally authorized operator may recover an expired but
-not revoked subject by renewing it with a new CSR or explicit generated-key
-request; a revoked subject must use fresh enrollment. This recovery never treats
-an expired or revoked certificate as authentication.
+without changing renewal policy. `renewalDueAt` tells clients when renewal is
+normally due, but does not block an intentional early key rotation.
+Certificate-authenticated renewal is accepted only when the credential is
+active, unexpired, and issued by a legacy, active, or retiring issuer. It is
+rejected once expired or revoked. A normally authorized operator may recover an
+expired but not revoked subject by renewing it with a new CSR or explicit
+generated-key request; a revoked subject must use fresh enrollment. This
+recovery never treats an expired or revoked certificate as authentication.
 
 The original serial-based `renewCertificate` mutation remains the explicit v1
 compatibility path until resolver-v2 migration is complete. New integrations

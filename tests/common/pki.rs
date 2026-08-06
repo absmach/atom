@@ -181,7 +181,7 @@ pub async fn rotate_tenant_issuer(
 ) -> AuthorityRecord {
     let mut tx = pool.begin().await.unwrap();
     let pending =
-        provisioning::begin_tenant_intermediate_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
+        provisioning::begin_tenant_authority_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
             .await
             .unwrap();
     tx.commit().await.unwrap();

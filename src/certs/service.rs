@@ -929,28 +929,6 @@ pub async fn renew_certificate_v2_in_tx(
     let old_metadata = metadata_from_value(&old.metadata)?;
     let now = Utc::now();
     validate_renewal_source(tx, &old, &old_metadata, authorization, now).await?;
-    let threshold_seconds = renewal_threshold_for_certificate(
-        tx,
-        old.entity_id,
-        old_metadata.profile_id,
-        old_metadata.renewal_threshold_seconds,
-    )
-    .await?;
-    let renewal_due_at = renewal_due_at(
-        old_metadata.not_before,
-        old_metadata.not_after,
-        threshold_seconds,
-    )?;
-    if matches!(
-        authorization,
-        CertificateRenewalAuthorization::PresentedCertificate { .. }
-    ) && now < renewal_due_at
-    {
-        return Err(AppError::bad_request(format!(
-            "certificate renewal is not due until {}",
-            renewal_due_at.to_rfc3339()
-        )));
-    }
 
     let key_mode = input.key_source.mode();
     let request_key_hash = renewal_request_key_hash(&input.idempotency_key);
@@ -1728,26 +1706,6 @@ async fn validate_renewal_source(
         }
     }
     Ok(())
-}
-
-async fn renewal_threshold_for_certificate(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    entity_id: Uuid,
-    profile_id: Option<Uuid>,
-    stored_threshold_seconds: Option<u64>,
-) -> Result<u64, AppError> {
-    if let Some(value) = stored_threshold_seconds {
-        return Ok(value);
-    }
-    if let Some(profile_id) = profile_id {
-        return Ok(profile::profile_by_id(&mut **tx, profile_id)
-            .await?
-            .renewal_threshold_seconds());
-    }
-    let subject = profile::load_subject(&mut **tx, entity_id).await?;
-    Ok(profile::resolve_for_subject_in_tx(tx, &subject, "client")
-        .await?
-        .renewal_threshold_seconds())
 }
 
 fn renewal_due_at(
