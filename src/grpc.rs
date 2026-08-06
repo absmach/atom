@@ -35,7 +35,8 @@ use proto::{
     certificate_service_server::{CertificateService, CertificateServiceServer},
     AuthenticateCredentialRequest, AuthenticateCredentialResponse, AuthenticateRequest,
     AuthenticateResponse, CheckRequest, CheckResponse, ResolveAliasRequest, ResolveAliasResponse,
-    ResolveCertificateRequest, ResolveCertificateResponse, RevokeEntityCertificatesRequest,
+    ResolveCertificateRequest, ResolveCertificateResponse, ResolveCertificateV2Request,
+    ResolveCertificateV2Response, RevokeEntityCertificatesRequest,
     RevokeEntityCertificatesResponse,
 };
 
@@ -337,6 +338,55 @@ impl CertificateService for AtomCertificates {
                 .unwrap_or_default(),
             credential_id: identity.credential_id.to_string(),
             expires_at: identity.expires_at.to_rfc3339(),
+        }))
+    }
+
+    async fn resolve_certificate_v2(
+        &self,
+        request: Request<ResolveCertificateV2Request>,
+    ) -> Result<Response<ResolveCertificateV2Response>, Status> {
+        let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
+        let req = request.into_inner();
+        let expected_tenant_id = parse_optional_uuid(&req.expected_tenant_id, "expected_tenant_id")
+            .map_err(Status::from)?;
+        let identity = certs::service::resolve_certificate_identity_v2(
+            &self.state.pool,
+            certs::service::ResolveCertificateV2 {
+                certificate_der: (!req.certificate_der.is_empty()).then_some(req.certificate_der),
+                fingerprint_sha256: (!req.fingerprint_sha256.trim().is_empty())
+                    .then_some(req.fingerprint_sha256),
+                issuer_fingerprint_sha256: (!req.issuer_fingerprint_sha256.trim().is_empty())
+                    .then_some(req.issuer_fingerprint_sha256),
+                serial_number: (!req.serial_number.trim().is_empty()).then_some(req.serial_number),
+                expected_tenant_id,
+            },
+        )
+        .await
+        .map_err(Status::from)?;
+        require_any_capability(
+            &self.state.pool,
+            &auth,
+            &[
+                ("authz.check", scope_for_tenant(identity.tenant_id)),
+                ("authz.check", Scope::Platform),
+            ],
+        )
+        .await
+        .map_err(Status::from)?;
+
+        Ok(Response::new(ResolveCertificateV2Response {
+            entity_id: identity.entity_id.to_string(),
+            tenant_id: identity
+                .tenant_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            credential_id: identity.credential_id.to_string(),
+            issuer_id: identity
+                .issuer_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            expires_at: identity.expires_at.to_rfc3339(),
+            status: identity.status,
         }))
     }
 

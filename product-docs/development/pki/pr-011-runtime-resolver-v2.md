@@ -1,5 +1,9 @@
 # PR-011 — Certificate Runtime Resolver v2
 
+## Status
+
+Implemented by the PR-011 delivery branch.
+
 ## Objective
 
 Make runtime certificate identity unambiguous and unlock safe duplicate serials across tenant issuers.

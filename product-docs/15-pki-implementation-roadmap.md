@@ -176,7 +176,9 @@ the window is expected and fine.
 ## Migration policy
 
 1. Existing v1 credentials retain `issuer_id = NULL`.
-2. Global serial uniqueness remains until PR-011 migrates all serial-only readers.
+2. PR-011 migrates managed readers to fingerprint or issuer-plus-serial, then
+   replaces global uniqueness with issuer-scoped uniqueness while preserving a
+   separately unique `issuer_id = NULL` legacy namespace.
 3. New tenant issuance starts only after issuer-aware service paths are merged and the production flag is lifted.
 4. Existing certificates migrate by renewal, not by rewriting issued certificates.
 5. The legacy CA chain, CRL, and OCSP remain available until the last legacy leaf expires plus retention.

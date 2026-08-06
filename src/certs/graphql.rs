@@ -78,7 +78,7 @@ impl CertificateQuery {
                     .await
                     .map_err(gql_error)?
             }
-            (None, Some(serial)) => service::certificate_by_serial(&state.pool, &serial)
+            (None, Some(serial)) => service::legacy_certificate_by_serial(&state.pool, &serial)
                 .await
                 .map_err(gql_error)?,
             _ => {
@@ -323,7 +323,7 @@ impl CertificateMutation {
     ) -> Result<IssuedCertificate> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let old = service::certificate_by_serial(&state.pool, &input.serial_number)
+        let old = service::legacy_certificate_by_serial(&state.pool, &input.serial_number)
             .await
             .map_err(gql_error)?;
         require_certificate_rotate(state, &auth, &old).await?;
@@ -404,7 +404,7 @@ impl CertificateMutation {
         input: RevokeCertificateInput,
     ) -> Result<Certificate> {
         let state = ctx.data::<AppState>()?;
-        let cert = service::certificate_by_serial(&state.pool, &input.serial_number)
+        let cert = service::legacy_certificate_by_serial(&state.pool, &input.serial_number)
             .await
             .map_err(gql_error)?;
         if cert.issuer_id.is_some() {

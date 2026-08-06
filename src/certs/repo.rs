@@ -18,6 +18,30 @@ pub struct CertificateCredential {
     pub created_at: DateTime<Utc>,
 }
 
+/// Certificate row plus every lifecycle state needed by the authoritative
+/// runtime resolver. Keeping this projection separate prevents management
+/// queries from accidentally treating their less restrictive joins as an
+/// authentication decision.
+#[derive(Debug, Clone, FromRow)]
+pub struct RuntimeCertificateCredential {
+    pub id: Uuid,
+    pub issuer_id: Option<Uuid>,
+    pub entity_id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub identifier: String,
+    pub credential_status: String,
+    pub metadata: Value,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub entity_status: String,
+    pub entity_deleted_at: Option<DateTime<Utc>>,
+    pub tenant_status: Option<String>,
+    pub tenant_deleted_at: Option<DateTime<Utc>>,
+    pub issuer_status: Option<String>,
+    pub issuer_issuance_enabled: Option<bool>,
+    pub issuer_not_before: Option<DateTime<Utc>>,
+    pub issuer_not_after: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertificateIssuanceRequestClaim {
     New { request_id: Uuid },
@@ -304,7 +328,10 @@ pub async fn complete_certificate_renewal(
     Ok(())
 }
 
-pub async fn certificate_by_serial<'e, E>(
+/// Legacy file-issuer lookup. Managed credentials are deliberately excluded:
+/// after PR-011 only the `issuer_id IS NULL` namespace has serial-only
+/// compatibility, and that namespace retains its own unique index.
+pub async fn legacy_certificate_by_serial<'e, E>(
     executor: E,
     serial_number: &str,
 ) -> Result<CertificateCredential, AppError>
@@ -317,11 +344,104 @@ where
                c.expires_at, c.created_at
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
-        WHERE c.kind = 'certificate' AND c.identifier = $1
+        WHERE c.kind = 'certificate'
+          AND c.issuer_id IS NULL
+          AND c.identifier = $1
         "#,
     )
     .bind(serial_number)
     .fetch_one(executor)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn runtime_certificate_by_fingerprint(
+    pool: &PgPool,
+    fingerprint_sha256: &str,
+) -> Result<RuntimeCertificateCredential, AppError> {
+    sqlx::query_as::<_, RuntimeCertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier,
+               c.status AS credential_status, c.metadata, c.expires_at,
+               e.status AS entity_status, e.deleted_at AS entity_deleted_at,
+               t.status AS tenant_status, t.deleted_at AS tenant_deleted_at,
+               a.status AS issuer_status,
+               a.issuance_enabled AS issuer_issuance_enabled,
+               a.not_before AS issuer_not_before,
+               a.not_after AS issuer_not_after
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        LEFT JOIN tenants t ON t.id = e.tenant_id
+        LEFT JOIN pki_authorities a ON a.id = c.issuer_id
+        WHERE c.kind = 'certificate'
+          AND c.metadata->>'fingerprint_sha256' = $1
+        "#,
+    )
+    .bind(fingerprint_sha256)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)
+}
+
+/// Managed-issuer selector. Legacy file-issuer rows have no authoritative
+/// `issuer_id` to return and remain reachable through DER/fingerprint v2
+/// selectors or the deprecated legacy resolver.
+pub async fn runtime_certificate_by_issuer_fingerprint_serial(
+    pool: &PgPool,
+    issuer_fingerprint_sha256: &str,
+    serial_number: &str,
+) -> Result<RuntimeCertificateCredential, AppError> {
+    sqlx::query_as::<_, RuntimeCertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier,
+               c.status AS credential_status, c.metadata, c.expires_at,
+               e.status AS entity_status, e.deleted_at AS entity_deleted_at,
+               t.status AS tenant_status, t.deleted_at AS tenant_deleted_at,
+               a.status AS issuer_status,
+               a.issuance_enabled AS issuer_issuance_enabled,
+               a.not_before AS issuer_not_before,
+               a.not_after AS issuer_not_after
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        LEFT JOIN tenants t ON t.id = e.tenant_id
+        LEFT JOIN pki_authorities a ON a.id = c.issuer_id
+        WHERE c.kind = 'certificate'
+          AND c.issuer_id IS NOT NULL
+          AND c.identifier = $2
+          AND a.fingerprint_sha256 = $1
+        "#,
+    )
+    .bind(issuer_fingerprint_sha256)
+    .bind(serial_number)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn runtime_legacy_certificate_by_serial(
+    pool: &PgPool,
+    serial_number: &str,
+) -> Result<RuntimeCertificateCredential, AppError> {
+    sqlx::query_as::<_, RuntimeCertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier,
+               c.status AS credential_status, c.metadata, c.expires_at,
+               e.status AS entity_status, e.deleted_at AS entity_deleted_at,
+               t.status AS tenant_status, t.deleted_at AS tenant_deleted_at,
+               NULL::text AS issuer_status,
+               NULL::boolean AS issuer_issuance_enabled,
+               NULL::timestamptz AS issuer_not_before,
+               NULL::timestamptz AS issuer_not_after
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        LEFT JOIN tenants t ON t.id = e.tenant_id
+        WHERE c.kind = 'certificate'
+          AND c.issuer_id IS NULL
+          AND c.identifier = $1
+        "#,
+    )
+    .bind(serial_number)
+    .fetch_one(pool)
     .await
     .map_err(db_err)
 }
