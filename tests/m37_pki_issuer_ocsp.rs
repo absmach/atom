@@ -684,7 +684,7 @@ fn assert_openssl_serial_ocsp(response_der: &[u8], issuer_pem: &str, serial: &st
         .arg("-issuer")
         .arg(&issuer_path)
         .arg("-serial")
-        .arg(serial)
+        .arg(format!("0x{serial}"))
         .arg("-CAfile")
         .arg(&issuer_path)
         .args(["-no_nonce", "-text"])
