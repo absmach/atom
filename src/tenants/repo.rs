@@ -606,29 +606,29 @@ pub async fn soft_delete_tenant_with_audit(
         other => AppError::Database(other),
     })?;
 
-    let revoked_certificates: i64 = sqlx::query_scalar(
+    let revocation_actor_id = actor_id.or(deleted_by);
+    let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"WITH revoked AS (
                UPDATE credentials c
                SET status = 'revoked',
                    metadata = c.metadata || jsonb_build_object(
                        'revoked_at', now(),
-                       'revocation_reason', 'tenant_deleted'
+                       'revocation_reason', 'tenant_deleted',
+                       'revoked_by_entity_id', $2::uuid
                    )
                FROM entities e
                WHERE c.entity_id = e.id
                  AND e.tenant_id = $1
                  AND c.status = 'active'
-               RETURNING c.id, c.kind
+               RETURNING c.id, c.kind, c.issuer_id
            )
-           SELECT COUNT(*) FROM revoked WHERE kind = 'certificate'"#,
+           SELECT id, issuer_id FROM revoked WHERE kind = 'certificate'"#,
     )
     .bind(id)
-    .fetch_one(&mut *tx)
+    .bind(revocation_actor_id)
+    .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;
-    if revoked_certificates > 0 {
-        crate::certs::repo::mark_crl_dirty_tx(&mut tx).await?;
-    }
 
     sqlx::query(
         "UPDATE sessions SET revoked_at = now()
@@ -647,7 +647,20 @@ pub async fn soft_delete_tenant_with_audit(
         target_id: Some(id),
         event: "tenant.delete",
     };
-    let details = serde_json::json!({});
+    let details = serde_json::json!({
+        "certificate_revocations": {
+            "count": revoked_certificates.len(),
+            "credential_ids": revoked_certificates
+                .iter()
+                .map(|(credential_id, _)| credential_id)
+                .collect::<Vec<_>>(),
+            "issuer_ids": revoked_certificates
+                .iter()
+                .filter_map(|(_, issuer_id)| *issuer_id)
+                .collect::<Vec<_>>(),
+            "reason": "tenant_deleted",
+        }
+    });
     crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(tenant)
 }

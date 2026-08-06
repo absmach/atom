@@ -39,6 +39,17 @@ pub struct CrlState {
     pub dirty: bool,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct CertificateRevocationRecord {
+    pub credential_id: Uuid,
+    pub issuer_id: Option<Uuid>,
+    pub issuer_fingerprint_sha256: Option<String>,
+    pub serial_number: String,
+    pub reason: String,
+    pub actor_entity_id: Option<Uuid>,
+    pub revoked_at: DateTime<Utc>,
+}
+
 pub async fn entity_tenant_id<'e, E>(executor: E, entity_id: Uuid) -> Result<Option<Uuid>, AppError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
@@ -356,6 +367,100 @@ pub async fn lock_certificate_by_id(
     .map_err(db_err)
 }
 
+pub async fn certificate_by_fingerprint<'e, E>(
+    executor: E,
+    fingerprint_sha256: &str,
+) -> Result<CertificateCredential, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, CertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+               c.expires_at, c.created_at
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.kind = 'certificate'
+          AND c.metadata->>'fingerprint_sha256' = $1
+        "#,
+    )
+    .bind(fingerprint_sha256)
+    .fetch_one(executor)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn lock_certificate_by_fingerprint(
+    tx: &mut Transaction<'_, Postgres>,
+    fingerprint_sha256: &str,
+) -> Result<CertificateCredential, AppError> {
+    sqlx::query_as::<_, CertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+               c.expires_at, c.created_at
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.kind = 'certificate'
+          AND c.metadata->>'fingerprint_sha256' = $1
+        FOR UPDATE OF c
+        "#,
+    )
+    .bind(fingerprint_sha256)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn certificate_by_issuer_serial<'e, E>(
+    executor: E,
+    issuer_id: Uuid,
+    serial_number: &str,
+) -> Result<CertificateCredential, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, CertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+               c.expires_at, c.created_at
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.kind = 'certificate'
+          AND c.issuer_id = $1
+          AND c.identifier = $2
+        "#,
+    )
+    .bind(issuer_id)
+    .bind(serial_number)
+    .fetch_one(executor)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn lock_certificate_by_issuer_serial(
+    tx: &mut Transaction<'_, Postgres>,
+    issuer_id: Uuid,
+    serial_number: &str,
+) -> Result<CertificateCredential, AppError> {
+    sqlx::query_as::<_, CertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+               c.expires_at, c.created_at
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.kind = 'certificate'
+          AND c.issuer_id = $1
+          AND c.identifier = $2
+        FOR UPDATE OF c
+        "#,
+    )
+    .bind(issuer_id)
+    .bind(serial_number)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
 pub async fn list_certificates(
     pool: &PgPool,
     entity_id: Option<Uuid>,
@@ -420,6 +525,47 @@ where
     Ok(())
 }
 
+pub async fn revoke_certificate_if_active(
+    tx: &mut Transaction<'_, Postgres>,
+    credential_id: Uuid,
+    metadata: Value,
+) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE credentials
+        SET status = 'revoked', metadata = $2
+        WHERE id = $1 AND kind = 'certificate' AND status = 'active'
+        "#,
+    )
+    .bind(credential_id)
+    .bind(metadata)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn certificate_revocation_by_id<'e, E>(
+    executor: E,
+    credential_id: Uuid,
+) -> Result<CertificateRevocationRecord, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, CertificateRevocationRecord>(
+        r#"
+        SELECT credential_id, issuer_id, issuer_fingerprint_sha256,
+               serial_number, reason, actor_entity_id, revoked_at
+        FROM certificate_revocations
+        WHERE credential_id = $1
+        "#,
+    )
+    .bind(credential_id)
+    .fetch_one(executor)
+    .await
+    .map_err(db_err)
+}
+
 pub async fn active_entity_certificates<'e, E>(
     executor: E,
     entity_id: Uuid,
@@ -434,6 +580,7 @@ where
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
         WHERE c.kind = 'certificate' AND c.entity_id = $1 AND c.status = 'active'
+        FOR UPDATE OF c
         "#,
     )
     .bind(entity_id)
@@ -522,32 +669,6 @@ pub async fn store_crl_tx(
     .bind(this_update)
     .bind(next_update)
     .bind(issuer_fingerprint_sha256)
-    .execute(&mut **tx)
-    .await
-    .map_err(AppError::Database)?;
-    Ok(())
-}
-
-pub async fn mark_crl_dirty(pool: &PgPool) -> Result<(), AppError> {
-    sqlx::query(
-        r#"
-        UPDATE certificate_crl_state
-        SET dirty = TRUE, updated_at = now()
-        "#,
-    )
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
-    Ok(())
-}
-
-pub async fn mark_crl_dirty_tx(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
-    sqlx::query(
-        r#"
-        UPDATE certificate_crl_state
-        SET dirty = TRUE, updated_at = now()
-        "#,
-    )
     .execute(&mut **tx)
     .await
     .map_err(AppError::Database)?;

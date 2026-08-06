@@ -403,37 +403,58 @@ impl CertificateMutation {
         ctx: &Context<'_>,
         input: RevokeCertificateInput,
     ) -> Result<Certificate> {
-        let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let cert = service::certificate_by_serial(&state.pool, &input.serial_number)
             .await
             .map_err(gql_error)?;
-        require_certificate_revoke(state, &auth, &cert).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let revoked =
-            service::revoke_certificate_in_tx(&mut tx, &input.serial_number, input.reason)
-                .await
-                .map_err(gql_error)?;
-        audit::commit_with_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: cert.tenant_id,
-                target_kind: Some("credential"),
-                target_id: Some(cert.credential_id),
-                event: "certificate.revoke",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "entity_id": cert.entity_id,
-                    "serial_number": cert.serial_number
-                }),
-            },
+        if cert.issuer_id.is_some() {
+            return Err(async_graphql::Error::new(
+                "managed certificate revocation requires revokeCertificateV2",
+            ));
+        }
+        Ok(revoke_certificate_exact(
+            ctx,
+            service::CertificateRevocationSelector::CredentialId(cert.credential_id),
+            input.reason,
         )
-        .await
-        .map_err(gql_error)?;
-        Ok(revoked.into())
+        .await?
+        .certificate)
+    }
+
+    /// Issuer-aware revocation by exact credential, fingerprint, or issuer and serial.
+    async fn revoke_certificate_v2(
+        &self,
+        ctx: &Context<'_>,
+        input: RevokeCertificateV2Input,
+    ) -> Result<CertificateRevocation> {
+        let selector = match (
+            input.credential_id,
+            input.fingerprint_sha256,
+            input.issuer_id,
+            input.serial_number,
+        ) {
+            (Some(credential_id), None, None, None) => {
+                service::CertificateRevocationSelector::CredentialId(parse_id(
+                    credential_id,
+                    "credentialId",
+                )?)
+            }
+            (None, Some(fingerprint), None, None) => {
+                service::CertificateRevocationSelector::FingerprintSha256(fingerprint)
+            }
+            (None, None, Some(issuer_id), Some(serial_number)) => {
+                service::CertificateRevocationSelector::IssuerSerial {
+                    issuer_id: parse_id(issuer_id, "issuerId")?,
+                    serial_number,
+                }
+            }
+            _ => {
+                return Err(async_graphql::Error::new(
+                    "provide exactly one selector: credentialId, fingerprintSha256, or issuerId with serialNumber",
+                ))
+            }
+        };
+        revoke_certificate_exact(ctx, selector, input.reason).await
     }
 
     async fn revoke_entity_certificates(
@@ -447,9 +468,14 @@ impl CertificateMutation {
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let count = service::revoke_entity_certificates_in_tx(&mut tx, entity_id, reason)
-            .await
-            .map_err(gql_error)?;
+        let revoked = service::revoke_entity_certificates_v2_in_tx(
+            &mut tx,
+            entity_id,
+            reason,
+            Some(auth.entity_id),
+        )
+        .await
+        .map_err(gql_error)?;
         audit::commit_with_audit(
             &state.pool,
             tx,
@@ -461,13 +487,93 @@ impl CertificateMutation {
                 target_id: Some(entity_id),
                 event: "certificate.revoke_entity",
                 outcome: AuditOutcome::Allow,
-                details: serde_json::json!({"count": count}),
+                details: serde_json::json!({
+                    "count": revoked.count,
+                    "credential_ids": revoked.credential_ids,
+                    "issuer_ids": revoked.issuer_ids,
+                    "reason": revoked.reason,
+                }),
             },
         )
         .await
         .map_err(gql_error)?;
-        Ok(count as i64)
+        Ok(revoked.count as i64)
     }
+}
+
+async fn revoke_certificate_exact(
+    ctx: &Context<'_>,
+    selector: service::CertificateRevocationSelector,
+    reason: Option<String>,
+) -> Result<CertificateRevocation> {
+    let auth = require_auth(ctx)?;
+    let state = ctx.data::<AppState>()?;
+    let cert = service::certificate_by_revocation_selector(&state.pool, &selector)
+        .await
+        .map_err(gql_error)?;
+    require_certificate_revoke(state, &auth, &cert).await?;
+    let selector_kind = selector.kind();
+    let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+    let revoked = service::revoke_certificate_v2_in_tx(
+        &mut tx,
+        service::RevokeCertificateV2 {
+            selector,
+            reason,
+            actor_entity_id: Some(auth.entity_id),
+            expected_entity_id: cert.entity_id,
+            expected_tenant_id: cert.tenant_id,
+        },
+    )
+    .await
+    .map_err(gql_error)?;
+    let details = serde_json::json!({
+        "credential_id": revoked.certificate.credential_id,
+        "entity_id": revoked.certificate.entity_id,
+        "issuer_id": revoked.certificate.issuer_id,
+        "issuer_fingerprint_sha256": revoked.issuer_fingerprint_sha256,
+        "serial_number": revoked.certificate.serial_number,
+        "reason": revoked.reason,
+        "revoked_at": revoked.revoked_at,
+        "selector": selector_kind,
+        "idempotent_replay": revoked.idempotent_replay,
+    });
+    if revoked.idempotent_replay {
+        tx.commit()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
+        audit::write(
+            &state.pool,
+            false,
+            audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: revoked.certificate.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(revoked.certificate.credential_id),
+                event: "certificate.revoke_replayed",
+                outcome: AuditOutcome::Allow,
+                details,
+            },
+        )
+        .await;
+    } else {
+        audit::commit_with_audit(
+            &state.pool,
+            tx,
+            state.config.events.enabled(),
+            &audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: revoked.certificate.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(revoked.certificate.credential_id),
+                event: "certificate.revoke",
+                outcome: AuditOutcome::Allow,
+                details,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+    }
+    Ok(revoked.into())
 }
 
 async fn renew_certificate_v2(
@@ -494,6 +600,7 @@ async fn renew_certificate_v2(
         &mut tx,
         &state.config,
         service::CertificateRenewalAuthorization::Operator {
+            actor_entity_id: Some(auth.entity_id),
             expected_entity_id: old.entity_id,
             expected_tenant_id: old.tenant_id,
         },
@@ -619,9 +726,61 @@ pub struct RevokeCertificateInput {
     pub reason: Option<String>,
 }
 
+#[derive(InputObject)]
+pub struct RevokeCertificateV2Input {
+    pub credential_id: Option<ID>,
+    pub fingerprint_sha256: Option<String>,
+    pub issuer_id: Option<ID>,
+    pub serial_number: Option<String>,
+    pub reason: Option<String>,
+}
+
 pub struct CertificateList {
     pub items: Vec<Certificate>,
     pub total: i64,
+}
+
+pub struct CertificateRevocation {
+    certificate: Certificate,
+    reason: String,
+    actor_entity_id: Option<Uuid>,
+    revoked_at: chrono::DateTime<chrono::Utc>,
+    idempotent_replay: bool,
+}
+
+impl From<service::CertificateRevocationResult> for CertificateRevocation {
+    fn from(value: service::CertificateRevocationResult) -> Self {
+        Self {
+            certificate: value.certificate.into(),
+            reason: value.reason,
+            actor_entity_id: value.actor_entity_id,
+            revoked_at: value.revoked_at,
+            idempotent_replay: value.idempotent_replay,
+        }
+    }
+}
+
+#[Object]
+impl CertificateRevocation {
+    async fn certificate(&self) -> &Certificate {
+        &self.certificate
+    }
+
+    async fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    async fn actor_entity_id(&self) -> Option<ID> {
+        self.actor_entity_id.map(|id| ID(id.to_string()))
+    }
+
+    async fn revoked_at(&self) -> String {
+        self.revoked_at.to_rfc3339()
+    }
+
+    async fn idempotent_replay(&self) -> bool {
+        self.idempotent_replay
+    }
 }
 
 #[Object]

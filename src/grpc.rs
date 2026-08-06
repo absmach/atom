@@ -494,10 +494,11 @@ impl CertificateService for AtomCertificates {
             .await
             .map_err(crate::error::db_err)
             .map_err(Status::from)?;
-        let revoked = certs::service::revoke_entity_certificates_in_tx(
+        let revoked = certs::service::revoke_entity_certificates_v2_in_tx(
             &mut tx,
             entity_id,
             (!req.reason.is_empty()).then_some(req.reason),
+            Some(auth.entity_id),
         )
         .await
         .map_err(Status::from)?;
@@ -512,14 +513,20 @@ impl CertificateService for AtomCertificates {
                 target_id: Some(entity_id),
                 event: "certificate.revoke_entity",
                 outcome: AuditOutcome::Allow,
-                details: serde_json::json!({"count": revoked, "transport": "grpc"}),
+                details: serde_json::json!({
+                    "count": revoked.count,
+                    "credential_ids": revoked.credential_ids,
+                    "issuer_ids": revoked.issuer_ids,
+                    "reason": revoked.reason,
+                    "transport": "grpc",
+                }),
             },
         )
         .await
         .map_err(Status::from)?;
 
         Ok(Response::new(RevokeEntityCertificatesResponse {
-            revoked: revoked as u64,
+            revoked: revoked.count as u64,
         }))
     }
 }

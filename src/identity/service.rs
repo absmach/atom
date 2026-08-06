@@ -2272,8 +2272,8 @@ pub async fn revoke_credential_in_tx(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let managed_by: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT managed_by FROM credentials
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT kind, managed_by FROM credentials
          WHERE id = $1 AND entity_id = $2
          FOR UPDATE",
     )
@@ -2282,12 +2282,19 @@ pub async fn revoke_credential_in_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
-    match managed_by {
+    let (kind, managed_by) = match row {
+        Some(row) => row,
         None => return Err(AppError::not_found("credential not found")),
-        Some(Some(value)) if value == "config" => return Err(AppError::conflict(
+    };
+    if managed_by.as_deref() == Some("config") {
+        return Err(AppError::conflict(
             "credential is managed by the bootstrap config file and cannot be revoked via the API",
-        )),
-        _ => {}
+        ));
+    }
+    if kind == "certificate" {
+        return Err(AppError::bad_request(
+            "use the exact certificate revocation API for certificate credentials",
+        ));
     }
     // Overwrite any prior revocation provenance (e.g. a `tenant_deleted` marker
     // from a tenant soft delete) with this explicit revocation, so a later tenant

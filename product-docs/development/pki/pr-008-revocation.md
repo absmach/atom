@@ -1,5 +1,9 @@
 # PR-008 — Issuer-Aware Revocation State Machine
 
+## Status
+
+Implemented by the PR-008 delivery branch.
+
 ## Objective
 
 Make certificate revocation immediately authoritative in Atom and ready for per-issuer CRL/OCSP publication.

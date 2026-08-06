@@ -62,17 +62,19 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
         .expect("insert credential");
     let cert_id = Uuid::new_v4();
     let serial = format!("{:032x}", cert_id.as_u128());
+    let issuer = format!("{:032x}{:032x}", cert_id.as_u128(), cert_id.as_u128());
     sqlx::query(
-        "INSERT INTO credentials (id, entity_id, kind, identifier, status)
-         VALUES ($1, $2, 'certificate', $3, 'active')",
+        "INSERT INTO credentials (id, entity_id, kind, identifier, status, metadata)
+         VALUES ($1, $2, 'certificate', $3, 'active',
+                 jsonb_build_object('issuer_fingerprint_sha256', $4::text))",
     )
     .bind(cert_id)
     .bind(id)
     .bind(&serial)
+    .bind(&issuer)
     .execute(&pool)
     .await
     .expect("insert certificate credential");
-    let issuer = format!("sd-issuer-{cert_id}");
     sqlx::query(
         "INSERT INTO certificate_crl_state (issuer_fingerprint_sha256, dirty)
          VALUES ($1, FALSE)",
@@ -1356,17 +1358,19 @@ async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
     .await
     .expect("insert api credential");
     let cert_id = Uuid::new_v4();
+    let issuer = format!("{:032x}{:032x}", cert_id.as_u128(), cert_id.as_u128());
     sqlx::query(
-        "INSERT INTO credentials (id, entity_id, kind, identifier, status)
-         VALUES ($1, $2, 'certificate', $3, 'active')",
+        "INSERT INTO credentials (id, entity_id, kind, identifier, status, metadata)
+         VALUES ($1, $2, 'certificate', $3, 'active',
+                 jsonb_build_object('issuer_fingerprint_sha256', $4::text))",
     )
     .bind(cert_id)
     .bind(entity_id)
     .bind(format!("{:032x}", cert_id.as_u128()))
+    .bind(&issuer)
     .execute(&pool)
     .await
     .expect("insert certificate credential");
-    let issuer = format!("sd-tenant-issuer-{cert_id}");
     sqlx::query(
         "INSERT INTO certificate_crl_state (issuer_fingerprint_sha256, dirty)
          VALUES ($1, FALSE)",
