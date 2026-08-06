@@ -1,5 +1,9 @@
 # PR-004 — Certificate Profiles and PKI Core
 
+## Status
+
+Implemented by the PR-004 delivery branch.
+
 ## Objective
 
 Extract certificate construction and validation into an Atom-owned PKI core, and
