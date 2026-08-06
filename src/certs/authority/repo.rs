@@ -116,6 +116,43 @@ where
         .map_err(db_err)
 }
 
+/// Select and lock the active issuer used by one issuance transaction.
+///
+/// The share lock prevents a lifecycle transition from retiring the authority
+/// after policy validation but before the issuer-bound credential commits.
+pub async fn lock_active_leaf_issuer_for_scope(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Option<Uuid>,
+) -> Result<AuthorityRecord, AppError> {
+    let query = format!(
+        r#"
+        SELECT {AUTHORITY_COLUMNS}
+        FROM pki_authorities
+        WHERE (($1::uuid IS NULL
+                AND tenant_id IS NULL
+                AND kind = 'platform_leaf_issuer')
+            OR ($1::uuid IS NOT NULL
+                AND tenant_id = $1
+                AND kind = 'tenant_intermediate'))
+          AND status = 'active'
+          AND issuance_enabled = true
+          AND not_before <= now()
+          AND not_after > now()
+        FOR SHARE
+        "#
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::RowNotFound => {
+                AppError::not_found("no active issuing authority is available for the entity scope")
+            }
+            other => AppError::Database(other),
+        })
+}
+
 /// Backward-compatible tenant-only selector for current call sites.
 pub async fn active_tenant_leaf_issuer(
     pool: &PgPool,

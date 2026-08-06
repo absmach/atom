@@ -1,5 +1,9 @@
 # PR-005 — Tenant-Aware CSR Signing
 
+## Status
+
+Implemented by the PR-005 delivery branch.
+
 ## Objective
 
 Add the first production tenant-aware leaf path using device-generated CSRs.

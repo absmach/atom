@@ -8,6 +8,7 @@ use crate::error::{db_err, AppError};
 #[derive(Debug, Clone, FromRow)]
 pub struct CertificateCredential {
     pub id: Uuid,
+    pub issuer_id: Option<Uuid>,
     pub entity_id: Uuid,
     pub tenant_id: Option<Uuid>,
     pub identifier: String,
@@ -15,6 +16,12 @@ pub struct CertificateCredential {
     pub metadata: Value,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertificateIssuanceRequestClaim {
+    New { request_id: Uuid },
+    Replay { credential_id: Uuid },
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -72,6 +79,116 @@ pub async fn insert_certificate_credential(
     .map_err(AppError::Database)
 }
 
+pub async fn insert_managed_certificate_credential(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    issuer_id: Uuid,
+    serial_number: &str,
+    metadata: Value,
+    expires_at: DateTime<Utc>,
+) -> Result<Uuid, AppError> {
+    sqlx::query_scalar(
+        r#"
+        INSERT INTO credentials (
+            id, entity_id, kind, identifier, metadata, expires_at, issuer_id
+        )
+        VALUES ($1, $2, 'certificate', $3, $4, $5, $6)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(entity_id)
+    .bind(serial_number)
+    .bind(metadata)
+    .bind(expires_at)
+    .bind(issuer_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AppError::Database)
+}
+
+pub async fn claim_certificate_issuance_request(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    request_key_hash: &str,
+    request_fingerprint_sha256: &str,
+) -> Result<CertificateIssuanceRequestClaim, AppError> {
+    let request_id = Uuid::new_v4();
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO certificate_issuance_requests (
+            id, entity_id, request_key_hash, request_fingerprint_sha256
+        )
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (entity_id, request_key_hash) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(request_id)
+    .bind(entity_id)
+    .bind(request_key_hash)
+    .bind(request_fingerprint_sha256)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    if inserted.is_some() {
+        return Ok(CertificateIssuanceRequestClaim::New { request_id });
+    }
+
+    let existing = sqlx::query_as::<_, (String, Option<Uuid>)>(
+        r#"
+        SELECT request_fingerprint_sha256, credential_id
+        FROM certificate_issuance_requests
+        WHERE entity_id = $1 AND request_key_hash = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(entity_id)
+    .bind(request_key_hash)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if existing.0 != request_fingerprint_sha256 {
+        return Err(AppError::conflict(
+            "idempotency key was already used for a different certificate request",
+        ));
+    }
+    existing
+        .1
+        .map(|credential_id| CertificateIssuanceRequestClaim::Replay { credential_id })
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "stored certificate issuance request is incomplete"
+            ))
+        })
+}
+
+pub async fn complete_certificate_issuance_request(
+    tx: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+    credential_id: Uuid,
+) -> Result<(), AppError> {
+    let completed = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE certificate_issuance_requests
+        SET credential_id = $2, completed_at = now()
+        WHERE id = $1 AND credential_id IS NULL
+        RETURNING id
+        "#,
+    )
+    .bind(request_id)
+    .bind(credential_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    if completed.is_none() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "certificate issuance request could not be completed"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn certificate_by_serial<'e, E>(
     executor: E,
     serial_number: &str,
@@ -81,7 +198,7 @@ where
 {
     sqlx::query_as::<_, CertificateCredential>(
         r#"
-        SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
@@ -112,7 +229,7 @@ where
 {
     sqlx::query_as::<_, CertificateCredential>(
         r#"
-        SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
@@ -135,7 +252,7 @@ pub async fn list_certificates(
 ) -> Result<Vec<CertificateCredential>, AppError> {
     let mut query = QueryBuilder::<Postgres>::new(
         r#"
-        SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
@@ -198,7 +315,7 @@ where
 {
     sqlx::query_as::<_, CertificateCredential>(
         r#"
-        SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
@@ -222,7 +339,7 @@ pub async fn revoked_certificates(
 ) -> Result<Vec<CertificateCredential>, AppError> {
     sqlx::query_as::<_, CertificateCredential>(
         r#"
-        SELECT c.id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
         FROM credentials c
         JOIN entities e ON e.id = c.entity_id
