@@ -18,7 +18,10 @@ CREATE TABLE certificate_revocations (
     reason                     TEXT        NOT NULL CHECK (
                                              length(btrim(reason)) BETWEEN 1 AND 128
                                            ),
-    actor_entity_id            UUID        REFERENCES entities(id) ON DELETE SET NULL,
+    -- Deliberately not an FK: revocation evidence must retain the actor UUID
+    -- after that actor is purged, and an ON DELETE action would conflict with
+    -- this table's immutability trigger.
+    actor_entity_id            UUID,
     revoked_at                 TIMESTAMPTZ NOT NULL,
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
