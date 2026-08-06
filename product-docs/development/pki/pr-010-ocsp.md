@@ -1,5 +1,9 @@
 # PR-010 — Per-Issuer OCSP
 
+## Status
+
+Implemented by the PR-010 delivery branch.
+
 ## Objective
 
 Provide standards-compliant OCSP good, revoked, and unknown responses for tenant issuers.

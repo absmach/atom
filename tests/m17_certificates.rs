@@ -9,17 +9,19 @@ use atom::{
     keys::{ActiveKeys, LoadedKey},
     state::AppState,
 };
-use ocsp::{
-    common::asn1::{CertId, Oid},
-    oid::ALGO_SHA1_DOT,
-    request::OneReq,
+use const_oid::ObjectIdentifier;
+use der::{
+    asn1::{Null, OctetString},
+    Encode,
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use ring::digest;
+use spki::AlgorithmIdentifierOwned;
 use sqlx::PgPool;
 use std::{fs, path::PathBuf};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+use x509_ocsp::{CertId, OcspRequest, Request as OcspSingleRequest, TbsRequest};
 use x509_parser::pem::parse_x509_pem;
 
 fn cert_config() -> Config {
@@ -453,19 +455,29 @@ fn ocsp_request_for_serial(ca_chain_pem: &str, serial_hex: &str) -> Vec<u8> {
             .data
             .as_ref(),
     );
-    let certid = CertId::new(
-        Oid::new_from_dot(ALGO_SHA1_DOT).unwrap(),
-        name_hash.as_ref(),
-        key_hash.as_ref(),
-        &hex::decode(serial_hex).unwrap(),
-    );
-    let one = OneReq {
-        certid,
-        one_req_ext: None,
-    };
-    let request_list = der_sequence(one.to_der().unwrap());
-    let tbs_request = der_sequence(request_list);
-    der_sequence(tbs_request)
+    let serial = hex::decode(serial_hex).unwrap();
+    OcspRequest {
+        tbs_request: TbsRequest {
+            version: Default::default(),
+            requestor_name: None,
+            request_list: vec![OcspSingleRequest {
+                req_cert: CertId {
+                    hash_algorithm: AlgorithmIdentifierOwned {
+                        oid: ObjectIdentifier::new_unwrap("1.3.14.3.2.26"),
+                        parameters: Some(Null.into()),
+                    },
+                    issuer_name_hash: OctetString::new(name_hash.as_ref()).unwrap(),
+                    issuer_key_hash: OctetString::new(key_hash.as_ref()).unwrap(),
+                    serial_number: x509_cert::serial_number::SerialNumber::new(&serial).unwrap(),
+                },
+                single_request_extensions: None,
+            }],
+            request_extensions: None,
+        },
+        optional_signature: None,
+    }
+    .to_der()
+    .unwrap()
 }
 
 fn first_certificate_der(pem: &str) -> Vec<u8> {
@@ -477,27 +489,4 @@ fn assert_ocsp_success(response: &[u8]) {
     assert!(response
         .windows(3)
         .any(|window| window == [0x0a, 0x01, 0x00]));
-}
-
-fn der_sequence(value: Vec<u8>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(value.len() + 6);
-    out.push(0x30);
-    out.extend(der_len(value.len()));
-    out.extend(value);
-    out
-}
-
-fn der_len(len: usize) -> Vec<u8> {
-    if len <= 127 {
-        return vec![len as u8];
-    }
-    let bytes = len
-        .to_be_bytes()
-        .into_iter()
-        .skip_while(|byte| *byte == 0)
-        .collect::<Vec<_>>();
-    let mut out = Vec::with_capacity(bytes.len() + 1);
-    out.push(0x80 | bytes.len() as u8);
-    out.extend(bytes);
-    out
 }

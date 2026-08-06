@@ -37,6 +37,8 @@ GET  /.well-known/jwks.json
 GET  /certs/ca-chain
 GET  /certs/crl
 POST /certs/ocsp
+GET  /certs/issuers/{issuer_id}/crl
+POST /certs/issuers/{issuer_id}/ocsp
 ```
 
 All other endpoints require a valid Bearer token. Public signup creates a

@@ -70,7 +70,18 @@ pub fn create_router(state: AppState) -> Router {
             "/certs/issuers/:issuer_id/crl",
             get(certs::http::issuer_crl),
         )
-        .route("/certs/ocsp", post(certs::http::ocsp))
+        .route(
+            "/certs/ocsp",
+            post(certs::http::ocsp).layer(DefaultBodyLimit::max(
+                certs::service::OCSP_REQUEST_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/certs/issuers/:issuer_id/ocsp",
+            post(certs::http::issuer_ocsp).layer(DefaultBodyLimit::max(
+                certs::service::OCSP_REQUEST_MAX_BYTES,
+            )),
+        )
         // GraphQL
         .route(
             "/graphql",
