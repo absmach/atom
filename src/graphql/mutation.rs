@@ -11,6 +11,7 @@ pub struct MutationRoot(
     super::groups::GroupMutation,
     super::credentials::CredentialMutation,
     super::certificates::CertificateMutation,
+    super::pki_authorities::AuthorityMutation,
     super::policies::PolicyMutation,
     super::authz::AuthzMutation,
     super::operations::OperationsMutation,

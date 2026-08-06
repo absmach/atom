@@ -381,9 +381,9 @@ default `ATOM_CORS_ALLOWED_ORIGINS`.
 
 ### Certificates (optional)
 
-Certificates are off by default for local dev. To enable the PKI endpoints
-(`GET /certs/ca-chain`, `GET /certs/crl`, `POST /certs/ocsp`), generate a local
-root CA and flip the cert vars in `.env`:
+Certificates are off by default for local dev. To enable the legacy v1 PKI
+endpoints (`GET /certs/ca-chain`, `GET /certs/crl`, `POST /certs/ocsp`), generate
+a local root CA and flip the cert vars in `.env`:
 
 ```bash
 mkdir -p certs
@@ -401,10 +401,11 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 ```
 
 Compose mounts `./certs` at `/certs:ro`; a host `cargo run` reads the files
-directly, so use `./certs/...` paths there. Production should use
-`ATOM_CERTS_CA_MODE=file_intermediate_issuer` with root certificate,
-intermediate certificate, and intermediate private key files mounted
-read-only. Atom never stores CA certificates or CA private keys in Postgres.
+directly, so use `./certs/...` paths there. The legacy production mode uses
+`ATOM_CERTS_CA_MODE=file_intermediate_issuer` with read-only files. The managed
+authority registry instead imports only the root certificate, stores generated
+CA keys envelope-encrypted in Postgres, and publishes its dynamic trust set at
+`GET /certs/trust-bundle.pem`; Atom never accepts a production root private key.
 
 ### Metrics
 
@@ -823,6 +824,8 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_CERTS_ROOT_CA_KEY_PATH`                                                                                                  | *(optional)*                                         | Mounted root CA private key path for `file_root_issuer`                                 |
 | `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS`                                                                                             | `2592000`                                            | Default issued certificate lifetime                                                     |
 | `ATOM_CERTS_LEAF_MAX_TTL_SECS`                                                                                                 | `2592000`                                            | Maximum issued certificate lifetime                                                     |
+| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY`                                                                                               | *(unset)*                                            | Dedicated base64-encoded 32-byte KEK required for managed CA keys                       |
+| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID`                                                                                            | `local-ca:v1`                                        | Operator-visible identifier for the managed CA KEK                                      |
 | `ATOM_CERTS_CA_DIR`                                                                                                            | `./certs`                                            | Docker Compose host directory mounted at `/certs:ro`                                    |
 | `ATOM_EMAIL_TEMPLATES_HOST_DIR`                                                                                                | `./email-templates`                                  | Docker Compose host directory mounted at `/email-templates:ro`                          |
 | `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8081` / `18081` / `3005` | Docker Compose host ports                                                               |
@@ -1047,6 +1050,7 @@ Authorization: Bearer <token>
 
 The public HTTP routes that do not require an existing Bearer token are
 `GET /health`, `GET /.well-known/jwks.json`, `GET /certs/ca-chain`,
+`GET /certs/trust-bundle.pem`,
 `GET /certs/crl`, `POST /certs/ocsp`, `GET /auth/public-config`,
 `POST /auth/login`, `GET /auth/email/verify`, `POST /auth/email/resend`,
 `POST /auth/password/reset/request`, `POST /auth/password/reset`,
@@ -1253,6 +1257,7 @@ GET  /health/live
 GET  /health/ready
 GET  /.well-known/jwks.json
 GET  /certs/ca-chain
+GET  /certs/trust-bundle.pem
 GET  /certs/crl
 POST /certs/ocsp
 GET  /auth/public-config
