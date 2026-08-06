@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     audit::spawn_retention_cleanup(state.clone());
     purge::spawn_purge_cleanup(state.clone());
     events::spawn_event_publisher(state.clone());
+    certs::lifecycle::spawn(state.clone());
 
     // Enrollment is a separate public TLS surface. Prepare it before spawning
     // any server so bad TLS material or a bad bind address fails startup.

@@ -2,6 +2,7 @@ pub mod authority;
 pub mod enrollment;
 pub mod graphql;
 pub mod http;
+pub mod lifecycle;
 pub mod pki_core;
 pub mod profile;
 pub mod repo;

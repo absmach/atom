@@ -555,3 +555,41 @@ lookup key so invalidation is exact and idempotent under at-least-once delivery.
 
 CRL and OCSP remain interoperability artifacts. Immediate resolver denial plus
 short certificate lifetimes are the primary revocation control.
+
+## Lifecycle automation and fleet operations
+
+Lifecycle automation is opt-in. Set `ATOM_PKI_LIFECYCLE_ENABLED=true` to run the
+replica-safe sweeper. Its interval and bounded scan size are controlled by
+`ATOM_PKI_LIFECYCLE_INTERVAL_SECS` and `ATOM_PKI_LIFECYCLE_BATCH_SIZE`.
+Disabling the job leaves issuance and all interactive certificate operations
+unchanged.
+
+The sweeper emits `certificate.expiring` once when an active leaf enters each
+of two windows: its profile-derived renewal window and the configured critical
+expiry window. The stored renewal threshold takes precedence; otherwise Atom
+resolves the applicable referenced, tenant-default, or platform-default
+certificate profile. Durable notification claims and the outbox event are
+written in one transaction, while a PostgreSQL advisory transaction lock
+coordinates replicas and restarts. Authority certificates emit
+`certificate.authority_expiring` within the configured rotation lead time.
+Events contain issuer, credential, entity, and tenant identifiers but no
+certificate, subject, key, CSR, or secret material.
+
+The `certificates` GraphQL query accepts `issuerId`, `expiresFrom`, and
+`expiresBefore` in addition to its existing filters. `expiresFrom` is inclusive
+and `expiresBefore` is exclusive. Expiry queries use a stable
+`(expires_at, credential_id)` order, and tenant authorization is applied in SQL
+before pagination rather than by filtering returned rows.
+
+`bulkRevokeCertificates` revokes one bounded page selected by exactly one of
+`tenantId`, `issuerId`, or `principalGroupId`. It reports every attempted item
+and returns the last contiguous successful credential as
+`nextCursorCredentialId`. A caller can repair a failed item and resume from that
+cursor; already revoked credentials are not selected again. Bulk issuance and
+notification delivery remain outside Atom.
+
+Prometheus metrics expose lifecycle operation counts, certificate expiry
+buckets, authority time to expiry, and CRL size and generation duration. Metric
+labels are deliberately bounded to operation, result, status, and time bucket;
+they never carry tenant, entity, credential, issuer, subject, serial, or key
+material.
