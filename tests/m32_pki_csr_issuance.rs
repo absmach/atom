@@ -415,6 +415,7 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
 fn managed_config() -> Config {
     let mut config = Config::for_tests();
     config.events.amqp_url = Some("amqp://unused-in-pr005-test".to_string());
+    config.graphql_limits.introspection_enabled = true;
     config
 }
 
