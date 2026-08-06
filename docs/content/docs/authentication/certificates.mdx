@@ -449,6 +449,79 @@ Managed-authority clients should use the issuer-specific route carried by their
 certificate's CRL distribution point. Likewise, `/certs/ocsp` is the legacy
 file-backed route; managed clients use their issuer-specific AIA URL.
 
+## Subject enrollment and re-enrollment
+
+Atom exposes the native enrollment adapter on a dedicated public TLS listener,
+separate from the main HTTP and gRPC ports. It is disabled by default. When
+enabled, Atom terminates TLS in process and asks for (but does not require) a
+client certificate. This permits bearer-authenticated first enrollment and
+certificate-only re-enrollment on the same port without trusting any proxy
+header.
+
+```text
+POST /pki/enroll     # Bearer Atom access token or login session
+POST /pki/reenroll   # verified mTLS client certificate; bearer is ignored
+```
+
+Both operations accept the same consumer-neutral JSON body:
+
+```json
+{
+  "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...",
+  "ttl_secs": 86400,
+  "idempotency_key": "client-generated-retry-key"
+}
+```
+
+There is intentionally no entity, tenant, issuer, profile, subject, or product
+field. For first enrollment Atom derives identity from the authenticated
+credential. For re-enrollment it derives the exact credential from the leaf DER
+verified by the TLS handshake and the authoritative runtime resolver. The
+internal enrollment service then calls the same managed issuance/renewal paths
+as the management API. The native HTTP code only adapts request and response
+shapes, so a later protocol adapter does not duplicate policy.
+
+The response returns `credential_id`, `entity_id`, `tenant_id`, `issuer_id`,
+`profile_id`, `profile_name`, `identity_uri`, `serial_number`,
+`certificate_pem`, `chain_pem`, `not_after`, `renewal_due_at`, the profile's
+exact `renewal_threshold_seconds`, and `idempotent_replay`. Keep the CSR private
+key locally; it never enters Atom. Exact retries return the same certificate.
+The old certificate remains active for the normal renewal overlap window.
+
+Enable and bind the listener with:
+
+```text
+ATOM_PKI_ENROLLMENT_ENABLED=true
+ATOM_PKI_ENROLLMENT_LISTEN_ADDR=0.0.0.0:8443
+ATOM_PKI_ENROLLMENT_TLS_CERT_PATH=/certs/enrollment-server.crt
+ATOM_PKI_ENROLLMENT_TLS_KEY_PATH=/certs/enrollment-server.key
+```
+
+The cert/key identify the enrollment server. Client certificates are verified
+against Atom's database-backed trust bundle, inside the process. Setting only
+one server TLS path, or enabling enrollment without both, fails startup. Never
+forward a client identity in `X-Client-Cert`, `X-Forwarded-Client-Cert`,
+`SSL-Client-Cert`, or application metadata: these values are ignored and cannot
+replace the TLS peer certificate.
+
+The verifier refreshes the database trust bundle every 60 seconds by default,
+so newly provisioned or rotated authorities become eligible without restarting
+Atom. A refresh failure retains the last known-good verifier and emits a
+warning; tune the interval with `ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS`.
+
+Per-entity (10/minute by default) and per-tenant (1000/minute) limits are stored
+atomically in PostgreSQL, so replicas share enforcement. `429` responses include
+`Retry-After`; `atom_rate_limit_rejections_total` and
+`atom_pki_enrollment_operations_total` expose bounded operational labels. CSR
+input defaults to a 64 KiB maximum and the entire HTTP body is bounded before
+full allocation.
+
+An expired, revoked, unknown, or not-yet-valid certificate, an inactive entity,
+or a frozen/inactive/deleted tenant cannot re-enroll. Recovery is first
+enrollment with an active non-certificate Atom credential. If none remains, an
+operator must use the normal credential-management recovery flow; weakening
+mTLS validation is never a recovery mechanism.
+
 ## Runtime Lookup
 
 Runtime services use `CertificateService.ResolveCertificateV2`. Supply at least
