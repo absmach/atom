@@ -363,6 +363,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         .await
         .unwrap();
     assert_eq!(tenant_override.maximum_ttl_seconds(), 3600);
+    let platform_ceiling = profile::profile_by_id(&pool, ceiling_id).await.unwrap();
     let narrowed_platform = sqlx::query(
         "UPDATE certificate_profiles SET default_ttl_seconds = 3000, maximum_ttl_seconds = 3500 WHERE id = $1",
     )
@@ -392,6 +393,18 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
                 vec![SanType::DnsName("one.example.test".try_into().unwrap())]
         }),
         Some(3600),
+        now,
+    )
+    .unwrap();
+    let platform_ceiling_cert = issue(
+        &platform_ceiling,
+        &tenant_subject,
+        &issuer,
+        &csr(|params| {
+            params.subject_alt_names =
+                vec![SanType::DnsName("two.example.test".try_into().unwrap())]
+        }),
+        Some(7200),
         now,
     )
     .unwrap();
@@ -444,6 +457,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         &global_cert,
         &dns_allowlist_cert,
         &dns_template_cert,
+        &platform_ceiling_cert,
         &tenant_override_cert,
         &p384_cert,
         &boundary_cert,
