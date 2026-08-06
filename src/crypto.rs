@@ -59,12 +59,15 @@ pub fn decrypt(
     let mut nonce_bytes = [0_u8; NONCE_LEN];
     nonce_bytes.copy_from_slice(nonce);
     let opening = aead_key(key)?;
-    let mut buf = ciphertext.to_vec();
+    // The AEAD implementation decrypts in place. Keep that backing allocation
+    // zeroizing so the original plaintext buffer is wiped after copying the
+    // returned value to its caller-owned result.
+    let mut buf = zeroize::Zeroizing::new(ciphertext.to_vec());
     let plaintext = opening
         .open_in_place(
             Nonce::assume_unique_for_key(nonce_bytes),
             Aad::from(aad),
-            &mut buf,
+            buf.as_mut_slice(),
         )
         .map_err(|_| AppError::Internal(anyhow::anyhow!("aead decrypt")))?;
     Ok(plaintext.to_vec())
