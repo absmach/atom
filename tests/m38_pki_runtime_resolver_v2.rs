@@ -359,13 +359,11 @@ async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE entities SET status = 'inactive', deleted_at = now() WHERE id = $1",
-    )
-    .bind(entity_a)
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE entities SET status = 'inactive', deleted_at = now() WHERE id = $1")
+        .bind(entity_a)
+        .execute(&pool)
+        .await
+        .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
     sqlx::query("UPDATE entities SET status = 'active', deleted_at = NULL WHERE id = $1")
         .bind(entity_a)

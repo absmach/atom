@@ -232,6 +232,7 @@ Unambiguous runtime resolution. At least one of certificate_der,
 fingerprint_sha256, or the issuer-fingerprint/serial pair is required. When
 multiple selectors are supplied they must all identify the same credential.
 
+
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | certificate_der | [bytes](#bytes) |  |  |
@@ -374,3 +375,4 @@ runtime services that terminate mTLS outside Atom.
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
+
