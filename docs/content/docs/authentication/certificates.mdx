@@ -111,6 +111,59 @@ completeAuthorityRetirement
 `pki.provision_automated` capability. Scoped access tokens cannot invoke CA
 lifecycle mutations.
 
+## Managed CSR signing (v2)
+
+`issueCertificateFromCsrV2` is the first managed leaf-issuance path. The
+existing `issueCertificateFromCsr` mutation remains the legacy file-issuer API;
+the explicit `V2` suffix prevents an authority migration from silently changing
+existing clients.
+
+The v2 input accepts only:
+
+- the target `entityId`;
+- the device-generated `csrPem`;
+- an optional requested `ttlSecs`; and
+- a required, caller-generated `idempotencyKey` (1–256 non-control UTF-8 bytes).
+
+Tenant, profile, issuer, CA path, and key reference are deliberately absent.
+Atom authorizes and locks the stored entity, derives its tenant, selects and
+locks that scope's active issuer, and resolves the stored `client` profile. The
+response includes the leaf, immutable issuing chain, issuer/profile IDs, and
+canonical identity URI. `privateKeyPem` is always null on this path because the
+device key never enters Atom.
+
+```graphql
+mutation SignDeviceCsr($input: IssueCertificateFromCsrV2Input!) {
+  issueCertificateFromCsrV2(input: $input) {
+    idempotentReplay
+    chainPem
+    certificate {
+      credentialId
+      issuerId
+      serialNumber
+      certificatePem
+      profileId
+      identityUri
+    }
+  }
+}
+```
+
+Reuse the same idempotency key only for an exact retry. Atom stores a digest of
+the key and request—not the token or CSR—and returns the original credential
+with `idempotentReplay: true`. Reusing it with different CSR or TTL content is a
+conflict. A replay does not enqueue a second `certificate.issue` domain event.
+
+Serial conflicts are retried in nested savepoints on the caller's transaction.
+The credential, issuer link, completion ledger, and outbox event commit
+together. If CA signing succeeds but any database write or final commit fails,
+the certificate is neither returned nor registered as a runtime credential;
+the uncommitted ledger row disappears too. Retrying the same key therefore
+either returns the prior committed credential or performs a clean replacement
+attempt. Operators reconcile an uncertain client response by retrying the same
+request and checking the credential ID, issuance ledger, audit log, and outbox;
+there is no separately usable orphan artifact to import.
+
 ## Legacy CA files
 
 The original v1 issuer remains available for backward compatibility and loads
@@ -148,8 +201,9 @@ offline-root flow above.
 | Production root private key | Offline; never accepted by Atom |
 | Legacy v1 CA certificate/key | Mounted files, loaded at startup |
 | Issued leaf certificate | `credentials` row with `kind = certificate` |
-| Issued leaf private key | Returned once, never stored |
+| Generated-path leaf private key | Returned once by legacy/generated issuance, never stored |
 | CSR private key | Never enters Atom |
+| Managed CSR idempotency state | Request/key digests and committed credential ID only |
 | CRL cache | `certificate_crl_state` |
 
 ## Public PKI Endpoints
