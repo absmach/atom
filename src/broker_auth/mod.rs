@@ -20,4 +20,4 @@ pub mod service;
 pub mod topic;
 
 pub use service::BrokerAuth;
-pub use topic::{TopicMatch, TopicTemplate, TopicTemplateSet};
+pub use topic::{TopicAllowList, TopicMatch, TopicTemplate, TopicTemplateSet};

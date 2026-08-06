@@ -286,6 +286,93 @@ impl TopicTemplateSet {
     }
 }
 
+/// Topics allowed without consulting the PDP.
+///
+/// **This is an authorization bypass**, and the only one in the callout. It
+/// exists because brokers carry operational topics that address no object at
+/// all — a health probe such as `hc/<tenant>` names nothing Atom can resolve, so
+/// there is no policy that could describe it and every request for it would be
+/// denied. Defaults to empty; a deployment that does not need it never gets one.
+///
+/// Patterns use ordinary MQTT filter syntax — `+` for one segment, `#` for the
+/// remainder — so `hc/+` admits a per-tenant health topic without also admitting
+/// `hc/a/b`. Prefer the narrowest pattern that covers the operational topic;
+/// `#` alone would hand the broker unconditional access to everything.
+///
+/// The broker's topic is matched literally, so a subscription to `hc/#` is
+/// admitted only by a pattern that itself covers `#` at that position.
+#[derive(Debug, Clone, Default)]
+pub struct TopicAllowList {
+    filters: Vec<Vec<String>>,
+}
+
+impl TopicAllowList {
+    pub fn parse_list(patterns: &[String]) -> Result<Self, TemplateParseError> {
+        let mut filters = Vec::new();
+        for pattern in patterns {
+            let raw = pattern.trim();
+            let fail = |reason: &str| TemplateParseError {
+                template: raw.to_string(),
+                reason: reason.to_string(),
+            };
+            if raw.is_empty() {
+                return Err(fail("allow pattern must not be empty"));
+            }
+            let segments: Vec<String> = raw.split('/').map(ToOwned::to_owned).collect();
+            if let Some(index) = segments.iter().position(|segment| segment == "#") {
+                if index != segments.len() - 1 {
+                    return Err(fail("'#' must be the last segment"));
+                }
+            }
+            filters.push(segments);
+        }
+        Ok(Self { filters })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.filters.is_empty()
+    }
+
+    pub fn allows(&self, topic: &str) -> bool {
+        let topic = topic.strip_prefix('/').unwrap_or(topic);
+        if topic.is_empty() {
+            return false;
+        }
+        let tokens: Vec<&str> = topic.split('/').collect();
+        self.filters
+            .iter()
+            .any(|filter| filter_matches(filter, &tokens))
+    }
+}
+
+fn filter_matches(filter: &[String], tokens: &[&str]) -> bool {
+    let mut index = 0;
+    while index < filter.len() {
+        // A broker '#' covers this position *and everything below it*, so only
+        // a pattern that is itself '#' here is broad enough to admit it. Letting
+        // '+' match it would widen the bypass past what the operator wrote —
+        // `hc/+` would admit a subscription to the whole `hc` subtree.
+        if filter[index] != "#" && tokens.get(index) == Some(&"#") {
+            return false;
+        }
+        match filter[index].as_str() {
+            "#" => return true,
+            "+" => {
+                if index >= tokens.len() {
+                    return false;
+                }
+            }
+            literal => {
+                if tokens.get(index) != Some(&literal) {
+                    return false;
+                }
+            }
+        }
+        index += 1;
+    }
+    index == tokens.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +585,83 @@ mod tests {
     #[test]
     fn template_set_rejects_a_bad_member() {
         assert!(TopicTemplateSet::parse_list(&["{resource}/#".into(), "{tenant}".into()]).is_err());
+    }
+
+    // ── Allow list ───────────────────────────────────────────────────────────
+
+    fn allow(patterns: &[&str]) -> TopicAllowList {
+        TopicAllowList::parse_list(&patterns.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .expect("patterns should parse")
+    }
+
+    #[test]
+    fn the_allow_list_is_empty_by_default() {
+        let list = TopicAllowList::default();
+        assert!(list.is_empty());
+        assert!(!list.allows("hc/acme"));
+    }
+
+    #[test]
+    fn a_single_segment_wildcard_admits_a_per_tenant_health_topic() {
+        let list = allow(&["hc/+"]);
+        assert!(list.allows("hc/acme"));
+        assert!(list.allows("hc/00000000-0000-0000-0000-000000000001"));
+    }
+
+    #[test]
+    fn a_single_segment_wildcard_does_not_admit_deeper_topics() {
+        let list = allow(&["hc/+"]);
+        assert!(!list.allows("hc/acme/extra"));
+        assert!(!list.allows("hc"));
+    }
+
+    #[test]
+    fn an_unrelated_topic_is_never_admitted() {
+        let list = allow(&["hc/+"]);
+        assert!(!list.allows("m/acme/c/telemetry"));
+        assert!(!list.allows("telemetry"));
+        assert!(!list.allows(""));
+    }
+
+    #[test]
+    fn a_multi_segment_wildcard_admits_the_whole_subtree() {
+        let list = allow(&["$sys/#"]);
+        assert!(list.allows("$sys"));
+        assert!(list.allows("$sys/broker/uptime"));
+        assert!(!list.allows("sys/broker"));
+    }
+
+    #[test]
+    fn an_exact_pattern_admits_only_itself() {
+        let list = allow(&["hc"]);
+        assert!(list.allows("hc"));
+        assert!(!list.allows("hc/acme"));
+    }
+
+    #[test]
+    fn any_pattern_in_the_list_may_admit() {
+        let list = allow(&["hc/+", "$sys/#"]);
+        assert!(list.allows("hc/acme"));
+        assert!(list.allows("$sys/uptime"));
+        assert!(!list.allows("m/acme/c/telemetry"));
+    }
+
+    #[test]
+    fn a_leading_slash_is_ignored_as_it_is_for_templates() {
+        assert!(allow(&["hc/+"]).allows("/hc/acme"));
+    }
+
+    #[test]
+    fn broker_wildcards_are_matched_literally() {
+        // A subscription to `hc/#` spans more than `hc/+` describes, so only a
+        // pattern that itself covers the position admits it.
+        assert!(!allow(&["hc/+"]).allows("hc/#"));
+        assert!(allow(&["hc/#"]).allows("hc/#"));
+    }
+
+    #[test]
+    fn allow_patterns_reject_a_non_terminal_hash_and_empty_input() {
+        assert!(TopicAllowList::parse_list(&["hc/#/tail".to_string()]).is_err());
+        assert!(TopicAllowList::parse_list(&["  ".to_string()]).is_err());
     }
 }

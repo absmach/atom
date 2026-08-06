@@ -389,6 +389,61 @@ async fn every_rejection_is_a_verdict_not_an_rpc_error() {
     assert!(!no_action.authorized);
 }
 
+/// Operational topics address no object, so no policy could describe them and
+/// every request for one would otherwise be denied. The allow list is the only
+/// path in the callout that skips the PDP, so its edges matter: it must admit
+/// exactly the configured shape and nothing broader.
+#[tokio::test]
+#[ignore]
+async fn the_allow_list_admits_operational_topics_and_nothing_wider() {
+    let pool = common::pool().await;
+    let (tenant_id, _) = make_tenant(&pool).await;
+    let (device_id, _) = make_device(&pool, Some(tenant_id)).await;
+    let (_, channel_alias) = make_channel(&pool, Some(tenant_id)).await;
+
+    let mut cfg = broker_config("{resource}/#", BrokerTopicRef::Alias);
+    cfg.broker_auth.topic_allow =
+        atom::broker_auth::TopicAllowList::parse_list(&["hc/+".to_string()])
+            .expect("allow list parses");
+    let mut client = serve(&pool, cfg).await;
+
+    let health = client
+        .authorize(authz(&device_id.to_string(), "hc/acme", Action::Publish))
+        .await
+        .expect("authorize rpc")
+        .into_inner();
+    assert!(health.authorized, "health topic should be admitted");
+
+    // The device holds no grant on this channel; the allow list must not have
+    // turned into a general bypass.
+    let ungranted = client
+        .authorize(authz(
+            &device_id.to_string(),
+            &channel_alias,
+            Action::Publish,
+        ))
+        .await
+        .expect("authorize rpc")
+        .into_inner();
+    assert!(
+        !ungranted.authorized,
+        "allow list leaked into ordinary topics"
+    );
+
+    for (topic, why) in [
+        ("hc/acme/extra", "deeper than the single-segment pattern"),
+        ("hc", "shorter than the pattern"),
+        ("hc/#", "spans the whole subtree, wider than `hc/+`"),
+    ] {
+        let response = client
+            .authorize(authz(&device_id.to_string(), topic, Action::Publish))
+            .await
+            .expect("authorize rpc")
+            .into_inner();
+        assert!(!response.authorized, "{topic} admitted, but it is {why}");
+    }
+}
+
 /// The callout is off unless explicitly enabled, because it authenticates its
 /// caller at the transport rather than with a bearer token.
 #[tokio::test]

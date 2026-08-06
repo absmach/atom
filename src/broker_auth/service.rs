@@ -158,6 +158,22 @@ impl AuthService for BrokerAuth {
             return Ok(Response::new(authz_denied("unsupported action")));
         };
 
+        // Operational topics are admitted before anything else, because they
+        // address no object: there is nothing for the PDP to decide on, and no
+        // policy an operator could write that would allow them. Empty unless a
+        // deployment configures it.
+        if self.state.config.broker_auth.topic_allow.allows(&req.topic) {
+            tracing::debug!(
+                external_id = %req.external_id, topic = %req.topic,
+                "broker authorize: allow (operational topic)"
+            );
+            return Ok(Response::new(AuthzRes {
+                authorized: true,
+                reason_code: REASON_SUCCESS,
+                reason: String::new(),
+            }));
+        }
+
         // `external_id` is whatever Authenticate returned. If the broker did not
         // authenticate this client it passes the protocol-level client id, which
         // is not an Atom subject — deny rather than guess.

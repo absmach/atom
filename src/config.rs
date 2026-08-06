@@ -118,6 +118,10 @@ pub struct BrokerAuthConfig {
     /// against. One kind, one lookup — the callout runs on the connect path and
     /// trying both would double the cost of every rejected connection.
     pub credential_kind: crate::models::enums::CredentialKind,
+    /// Topics authorized without consulting the PDP. Empty by default; see
+    /// [`crate::broker_auth::TopicAllowList`] for why it exists and how narrow
+    /// a pattern should be.
+    pub topic_allow: crate::broker_auth::TopicAllowList,
 }
 
 /// First segment names the object, the rest is unconstrained — the near
@@ -134,8 +138,24 @@ impl Default for BrokerAuthConfig {
             .expect("the built-in default template must parse"),
             topic_ref: BrokerTopicRef::default(),
             credential_kind: crate::models::enums::CredentialKind::Password,
+            topic_allow: crate::broker_auth::TopicAllowList::default(),
         }
     }
+}
+
+/// Split a comma-separated env var, dropping blanks. Absent or blank yields an
+/// empty list.
+fn comma_list(name: &str) -> Vec<String> {
+    nonempty_env(name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn broker_credential_kind_from_env() -> Result<crate::models::enums::CredentialKind> {
@@ -1063,6 +1083,9 @@ fn broker_auth_from_env() -> Result<BrokerAuthConfig> {
             &std::env::var("ATOM_BROKER_TOPIC_REF").unwrap_or_default(),
         )?,
         credential_kind: broker_credential_kind_from_env()?,
+        topic_allow: crate::broker_auth::TopicAllowList::parse_list(&comma_list(
+            "ATOM_BROKER_TOPIC_ALLOW",
+        ))?,
     })
 }
 

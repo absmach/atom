@@ -243,6 +243,17 @@ Config (`ATOM_BROKER_*`), all optional:
 | `ATOM_BROKER_TOPIC_TEMPLATE` | `{resource}/#` | comma-separated templates, tried in order |
 | `ATOM_BROKER_TOPIC_REF` | `alias` | `alias` or `uuid` — how a bound segment names an object |
 | `ATOM_BROKER_CREDENTIAL_KIND` | `password` | `password` or `shared_key` |
+| `ATOM_BROKER_TOPIC_ALLOW` | *(empty)* | comma-separated MQTT filters authorized **without consulting the PDP** |
+
+`ATOM_BROKER_TOPIC_ALLOW` is the only authorization bypass in the callout. It
+exists because brokers carry operational topics that address no object — a
+health probe such as `hc/<tenant>` names nothing Atom can resolve, so no policy
+could describe it and every request for it would be denied. Patterns are
+ordinary MQTT filters (`+` one segment, `#` the remainder); use the narrowest
+one that covers the topic, since `#` alone grants the broker everything. The
+broker's topic is matched literally and a broker `#` is only admitted by a
+pattern that is itself `#` at that position — otherwise `hc/+` would quietly
+admit a subscription to the whole `hc` subtree.
 
 **Off by default for a security reason, not a rollout one.** It is the only gRPC
 service here with no bearer token to check — a broker's callout client cannot
