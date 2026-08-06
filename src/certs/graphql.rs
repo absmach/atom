@@ -144,6 +144,56 @@ impl CertificateMutation {
         Ok(issued.into())
     }
 
+    /// Managed one-time key bootstrap. The legacy `issueCertificate` mutation
+    /// remains the explicit file-issuer compatibility path.
+    async fn issue_generated_certificate_v2(
+        &self,
+        ctx: &Context<'_>,
+        input: IssueGeneratedCertificateV2Input,
+    ) -> Result<IssuedCertificate> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let entity_id = parse_id(input.entity_id, "entityId")?;
+        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let issued = service::issue_generated_certificate_v2_in_tx(
+            &mut tx,
+            &state.config,
+            tenant_id,
+            service::IssueGeneratedCertificateV2 {
+                entity_id,
+                ttl_secs: input.ttl_secs,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        audit::commit_with_audit(
+            &state.pool,
+            tx,
+            state.config.events.enabled(),
+            &audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: Some("entity"),
+                target_id: Some(entity_id),
+                event: "certificate.issue",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "credential_id": issued.certificate.credential_id,
+                    "serial_number": issued.certificate.serial_number,
+                    "issuer_id": issued.certificate.issuer_id,
+                    "profile_id": issued.certificate.profile_id,
+                    "csr": false,
+                    "generated_key": true,
+                    "managed": true,
+                }),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(issued.into())
+    }
+
     async fn issue_certificate_from_csr(
         &self,
         ctx: &Context<'_>,
@@ -396,6 +446,12 @@ pub struct IssueCertificateInput {
 }
 
 #[derive(InputObject)]
+pub struct IssueGeneratedCertificateV2Input {
+    pub entity_id: ID,
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(InputObject)]
 pub struct IssueCertificateFromCsrInput {
     pub entity_id: ID,
     pub ttl_secs: Option<u64>,
@@ -441,7 +497,7 @@ impl CertificateList {
 
 pub struct IssuedCertificate {
     pub certificate: Certificate,
-    pub private_key_pem: Option<String>,
+    pub private_key_pem: Option<service::OneTimePrivateKey>,
     pub chain_pem: Option<String>,
     pub idempotent_replay: bool,
 }
@@ -453,7 +509,9 @@ impl IssuedCertificate {
     }
 
     async fn private_key_pem(&self) -> Option<&str> {
-        self.private_key_pem.as_deref()
+        self.private_key_pem
+            .as_ref()
+            .map(service::OneTimePrivateKey::expose)
     }
 
     async fn chain_pem(&self) -> Option<&str> {

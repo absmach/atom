@@ -11,7 +11,8 @@ use p256::{elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePublicKey, PublicK
 use rcgen::{
     CertificateParams, CertificateSigningRequestParams, CrlDistributionPoint, CustomExtension,
     DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PublicKeyData,
-    SanType, SerialNumber, SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
+    RsaKeySize, SanType, SerialNumber, SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
+    PKCS_ECDSA_P384_SHA384, PKCS_ED25519, PKCS_RSA_SHA256,
 };
 use ring::{digest, rand, rand::SecureRandom};
 use time::{Duration, OffsetDateTime};
@@ -22,6 +23,7 @@ use x509_parser::{
     prelude::{FromDer, ParsedExtension, X509Certificate},
 };
 use yasna::{models::ObjectIdentifier, Tag};
+use zeroize::Zeroizing;
 
 use crate::{config::PkiCaKeyConfig, error::AppError};
 
@@ -271,6 +273,80 @@ pub struct IssuedCertificate {
     pub profile_name: String,
     pub dns_names: Vec<String>,
     pub ip_addresses: Vec<IpAddr>,
+}
+
+/// A freshly generated CSR and its one-time private key. The private material
+/// is deliberately non-cloneable, redacted from Debug, and zeroized on drop.
+pub struct GeneratedLeafRequest {
+    csr_pem: String,
+    private_key_pem: Zeroizing<String>,
+}
+
+impl fmt::Debug for GeneratedLeafRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GeneratedLeafRequest")
+            .field("csr_present", &true)
+            .field("private_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl GeneratedLeafRequest {
+    pub fn csr_pem(&self) -> &str {
+        &self.csr_pem
+    }
+
+    pub fn into_private_key_pem(self) -> Zeroizing<String> {
+        self.private_key_pem
+    }
+}
+
+/// Generate a leaf key using the first Atom-supported algorithm/size in the
+/// stored profile. Profile order is the preference order; callers cannot
+/// select or override it.
+pub fn generate_leaf_request(
+    profile: &CertificateProfile,
+) -> Result<GeneratedLeafRequest, AppError> {
+    let key_pair = generate_profile_key_pair(profile)?;
+    let csr_pem = CertificateParams::default()
+        .serialize_request(&key_pair)
+        .and_then(|request| request.pem())
+        .map_err(core_encoding_error)?;
+    let private_key_pem = Zeroizing::new(key_pair.serialize_pem());
+    Ok(GeneratedLeafRequest {
+        csr_pem,
+        private_key_pem,
+    })
+}
+
+fn generate_profile_key_pair(profile: &CertificateProfile) -> Result<KeyPair, AppError> {
+    for rule in &profile.permitted_key_algorithms {
+        for size in &rule.sizes {
+            let generated = match (rule.algorithm, *size) {
+                (KeyAlgorithm::Ecdsa, 256) => KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256),
+                (KeyAlgorithm::Ecdsa, 384) => KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384),
+                (KeyAlgorithm::Ed25519, 255) => KeyPair::generate_for(&PKCS_ED25519),
+                (KeyAlgorithm::Rsa, 2048) => {
+                    KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048)
+                }
+                (KeyAlgorithm::Rsa, 3072) => {
+                    KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_3072)
+                }
+                (KeyAlgorithm::Rsa, 4096) => {
+                    KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_4096)
+                }
+                _ => continue,
+            };
+            return generated.map_err(|_| {
+                AppError::Internal(anyhow::anyhow!(
+                    "stored client profile key algorithm is unavailable for generation"
+                ))
+            });
+        }
+    }
+    Err(AppError::Internal(anyhow::anyhow!(
+        "stored client profile has no supported generated-key algorithm"
+    )))
 }
 
 struct ParsedCsr {
@@ -1007,5 +1083,26 @@ mod tests {
         let mut requested = CertificateParams::default();
         requested.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         assert!(validate_requested_extensions(&profile, &requested).is_err());
+    }
+
+    #[test]
+    fn generated_request_uses_profile_algorithm_and_redacts_key() {
+        let mut profile = profile(vec![ExtendedKeyUsage::ClientAuth]);
+        profile.permitted_key_algorithms = vec![KeyAlgorithmRule {
+            algorithm: KeyAlgorithm::Ecdsa,
+            sizes: vec![384],
+        }];
+
+        let generated = generate_leaf_request(&profile).unwrap();
+        let debug = format!("{generated:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("PRIVATE KEY"));
+
+        let parsed = parse_and_verify_csr(generated.csr_pem()).unwrap();
+        assert_eq!(parsed.algorithm, KeyAlgorithm::Ecdsa);
+        assert_eq!(parsed.key_size, 384);
+        let private_key = generated.into_private_key_pem();
+        let key_pair = KeyPair::from_pem(private_key.as_str()).unwrap();
+        assert!(std::ptr::eq(key_pair.algorithm(), &PKCS_ECDSA_P384_SHA384));
     }
 }

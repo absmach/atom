@@ -21,7 +21,7 @@ use std::fs;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::pem::parse_x509_pem;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     config::{CertsCaMode, Config},
@@ -61,6 +61,12 @@ pub struct IssueCertificateFromCsrV2 {
     pub ttl_secs: Option<u64>,
     pub csr_pem: String,
     pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueGeneratedCertificateV2 {
+    pub entity_id: Uuid,
+    pub ttl_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,10 +125,32 @@ pub struct CertificateRecord {
     pub revocation_reason: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+pub struct OneTimePrivateKey(Zeroizing<String>);
+
+impl OneTimePrivateKey {
+    fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    fn from_zeroizing(value: Zeroizing<String>) -> Self {
+        Self(value)
+    }
+
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for OneTimePrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OneTimePrivateKey([REDACTED])")
+    }
+}
+
+#[derive(Debug)]
 pub struct IssuedCertificate {
     pub certificate: CertificateRecord,
-    pub private_key_pem: Option<String>,
+    pub private_key_pem: Option<OneTimePrivateKey>,
     pub chain_pem: Option<String>,
     pub idempotent_replay: bool,
 }
@@ -412,7 +440,7 @@ pub async fn issue_certificate_in_tx(
         let cert = params
             .signed_by(&key_pair, &loaded.issuer)
             .map_err(rcgen_err)?;
-        let mut private_key_pem = key_pair.serialize_pem();
+        let private_key_pem = OneTimePrivateKey::new(key_pair.serialize_pem());
         // Each attempt runs in a nested transaction (a SAVEPOINT): a serial
         // collision aborts the current (sub)transaction in Postgres, so without
         // one, retrying would run against — and the caller would later commit —
@@ -446,10 +474,8 @@ pub async fn issue_certificate_in_tx(
             }
             Err(err) if is_unique_violation(&err) && attempt + 1 < SERIAL_INSERT_ATTEMPTS => {
                 attempt_tx.rollback().await.map_err(AppError::Database)?;
-                private_key_pem.zeroize();
             }
             Err(err) => {
-                private_key_pem.zeroize();
                 return Err(err);
             }
         }
@@ -638,6 +664,98 @@ pub async fn issue_certificate_from_csr_v2_in_tx(
                 return Ok(IssuedCertificate {
                     certificate,
                     private_key_pem: None,
+                    chain_pem: Some(chain_pem),
+                    idempotent_replay: false,
+                });
+            }
+            Err(error) if is_unique_violation(&error) => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
+                if attempt + 1 == SERIAL_INSERT_ATTEMPTS {
+                    return Err(AppError::conflict(
+                        "failed to allocate a unique certificate serial number",
+                    ));
+                }
+            }
+            Err(error) => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
+                return Err(error);
+            }
+        }
+    }
+
+    Err(AppError::conflict(
+        "failed to allocate a unique certificate serial number",
+    ))
+}
+
+/// Explicitly versioned managed generated-key bootstrap. The feature gate is
+/// off by default until per-issuer revocation publication is complete.
+pub async fn issue_generated_certificate_v2_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &Config,
+    authorized_tenant_id: Option<Uuid>,
+    input: IssueGeneratedCertificateV2,
+) -> Result<IssuedCertificate, AppError> {
+    if !config.pki_generated_key_issuance_enabled {
+        return Err(AppError::Forbidden);
+    }
+
+    let (_, stored_tenant_id) = identity::repo::lock_active_entity(tx, input.entity_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("entity not found"))?;
+    if stored_tenant_id != authorized_tenant_id {
+        return Err(AppError::Forbidden);
+    }
+    let subject = profile::load_subject(&mut **tx, input.entity_id).await?;
+    if subject.tenant_id() != stored_tenant_id {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "locked entity scope changed during certificate issuance"
+        )));
+    }
+
+    let certificate_profile = profile::resolve_for_subject_in_tx(tx, &subject, "client").await?;
+    let authority = authority_repo::lock_active_leaf_issuer_for_scope(tx, stored_tenant_id).await?;
+    validate_issuer_scope(&authority, stored_tenant_id)?;
+    let issuer = pki_core::PkiIssuer::from_managed_authority(&authority, &config.pki_ca_keys)?;
+    let mut generated = Some(pki_core::generate_leaf_request(&certificate_profile)?);
+
+    for attempt in 0..SERIAL_INSERT_ATTEMPTS {
+        let csr_pem = generated
+            .as_ref()
+            .map(pki_core::GeneratedLeafRequest::csr_pem)
+            .ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!(
+                    "generated leaf key was consumed before issuance completed"
+                ))
+            })?;
+        let issued = pki_core::issue_from_csr(
+            &certificate_profile,
+            &subject,
+            &issuer,
+            pki_core::IssueFromCsr {
+                csr_pem,
+                requested_ttl_seconds: input.ttl_secs,
+            },
+        )?;
+        let chain_pem = issued.chain_pem.clone();
+        let mut attempt_tx = tx.begin().await.map_err(AppError::Database)?;
+        let outcome =
+            persist_managed_certificate(&mut attempt_tx, input.entity_id, &authority, issued).await;
+        match outcome {
+            Ok(certificate) => {
+                attempt_tx.commit().await.map_err(AppError::Database)?;
+                return Ok(IssuedCertificate {
+                    certificate,
+                    private_key_pem: Some(OneTimePrivateKey::from_zeroizing(
+                        generated
+                            .take()
+                            .ok_or_else(|| {
+                                AppError::Internal(anyhow::anyhow!(
+                                    "generated leaf key was already consumed"
+                                ))
+                            })?
+                            .into_private_key_pem(),
+                    )),
                     chain_pem: Some(chain_pem),
                     idempotent_replay: false,
                 });

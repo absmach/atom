@@ -1,5 +1,9 @@
 # PR-006 — Generated-Key Tenant Leaf Issuance
 
+## Status
+
+Implemented by the PR-006 delivery branch.
+
 ## Objective
 
 Add one-time generated-key bootstrap using the same tenant-aware issuance pipeline.
