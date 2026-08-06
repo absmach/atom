@@ -164,6 +164,52 @@ attempt. Operators reconcile an uncertain client response by retrying the same
 request and checking the credential ID, issuance ledger, audit log, and outbox;
 there is no separately usable orphan artifact to import.
 
+## Managed generated-key bootstrap (v2)
+
+`issueGeneratedCertificateV2` uses the same stored entity, `client` profile,
+managed issuer, verification, savepoint, and transaction boundaries as v2 CSR
+signing. Its input contains only `entityId` and optional `ttlSecs`; tenant,
+issuer, profile, algorithm, names, extensions, and key references cannot be
+supplied by the caller. The first Atom-supported algorithm and size in the
+stored profile is used as the profile's generation preference.
+
+```graphql
+mutation BootstrapDevice($input: IssueGeneratedCertificateV2Input!) {
+  issueGeneratedCertificateV2(input: $input) {
+    privateKeyPem
+    chainPem
+    certificate {
+      credentialId
+      issuerId
+      certificatePem
+      profileId
+      identityUri
+    }
+  }
+}
+```
+
+The private key exists only in the one successful response. Atom stores the
+certificate and non-secret issuer/profile metadata, never the key, and exposes
+no reveal, recovery, escrow, or historical download operation. Secret response
+buffers are redacted from debug output and zeroized on drop where the Rust and
+cryptographic-library APIs permit it. Audit and outbox details contain only
+credential, serial, issuer, and profile identifiers.
+
+If the database write or commit fails, no credential, audit event, or outbox
+row survives and no key is returned. If the commit succeeds but the response is
+lost or cannot be serialized to the caller, the certificate remains visible in
+the credential list and in `certificate.issue` audit/outbox records, but its
+private key is permanently unrecoverable. Operators must treat that credential
+as unusable, disable or revoke it, and perform a new bootstrap; they must never
+log response bodies while investigating.
+
+This route is gated by `ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED`, which defaults
+to `false` in code, examples, and Compose. Keep it disabled in production until
+PR-010 completes per-issuer CRL and OCSP publication. The legacy
+`issueCertificate` mutation remains available as the explicit v1 migration
+path and is not silently redirected to managed authorities.
+
 ## Legacy CA files
 
 The original v1 issuer remains available for backward compatibility and loads

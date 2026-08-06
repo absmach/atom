@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+pub mod pki;
+
 use sqlx::PgPool;
 
 /// Connect to the test database and run all migrations.
