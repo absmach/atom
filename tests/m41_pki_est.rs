@@ -546,6 +546,62 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         .await,
     );
 
+    // Saturate this subject's persisted rate window without changing the
+    // service configuration, then prove both remaining mutation adapters emit
+    // structured failure observations on their service-error branches.
+    sqlx::query(
+        r#"UPDATE pki_enrollment_rate_windows
+           SET request_count = $2
+           WHERE scope_kind = 'entity' AND scope_id = $1"#,
+    )
+    .bind(entity)
+    .bind(i64::from(config.enrollment.entity_rate_limit.max_requests))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let encoded_csr = STANDARD.encode(csr_der(&first_csr));
+    for operation in ["simpleenroll", "serverkeygen"] {
+        let response = est_request(
+            address,
+            &server_cert_pem,
+            None,
+            "POST",
+            &format!("/.well-known/est/{operation}"),
+            Some(&basic),
+            Some("application/pkcs10"),
+            encoded_csr.as_bytes(),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 429, "{}", response.body);
+    }
+
+    for (event, mode, outcome, minimum) in [
+        ("certificate.enroll", "first", "error", 1_i64),
+        ("certificate.enroll", "serverkeygen", "error", 1_i64),
+        ("certificate.reenroll", "reenroll", "deny", 2_i64),
+    ] {
+        let observed: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*)
+               FROM event_outbox
+               WHERE event = $1
+                 AND payload->>'outcome' = $3
+                 AND payload->'details'->>'transport' = 'est'
+                 AND payload->'details'->>'mode' = $2"#,
+        )
+        .bind(event)
+        .bind(mode)
+        .bind(outcome)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            observed >= minimum,
+            "EST {mode} mutation failures must be observed"
+        );
+    }
+
     server_task.abort();
     let _ = server_task.await;
     fs::remove_dir_all(directory).ok();
