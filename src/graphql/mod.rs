@@ -3,6 +3,9 @@ pub mod api_endpoints;
 pub mod auth;
 pub mod authz;
 pub mod certificates;
+pub mod pki_authorities {
+    pub use crate::certs::authority::graphql::*;
+}
 pub mod credentials;
 pub mod entities;
 pub mod groups;

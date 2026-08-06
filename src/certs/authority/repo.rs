@@ -1,9 +1,12 @@
-use sqlx::{PgPool, Postgres};
+use chrono::{DateTime, Utc};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::error::{db_err, AppError};
 
-use super::AuthorityRecord;
+use super::{key_provider::EncryptedAuthorityKey, AuthorityKind, AuthorityRecord, AuthorityStatus};
+
+const PROVISIONING_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_504b_4933;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct EncryptedKeyRequirement {
@@ -36,6 +39,9 @@ const AUTHORITY_COLUMNS: &str = r#"
     wrapped_dek_nonce,
     key_encryption_key_id,
     encryption_algorithm,
+    provisioning_mode,
+    csr_pem,
+    failure_reason,
     created_at,
     updated_at,
     activated_at,
@@ -159,4 +165,363 @@ pub async fn encrypted_key_requirements(
     .fetch_all(pool)
     .await
     .map_err(db_err)
+}
+
+pub struct PendingAuthorityInsert<'a> {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub parent_id: Uuid,
+    pub kind: AuthorityKind,
+    pub version: i32,
+    pub subject: &'a str,
+    pub csr_pem: &'a str,
+    pub provisioning_mode: &'a str,
+    pub key: &'a EncryptedAuthorityKey,
+}
+
+pub struct CompletedAuthority {
+    pub subject: String,
+    pub serial_number: String,
+    pub fingerprint_sha256: String,
+    pub subject_key_id: String,
+    pub authority_key_id: Option<String>,
+    pub certificate_pem: String,
+    pub chain_pem: String,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+}
+
+pub async fn lock_provisioning(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(PROVISIONING_ADVISORY_LOCK_ID)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
+pub async fn lock_active_tenant(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM tenants WHERE id = $1 AND status = 'active' AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+pub async fn authority_by_id_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_id: Uuid,
+) -> Result<AuthorityRecord, AppError> {
+    let query = format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1 FOR UPDATE");
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(authority_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_err)
+}
+
+pub async fn authority_by_fingerprint(
+    tx: &mut Transaction<'_, Postgres>,
+    fingerprint_sha256: &str,
+) -> Result<Option<AuthorityRecord>, AppError> {
+    let query =
+        format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE fingerprint_sha256 = $1");
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(fingerprint_sha256)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)
+}
+
+pub async fn next_authority_version(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: AuthorityKind,
+    tenant_id: Option<Uuid>,
+) -> Result<i32, AppError> {
+    sqlx::query_scalar(
+        r#"SELECT COALESCE(MAX(version), 0) + 1
+           FROM pki_authorities
+           WHERE kind = $1 AND tenant_id IS NOT DISTINCT FROM $2"#,
+    )
+    .bind(kind)
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn pending_authority_for_scope(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: AuthorityKind,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<AuthorityRecord>, AppError> {
+    let query = format!(
+        r#"SELECT {AUTHORITY_COLUMNS}
+           FROM pki_authorities
+           WHERE kind = $1
+             AND tenant_id IS NOT DISTINCT FROM $2
+             AND status IN ('provisioning', 'pending_signature')
+           ORDER BY version DESC
+           LIMIT 1
+           FOR UPDATE"#
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(kind)
+        .bind(tenant_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)
+}
+
+pub async fn active_authority_for_scope(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: AuthorityKind,
+    tenant_id: Option<Uuid>,
+) -> Result<Option<AuthorityRecord>, AppError> {
+    let query = format!(
+        r#"SELECT {AUTHORITY_COLUMNS}
+           FROM pki_authorities
+           WHERE kind = $1
+             AND tenant_id IS NOT DISTINCT FROM $2
+             AND status = 'active'
+             AND not_before <= now()
+             AND not_after > now()
+           ORDER BY version DESC
+           LIMIT 1
+           FOR UPDATE"#
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(kind)
+        .bind(tenant_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)
+}
+
+pub async fn active_root(tx: &mut Transaction<'_, Postgres>) -> Result<AuthorityRecord, AppError> {
+    active_authority_for_scope(tx, AuthorityKind::Root, None)
+        .await?
+        .ok_or_else(|| AppError::not_found("no active root authority"))
+}
+
+pub async fn active_platform_intermediate(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<AuthorityRecord, AppError> {
+    active_authority_for_scope(tx, AuthorityKind::PlatformIntermediate, None)
+        .await?
+        .ok_or_else(|| AppError::not_found("no active platform intermediate authority"))
+}
+
+pub async fn insert_root_authority(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    version: i32,
+    completed: &CompletedAuthority,
+) -> Result<AuthorityRecord, AppError> {
+    sqlx::query(
+        r#"INSERT INTO pki_authorities (
+               id, kind, version, status, issuance_enabled, subject,
+               serial_number, fingerprint_sha256, subject_key_id,
+               authority_key_id, certificate_pem, chain_pem, not_before,
+               not_after, key_backend, provisioning_mode, activated_at
+           ) VALUES (
+               $1, 'root', $2, 'active', false, $3,
+               $4, $5, $6, $7, $8, $9, $10, $11,
+               'public_only', 'imported', now()
+           )"#,
+    )
+    .bind(id)
+    .bind(version)
+    .bind(&completed.subject)
+    .bind(&completed.serial_number)
+    .bind(&completed.fingerprint_sha256)
+    .bind(&completed.subject_key_id)
+    .bind(&completed.authority_key_id)
+    .bind(&completed.certificate_pem)
+    .bind(&completed.chain_pem)
+    .bind(completed.not_before)
+    .bind(completed.not_after)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    authority_by_id_for_update(tx, id).await
+}
+
+pub async fn insert_pending_authority(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &PendingAuthorityInsert<'_>,
+) -> Result<AuthorityRecord, AppError> {
+    sqlx::query(
+        r#"INSERT INTO pki_authorities (
+               id, tenant_id, parent_id, kind, version, status,
+               issuance_enabled, subject, key_backend, encrypted_private_key,
+               private_key_nonce, wrapped_dek, wrapped_dek_nonce,
+               key_encryption_key_id, encryption_algorithm, provisioning_mode,
+               csr_pem
+           ) VALUES (
+               $1, $2, $3, $4, $5, 'pending_signature',
+               false, $6, 'encrypted_database', $7,
+               $8, $9, $10, $11, $12, $13, $14
+           )"#,
+    )
+    .bind(input.id)
+    .bind(input.tenant_id)
+    .bind(input.parent_id)
+    .bind(input.kind)
+    .bind(input.version)
+    .bind(input.subject)
+    .bind(&input.key.encrypted_private_key)
+    .bind(&input.key.private_key_nonce)
+    .bind(&input.key.wrapped_dek)
+    .bind(&input.key.wrapped_dek_nonce)
+    .bind(&input.key.key_encryption_key_id)
+    .bind(&input.key.encryption_algorithm)
+    .bind(input.provisioning_mode)
+    .bind(input.csr_pem)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    authority_by_id_for_update(tx, input.id).await
+}
+
+pub async fn activate_authority(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_id: Uuid,
+    completed: &CompletedAuthority,
+    issuance_enabled: bool,
+) -> Result<AuthorityRecord, AppError> {
+    sqlx::query(
+        r#"UPDATE pki_authorities
+           SET status = 'active', issuance_enabled = $2, subject = $3,
+               serial_number = $4, fingerprint_sha256 = $5,
+               subject_key_id = $6, authority_key_id = $7,
+               certificate_pem = $8, chain_pem = $9, not_before = $10,
+               not_after = $11, failure_reason = NULL, activated_at = now(),
+               updated_at = now()
+           WHERE id = $1 AND status = 'pending_signature'"#,
+    )
+    .bind(authority_id)
+    .bind(issuance_enabled)
+    .bind(&completed.subject)
+    .bind(&completed.serial_number)
+    .bind(&completed.fingerprint_sha256)
+    .bind(&completed.subject_key_id)
+    .bind(&completed.authority_key_id)
+    .bind(&completed.certificate_pem)
+    .bind(&completed.chain_pem)
+    .bind(completed.not_before)
+    .bind(completed.not_after)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    authority_by_id_for_update(tx, authority_id).await
+}
+
+pub async fn mark_authority_failed(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_id: Uuid,
+    reason: &str,
+) -> Result<AuthorityRecord, AppError> {
+    sqlx::query(
+        r#"UPDATE pki_authorities
+           SET status = 'failed', issuance_enabled = false,
+               failure_reason = $2, updated_at = now()
+           WHERE id = $1 AND status IN ('provisioning', 'pending_signature')"#,
+    )
+    .bind(authority_id)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    authority_by_id_for_update(tx, authority_id).await
+}
+
+pub async fn retire_other_active_authorities(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_id: Uuid,
+    kind: AuthorityKind,
+    tenant_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        r#"UPDATE pki_authorities
+           SET status = 'retiring', issuance_enabled = false,
+               retiring_at = now(), updated_at = now()
+           WHERE id <> $1
+             AND kind = $2
+             AND tenant_id IS NOT DISTINCT FROM $3
+             AND status = 'active'
+           RETURNING id"#,
+    )
+    .bind(authority_id)
+    .bind(kind)
+    .bind(tenant_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn transition_authority(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_id: Uuid,
+    from: AuthorityStatus,
+    to: AuthorityStatus,
+) -> Result<AuthorityRecord, AppError> {
+    let result = sqlx::query(
+        r#"UPDATE pki_authorities
+           SET status = $3,
+               issuance_enabled = false,
+               retiring_at = CASE WHEN $3 = 'retiring' THEN COALESCE(retiring_at, now()) ELSE retiring_at END,
+               retired_at = CASE WHEN $3 = 'retired' THEN COALESCE(retired_at, now()) ELSE retired_at END,
+               updated_at = now()
+           WHERE id = $1 AND status = $2"#,
+    )
+    .bind(authority_id)
+    .bind(from)
+    .bind(to)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::conflict("authority lifecycle state changed"));
+    }
+    authority_by_id_for_update(tx, authority_id).await
+}
+
+pub async fn list_authorities(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+) -> Result<Vec<AuthorityRecord>, AppError> {
+    let query = format!(
+        r#"SELECT {AUTHORITY_COLUMNS}
+           FROM pki_authorities
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+           ORDER BY tenant_id NULLS FIRST, kind, version DESC"#
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)
+}
+
+pub async fn trust_bundle_authorities(pool: &PgPool) -> Result<Vec<AuthorityRecord>, AppError> {
+    let query = format!(
+        r#"SELECT {AUTHORITY_COLUMNS}
+           FROM pki_authorities
+           WHERE status IN ('active', 'retiring', 'retired')
+             AND certificate_pem IS NOT NULL
+             AND chain_pem IS NOT NULL
+           ORDER BY CASE kind WHEN 'root' THEN 0 ELSE 1 END,
+                    tenant_id NULLS FIRST, kind, version DESC"#
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)
 }

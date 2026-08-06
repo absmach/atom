@@ -1,6 +1,6 @@
 ---
 title: Certificates
-description: Atom-native certificate credentials, CA files, CRL, OCSP, and runtime lookup.
+description: Atom-native certificate credentials, managed authorities, trust distribution, CRL, OCSP, and runtime lookup.
 ---
 
 Certificates are credentials for machines. Instead of sending a password or API key, a client proves identity with a certificate during mTLS.
@@ -39,9 +39,56 @@ Atom owns the certificate lifecycle for issued client certificates:
 
 **What this means:** the operator mounts CA files. Atom uses them to issue a certificate for an entity. The issued certificate is stored as a credential row. Later, a runtime service receives an mTLS client certificate and asks Atom which entity it belongs to.
 
-## CA Files
+## Managed authorities
 
-Atom does not store CA certificates or CA private keys in Postgres. It loads issuer files during startup.
+Atom can provision a versioned private-CA hierarchy while keeping the production
+root key offline:
+
+- import only the root certificate as a `public_only` trust anchor;
+- generate an encrypted tenant-intermediate or platform-leaf-issuer key and CSR;
+- export the CSR for offline signing and import the signed CA certificate;
+- optionally provision a platform intermediate, then use the separately
+  authorized automated operation to sign tenant intermediates;
+- rotate issuers through `active`, `retiring`, and `retired` states without
+  deleting their validation history.
+
+The management mutations derive the subject, hierarchy, constraints, and tenant
+scope from stored state. Callers cannot submit an issuer ID, CA subject, key
+reference, or path-length constraint. Every managed tenant intermediate and the
+platform leaf issuer has `pathLen=0`, `CA=true`, `keyCertSign`, and `cRLSign`.
+
+Managed encrypted-database keys require a dedicated CA key-encryption key:
+
+```text
+ATOM_PKI_CA_KEY_ENCRYPTION_KEY=<base64 encoded 32-byte key>
+ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID=local-ca:v1
+```
+
+Generate this value independently from every JWT or credential-encryption key.
+Atom never accepts or stores the production root private key.
+
+The authenticated GraphQL API exposes the following lifecycle operations to
+callers holding `pki.provision` in the authority's stored scope:
+
+```text
+importRootAuthority
+beginTenantAuthorityProvisioning
+beginPlatformLeafIssuerProvisioning
+beginPlatformIntermediateProvisioning
+importSignedAuthority
+beginAuthorityRetirement
+completeAuthorityRetirement
+```
+
+`provisionTenantAuthorityAutomatically` additionally requires the platform-wide
+`pki.provision_automated` capability. Scoped access tokens cannot invoke CA
+lifecycle mutations.
+
+## Legacy CA files
+
+The original v1 issuer remains available for backward compatibility and loads
+issuer files during startup. Managed-authority provisioning does not alter v1
+leaf issuance until the later PKI issuance cutover.
 
 Production should use:
 
@@ -60,15 +107,19 @@ ATOM_CERTS_ROOT_CA_CERT_PATH=/certs/root-ca.crt
 ATOM_CERTS_ROOT_CA_KEY_PATH=/certs/root-ca.key
 ```
 
-Root issuer mode is less safe because the root private key is mounted into Atom. Production should prefer an intermediate issuer so the root private key can stay offline.
+Root issuer mode is less safe because the root private key is mounted into Atom.
+It is a legacy-development mode only. Production managed authorities use the
+offline-root flow above.
 
 ## What Is Stored
 
 | Item | Stored where |
 |---|---|
-| Root CA certificate | Mounted file |
-| Intermediate CA certificate | Mounted file |
-| Issuer private key | Mounted file, loaded at startup |
+| Managed root CA certificate | `pki_authorities` as `public_only` |
+| Managed intermediate certificate and chain | `pki_authorities` |
+| Managed issuer private key | Envelope-encrypted in `pki_authorities` |
+| Production root private key | Offline; never accepted by Atom |
+| Legacy v1 CA certificate/key | Mounted files, loaded at startup |
 | Issued leaf certificate | `credentials` row with `kind = certificate` |
 | Issued leaf private key | Returned once, never stored |
 | CSR private key | Never enters Atom |
@@ -80,9 +131,16 @@ These endpoints are public because clients and runtimes need to verify certifica
 
 ```text
 GET  /certs/ca-chain
+GET  /certs/trust-bundle.pem
 GET  /certs/crl
 POST /certs/ocsp
 ```
+
+`/certs/trust-bundle.pem` is assembled from current database authority state on
+every request. It returns an ETag derived from the bundle, accepts
+`If-None-Match`, and includes cache directives so relying parties can poll
+cheaply and notice a newly provisioned or rotated tenant authority without an
+Atom restart.
 
 ## Runtime Lookup
 

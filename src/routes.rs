@@ -61,6 +61,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health/ready", get(health::ready))
         // Public PKI artifacts
         .route("/certs/ca-chain", get(certs::http::ca_chain))
+        .route(
+            "/certs/trust-bundle.pem",
+            get(certs::authority::http::trust_bundle),
+        )
         .route("/certs/crl", get(certs::http::crl))
         .route("/certs/ocsp", post(certs::http::ocsp))
         // GraphQL
