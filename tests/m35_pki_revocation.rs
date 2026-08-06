@@ -184,10 +184,12 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
             .data(auth(common::admin_id(), None)),
         )
         .await;
-    assert!(errors_contain(
-        &legacy_managed.errors,
-        "requires revokeCertificateV2"
-    ));
+    assert!(errors_contain(&legacy_managed.errors, "not found"));
+    assert_eq!(
+        certificate_status(&pool, unaffected.credential_id).await,
+        "active",
+        "the legacy serial-only mutation must not see a managed credential"
+    );
 
     // PR-011's issuer-scoped uniqueness permits this duplicate across issuers;
     // keep the fixture in a rolled-back transaction so later assertions in
