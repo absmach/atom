@@ -4,9 +4,7 @@ use uuid::Uuid;
 
 use crate::error::{db_err, AppError};
 
-use super::{
-    key_provider::EncryptedAuthorityKey, AuthorityKind, AuthorityRecord, AuthorityStatus,
-};
+use super::{key_provider::EncryptedAuthorityKey, AuthorityKind, AuthorityRecord, AuthorityStatus};
 
 const PROVISIONING_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_504b_4933;
 
@@ -220,9 +218,7 @@ pub async fn authority_by_id_for_update(
     tx: &mut Transaction<'_, Postgres>,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
-    let query = format!(
-        "SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1 FOR UPDATE"
-    );
+    let query = format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1 FOR UPDATE");
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(authority_id)
         .fetch_one(&mut **tx)
@@ -234,9 +230,8 @@ pub async fn authority_by_fingerprint(
     tx: &mut Transaction<'_, Postgres>,
     fingerprint_sha256: &str,
 ) -> Result<Option<AuthorityRecord>, AppError> {
-    let query = format!(
-        "SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE fingerprint_sha256 = $1"
-    );
+    let query =
+        format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE fingerprint_sha256 = $1");
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(fingerprint_sha256)
         .fetch_optional(&mut **tx)
@@ -309,9 +304,7 @@ pub async fn active_authority_for_scope(
         .map_err(db_err)
 }
 
-pub async fn active_root(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<AuthorityRecord, AppError> {
+pub async fn active_root(tx: &mut Transaction<'_, Postgres>) -> Result<AuthorityRecord, AppError> {
     active_authority_for_scope(tx, AuthorityKind::Root, None)
         .await?
         .ok_or_else(|| AppError::not_found("no active root authority"))

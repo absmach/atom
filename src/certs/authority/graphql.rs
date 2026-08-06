@@ -59,7 +59,11 @@ impl AuthorityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         require_mutation_access(state, &auth, Scope::Platform).await?;
-        let mut tx = state.pool.begin().await.map_err(|error| gql_error(db_err(error)))?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
         let authority = provisioning::import_root_in_tx(&mut tx, &certificate_pem)
             .await
             .map_err(gql_error)?;
@@ -85,7 +89,11 @@ impl AuthorityMutation {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_mutation_access(state, &auth, Scope::Tenant(tenant_id)).await?;
-        let mut tx = state.pool.begin().await.map_err(|error| gql_error(db_err(error)))?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
         let authority = provisioning::begin_tenant_authority_in_tx(
             &mut tx,
             &state.config.pki_ca_keys,
@@ -113,13 +121,15 @@ impl AuthorityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         require_mutation_access(state, &auth, Scope::Platform).await?;
-        let mut tx = state.pool.begin().await.map_err(|error| gql_error(db_err(error)))?;
-        let authority = provisioning::begin_platform_leaf_issuer_in_tx(
-            &mut tx,
-            &state.config.pki_ca_keys,
-        )
-        .await
-        .map_err(gql_error)?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
+        let authority =
+            provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &state.config.pki_ca_keys)
+                .await
+                .map_err(gql_error)?;
         commit_authority_event(
             state,
             tx,
@@ -140,13 +150,15 @@ impl AuthorityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         require_mutation_access(state, &auth, Scope::Platform).await?;
-        let mut tx = state.pool.begin().await.map_err(|error| gql_error(db_err(error)))?;
-        let authority = provisioning::begin_platform_intermediate_in_tx(
-            &mut tx,
-            &state.config.pki_ca_keys,
-        )
-        .await
-        .map_err(gql_error)?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
+        let authority =
+            provisioning::begin_platform_intermediate_in_tx(&mut tx, &state.config.pki_ca_keys)
+                .await
+                .map_err(gql_error)?;
         commit_authority_event(
             state,
             tx,
@@ -173,7 +185,11 @@ impl AuthorityMutation {
             .await
             .map_err(gql_error)?;
         require_mutation_access(state, &auth, authority_scope(&existing)).await?;
-        let mut tx = state.pool.begin().await.map_err(|error| gql_error(db_err(error)))?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
         let outcome = provisioning::import_signed_authority_in_tx(
             &mut tx,
             &state.config.pki_ca_keys,
@@ -225,7 +241,11 @@ impl AuthorityMutation {
         )
         .await
         .map_err(gql_error)?;
-        let mut tx = state.pool.begin().await.map_err(|error| gql_error(db_err(error)))?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
         let outcome = provisioning::provision_tenant_automatically_in_tx(
             &mut tx,
             &state.config.pki_ca_keys,
@@ -281,16 +301,16 @@ impl AuthorityMutation {
             .await
             .map_err(gql_error)?;
         require_mutation_access(state, &auth, authority_scope(&existing)).await?;
-        let mut tx = state.pool.begin().await.map_err(|error| gql_error(db_err(error)))?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
         let authority = if complete {
             provisioning::complete_retirement_in_tx(&mut tx, authority_id).await
         } else {
-            provisioning::begin_retirement_in_tx(
-                &mut tx,
-                &state.config.pki_ca_keys,
-                authority_id,
-            )
-            .await
+            provisioning::begin_retirement_in_tx(&mut tx, &state.config.pki_ca_keys, authority_id)
+                .await
         }
         .map_err(gql_error)?;
         let event = if complete {

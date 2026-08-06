@@ -62,7 +62,10 @@ async fn ca_provisioning_is_validated_idempotent_and_restart_safe() {
     let pending = begin_tenant(&pool, &ca_keys, tenant_id).await;
     let wrong_tenant_cert = sign_csr(&pending, &root, |csr| {
         let mut subject = DistinguishedName::new();
-        subject.push(DnType::CommonName, "Atom Tenant attacker Intermediate CA v1");
+        subject.push(
+            DnType::CommonName,
+            "Atom Tenant attacker Intermediate CA v1",
+        );
         csr.params.distinguished_name = subject;
     });
     assert_failed(import_signed(&pool, &ca_keys, pending.id, &wrong_tenant_cert).await);
@@ -102,16 +105,13 @@ async fn ca_provisioning_is_validated_idempotent_and_restart_safe() {
     // A new version performs a one-active-issuer handover.
     let replacement_pending = begin_tenant(&pool, &ca_keys, tenant_id).await;
     let replacement_pem = sign_csr(&replacement_pending, &root, |_| {});
-    let replacement = import_signed(
-        &pool,
-        &ca_keys,
-        replacement_pending.id,
-        &replacement_pem,
-    )
-    .await;
+    let replacement =
+        import_signed(&pool, &ca_keys, replacement_pending.id, &replacement_pem).await;
     assert!(replacement.succeeded());
     assert_eq!(replacement.replaced_authorities, vec![valid.authority.id]);
-    let old = repo::authority_by_id(&pool, valid.authority.id).await.unwrap();
+    let old = repo::authority_by_id(&pool, valid.authority.id)
+        .await
+        .unwrap();
     assert_eq!(old.status, AuthorityStatus::Retiring);
     assert!(!old.issuance_enabled);
     assert_eq!(
@@ -142,19 +142,17 @@ async fn ca_provisioning_is_validated_idempotent_and_restart_safe() {
     let platform_ca_pending = begin_platform_intermediate(&pool, &ca_keys).await;
     assert_generated_ca_csr(&platform_ca_pending, BasicConstraints::Constrained(1));
     let platform_ca_pem = sign_csr(&platform_ca_pending, &root, |_| {});
-    let platform_ca = import_signed(
-        &pool,
-        &ca_keys,
-        platform_ca_pending.id,
-        &platform_ca_pem,
-    )
-    .await;
+    let platform_ca =
+        import_signed(&pool, &ca_keys, platform_ca_pending.id, &platform_ca_pem).await;
     assert!(platform_ca.succeeded());
     assert!(!platform_ca.authority.issuance_enabled);
     let automated_tenant = create_tenant(&pool, "pki-automated").await;
     let automated = provision_automatically(&pool, &ca_keys, automated_tenant).await;
     assert!(automated.succeeded());
-    assert_eq!(automated.authority.parent_id, Some(platform_ca.authority.id));
+    assert_eq!(
+        automated.authority.parent_id,
+        Some(platform_ca.authority.id)
+    );
     assert!(automated.authority.issuance_enabled);
 
     // Trust bundle generation is database-backed and changes without a restart.
@@ -193,13 +191,8 @@ async fn ca_provisioning_is_validated_idempotent_and_restart_safe() {
     let restarted_pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
-    let restarted = import_signed(
-        &restarted_pool,
-        &ca_keys,
-        restart_pending.id,
-        &restart_cert,
-    )
-    .await;
+    let restarted =
+        import_signed(&restarted_pool, &ca_keys, restart_pending.id, &restart_cert).await;
     assert!(restarted.succeeded());
     restarted_pool.close().await;
 
@@ -239,7 +232,9 @@ async fn ca_provisioning_is_validated_idempotent_and_restart_safe() {
 fn test_root(common_name: &str, starts_in_days: i64, lasts_days: i64) -> TestRoot {
     let key = KeyPair::generate().unwrap();
     let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-    params.distinguished_name.push(DnType::CommonName, common_name);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(2));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.key_identifier_method = KeyIdMethod::Sha256;
@@ -254,8 +249,8 @@ fn sign_csr(
     root: &TestRoot,
     mutate: impl FnOnce(&mut CertificateSigningRequestParams),
 ) -> String {
-    let mut csr = CertificateSigningRequestParams::from_pem(pending.csr_pem.as_deref().unwrap())
-        .unwrap();
+    let mut csr =
+        CertificateSigningRequestParams::from_pem(pending.csr_pem.as_deref().unwrap()).unwrap();
     csr.params.not_before = OffsetDateTime::now_utc() - TimeDuration::minutes(1);
     csr.params.not_after = OffsetDateTime::now_utc() + TimeDuration::days(30);
     mutate(&mut csr);
@@ -282,10 +277,13 @@ fn sign_with_wrong_key(pending: &AuthorityRecord, root: &TestRoot) -> String {
 }
 
 fn assert_generated_ca_csr(authority: &AuthorityRecord, expected: BasicConstraints) {
-    let parsed = CertificateSigningRequestParams::from_pem(authority.csr_pem.as_deref().unwrap())
-        .unwrap();
+    let parsed =
+        CertificateSigningRequestParams::from_pem(authority.csr_pem.as_deref().unwrap()).unwrap();
     assert_eq!(parsed.params.is_ca, IsCa::Ca(expected));
-    assert!(parsed.params.key_usages.contains(&KeyUsagePurpose::KeyCertSign));
+    assert!(parsed
+        .params
+        .key_usages
+        .contains(&KeyUsagePurpose::KeyCertSign));
     assert!(parsed.params.key_usages.contains(&KeyUsagePurpose::CrlSign));
 }
 
@@ -303,16 +301,11 @@ async fn import_root(pool: &PgPool, pem: &str) -> AuthorityRecord {
     authority
 }
 
-async fn begin_tenant(
-    pool: &PgPool,
-    ca_keys: &PkiCaKeyConfig,
-    tenant_id: Uuid,
-) -> AuthorityRecord {
+async fn begin_tenant(pool: &PgPool, ca_keys: &PkiCaKeyConfig, tenant_id: Uuid) -> AuthorityRecord {
     let mut tx = pool.begin().await.unwrap();
-    let authority =
-        provisioning::begin_tenant_authority_in_tx(&mut tx, ca_keys, tenant_id)
-            .await
-            .unwrap();
+    let authority = provisioning::begin_tenant_authority_in_tx(&mut tx, ca_keys, tenant_id)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     authority
 }
@@ -334,10 +327,7 @@ async fn begin_platform_leaf(pool: &PgPool, ca_keys: &PkiCaKeyConfig) -> Authori
     authority
 }
 
-async fn begin_platform_intermediate(
-    pool: &PgPool,
-    ca_keys: &PkiCaKeyConfig,
-) -> AuthorityRecord {
+async fn begin_platform_intermediate(pool: &PgPool, ca_keys: &PkiCaKeyConfig) -> AuthorityRecord {
     let mut tx = pool.begin().await.unwrap();
     let authority = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
         .await
@@ -352,10 +342,9 @@ async fn provision_automatically(
     tenant_id: Uuid,
 ) -> provisioning::AuthorityImportOutcome {
     let mut tx = pool.begin().await.unwrap();
-    let outcome =
-        provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
-            .await
-            .unwrap();
+    let outcome = provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     outcome
 }

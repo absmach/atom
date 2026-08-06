@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub mod key_provider;
 pub mod graphql;
 pub mod http;
+pub mod key_provider;
 pub mod provisioning;
 pub mod repo;
 

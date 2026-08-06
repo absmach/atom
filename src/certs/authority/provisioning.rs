@@ -2,11 +2,7 @@ use std::collections::HashSet;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
-use p256::{
-    elliptic_curve::sec1::ToEncodedPoint,
-    pkcs8::DecodePublicKey,
-    PublicKey,
-};
+use p256::{elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePublicKey, PublicKey};
 use rand::{rngs::OsRng, RngCore};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyIdMethod, KeyUsagePurpose,
@@ -16,18 +12,14 @@ use ring::digest;
 use sqlx::{PgPool, Postgres, Transaction};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-use x509_parser::{
-    extensions::ParsedExtension,
-    pem::parse_x509_pem,
-    prelude::X509Certificate,
-};
+use x509_parser::{extensions::ParsedExtension, pem::parse_x509_pem, prelude::X509Certificate};
 
 use crate::{config::PkiCaKeyConfig, error::AppError};
 
 use super::{
     key_provider::{
-        AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider,
-        EncryptedAuthorityKey, EncryptedDatabaseKeyProvider,
+        AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider, EncryptedAuthorityKey,
+        EncryptedDatabaseKeyProvider,
     },
     repo, AuthorityKind, AuthorityRecord, AuthorityStatus,
 };
@@ -123,9 +115,7 @@ pub async fn import_root_in_tx(
     let parsed = parse_authority_certificate(certificate_pem)?;
     validate_root_certificate(&parsed)?;
 
-    if let Some(existing) =
-        repo::authority_by_fingerprint(tx, &parsed.fingerprint_sha256).await?
-    {
+    if let Some(existing) = repo::authority_by_fingerprint(tx, &parsed.fingerprint_sha256).await? {
         if existing.kind == AuthorityKind::Root {
             return Ok(existing);
         }
@@ -199,12 +189,9 @@ pub async fn provision_tenant_automatically_in_tx(
     repo::lock_provisioning(tx).await?;
     repo::lock_active_tenant(tx, tenant_id).await?;
 
-    if let Some(active) = repo::active_authority_for_scope(
-        tx,
-        AuthorityKind::TenantIntermediate,
-        Some(tenant_id),
-    )
-    .await?
+    if let Some(active) =
+        repo::active_authority_for_scope(tx, AuthorityKind::TenantIntermediate, Some(tenant_id))
+            .await?
     {
         return Ok(AuthorityImportOutcome {
             authority: active,
@@ -212,12 +199,9 @@ pub async fn provision_tenant_automatically_in_tx(
             replaced_authorities: Vec::new(),
         });
     }
-    if let Some(existing) = repo::pending_authority_for_scope(
-        tx,
-        AuthorityKind::TenantIntermediate,
-        Some(tenant_id),
-    )
-    .await?
+    if let Some(existing) =
+        repo::pending_authority_for_scope(tx, AuthorityKind::TenantIntermediate, Some(tenant_id))
+            .await?
     {
         return Err(AppError::conflict(format!(
             "authority {} is already waiting for an offline signature",
@@ -313,9 +297,7 @@ async fn import_signed_authority_locked(
         });
     }
 
-    if let Some(existing) =
-        repo::authority_by_fingerprint(tx, &parsed.fingerprint_sha256).await?
-    {
+    if let Some(existing) = repo::authority_by_fingerprint(tx, &parsed.fingerprint_sha256).await? {
         if existing.id != authority.id {
             let reason = "certificate was already imported for another authority".to_string();
             let failed = repo::mark_authority_failed(tx, authority.id, &reason).await?;
@@ -555,13 +537,26 @@ fn validate_imported_authority(
         .as_deref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("parent certificate is missing")))?;
     let parsed_parent = parse_authority_certificate(parent_pem)?;
+    validate_ca_shape(parent.kind, &parsed_parent)?;
+    if parent.fingerprint_sha256.as_deref() != Some(&parsed_parent.fingerprint_sha256) {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "stored parent certificate metadata does not match its certificate"
+        )));
+    }
     let (_, child) = x509_parser::parse_x509_certificate(&certificate.der)
         .map_err(|_| AppError::bad_request("invalid signed authority certificate"))?;
     let (_, issuer) = x509_parser::parse_x509_certificate(&parsed_parent.der)
         .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid parent certificate")))?;
+    if child.issuer() != issuer.subject() {
+        return Err(AppError::bad_request(
+            "authority certificate issuer does not match its intended parent",
+        ));
+    }
     child
         .verify_signature(Some(issuer.public_key()))
-        .map_err(|_| AppError::bad_request("authority certificate has the wrong parent signature"))?;
+        .map_err(|_| {
+            AppError::bad_request("authority certificate has the wrong parent signature")
+        })?;
     if certificate.authority_key_id.as_deref() != Some(parsed_parent.subject_key_id.as_slice()) {
         return Err(AppError::bad_request(
             "authority key identifier does not match parent subject key identifier",
@@ -606,7 +601,9 @@ fn validate_ca_shape(
 ) -> Result<(), AppError> {
     let now = Utc::now();
     if certificate.not_before > now + chrono::Duration::seconds(CA_CLOCK_SKEW_SECS) {
-        return Err(AppError::bad_request("authority certificate is not yet valid"));
+        return Err(AppError::bad_request(
+            "authority certificate is not yet valid",
+        ));
     }
     if certificate.not_after <= now {
         return Err(AppError::bad_request("authority certificate is expired"));
@@ -620,7 +617,9 @@ fn validate_ca_shape(
             ))
         }
         AuthorityKind::PlatformIntermediate
-            if certificate.path_len_constraint.is_some_and(|path_len| path_len < 1) =>
+            if certificate
+                .path_len_constraint
+                .is_some_and(|path_len| path_len < 1) =>
         {
             Err(AppError::bad_request(
                 "platform intermediate must permit one subordinate CA level",
@@ -633,12 +632,12 @@ fn validate_ca_shape(
     }
 }
 
-fn parse_authority_certificate(certificate_pem: &str) -> Result<ParsedAuthorityCertificate, AppError> {
+fn parse_authority_certificate(
+    certificate_pem: &str,
+) -> Result<ParsedAuthorityCertificate, AppError> {
     let (remaining, pem) = parse_x509_pem(certificate_pem.as_bytes())
         .map_err(|_| AppError::bad_request("invalid authority certificate PEM"))?;
-    if pem.label != "CERTIFICATE"
-        || !remaining.iter().all(|byte| byte.is_ascii_whitespace())
-    {
+    if pem.label != "CERTIFICATE" || !remaining.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Err(AppError::bad_request(
             "authority import accepts exactly one certificate and no private key material",
         ));
@@ -649,9 +648,13 @@ fn parse_authority_certificate(certificate_pem: &str) -> Result<ParsedAuthorityC
         .tbs_certificate
         .basic_constraints()
         .map_err(|_| AppError::bad_request("invalid authority basic constraints"))?
-        .ok_or_else(|| AppError::bad_request("authority certificate is missing basic constraints"))?;
+        .ok_or_else(|| {
+            AppError::bad_request("authority certificate is missing basic constraints")
+        })?;
     if !basic.value.ca {
-        return Err(AppError::bad_request("authority certificate must have CA=true"));
+        return Err(AppError::bad_request(
+            "authority certificate must have CA=true",
+        ));
     }
     let usage = cert
         .tbs_certificate
@@ -699,7 +702,9 @@ fn parse_authority_certificate(certificate_pem: &str) -> Result<ParsedAuthorityC
     }
     let subject_key_id = subject_key_id
         .filter(|key_id| !key_id.is_empty())
-        .ok_or_else(|| AppError::bad_request("authority certificate is missing subject key identifier"))?;
+        .ok_or_else(|| {
+            AppError::bad_request("authority certificate is missing subject key identifier")
+        })?;
     let common_name = certificate_common_name(&cert)?;
     let not_before = DateTime::<Utc>::from_timestamp(cert.validity().not_before.timestamp(), 0)
         .ok_or_else(|| AppError::bad_request("invalid authority notBefore"))?;
@@ -739,9 +744,14 @@ fn certificate_common_name(certificate: &X509Certificate<'_>) -> Result<String, 
     Ok(name)
 }
 
-fn ca_certificate_params(kind: AuthorityKind, common_name: &str) -> Result<CertificateParams, AppError> {
+fn ca_certificate_params(
+    kind: AuthorityKind,
+    common_name: &str,
+) -> Result<CertificateParams, AppError> {
     let mut params = CertificateParams::new(Vec::<String>::new()).map_err(rcgen_error)?;
-    params.distinguished_name.push(DnType::CommonName, common_name);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
     let path_len = match kind {
         AuthorityKind::PlatformIntermediate => 1,
         AuthorityKind::PlatformLeafIssuer | AuthorityKind::TenantIntermediate => 0,
@@ -784,10 +794,7 @@ fn completed_authority(
         serial_number: certificate.serial_number.clone(),
         fingerprint_sha256: certificate.fingerprint_sha256.clone(),
         subject_key_id: hex::encode(&certificate.subject_key_id),
-        authority_key_id: certificate
-            .authority_key_id
-            .as_ref()
-            .map(hex::encode),
+        authority_key_id: certificate.authority_key_id.as_ref().map(hex::encode),
         certificate_pem: certificate.pem.clone(),
         chain_pem: chain_pem.to_string(),
         not_before: certificate.not_before,
@@ -808,7 +815,10 @@ fn ensure_parent_available(parent: &AuthorityRecord) -> Result<(), AppError> {
         return Err(AppError::bad_request("parent authority is not active"));
     }
     let now = Utc::now();
-    if !parent.not_before.is_some_and(|not_before| not_before <= now) {
+    if !parent
+        .not_before
+        .is_some_and(|not_before| not_before <= now)
+    {
         return Err(AppError::bad_request("parent authority is not yet valid"));
     }
     if !parent.not_after.is_some_and(|not_after| now < not_after) {
@@ -855,7 +865,9 @@ fn key_provider_error(error: impl std::fmt::Display) -> AppError {
 }
 
 fn rcgen_error(error: rcgen::Error) -> AppError {
-    AppError::Internal(anyhow::anyhow!("authority certificate operation failed: {error}"))
+    AppError::Internal(anyhow::anyhow!(
+        "authority certificate operation failed: {error}"
+    ))
 }
 
 #[cfg(test)]
@@ -866,7 +878,9 @@ mod tests {
 
     fn test_ca_params(common_name: &str, path_len: u8) -> CertificateParams {
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
-        params.distinguished_name.push(DnType::CommonName, common_name);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(path_len));
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         params.key_identifier_method = KeyIdMethod::Sha256;
@@ -893,8 +907,8 @@ mod tests {
             .self_signed(&key)
             .expect("certificate");
         let parsed = parse_authority_certificate(&certificate.pem()).expect("parse");
-        let error = validate_ca_shape(AuthorityKind::PlatformLeafIssuer, &parsed)
-            .expect_err("path length");
+        let error =
+            validate_ca_shape(AuthorityKind::PlatformLeafIssuer, &parsed).expect_err("path length");
         assert!(error.to_string().contains("pathLenConstraint=0"));
     }
 
