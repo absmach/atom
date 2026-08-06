@@ -322,7 +322,6 @@ fn decode_request_body(max_der: usize, body: &[u8]) -> Result<Vec<u8>, AppError>
     Ok(der)
 }
 
-
 /// Derive the largest DER request whose canonical PEM representation still
 /// fits the enrollment service's representation-independent CSR limit.
 pub(super) fn maximum_der_csr_bytes(max_pem_bytes: usize) -> usize {
