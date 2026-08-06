@@ -119,19 +119,45 @@ pub struct LeafBasicConstraints {
 
 #[derive(Debug, Clone)]
 pub struct CertificateProfile {
-    pub id: Uuid,
-    pub tenant_id: Option<Uuid>,
-    pub base_profile_id: Option<Uuid>,
-    pub name: String,
-    pub permitted_key_algorithms: Vec<KeyAlgorithmRule>,
-    pub default_ttl_seconds: u64,
-    pub maximum_ttl_seconds: u64,
-    pub renewal_threshold_seconds: u64,
-    pub key_usages: Vec<KeyUsage>,
-    pub extended_key_usages: Vec<ExtendedKeyUsage>,
-    pub san_policy: SanPolicy,
-    pub identity_uri_template: String,
-    pub basic_constraints: LeafBasicConstraints,
+    pub(crate) id: Uuid,
+    pub(crate) tenant_id: Option<Uuid>,
+    pub(crate) base_profile_id: Option<Uuid>,
+    pub(crate) name: String,
+    pub(crate) permitted_key_algorithms: Vec<KeyAlgorithmRule>,
+    pub(crate) default_ttl_seconds: u64,
+    pub(crate) maximum_ttl_seconds: u64,
+    pub(crate) renewal_threshold_seconds: u64,
+    pub(crate) key_usages: Vec<KeyUsage>,
+    pub(crate) extended_key_usages: Vec<ExtendedKeyUsage>,
+    pub(crate) san_policy: SanPolicy,
+    pub(crate) identity_uri_template: String,
+    pub(crate) basic_constraints: LeafBasicConstraints,
+}
+
+impl CertificateProfile {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn default_ttl_seconds(&self) -> u64 {
+        self.default_ttl_seconds
+    }
+
+    pub fn maximum_ttl_seconds(&self) -> u64 {
+        self.maximum_ttl_seconds
+    }
+
+    pub fn renewal_threshold_seconds(&self) -> u64 {
+        self.renewal_threshold_seconds
+    }
+
+    pub fn extended_key_usages(&self) -> &[ExtendedKeyUsage] {
+        &self.extended_key_usages
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromRow)]

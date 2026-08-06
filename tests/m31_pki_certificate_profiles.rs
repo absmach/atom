@@ -50,8 +50,8 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     let server = profile::resolve_for_subject(&pool, &tenant_subject, "server")
         .await
         .unwrap();
-    assert_eq!(client.extended_key_usages.len(), 1);
-    assert_eq!(server.extended_key_usages.len(), 1);
+    assert_eq!(client.extended_key_usages().len(), 1);
+    assert_eq!(server.extended_key_usages().len(), 1);
 
     let combined_id = insert_platform_profile(
         &pool,
@@ -71,7 +71,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     let combined = profile::resolve_for_subject(&pool, &tenant_subject, "combined")
         .await
         .unwrap();
-    assert_eq!(combined.id, combined_id);
+    assert_eq!(combined.id(), combined_id);
 
     let now = Utc::now().with_nanosecond(0).unwrap();
     let issuer = test_issuer(now, 30 * 24 * 60 * 60);
@@ -156,10 +156,35 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         csr(|params| params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth]);
     assert!(issue(&client, &tenant_subject, &issuer, &arbitrary_eku, None, now).is_err());
 
-    let mut wrong_size_profile = client.clone();
-    wrong_size_profile.permitted_key_algorithms[0].sizes = vec![384];
+    let p384_id = insert_platform_profile(
+        &pool,
+        "p384_only",
+        3600,
+        7200,
+        json!({
+            "dns":{"mode":"deny","values":[]},
+            "ip":{"mode":"deny","values":[]},
+            "email":{"mode":"deny","values":[]},
+            "uri":{"mode":"identity","values":[]}
+        }),
+        &["digital_signature"],
+        &["client_auth"],
+    )
+    .await;
+    sqlx::query(
+        r#"UPDATE certificate_profiles
+           SET permitted_key_algorithms = '[{"algorithm":"ecdsa","sizes":[384]}]'::jsonb
+           WHERE id = $1"#,
+    )
+    .bind(p384_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let p384_profile = profile::resolve_for_subject(&pool, &tenant_subject, "p384_only")
+        .await
+        .unwrap();
     assert!(issue(
-        &wrong_size_profile,
+        &p384_profile,
         &tenant_subject,
         &issuer,
         &plain_csr,
@@ -167,6 +192,21 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         now
     )
     .is_err());
+    let p384_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+    let p384_csr = CertificateParams::default()
+        .serialize_request(&p384_key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let p384_cert = issue(
+        &p384_profile,
+        &tenant_subject,
+        &issuer,
+        &p384_csr,
+        None,
+        now,
+    )
+    .unwrap();
 
     insert_platform_profile(
         &pool,
@@ -322,7 +362,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     let tenant_override = profile::resolve_for_subject(&pool, &tenant_subject, "tenant_ceiling")
         .await
         .unwrap();
-    assert_eq!(tenant_override.maximum_ttl_seconds, 3600);
+    assert_eq!(tenant_override.maximum_ttl_seconds(), 3600);
     let narrowed_platform = sqlx::query(
         "UPDATE certificate_profiles SET default_ttl_seconds = 3000, maximum_ttl_seconds = 3500 WHERE id = $1",
     )
@@ -357,18 +397,34 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     .unwrap();
 
     let boundary_issuer = test_issuer(now, 3600);
-    let mut boundary_profile = client.clone();
-    boundary_profile.default_ttl_seconds = 3600;
-    boundary_profile.maximum_ttl_seconds = 3601;
-    assert!(issue(
+    insert_platform_profile(
+        &pool,
+        "validity_boundary",
+        3600,
+        3601,
+        json!({
+            "dns":{"mode":"deny","values":[]},
+            "ip":{"mode":"deny","values":[]},
+            "email":{"mode":"deny","values":[]},
+            "uri":{"mode":"identity","values":[]}
+        }),
+        &["digital_signature"],
+        &["client_auth"],
+    )
+    .await;
+    let boundary_profile =
+        profile::resolve_for_subject(&pool, &tenant_subject, "validity_boundary")
+            .await
+            .unwrap();
+    let boundary_cert = issue(
         &boundary_profile,
         &tenant_subject,
         &boundary_issuer,
         &plain_csr,
         Some(3600),
-        now
+        now,
     )
-    .is_ok());
+    .unwrap();
     assert!(issue(
         &boundary_profile,
         &tenant_subject,
@@ -389,6 +445,8 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         &dns_allowlist_cert,
         &dns_template_cert,
         &tenant_override_cert,
+        &p384_cert,
+        &boundary_cert,
     ] {
         assert_openssl_profile(certificate);
     }
