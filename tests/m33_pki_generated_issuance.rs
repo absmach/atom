@@ -225,7 +225,10 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
                   credentialId certificatePem issuerId profileId identityUri
                 }} }}"#
             ))
-            .data(auth(entity_a, Some(tenant_a))),
+            // Credential reads require an explicit read/manage capability;
+            // use the seeded platform administrator so this assertion tests
+            // the persisted response shape rather than self-management auth.
+            .data(auth(common::admin_id(), None)),
         )
         .await;
     assert!(retrieved.errors.is_empty(), "{:?}", retrieved.errors);
