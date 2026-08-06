@@ -144,6 +144,7 @@ pub struct RevokeCertificateV2 {
 #[derive(Debug, Clone)]
 pub struct CertificateRevocationResult {
     pub certificate: CertificateRecord,
+    pub issuer_fingerprint_sha256: Option<String>,
     pub reason: String,
     pub actor_entity_id: Option<Uuid>,
     pub revoked_at: DateTime<Utc>,
@@ -1264,6 +1265,7 @@ pub async fn revoke_certificate_v2_in_tx(
         let revocation = repo::certificate_revocation_by_id(&mut **tx, current.id).await?;
         return Ok(CertificateRevocationResult {
             certificate: record_from_row(current)?,
+            issuer_fingerprint_sha256: revocation.issuer_fingerprint_sha256,
             reason: revocation.reason,
             actor_entity_id: revocation.actor_entity_id,
             revoked_at: revocation.revoked_at,
@@ -1291,6 +1293,7 @@ pub async fn revoke_certificate_v2_in_tx(
     let certificate = record_from_row(repo::fetch_certificate_by_id(&mut **tx, current.id).await?)?;
     Ok(CertificateRevocationResult {
         certificate,
+        issuer_fingerprint_sha256: revocation.issuer_fingerprint_sha256,
         reason: revocation.reason,
         actor_entity_id: revocation.actor_entity_id,
         revoked_at: revocation.revoked_at,

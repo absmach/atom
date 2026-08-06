@@ -530,7 +530,7 @@ async fn revoke_certificate_exact(
         "credential_id": revoked.certificate.credential_id,
         "entity_id": revoked.certificate.entity_id,
         "issuer_id": revoked.certificate.issuer_id,
-        "issuer_fingerprint_sha256": revoked.certificate.issuer_fingerprint_sha256,
+        "issuer_fingerprint_sha256": revoked.issuer_fingerprint_sha256,
         "serial_number": revoked.certificate.serial_number,
         "reason": revoked.reason,
         "revoked_at": revoked.revoked_at,
