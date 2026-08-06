@@ -69,6 +69,9 @@ pub struct Config {
     pub auth_exchange_code_expiry_secs: u64,
     pub login_failure_limit: i64,
     pub login_failure_window_secs: i64,
+    /// One-time managed leaf-key bootstrap. This remains opt-in until the
+    /// issuer-aware revocation publication path is complete.
+    pub pki_generated_key_issuance_enabled: bool,
     pub certs_enabled: bool,
     pub certs_ca_mode: CertsCaMode,
     pub certs_root_ca_cert_path: Option<String>,
@@ -567,6 +570,10 @@ impl Config {
             auth_exchange_code_expiry_secs: env_u64("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", 300),
             login_failure_limit: env_positive_i64("ATOM_LOGIN_FAILURE_LIMIT", 5)?,
             login_failure_window_secs: env_positive_i64("ATOM_LOGIN_FAILURE_WINDOW_SECS", 15 * 60)?,
+            pki_generated_key_issuance_enabled: env_bool_default(
+                "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
+                false,
+            ),
             certs_enabled: env_bool_default("ATOM_CERTS_ENABLED", true),
             certs_ca_mode: CertsCaMode::from_env_value(
                 &std::env::var("ATOM_CERTS_CA_MODE")
@@ -642,6 +649,7 @@ impl Config {
             auth_exchange_code_expiry_secs: 300,
             login_failure_limit: 5,
             login_failure_window_secs: 15 * 60,
+            pki_generated_key_issuance_enabled: false,
             certs_enabled: false,
             certs_ca_mode: CertsCaMode::FileIntermediateIssuer,
             certs_root_ca_cert_path: None,
@@ -1141,6 +1149,10 @@ mod tests {
         assert_eq!(cfg.audit_retention.days, 365);
         assert_eq!(cfg.login_failure_limit, 5);
         assert_eq!(cfg.login_failure_window_secs, 900);
+        assert!(
+            !cfg.pki_generated_key_issuance_enabled,
+            "managed generated-key issuance must default off"
+        );
         assert!(cfg.rate_limits.enabled);
         assert!(
             !cfg.graphql_limits.introspection_enabled,
@@ -1241,6 +1253,22 @@ mod tests {
 
         let cfg = Config::from_env().expect("config");
         assert!(cfg.graphql_limits.introspection_enabled);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn managed_generated_key_issuance_requires_explicit_opt_in() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("config");
+        assert!(!cfg.pki_generated_key_issuance_enabled);
+
+        std::env::set_var("ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED", "true");
+        let cfg = Config::from_env().expect("config");
+        assert!(cfg.pki_generated_key_issuance_enabled);
 
         clear_hardening_env();
     }
@@ -1424,6 +1452,7 @@ mod tests {
             "ATOM_AUDIT_CLEANUP_BATCH_SIZE",
             "ATOM_LOGIN_FAILURE_LIMIT",
             "ATOM_LOGIN_FAILURE_WINDOW_SECS",
+            "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
             "ATOM_RATE_LIMIT_ENABLED",
             "ATOM_TRUSTED_PROXY_CIDRS",
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
