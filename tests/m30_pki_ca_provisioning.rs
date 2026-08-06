@@ -154,6 +154,12 @@ async fn ca_provisioning_is_validated_idempotent_and_restart_safe() {
     });
     assert_failed(import_signed(&pool, &ca_keys, pending.id, &excessive_path).await);
 
+    let pending = begin_tenant(&pool, &ca_keys, tenant_id).await;
+    let excessive_validity = sign_csr(&pending, &root, |csr| {
+        csr.params.not_after = root.params.not_after + TimeDuration::days(1);
+    });
+    assert_failed(import_signed(&pool, &ca_keys, pending.id, &excessive_validity).await);
+
     // The valid offline flow activates exactly the generated key and chain.
     let pending = begin_tenant(&pool, &ca_keys, tenant_id).await;
     let signed = sign_csr(&pending, &root, |_| {});
