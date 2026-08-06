@@ -205,7 +205,7 @@ INSERT INTO certificate_profiles (
         'server',
         '[{"algorithm":"ecdsa","sizes":[256]}]'::jsonb,
         86400, 604800, 86400,
-        ARRAY['digital_signature','key_encipherment']::TEXT[],
+        ARRAY['digital_signature']::TEXT[],
         ARRAY['server_auth']::TEXT[],
         '{
             "dns":{"mode":"deny","values":[]},

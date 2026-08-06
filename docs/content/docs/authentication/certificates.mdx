@@ -57,6 +57,33 @@ scope from stored state. Callers cannot submit an issuer ID, CA subject, key
 reference, or path-length constraint. Every managed tenant intermediate and the
 platform leaf issuer has `pathLen=0`, `CA=true`, `keyCertSign`, and `cRLSign`.
 
+## Certificate profiles
+
+Managed leaf shape is stored in `certificate_profiles`, rather than selected by
+certificate-construction branches. Atom ships conservative `client` and
+`server` platform profiles. The client profile contains only `clientAuth`; the
+server profile contains only `serverAuth`. A certificate carrying both usages
+requires an additional explicit profile row.
+
+Each profile records permitted key algorithms and sizes, default and maximum
+validity, the renewal threshold, key usages, extended key usages, per-SAN-type
+policy, leaf basic constraints, and the canonical identity URI template. A
+tenant override references a platform profile and may shorten its time limits
+or narrow its SAN policy, but cannot widen the platform ceiling.
+
+The PKI core derives identity from the stored entity and tenant:
+
+```text
+urn:atom:tenant:<tenant-id>:entity:<entity-id>
+urn:atom:entity:<entity-id>                  # global entity
+```
+
+CSR signatures are verified. Requested certificate extensions are not trusted:
+CA capability, CA key usages, non-profile EKUs, identity substitution, and SANs
+outside the stored policy are rejected. The resulting leaf points to the
+issuer's configured OCSP, CA-issuers, and CRL routes. The legacy v1 issuance API
+continues to use its existing behavior until the managed issuance cutover.
+
 Managed encrypted-database keys require a dedicated CA key-encryption key:
 
 ```text

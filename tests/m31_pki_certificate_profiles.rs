@@ -64,7 +64,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
             "email":{"mode":"deny","values":[]},
             "uri":{"mode":"identity","values":[]}
         }),
-        &["digital_signature", "key_encipherment"],
+        &["digital_signature"],
         &["client_auth", "server_auth"],
     )
     .await;
@@ -168,7 +168,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
             "email":{"mode":"deny","values":[]},
             "uri":{"mode":"identity","values":[]}
         }),
-        &["digital_signature", "key_encipherment"],
+        &["digital_signature"],
         &["server_auth"],
     )
     .await;
@@ -212,7 +212,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
             "email":{"mode":"deny","values":[]},
             "uri":{"mode":"identity","values":[]}
         }),
-        &["digital_signature", "key_encipherment"],
+        &["digital_signature"],
         &["server_auth"],
     )
     .await;
@@ -259,7 +259,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
             "email":{"mode":"deny","values":[]},
             "uri":{"mode":"identity","values":[]}
         }),
-        &["digital_signature", "key_encipherment"],
+        &["digital_signature"],
         &["server_auth"],
     )
     .await;
@@ -591,7 +591,7 @@ async fn insert_tenant_override(
             $1, $2, $3, 'tenant_ceiling',
             '[{"algorithm":"ecdsa","sizes":[256]}]'::jsonb,
             $4, $5, 300,
-            ARRAY['digital_signature','key_encipherment']::text[],
+            ARRAY['digital_signature']::text[],
             ARRAY['server_auth']::text[], $6,
             'urn:atom:{scope}entity:{entity_id}',
             '{"ca":false,"path_len":null}'::jsonb

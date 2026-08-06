@@ -391,11 +391,6 @@ fn validate_requested_extensions(
                     "CSR requested an arbitrary extended key usage",
                 ))
             }
-            _ => {
-                return Err(AppError::bad_request(
-                    "CSR requested an unsupported extended key usage",
-                ))
-            }
         };
         if !profile.extended_key_usages.contains(&requested_usage) {
             return Err(AppError::bad_request(
@@ -673,12 +668,21 @@ fn validate_chain(issuer_der: &[u8], chain_pem: &str) -> Result<(), AppError> {
             .map_err(|_| AppError::bad_request("invalid issuer chain certificate"))?;
         let (_, parent) = x509_parser::parse_x509_certificate(&pair[1])
             .map_err(|_| AppError::bad_request("invalid issuer chain certificate"))?;
+        validate_issuer_certificate(&child)?;
+        validate_issuer_certificate(&parent)?;
         if child.issuer() != parent.subject() {
             return Err(AppError::bad_request("issuer chain names do not link"));
         }
         child
             .verify_signature(Some(parent.public_key()))
             .map_err(|_| AppError::bad_request("issuer chain signature verification failed"))?;
+        if child.validity().not_before < parent.validity().not_before
+            || child.validity().not_after > parent.validity().not_after
+        {
+            return Err(AppError::bad_request(
+                "issuer chain validity exceeds its parent",
+            ));
+        }
     }
     let (_, root) = x509_parser::parse_x509_certificate(
         chain
@@ -691,6 +695,7 @@ fn validate_chain(issuer_der: &[u8], chain_pem: &str) -> Result<(), AppError> {
             "issuer chain is not anchored by a root",
         ));
     }
+    validate_issuer_certificate(&root)?;
     root.verify_signature(None)
         .map_err(|_| AppError::bad_request("issuer chain root is not self-signed"))?;
     Ok(())
@@ -764,12 +769,6 @@ fn random_serial() -> Result<SerialNumber, AppError> {
         bytes[0] = 1;
     }
     Ok(SerialNumber::from(bytes.to_vec()))
-}
-
-fn to_offset(value: DateTime<Utc>) -> Result<OffsetDateTime, AppError> {
-    OffsetDateTime::from_unix_timestamp(value.timestamp())
-        .map(|time| time + Duration::nanoseconds(value.timestamp_subsec_nanos() as i64))
-        .map_err(|_| AppError::bad_request("invalid certificate timestamp"))
 }
 
 fn to_chrono(value: OffsetDateTime) -> Result<DateTime<Utc>, AppError> {

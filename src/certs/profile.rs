@@ -313,7 +313,7 @@ fn validate_key_algorithms(rules: &[KeyAlgorithmRule]) -> Result<(), AppError> {
         for size in &rule.sizes {
             if !sizes.insert(*size)
                 || match rule.algorithm {
-                    KeyAlgorithm::Ecdsa => !matches!(size, 256 | 384),
+                    KeyAlgorithm::Ecdsa => !matches!(*size, 256 | 384),
                     KeyAlgorithm::Rsa => *size < 2048 || *size % 256 != 0,
                     KeyAlgorithm::Ed25519 => *size != 255,
                 }
@@ -337,7 +337,7 @@ fn validate_san_policy(policy: &SanPolicy) -> Result<(), AppError> {
     validate_rule(&policy.ip, &[SanRuleMode::Deny, SanRuleMode::Allowlist])?;
     validate_rule(&policy.email, &[SanRuleMode::Deny, SanRuleMode::Allowlist])?;
     validate_rule(&policy.uri, &[SanRuleMode::Identity])?;
-    if policy.uri.values.len() != 0 {
+    if !policy.uri.values.is_empty() {
         return Err(invalid_profile("identity URI rule cannot contain values"));
     }
     Ok(())
