@@ -268,10 +268,10 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
     .await;
     assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    // Simulate the same serial under two issuers (PR-011 later changes the
-    // production uniqueness model). Exact issuer+serial lookup keeps A and B
-    // independent even after A is revoked.
-    sqlx::query("DROP INDEX idx_credentials_certificate_serial")
+    // PR-011's production uniqueness model permits the same serial under two
+    // issuers. Exact issuer+serial lookup keeps A and B independent even after
+    // A is revoked.
+    sqlx::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
         .execute(&pool)
         .await
         .unwrap();

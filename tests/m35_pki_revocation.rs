@@ -184,18 +184,20 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
             .data(auth(common::admin_id(), None)),
         )
         .await;
-    assert!(errors_contain(
-        &legacy_managed.errors,
-        "requires revokeCertificateV2"
-    ));
+    assert!(errors_contain(&legacy_managed.errors, "not found"));
+    assert_eq!(
+        certificate_status(&pool, unaffected.credential_id).await,
+        "active",
+        "the legacy serial-only mutation must not see a managed credential"
+    );
 
-    // The selector remains unambiguous once PR-011 removes global serial
-    // uniqueness. Exercise that future database shape inside a rolled-back DDL
-    // transaction so this PR does not perform the resolver-v2 cutover early.
+    // PR-011's issuer-scoped uniqueness permits this duplicate across issuers;
+    // keep the fixture in a rolled-back transaction so later assertions in
+    // this test binary retain their original data set.
     let duplicate_a = issue_managed(&pool, &config, tenant_a, entity_a, "duplicate-a").await;
     let duplicate_b = issue_managed(&pool, &config, tenant_b, entity_b, "duplicate-b").await;
     let mut duplicate_tx = pool.begin().await.unwrap();
-    sqlx::query("DROP INDEX idx_credentials_certificate_serial")
+    sqlx::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
         .execute(&mut *duplicate_tx)
         .await
         .unwrap();

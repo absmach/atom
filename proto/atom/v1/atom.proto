@@ -18,7 +18,11 @@ service AuthService {
 // CertificateService resolves and revokes Atom certificate credentials for
 // runtime services that terminate mTLS outside Atom.
 service CertificateService {
-  rpc ResolveCertificate(ResolveCertificateRequest) returns (ResolveCertificateResponse);
+  // Legacy file-issuer resolver. Managed issuers must use ResolveCertificateV2.
+  rpc ResolveCertificate(ResolveCertificateRequest) returns (ResolveCertificateResponse) {
+    option deprecated = true;
+  }
+  rpc ResolveCertificateV2(ResolveCertificateV2Request) returns (ResolveCertificateV2Response);
   rpc RevokeEntityCertificates(RevokeEntityCertificatesRequest) returns (RevokeEntityCertificatesResponse);
 }
 
@@ -99,6 +103,28 @@ message ResolveCertificateResponse {
   string tenant_id = 2;
   string credential_id = 3;
   string expires_at = 4;
+}
+
+// Unambiguous runtime resolution. At least one of certificate_der,
+// fingerprint_sha256, or the issuer-fingerprint/serial pair is required. When
+// multiple selectors are supplied they must all identify the same credential.
+message ResolveCertificateV2Request {
+  bytes certificate_der = 1;
+  string fingerprint_sha256 = 2;
+  string issuer_fingerprint_sha256 = 3;
+  string serial_number = 4;
+  // Optional tenant binding. Empty means no expected tenant; a global entity
+  // still resolves with an empty tenant_id and never acquires tenant scope.
+  string expected_tenant_id = 5;
+}
+
+message ResolveCertificateV2Response {
+  string entity_id = 1;
+  string tenant_id = 2;
+  string credential_id = 3;
+  string issuer_id = 4;
+  string expires_at = 5;
+  string status = 6;
 }
 
 message RevokeEntityCertificatesRequest {

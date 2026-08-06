@@ -47,6 +47,7 @@ const SERIAL_INSERT_ATTEMPTS: usize = 3;
 pub const OCSP_REQUEST_MAX_BYTES: usize = 16 * 1024;
 const OCSP_MAX_SINGLE_REQUESTS: usize = 16;
 const OCSP_VALIDITY_SECONDS: i64 = 300;
+pub const RUNTIME_CERTIFICATE_DER_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct IssueCertificate {
@@ -107,6 +108,15 @@ pub struct RenewCertificateV2 {
     pub key_source: RenewalKeySource,
     pub revoke_old: bool,
     pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveCertificateV2 {
+    pub certificate_der: Option<Vec<u8>>,
+    pub fingerprint_sha256: Option<String>,
+    pub issuer_fingerprint_sha256: Option<String>,
+    pub serial_number: Option<String>,
+    pub expected_tenant_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -270,7 +280,9 @@ pub struct CertificateIdentity {
     pub entity_id: Uuid,
     pub tenant_id: Option<Uuid>,
     pub credential_id: Uuid,
+    pub issuer_id: Option<Uuid>,
     pub expires_at: DateTime<Utc>,
+    pub status: String,
 }
 
 pub struct CertificateIssuer {
@@ -921,7 +933,7 @@ pub async fn renew_certificate_in_tx(
     input: RenewCertificate,
 ) -> Result<IssuedCertificate, AppError> {
     let serial = normalize_serial(&input.serial_number)?;
-    let old = record_from_row(repo::certificate_by_serial(&mut **tx, &serial).await?)?;
+    let old = record_from_row(repo::legacy_certificate_by_serial(&mut **tx, &serial).await?)?;
     if old.status == "revoked" {
         return Err(AppError::bad_request("cannot renew a revoked certificate"));
     }
@@ -1192,7 +1204,7 @@ pub async fn revoke_certificate_in_tx(
     reason: Option<String>,
 ) -> Result<CertificateRecord, AppError> {
     let serial = normalize_serial(serial_number)?;
-    let current = repo::certificate_by_serial(&mut **tx, &serial).await?;
+    let current = repo::legacy_certificate_by_serial(&mut **tx, &serial).await?;
     if current.issuer_id.is_some() {
         return Err(AppError::bad_request(
             "managed certificate revocation requires an exact v2 selector",
@@ -1376,13 +1388,22 @@ pub async fn revoke_entity_certificates_v2_in_tx(
     })
 }
 
+pub async fn legacy_certificate_by_serial(
+    pool: &sqlx::PgPool,
+    serial_number: &str,
+) -> Result<CertificateRecord, AppError> {
+    repo::legacy_certificate_by_serial(pool, &normalize_serial(serial_number)?)
+        .await
+        .and_then(record_from_row)
+}
+
+/// Backward-compatible alias for the legacy file-issuer management lookup.
+/// New managed paths must use an exact credential, fingerprint, or issuer pair.
 pub async fn certificate_by_serial(
     pool: &sqlx::PgPool,
     serial_number: &str,
 ) -> Result<CertificateRecord, AppError> {
-    repo::certificate_by_serial(pool, &normalize_serial(serial_number)?)
-        .await
-        .and_then(record_from_row)
+    legacy_certificate_by_serial(pool, serial_number).await
 }
 
 pub async fn certificate_by_id(
@@ -1617,7 +1638,7 @@ pub async fn ocsp_response(
         let issuer_matches = certid_issuer_matches(&one.req_cert, &loaded.certificate_der)?;
         let status = if issuer_matches {
             let serial = serial_from_ocsp_request(&one.req_cert)?;
-            match repo::certificate_by_serial(pool, &serial).await {
+            match repo::legacy_certificate_by_serial(pool, &serial).await {
                 Ok(cert) if cert.status == "active" => CertStatus::good(),
                 Ok(cert) => {
                     let metadata = metadata_from_value(&cert.metadata)?;
@@ -1731,35 +1752,225 @@ pub async fn issuer_ocsp_response(
     )
 }
 
+/// Deprecated runtime compatibility resolver for the legacy file issuer.
+///
+/// Serial-only resolution is safe solely inside the `issuer_id IS NULL`
+/// namespace, which retains a dedicated unique index. Managed certificates are
+/// intentionally invisible here and must use [`resolve_certificate_identity_v2`].
 pub async fn resolve_certificate_identity(
     pool: &sqlx::PgPool,
     serial_number: &str,
     fingerprint_sha256: Option<&str>,
 ) -> Result<CertificateIdentity, AppError> {
-    let record = certificate_by_serial(pool, serial_number).await?;
-    if record.status != "active" {
-        return Err(AppError::Unauthorized("certificate revoked".into()));
-    }
-    let expires_at = record
-        .expires_at
-        .ok_or_else(|| AppError::Unauthorized("certificate has no expiry".into()))?;
-    if expires_at <= Utc::now() {
-        return Err(AppError::Unauthorized("certificate expired".into()));
-    }
+    let serial = normalize_serial(serial_number)?;
+    let record = repo::runtime_legacy_certificate_by_serial(pool, &serial).await?;
     if let Some(expected) = fingerprint_sha256 {
-        if normalize_fingerprint(expected) != normalize_fingerprint(&record.fingerprint_sha256) {
+        let expected = validated_fingerprint(expected)?;
+        if expected != runtime_stored_fingerprint(&record)? {
             return Err(AppError::Unauthorized(
                 "certificate fingerprint mismatch".into(),
             ));
         }
     }
-    repo::entity_tenant_id(pool, record.entity_id).await?;
+    runtime_identity_from_row(record, None)
+}
+
+/// Authoritative, issuer-aware certificate resolver. Every supplied selector
+/// is independently verified and, when more than one is present, all selectors
+/// must identify the same credential.
+pub async fn resolve_certificate_identity_v2(
+    pool: &sqlx::PgPool,
+    input: ResolveCertificateV2,
+) -> Result<CertificateIdentity, AppError> {
+    let der_fingerprint = input
+        .certificate_der
+        .as_deref()
+        .map(runtime_der_fingerprint)
+        .transpose()?;
+    let supplied_fingerprint = input
+        .fingerprint_sha256
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(validated_fingerprint)
+        .transpose()?;
+    if let (Some(derived), Some(supplied)) = (&der_fingerprint, &supplied_fingerprint) {
+        if derived != supplied {
+            return Err(runtime_selector_mismatch());
+        }
+    }
+    let fingerprint = der_fingerprint.or(supplied_fingerprint);
+
+    let issuer_fingerprint = input
+        .issuer_fingerprint_sha256
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(validated_fingerprint)
+        .transpose()?;
+    let serial = input
+        .serial_number
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_serial)
+        .transpose()?;
+    let issuer_serial = match (issuer_fingerprint, serial) {
+        (Some(issuer_fingerprint), Some(serial)) => Some((issuer_fingerprint, serial)),
+        (None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "issuer_fingerprint_sha256 and serial_number must be supplied together",
+            ))
+        }
+    };
+
+    if fingerprint.is_none() && issuer_serial.is_none() {
+        return Err(AppError::bad_request(
+            "provide certificate_der, fingerprint_sha256, or issuer fingerprint plus serial",
+        ));
+    }
+
+    let record = match (fingerprint.as_deref(), issuer_serial.as_ref()) {
+        (Some(fingerprint), None) => {
+            repo::runtime_certificate_by_fingerprint(pool, fingerprint).await?
+        }
+        (None, Some((issuer_fingerprint, serial))) => {
+            repo::runtime_certificate_by_issuer_fingerprint_serial(pool, issuer_fingerprint, serial)
+                .await?
+        }
+        (Some(fingerprint), Some((issuer_fingerprint, serial))) => {
+            let by_fingerprint = repo::runtime_certificate_by_fingerprint(pool, fingerprint).await;
+            let by_issuer = repo::runtime_certificate_by_issuer_fingerprint_serial(
+                pool,
+                issuer_fingerprint,
+                serial,
+            )
+            .await;
+            match by_fingerprint {
+                Ok(by_fingerprint) => match by_issuer {
+                    Ok(by_issuer) if by_fingerprint.id == by_issuer.id => by_fingerprint,
+                    Ok(_) | Err(AppError::NotFound(_)) => return Err(runtime_selector_mismatch()),
+                    Err(error) => return Err(error),
+                },
+                Err(AppError::NotFound(_)) => match by_issuer {
+                    Ok(_) | Err(AppError::NotFound(_)) => return Err(runtime_selector_mismatch()),
+                    Err(error) => return Err(error),
+                },
+                Err(error) => return Err(error),
+            }
+        }
+        (None, None) => {
+            return Err(AppError::bad_request(
+                "certificate resolver selector is missing",
+            ))
+        }
+    };
+
+    runtime_identity_from_row(record, input.expected_tenant_id)
+}
+
+fn runtime_der_fingerprint(certificate_der: &[u8]) -> Result<String, AppError> {
+    if certificate_der.is_empty() {
+        return Err(AppError::bad_request("certificate_der must not be empty"));
+    }
+    if certificate_der.len() > RUNTIME_CERTIFICATE_DER_MAX_BYTES {
+        return Err(AppError::payload_too_large(format!(
+            "certificate_der exceeds {} bytes",
+            RUNTIME_CERTIFICATE_DER_MAX_BYTES
+        )));
+    }
+    let (remaining, _) = x509_parser::parse_x509_certificate(certificate_der)
+        .map_err(|_| AppError::bad_request("invalid X.509 certificate DER"))?;
+    if !remaining.is_empty() {
+        return Err(AppError::bad_request(
+            "certificate_der contains trailing data",
+        ));
+    }
+    Ok(hex::encode(
+        digest::digest(&digest::SHA256, certificate_der).as_ref(),
+    ))
+}
+
+fn runtime_stored_fingerprint(
+    record: &repo::RuntimeCertificateCredential,
+) -> Result<String, AppError> {
+    let value = record
+        .metadata
+        .get("fingerprint_sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::Unauthorized("certificate fingerprint is unavailable".into()))?;
+    validated_fingerprint(value)
+        .map_err(|_| AppError::Unauthorized("certificate fingerprint is invalid".into()))
+}
+
+fn runtime_identity_from_row(
+    record: repo::RuntimeCertificateCredential,
+    expected_tenant_id: Option<Uuid>,
+) -> Result<CertificateIdentity, AppError> {
+    if record.credential_status != "active" {
+        return Err(AppError::Unauthorized(
+            "certificate credential is not active".into(),
+        ));
+    }
+    let now = Utc::now();
+    let expires_at = record
+        .expires_at
+        .ok_or_else(|| AppError::Unauthorized("certificate has no expiry".into()))?;
+    if expires_at <= now {
+        return Err(AppError::Unauthorized("certificate expired".into()));
+    }
+    runtime_stored_fingerprint(&record)?;
+
+    if record.entity_status != "active" || record.entity_deleted_at.is_some() {
+        return Err(AppError::Unauthorized(
+            "certificate entity is not active".into(),
+        ));
+    }
+    if record.tenant_id.is_some()
+        && (record.tenant_status.as_deref() != Some("active") || record.tenant_deleted_at.is_some())
+    {
+        return Err(AppError::Unauthorized(
+            "certificate tenant is not active".into(),
+        ));
+    }
+    if expected_tenant_id.is_some() && expected_tenant_id != record.tenant_id {
+        return Err(AppError::Forbidden);
+    }
+
+    if record.issuer_id.is_some() {
+        let issuer_enabled = match record.issuer_status.as_deref() {
+            Some("active") => record.issuer_issuance_enabled == Some(true),
+            Some("retiring" | "retired") => true,
+            _ => false,
+        };
+        if !issuer_enabled {
+            return Err(AppError::Unauthorized(
+                "certificate issuer is not enabled for verification".into(),
+            ));
+        }
+        if record
+            .issuer_not_before
+            .is_none_or(|not_before| not_before > now)
+            || record
+                .issuer_not_after
+                .is_none_or(|not_after| not_after <= now)
+        {
+            return Err(AppError::Unauthorized(
+                "certificate issuer is outside its validity period".into(),
+            ));
+        }
+    }
+
     Ok(CertificateIdentity {
         entity_id: record.entity_id,
         tenant_id: record.tenant_id,
-        credential_id: record.credential_id,
+        credential_id: record.id,
+        issuer_id: record.issuer_id,
         expires_at,
+        status: record.credential_status,
     })
+}
+
+fn runtime_selector_mismatch() -> AppError {
+    AppError::Unauthorized("certificate selectors do not identify the same credential".into())
 }
 
 pub fn normalize_serial(serial_number: &str) -> Result<String, AppError> {
@@ -2243,9 +2454,9 @@ fn leaf_ttl(config: &Config, ttl_secs: Option<u64>) -> Result<u64, AppError> {
 
 fn validate_certificate_status(status: String) -> Result<String, AppError> {
     match status.as_str() {
-        "active" | "revoked" => Ok(status),
+        "active" | "revocation_pending" | "revoked" => Ok(status),
         _ => Err(AppError::bad_request(
-            "certificate status must be active or revoked",
+            "certificate status must be active, revocation_pending, or revoked",
         )),
     }
 }

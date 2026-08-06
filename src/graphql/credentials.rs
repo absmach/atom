@@ -442,9 +442,12 @@ fn parse_credential_status(
     match status {
         None => Ok(None),
         Some("active") => Ok(Some(crate::models::enums::CredentialStatus::Active)),
+        Some("revocation_pending") => Ok(Some(
+            crate::models::enums::CredentialStatus::RevocationPending,
+        )),
         Some("revoked") => Ok(Some(crate::models::enums::CredentialStatus::Revoked)),
         Some(other) => Err(gql_error(crate::error::AppError::bad_request(format!(
-            "invalid status filter: {other} (expected 'active' or 'revoked')"
+            "invalid status filter: {other} (expected 'active', 'revocation_pending', or 'revoked')"
         )))),
     }
 }

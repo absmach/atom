@@ -269,8 +269,9 @@ generated-key request; a revoked subject must use fresh enrollment. This
 recovery never treats an expired or revoked certificate as authentication.
 
 The original serial-based `renewCertificate` mutation remains the explicit v1
-compatibility path until resolver-v2 migration is complete. New integrations
-must use the exact-credential v2 mutations.
+compatibility path for `issuerId: null` file-issuer credentials. It is isolated
+to that separately unique legacy namespace; new integrations use the
+exact-credential v2 mutations.
 
 ## Issuer-aware revocation (v2)
 
@@ -284,7 +285,7 @@ these selectors:
 Serial alone is deliberately not a managed-certificate selector. The original
 `revokeCertificate` mutation is retained only for legacy `issuerId: null`
 credentials; it rejects managed certificates so new callers cannot create an
-ambiguous mutation dependency before the resolver-v2 cutover.
+ambiguous mutation dependency after the resolver-v2 cutover.
 
 ```graphql
 mutation RevokeManagedCertificate($input: RevokeCertificateV2Input!) {
@@ -450,6 +451,34 @@ file-backed route; managed clients use their issuer-specific AIA URL.
 
 ## Runtime Lookup
 
-Runtime services should prefer certificate fingerprint plus serial number when asking Atom to resolve a certificate. Atom returns identity only for active, known, non-expired, non-revoked certificates.
+Runtime services use `CertificateService.ResolveCertificateV2`. Supply at least
+one exact selector:
 
-If the certificate is unknown, expired, revoked, or issued by the wrong issuer, Atom returns a negative result.
+- the complete leaf DER, from which Atom derives SHA-256;
+- the leaf DER SHA-256 fingerprint; or
+- a managed issuer fingerprint together with the normalized leaf serial.
+
+When more than one selector is supplied, every selector must identify the same
+credential. Atom returns the entity, tenant, credential, issuer, expiry, and
+status. A global entity returns an empty tenant and never acquires tenant scope.
+Use `expectedTenantId` to bind a resolution to the relying party's requested
+scope before normal authorization.
+
+Resolution denies unknown, `revocation_pending`, revoked, expired,
+inactive/deleted-entity, frozen/deleted-tenant, and unavailable-issuer state.
+Retiring and retained retired issuers continue to verify existing leaves until
+expiry. Managed serial uniqueness is scoped to `issuerId`; independent issuers
+may safely use the same serial.
+
+`CertificateService.ResolveCertificate` is deprecated and can see only the
+separately unique legacy file-issuer namespace where `issuerId` is null. It can
+never select a managed credential.
+
+When event publishing is configured, invalidate resolver caches from
+`certificate.issue`, `certificate.renew`, `certificate.revoke`, and
+`certificate.revoke_entity`, plus entity, tenant, and authority lifecycle
+events. Cache the returned credential, issuer, entity, and tenant IDs with the
+lookup key so invalidation is exact and idempotent under at-least-once delivery.
+
+CRL and OCSP remain interoperability artifacts. Immediate resolver denial plus
+short certificate lifetimes are the primary revocation control.
