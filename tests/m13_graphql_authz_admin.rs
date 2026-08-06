@@ -1120,15 +1120,23 @@ async fn entity_and_resource_lifecycle_mutations_write_audit_events() {
         "status mutations must not emit duplicate generic entity.update rows"
     );
 
-    for event in [
-        "entity.enable",
-        "entity.disable",
-        "entity.delete",
-        "entity.restore",
-    ] {
+    for event in ["entity.enable", "entity.disable", "entity.restore"] {
         let details = latest_entity_audit_details(&pool, device_id, event).await;
         assert_eq!(details, serde_json::json!({}), "{event}");
     }
+    let delete_details = latest_entity_audit_details(&pool, device_id, "entity.delete").await;
+    assert_eq!(
+        delete_details,
+        serde_json::json!({
+            "certificate_revocations": {
+                "count": 0,
+                "credential_ids": [],
+                "issuer_ids": [],
+                "reason": "entity_deleted",
+            }
+        }),
+        "entity.delete"
+    );
 
     let resource_details =
         latest_resource_audit_details(&pool, channel_id, "resource.update").await;

@@ -271,6 +271,61 @@ The original serial-based `renewCertificate` mutation remains the explicit v1
 compatibility path until resolver-v2 migration is complete. New integrations
 must use the exact-credential v2 mutations.
 
+## Issuer-aware revocation (v2)
+
+Use `revokeCertificateV2` for managed certificates. It accepts exactly one of
+these selectors:
+
+- `credentialId`;
+- `fingerprintSha256`; or
+- `issuerId` together with `serialNumber`.
+
+Serial alone is deliberately not a managed-certificate selector. The original
+`revokeCertificate` mutation is retained only for legacy `issuerId: null`
+credentials; it rejects managed certificates so new callers cannot create an
+ambiguous mutation dependency before the resolver-v2 cutover.
+
+```graphql
+mutation RevokeManagedCertificate($input: RevokeCertificateV2Input!) {
+  revokeCertificateV2(input: $input) {
+    idempotentReplay
+    reason
+    actorEntityId
+    revokedAt
+    certificate {
+      credentialId
+      issuerId
+      serialNumber
+      status
+    }
+  }
+}
+```
+
+Revocation transitions the exact credential directly from `active` to
+`revoked`; Atom does not use a publication-dependent pending state. The status
+change, immutable `certificate_revocations` evidence, and dirty flag for only
+the affected issuer commit in one database transaction. Runtime resolution
+denies the credential from that commit onward, even before a CRL or OCSP
+artifact is regenerated. PR-009 and PR-010 own artifact encoding and serving.
+
+Reason values are short reason codes (for example `key_compromise`,
+`superseded`, or `cessation_of_operation`), not free-form incident notes. Audit
+and lifecycle outbox payloads identify the actor, credential, issuer,
+fingerprint, serial, reason, and revocation time but contain no certificate,
+key, CSR, or other secret material.
+
+An exact repeated request is idempotent: it returns the original actor, reason,
+and time with `idempotentReplay: true`, does not rewrite history, and does not
+enqueue a second `certificate.revoke` event. Revoked credentials cannot use the
+renewal recovery path; enroll a fresh credential instead.
+
+`revokeEntityCertificates` revokes every active certificate for one authorized
+entity and records the affected credential and issuer IDs in its event. Entity
+suspension and tenant freeze/delete fail closed in runtime resolution. Tenant
+or entity deletion also records exact revocation evidence for every certificate
+it transitions; restoring the subject never reactivates those certificates.
+
 ## Legacy CA files
 
 The original v1 issuer remains available for backward compatibility and loads
@@ -311,6 +366,7 @@ offline-root flow above.
 | Generated-path leaf private key | Returned once by legacy/generated issuance, never stored |
 | CSR private key | Never enters Atom |
 | Managed CSR idempotency state | Request/key digests and committed credential ID only |
+| Certificate revocation evidence | `certificate_revocations`, one immutable row per exact credential |
 | CRL cache | `certificate_crl_state` |
 
 ## Public PKI Endpoints
