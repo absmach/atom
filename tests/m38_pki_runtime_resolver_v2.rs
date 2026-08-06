@@ -741,7 +741,11 @@ async fn set_issuer_status(pool: &PgPool, issuer_id: Uuid, status: &str, enabled
         "UPDATE pki_authorities
          SET status = $2, issuance_enabled = $3,
              retiring_at = CASE WHEN $2 = 'retiring' THEN now() ELSE NULL END,
-             retired_at = CASE WHEN $2 = 'retired' THEN now() ELSE NULL END
+             retired_at = CASE WHEN $2 = 'retired' THEN now() ELSE NULL END,
+             failure_reason = CASE
+                 WHEN $2 = 'failed' THEN 'PR-011 lifecycle test'
+                 ELSE NULL
+             END
          WHERE id = $1",
     )
     .bind(issuer_id)
