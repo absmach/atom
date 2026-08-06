@@ -50,11 +50,9 @@ pub const PKI_CERTIFICATE_EXPIRY_COUNT: &str = "atom_pki_certificate_expiry_coun
 /// Current CRL artifact size, labelled only by legacy/managed publication path.
 pub const PKI_CRL_SIZE_BYTES: &str = "atom_pki_crl_size_bytes";
 /// Histogram of actual CRL regeneration time (cache hits are not observations).
-pub const PKI_CRL_GENERATION_DURATION: &str =
-    "atom_pki_crl_generation_duration_seconds";
+pub const PKI_CRL_GENERATION_DURATION: &str = "atom_pki_crl_generation_duration_seconds";
 /// Minimum active/retiring authority time-to-expiry by bounded authority kind.
-pub const PKI_AUTHORITY_TIME_TO_EXPIRY: &str =
-    "atom_pki_authority_time_to_expiry_seconds";
+pub const PKI_AUTHORITY_TIME_TO_EXPIRY: &str = "atom_pki_authority_time_to_expiry_seconds";
 
 #[cfg(feature = "metrics")]
 mod backend {
@@ -145,10 +143,7 @@ mod backend {
         .increment(1);
     }
 
-    pub fn record_pki_lifecycle_operation(
-        operation: &'static str,
-        outcome: &'static str,
-    ) {
+    pub fn record_pki_lifecycle_operation(operation: &'static str, outcome: &'static str) {
         metrics::counter!(
             PKI_LIFECYCLE_OPERATIONS,
             "operation" => operation,
@@ -213,8 +208,7 @@ mod backend {
             else {
                 continue;
             };
-            metrics::gauge!(PKI_AUTHORITY_TIME_TO_EXPIRY, "kind" => kind)
-                .set(row.seconds.max(0.0));
+            metrics::gauge!(PKI_AUTHORITY_TIME_TO_EXPIRY, "kind" => kind).set(row.seconds.max(0.0));
         }
     }
 
@@ -267,11 +261,7 @@ mod backend {
     #[inline]
     pub fn record_pki_enrollment(_mode: &'static str, _outcome: &'static str) {}
     #[inline]
-    pub fn record_pki_lifecycle_operation(
-        _operation: &'static str,
-        _outcome: &'static str,
-    ) {
-    }
+    pub fn record_pki_lifecycle_operation(_operation: &'static str, _outcome: &'static str) {}
     #[inline]
     pub fn record_pki_fleet_snapshot(
         _expiry_rows: &[crate::certs::lifecycle::repo::ExpiryMetricRow],
@@ -289,7 +279,7 @@ mod backend {
 
 pub use backend::{
     enabled, init, record_audit_db_suppressed, record_audit_failure, record_decision,
-    record_outbox_exhausted, record_outbox_publish_failure, record_pki_crl,
-    record_pki_enrollment, record_pki_fleet_snapshot, record_pki_key_provider_operation,
-    record_pki_lifecycle_operation, record_rate_limit_rejection, render,
+    record_outbox_exhausted, record_outbox_publish_failure, record_pki_crl, record_pki_enrollment,
+    record_pki_fleet_snapshot, record_pki_key_provider_operation, record_pki_lifecycle_operation,
+    record_rate_limit_rejection, render,
 };

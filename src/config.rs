@@ -1169,10 +1169,7 @@ fn pki_lifecycle_from_env() -> Result<PkiLifecycleConfig> {
     let default = PkiLifecycleConfig::default();
     let cfg = PkiLifecycleConfig {
         enabled: env_bool_default("ATOM_PKI_LIFECYCLE_ENABLED", default.enabled),
-        interval_secs: env_parse(
-            "ATOM_PKI_LIFECYCLE_INTERVAL_SECS",
-            default.interval_secs,
-        )?,
+        interval_secs: env_parse("ATOM_PKI_LIFECYCLE_INTERVAL_SECS", default.interval_secs)?,
         batch_size: env_parse("ATOM_PKI_LIFECYCLE_BATCH_SIZE", default.batch_size)?,
         expiry_warning_secs: env_parse(
             "ATOM_PKI_EXPIRY_WARNING_SECS",

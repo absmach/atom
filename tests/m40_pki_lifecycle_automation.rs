@@ -11,8 +11,7 @@ use atom::{
     certs::{enrollment, lifecycle, service},
     config::PkiLifecycleConfig,
     graphql::build_schema,
-    identity,
-    metrics,
+    identity, metrics,
     models::{
         enums::{Effect, SubjectKind},
         group::CreateGroup,
@@ -46,10 +45,8 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
 
     let tenant_a = common::pki::create_tenant(&pool, "pki-life-a").await;
     let tenant_b = common::pki::create_tenant(&pool, "pki-life-b").await;
-    let issuer_a =
-        common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_a).await;
-    let issuer_b =
-        common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_b).await;
+    let issuer_a = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_a).await;
+    let _issuer_b = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_b).await;
     let entity_a = common::pki::create_entity(&pool, tenant_a, "pki-life-a").await;
     let entity_b = common::pki::create_entity(&pool, tenant_b, "pki-life-b").await;
 
@@ -103,14 +100,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(outbox_count(&pool, "certificate.expiring").await, 0);
     let mut disabled_config = config.clone();
     disabled_config.pki_lifecycle.enabled = false;
-    let disabled_mode = issue(
-        &pool,
-        &disabled_config,
-        tenant_b,
-        entity_b,
-        "disabled-mode",
-    )
-    .await;
+    let disabled_mode = issue(&pool, &disabled_config, tenant_b, entity_b, "disabled-mode").await;
     assert_eq!(
         certificate_status(&pool, disabled_mode.credential_id).await,
         "active"
@@ -137,6 +127,22 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(restart.certificate_events, 0);
     assert_eq!(restart.authority_events, 0);
 
+    // A later profile snapshot/correction may move the timestamp but does not
+    // create a second logical renewal-window notification for this certificate.
+    sqlx::query(
+        "UPDATE credentials SET metadata = jsonb_set(metadata, '{renewal_due_at}', to_jsonb($2::timestamptz)) WHERE id = $1",
+    )
+    .bind(due.credential_id)
+    .bind(now - Duration::hours(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let shifted_window = lifecycle::sweep_once(&pool, config.pki_lifecycle, true, now)
+        .await
+        .unwrap();
+    assert_eq!(shifted_window.certificate_events, 0);
+    assert_eq!(outbox_count(&pool, "certificate.expiring").await, 2);
+
     assert_certificate_event(&pool, due.credential_id, "renewal").await;
     assert_certificate_event(&pool, critical.credential_id, "expiry").await;
     assert_authority_event(&pool, issuer_a.id, tenant_a).await;
@@ -148,12 +154,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     // The marker and outbox insert are one transaction: a forced outbox error
     // leaves neither, and the next healthy sweep can retry it.
     let transactional = issue(&pool, &config, tenant_a, entity_a, "transactional").await;
-    set_profile_fallback_expiry(
-        &pool,
-        transactional.credential_id,
-        now + Duration::days(1),
-    )
-    .await;
+    set_profile_fallback_expiry(&pool, transactional.credential_id, now + Duration::days(1)).await;
     install_outbox_failure(&pool).await;
     let failed = lifecycle::sweep_once(&pool, config.pki_lifecycle, true, now).await;
     assert!(failed.is_err());
@@ -189,14 +190,8 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     let page_one = page_one.data.into_json().unwrap()["certificates"].clone();
     assert!(page_one["total"].as_i64().unwrap() >= 4);
     assert_eq!(page_one["items"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        page_one["items"][0]["tenantId"],
-        tenant_a.to_string()
-    );
-    assert_eq!(
-        page_one["items"][0]["issuerId"],
-        issuer_a.id.to_string()
-    );
+    assert_eq!(page_one["items"][0]["tenantId"], tenant_a.to_string());
+    assert_eq!(page_one["items"][0]["issuerId"], issuer_a.id.to_string());
     let first_page_id = page_one["items"][0]["credentialId"]
         .as_str()
         .unwrap()
@@ -237,6 +232,15 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     let group_cert_a = issue(&pool, &config, tenant_a, group_entity_a, "group-a").await;
     let group_cert_b = issue(&pool, &config, tenant_a, group_entity_b, "group-b").await;
     let group_id = create_principal_group(&pool, tenant_a, &[group_entity_a, group_entity_b]).await;
+    // Even a corrupt cross-tenant membership row is constrained by the SQL
+    // selector scope and cannot turn a tenant-wide permission into platform
+    // revocation authority.
+    sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
+        .bind(group_id)
+        .bind(entity_b)
+        .execute(&pool)
+        .await
+        .unwrap();
     let group_bulk = execute_bulk(
         &schema,
         tenant_operator,
@@ -246,9 +250,18 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     .await;
     assert!(group_bulk["complete"].as_bool().unwrap());
     assert_eq!(group_bulk["items"].as_array().unwrap().len(), 2);
-    assert_eq!(certificate_status(&pool, group_cert_a.credential_id).await, "revoked");
-    assert_eq!(certificate_status(&pool, group_cert_b.credential_id).await, "revoked");
-    assert_eq!(certificate_status(&pool, unaffected_b.credential_id).await, "active");
+    assert_eq!(
+        certificate_status(&pool, group_cert_a.credential_id).await,
+        "revoked"
+    );
+    assert_eq!(
+        certificate_status(&pool, group_cert_b.credential_id).await,
+        "revoked"
+    );
+    assert_eq!(
+        certificate_status(&pool, unaffected_b.credential_id).await,
+        "active"
+    );
 
     // Successful and failed renewal paths feed bounded lifecycle counters.
     let renewed_b = service::renew_certificate_v2(
@@ -297,8 +310,14 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     )
     .await;
     assert!(issuer_bulk["complete"].as_bool().unwrap());
-    assert_eq!(certificate_status(&pool, unaffected_b.credential_id).await, "active");
-    assert_eq!(certificate_status(&pool, renewed_b.credential_id).await, "active");
+    assert_eq!(
+        certificate_status(&pool, unaffected_b.credential_id).await,
+        "active"
+    );
+    assert_eq!(
+        certificate_status(&pool, renewed_b.credential_id).await,
+        "active"
+    );
 
     // Partial failure stops at the first failed item and returns the last
     // contiguous cursor. Repairing the row and resuming does not revisit or
@@ -410,7 +429,10 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
         metrics::PKI_CRL_GENERATION_DURATION,
         metrics::PKI_AUTHORITY_TIME_TO_EXPIRY,
     ] {
-        assert!(rendered.contains(metric), "missing metric {metric}: {rendered}");
+        assert!(
+            rendered.contains(metric),
+            "missing metric {metric}: {rendered}"
+        );
     }
     for operation in ["issuance", "renewal", "revocation", "enrollment"] {
         assert!(rendered.contains(&format!("operation=\"{operation}\"")));
@@ -642,11 +664,7 @@ async fn grant_tenant_manage(pool: &PgPool, tenant_id: Uuid, actor_id: Uuid) {
     .unwrap();
 }
 
-async fn create_principal_group(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    members: &[Uuid],
-) -> Uuid {
+async fn create_principal_group(pool: &PgPool, tenant_id: Uuid, members: &[Uuid]) -> Uuid {
     let group = identity::repo::create_group(
         pool,
         CreateGroup {
@@ -661,14 +679,12 @@ async fn create_principal_group(
     .await
     .unwrap();
     for member in members {
-        sqlx::query(
-            "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)",
-        )
-        .bind(group.id)
-        .bind(member)
-        .execute(pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
+            .bind(group.id)
+            .bind(member)
+            .execute(pool)
+            .await
+            .unwrap();
     }
     group.id
 }

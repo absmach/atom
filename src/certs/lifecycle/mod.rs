@@ -9,9 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    certs::service::{
-        self as certificates, CertificateRevocationSelector, RevokeCertificateV2,
-    },
+    certs::service::{self as certificates, CertificateRevocationSelector, RevokeCertificateV2},
     config::PkiLifecycleConfig,
     error::AppError,
     models::enums::AuditOutcome,
@@ -83,19 +81,11 @@ pub fn spawn(state: AppState) {
     }
 
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            match sweep_once(
-                &state.pool,
-                cfg,
-                state.config.events.enabled(),
-                Utc::now(),
-            )
-            .await
-            {
+            match sweep_once(&state.pool, cfg, state.config.events.enabled(), Utc::now()).await {
                 Ok(summary) if summary.certificate_events + summary.authority_events > 0 => {
                     tracing::info!(
                         certificate_events = summary.certificate_events,
@@ -141,90 +131,93 @@ pub async fn sweep_once(
     };
 
     if events_enabled {
-        let certificate_windows =
-            repo::due_certificate_windows(&mut tx, now, cfg.expiry_warning_secs, cfg.batch_size)
+        // Reserve the bounded run for authorities first. A sustained leaf
+        // backlog must not hide an approaching CA expiry and turn one tenant's
+        // entire fleet into an outage.
+        let authority_windows =
+            repo::due_authority_windows(&mut tx, now, cfg.authority_warning_secs, cfg.batch_size)
                 .await?;
-        for window in certificate_windows {
+        for window in authority_windows {
             if !repo::claim_notification(
                 &mut tx,
-                "credential",
-                window.credential_id,
-                &window.window_kind,
+                "authority",
+                window.issuer_id,
+                "authority_expiry",
                 window.window_at,
             )
             .await?
             {
                 continue;
             }
+            // Keep the identifier keys stable across both event types;
+            // authority events have no leaf credential or entity.
             let details = serde_json::json!({
                 "issuer_id": window.issuer_id,
-                "credential_id": window.credential_id,
-                "entity_id": window.entity_id,
+                "credential_id": null,
+                "entity_id": null,
                 "tenant_id": window.tenant_id,
-                "window": window.window_kind,
+                "authority_kind": window.kind,
+                "window": "authority_expiry",
                 "window_at": window.window_at,
                 "expires_at": window.expires_at,
+                "rotation_procedure": "PR-003",
             });
             crate::events::enqueue(
                 &mut *tx,
                 true,
                 None,
                 window.tenant_id,
-                Some("credential"),
-                Some(window.credential_id),
-                "certificate.expiring",
+                Some("pki_authority"),
+                Some(window.issuer_id),
+                "certificate.authority_expiring",
                 "allow",
                 &details,
             )
             .await?;
-            summary.certificate_events += 1;
+            summary.authority_events += 1;
         }
 
         let remaining = cfg
             .batch_size
-            .saturating_sub(i64::try_from(summary.certificate_events).unwrap_or(i64::MAX));
+            .saturating_sub(i64::try_from(summary.authority_events).unwrap_or(i64::MAX));
         if remaining > 0 {
-            let authority_windows =
-                repo::due_authority_windows(&mut tx, now, cfg.authority_warning_secs, remaining)
+            let certificate_windows =
+                repo::due_certificate_windows(&mut tx, now, cfg.expiry_warning_secs, remaining)
                     .await?;
-            for window in authority_windows {
+            for window in certificate_windows {
                 if !repo::claim_notification(
                     &mut tx,
-                    "authority",
-                    window.issuer_id,
-                    "authority_expiry",
+                    "credential",
+                    window.credential_id,
+                    &window.window_kind,
                     window.window_at,
                 )
                 .await?
                 {
                     continue;
                 }
-                // Keep the identifier keys stable across both event types;
-                // authority events have no leaf credential or entity.
                 let details = serde_json::json!({
                     "issuer_id": window.issuer_id,
-                    "credential_id": null,
-                    "entity_id": null,
+                    "credential_id": window.credential_id,
+                    "entity_id": window.entity_id,
                     "tenant_id": window.tenant_id,
-                    "authority_kind": window.kind,
-                    "window": "authority_expiry",
+                    "window": window.window_kind,
                     "window_at": window.window_at,
                     "expires_at": window.expires_at,
-                    "rotation_procedure": "PR-003",
                 });
                 crate::events::enqueue(
                     &mut *tx,
                     true,
                     None,
                     window.tenant_id,
-                    Some("pki_authority"),
-                    Some(window.issuer_id),
-                    "certificate.authority_expiring",
+                    Some("credential"),
+                    Some(window.credential_id),
+                    "certificate.expiring",
                     "allow",
                     &details,
                 )
                 .await?;
-                summary.authority_events += 1;
+                summary.certificate_events += 1;
             }
         }
     }

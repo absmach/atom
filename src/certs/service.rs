@@ -743,13 +743,8 @@ pub async fn issue_certificate_from_csr_v2_in_tx(
     authorized_tenant_id: Option<Uuid>,
     input: IssueCertificateFromCsrV2,
 ) -> Result<IssuedCertificate, AppError> {
-    let result = issue_certificate_from_csr_v2_in_tx_inner(
-        tx,
-        config,
-        authorized_tenant_id,
-        input,
-    )
-    .await;
+    let result =
+        issue_certificate_from_csr_v2_in_tx_inner(tx, config, authorized_tenant_id, input).await;
     record_lifecycle_operation("issuance", &result);
     result
 }
@@ -868,13 +863,8 @@ pub async fn issue_generated_certificate_v2_in_tx(
     authorized_tenant_id: Option<Uuid>,
     input: IssueGeneratedCertificateV2,
 ) -> Result<IssuedCertificate, AppError> {
-    let result = issue_generated_certificate_v2_in_tx_inner(
-        tx,
-        config,
-        authorized_tenant_id,
-        input,
-    )
-    .await;
+    let result =
+        issue_generated_certificate_v2_in_tx_inner(tx, config, authorized_tenant_id, input).await;
     record_lifecycle_operation("issuance", &result);
     result
 }
@@ -1456,13 +1446,8 @@ pub async fn revoke_entity_certificates_v2_in_tx(
     reason: Option<String>,
     actor_entity_id: Option<Uuid>,
 ) -> Result<BulkCertificateRevocationResult, AppError> {
-    let result = revoke_entity_certificates_v2_in_tx_inner(
-        tx,
-        entity_id,
-        reason,
-        actor_entity_id,
-    )
-    .await;
+    let result =
+        revoke_entity_certificates_v2_in_tx_inner(tx, entity_id, reason, actor_entity_id).await;
     record_lifecycle_operation("revocation", &result);
     result
 }
@@ -1642,11 +1627,7 @@ pub async fn generate_crl(
     )
     .await?;
     tx.commit().await.map_err(AppError::Database)?;
-    crate::metrics::record_pki_crl(
-        "legacy",
-        crl_der.len(),
-        Some(generation_started.elapsed()),
-    );
+    crate::metrics::record_pki_crl("legacy", crl_der.len(), Some(generation_started.elapsed()));
     Ok(crl_der)
 }
 
@@ -1756,11 +1737,7 @@ pub async fn issuer_crl(
     )
     .await?;
     tx.commit().await.map_err(AppError::Database)?;
-    crate::metrics::record_pki_crl(
-        "managed",
-        crl_der.len(),
-        Some(generation_started.elapsed()),
-    );
+    crate::metrics::record_pki_crl("managed", crl_der.len(), Some(generation_started.elapsed()));
     Ok(CrlArtifact {
         der: crl_der,
         sha256: crl_sha256,

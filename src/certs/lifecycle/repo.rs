@@ -109,7 +109,6 @@ pub async fn due_certificate_windows(
                   WHERE n.subject_kind = 'credential'
                     AND n.subject_id = w.credential_id
                     AND n.window_kind = 'renewal'
-                    AND n.window_at = w.renewal_at
               )
             UNION ALL
             SELECT credential_id, issuer_id, entity_id, tenant_id, expires_at,
@@ -122,7 +121,6 @@ pub async fn due_certificate_windows(
                   WHERE n.subject_kind = 'credential'
                     AND n.subject_id = w.credential_id
                     AND n.window_kind = 'expiry'
-                    AND n.window_at = w.expires_at - ($2 * interval '1 second')
               )
         )
         SELECT credential_id, issuer_id, entity_id, tenant_id, expires_at,
@@ -164,7 +162,6 @@ pub async fn due_authority_windows(
               WHERE n.subject_kind = 'authority'
                 AND n.subject_id = a.id
                 AND n.window_kind = 'authority_expiry'
-                AND n.window_at = a.not_after - ($2 * interval '1 second')
           )
         ORDER BY window_at ASC, a.id ASC
         LIMIT $3
@@ -254,16 +251,14 @@ pub async fn selector_tenant_id(
     selector: BulkRevocationSelector,
 ) -> Result<Option<Uuid>, AppError> {
     match selector {
-        BulkRevocationSelector::Tenant(tenant_id) => {
-            sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(tenant_id)
-            .fetch_one(pool)
-            .await
-            .map(Some)
-            .map_err(db_err)
-        }
+        BulkRevocationSelector::Tenant(tenant_id) => sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await
+        .map(Some)
+        .map_err(db_err),
         BulkRevocationSelector::Issuer(issuer_id) => {
             sqlx::query_scalar("SELECT tenant_id FROM pki_authorities WHERE id = $1")
                 .bind(issuer_id)
@@ -271,15 +266,13 @@ pub async fn selector_tenant_id(
                 .await
                 .map_err(db_err)
         }
-        BulkRevocationSelector::PrincipalGroup(group_id) => {
-            sqlx::query_scalar(
-                "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(group_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)
-        }
+        BulkRevocationSelector::PrincipalGroup(group_id) => sqlx::query_scalar(
+            "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(group_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err),
     }
 }
 
@@ -290,36 +283,44 @@ pub async fn bulk_candidates(
     limit: i64,
 ) -> Result<Vec<BulkCandidate>, AppError> {
     match selector {
-        BulkRevocationSelector::PrincipalGroup(group_id) => {
-            sqlx::query_as::<_, BulkCandidate>(
-                r#"
-                WITH RECURSIVE selected_groups(id) AS (
-                    SELECT $1::uuid
+        BulkRevocationSelector::PrincipalGroup(group_id) => sqlx::query_as::<_, BulkCandidate>(
+            r#"
+                WITH RECURSIVE root_group(id, tenant_id) AS (
+                    SELECT id, tenant_id
+                    FROM principal_groups
+                    WHERE id = $1 AND deleted_at IS NULL
+                ), selected_groups(id) AS (
+                    SELECT id FROM root_group
                     UNION
                     SELECT h.child_id
                     FROM principal_group_hierarchy h
                     JOIN selected_groups parent ON parent.id = h.parent_id
+                    JOIN principal_groups child ON child.id = h.child_id
+                    CROSS JOIN root_group root
+                    WHERE child.deleted_at IS NULL
+                      AND child.tenant_id IS NOT DISTINCT FROM root.tenant_id
                 )
                 SELECT c.id AS credential_id, c.issuer_id, c.entity_id, e.tenant_id
                 FROM credentials c
                 JOIN entities e ON e.id = c.entity_id
                 JOIN principal_group_members gm ON gm.entity_id = e.id
                 JOIN selected_groups sg ON sg.id = gm.group_id
+                CROSS JOIN root_group root
                 WHERE c.kind = 'certificate'
-                  AND c.status IN ('active', 'revocation_pending')
+                  AND c.status = 'active'
+                  AND e.tenant_id IS NOT DISTINCT FROM root.tenant_id
                   AND ($2::uuid IS NULL OR c.id > $2)
                 GROUP BY c.id, c.issuer_id, c.entity_id, e.tenant_id
                 ORDER BY c.id ASC
                 LIMIT $3
                 "#,
-            )
-            .bind(group_id)
-            .bind(after)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-            .map_err(AppError::Database)
-        }
+        )
+        .bind(group_id)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database),
         selector => {
             let mut query = QueryBuilder::<Postgres>::new(
                 r#"
@@ -327,7 +328,7 @@ pub async fn bulk_candidates(
                 FROM credentials c
                 JOIN entities e ON e.id = c.entity_id
                 WHERE c.kind = 'certificate'
-                  AND c.status IN ('active', 'revocation_pending')
+                  AND c.status = 'active'
                 "#,
             );
             match selector {
@@ -338,6 +339,9 @@ pub async fn bulk_candidates(
                 BulkRevocationSelector::Issuer(issuer_id) => {
                     query.push(" AND c.issuer_id = ");
                     query.push_bind(issuer_id);
+                    query.push(
+                        " AND EXISTS (SELECT 1 FROM pki_authorities a WHERE a.id = c.issuer_id AND e.tenant_id IS NOT DISTINCT FROM a.tenant_id)",
+                    );
                 }
                 BulkRevocationSelector::PrincipalGroup(_) => unreachable!(),
             }

@@ -67,10 +67,7 @@ pub async fn enroll(
     )
     .await;
     crate::metrics::record_pki_enrollment("first", outcome(&result));
-    crate::metrics::record_pki_lifecycle_operation(
-        "enrollment",
-        lifecycle_outcome(&result),
-    );
+    crate::metrics::record_pki_lifecycle_operation("enrollment", lifecycle_outcome(&result));
     result
 }
 
@@ -128,10 +125,7 @@ pub async fn re_enroll(
 ) -> Result<EnrollmentResponse, AppError> {
     let result = re_enroll_inner(state, peer, input).await;
     crate::metrics::record_pki_enrollment("reenroll", outcome(&result));
-    crate::metrics::record_pki_lifecycle_operation(
-        "enrollment",
-        lifecycle_outcome(&result),
-    );
+    crate::metrics::record_pki_lifecycle_operation("enrollment", lifecycle_outcome(&result));
     result
 }
 

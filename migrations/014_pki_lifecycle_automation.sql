@@ -16,7 +16,7 @@ CREATE TABLE pki_lifecycle_notifications (
                                )),
     window_at      TIMESTAMPTZ NOT NULL,
     emitted_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (subject_kind, subject_id, window_kind, window_at)
+    PRIMARY KEY (subject_kind, subject_id, window_kind)
 );
 
 CREATE INDEX idx_pki_lifecycle_notifications_emitted

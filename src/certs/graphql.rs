@@ -532,22 +532,16 @@ impl CertificateMutation {
     ) -> Result<BulkRevokeCertificatesPayload> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let selector = match (
-            input.tenant_id,
-            input.issuer_id,
-            input.principal_group_id,
-        ) {
-            (Some(id), None, None) => lifecycle::BulkRevocationSelector::Tenant(parse_id(
-                id,
-                "tenantId",
-            )?),
-            (None, Some(id), None) => lifecycle::BulkRevocationSelector::Issuer(parse_id(
-                id,
-                "issuerId",
-            )?),
-            (None, None, Some(id)) => lifecycle::BulkRevocationSelector::PrincipalGroup(
-                parse_id(id, "principalGroupId")?,
-            ),
+        let selector = match (input.tenant_id, input.issuer_id, input.principal_group_id) {
+            (Some(id), None, None) => {
+                lifecycle::BulkRevocationSelector::Tenant(parse_id(id, "tenantId")?)
+            }
+            (None, Some(id), None) => {
+                lifecycle::BulkRevocationSelector::Issuer(parse_id(id, "issuerId")?)
+            }
+            (None, None, Some(id)) => {
+                lifecycle::BulkRevocationSelector::PrincipalGroup(parse_id(id, "principalGroupId")?)
+            }
             _ => {
                 return Err(async_graphql::Error::new(
                     "provide exactly one selector: tenantId, issuerId, or principalGroupId",
@@ -558,12 +552,7 @@ impl CertificateMutation {
             .await
             .map_err(gql_error)?;
         let scope = scope_for_tenant(selector_tenant);
-        require_any_capability(
-            &state.pool,
-            &auth,
-            &[("revoke", scope), ("manage", scope)],
-        )
-        .await?;
+        require_any_capability(&state.pool, &auth, &[("revoke", scope), ("manage", scope)]).await?;
         let after = input
             .after_credential_id
             .map(|id| parse_id(id, "afterCredentialId"))
