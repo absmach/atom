@@ -165,12 +165,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asn1_der"
-version = "0.7.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4858a9d740c5007a9069007c3b4e91152d0506f13c1b31dd49051fd537656156"
-
-[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,6 +422,8 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "const-oid",
+ "der",
  "dotenvy",
  "hex",
  "insta",
@@ -439,7 +435,6 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "minijinja",
- "ocsp",
  "openidconnect",
  "p256",
  "prost",
@@ -452,6 +447,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sqlx",
+ "spki",
  "thiserror 1.0.69",
  "time",
  "tokio",
@@ -464,6 +460,8 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "x509-cert",
+ "x509-ocsp",
  "x509-parser",
  "zeroize",
 ]
@@ -2620,21 +2618,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ocsp"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aef2010711f55f8ed2627630936202af42741336bc1ceaf1b0b256e02e821f18"
-dependencies = [
- "asn1_der",
- "chrono",
- "hex",
- "lazy_static",
- "thiserror 1.0.69",
- "tracing",
- "tracing-futures",
-]
-
-[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4651,16 +4634,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-futures"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
-dependencies = [
- "pin-project",
- "tracing",
-]
-
-[[package]]
 name = "tracing-log"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5486,6 +5459,18 @@ dependencies = [
  "const-oid",
  "der",
  "spki",
+]
+
+[[package]]
+name = "x509-ocsp"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e54e695a31f0fecb826cf59ae2093c941d7ef932a1f8508185dd23b29ce2e2e"
+dependencies = [
+ "const-oid",
+ "der",
+ "spki",
+ "x509-cert",
 ]
 
 [[package]]

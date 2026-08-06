@@ -12,7 +12,9 @@ use rcgen::{
     CertificateParams, CertificateRevocationListParams, CertificateSigningRequestParams,
     CrlDistributionPoint, CustomExtension, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, PublicKeyData, RsaKeySize, SanType, SerialNumber, SignatureAlgorithm,
-    SigningKey, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519, PKCS_RSA_SHA256,
+    SigningKey, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ECDSA_P521_SHA256,
+    PKCS_ECDSA_P521_SHA384, PKCS_ECDSA_P521_SHA512, PKCS_ED25519, PKCS_RSA_SHA256, PKCS_RSA_SHA384,
+    PKCS_RSA_SHA512,
 };
 use ring::{digest, rand, rand::SecureRandom};
 use time::{Duration, OffsetDateTime};
@@ -103,7 +105,38 @@ pub struct PkiIssuer {
 /// certificate issuance helpers.
 pub struct PkiArtifactSigner {
     certificate_pem: String,
+    chain_pem: String,
     signing_key: PkiSigningKey,
+}
+
+/// Signature algorithm selected by the authority key itself. Consumers use
+/// this value to encode artifact signature identifiers without guessing from
+/// the certificate that signed the authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PkiSignatureAlgorithm {
+    RsaPkcs1Sha256,
+    RsaPkcs1Sha384,
+    RsaPkcs1Sha512,
+    EcdsaSha256,
+    EcdsaSha384,
+    EcdsaSha512,
+    Ed25519,
+}
+
+/// A signature produced through the restricted retained-artifact surface.
+pub struct PkiArtifactSignature {
+    algorithm: PkiSignatureAlgorithm,
+    bytes: Vec<u8>,
+}
+
+impl PkiArtifactSignature {
+    pub fn algorithm(&self) -> PkiSignatureAlgorithm {
+        self.algorithm
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 struct ManagedAuthorityMaterial {
@@ -243,6 +276,7 @@ impl PkiArtifactSigner {
         let material = managed_authority_material(authority, ca_keys)?;
         Ok(Self {
             certificate_pem: material.certificate_pem,
+            chain_pem: material.chain_pem,
             signing_key: material.signing_key,
         })
     }
@@ -253,6 +287,51 @@ impl PkiArtifactSigner {
         let crl = params.signed_by(&signer).map_err(core_encoding_error)?;
         Ok(crl.der().to_vec())
     }
+
+    /// Return the already-public, validated issuer chain for embedding in a
+    /// signed OCSP response. The first certificate is always the signer.
+    pub fn certificate_chain_der(&self) -> Result<Vec<Vec<u8>>, AppError> {
+        certificate_chain_der(&self.chain_pem)
+    }
+
+    /// Sign only the DER-encoded OCSP ResponseData value. This deliberately
+    /// does not expose the underlying CA key or a general certificate issuer.
+    pub fn sign_ocsp_response_data(
+        &self,
+        response_data_der: &[u8],
+    ) -> Result<PkiArtifactSignature, AppError> {
+        let algorithm = pki_signature_algorithm(self.signing_key.algorithm())?;
+        let bytes = self
+            .signing_key
+            .sign(response_data_der)
+            .map_err(core_encoding_error)?;
+        Ok(PkiArtifactSignature { algorithm, bytes })
+    }
+}
+
+pub(crate) fn pki_signature_algorithm(
+    algorithm: &SignatureAlgorithm,
+) -> Result<PkiSignatureAlgorithm, AppError> {
+    let algorithm = if algorithm == &PKCS_RSA_SHA256 {
+        PkiSignatureAlgorithm::RsaPkcs1Sha256
+    } else if algorithm == &PKCS_RSA_SHA384 {
+        PkiSignatureAlgorithm::RsaPkcs1Sha384
+    } else if algorithm == &PKCS_RSA_SHA512 {
+        PkiSignatureAlgorithm::RsaPkcs1Sha512
+    } else if algorithm == &PKCS_ECDSA_P256_SHA256 || algorithm == &PKCS_ECDSA_P521_SHA256 {
+        PkiSignatureAlgorithm::EcdsaSha256
+    } else if algorithm == &PKCS_ECDSA_P384_SHA384 || algorithm == &PKCS_ECDSA_P521_SHA384 {
+        PkiSignatureAlgorithm::EcdsaSha384
+    } else if algorithm == &PKCS_ECDSA_P521_SHA512 {
+        PkiSignatureAlgorithm::EcdsaSha512
+    } else if algorithm == &PKCS_ED25519 {
+        PkiSignatureAlgorithm::Ed25519
+    } else {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "unsupported authority signature algorithm"
+        )));
+    };
+    Ok(algorithm)
 }
 
 fn managed_authority_material(
@@ -1174,5 +1253,24 @@ mod tests {
         let private_key = generated.into_private_key_pem();
         let key_pair = KeyPair::from_pem(private_key.as_str()).unwrap();
         assert!(std::ptr::eq(key_pair.algorithm(), &PKCS_ECDSA_P384_SHA384));
+    }
+
+    #[test]
+    fn artifact_signature_algorithm_maps_every_rcgen_variant() {
+        let cases = [
+            (&PKCS_RSA_SHA256, PkiSignatureAlgorithm::RsaPkcs1Sha256),
+            (&PKCS_RSA_SHA384, PkiSignatureAlgorithm::RsaPkcs1Sha384),
+            (&PKCS_RSA_SHA512, PkiSignatureAlgorithm::RsaPkcs1Sha512),
+            (&PKCS_ECDSA_P256_SHA256, PkiSignatureAlgorithm::EcdsaSha256),
+            (&PKCS_ECDSA_P384_SHA384, PkiSignatureAlgorithm::EcdsaSha384),
+            (&PKCS_ECDSA_P521_SHA256, PkiSignatureAlgorithm::EcdsaSha256),
+            (&PKCS_ECDSA_P521_SHA384, PkiSignatureAlgorithm::EcdsaSha384),
+            (&PKCS_ECDSA_P521_SHA512, PkiSignatureAlgorithm::EcdsaSha512),
+            (&PKCS_ED25519, PkiSignatureAlgorithm::Ed25519),
+        ];
+
+        for (algorithm, expected) in cases {
+            assert_eq!(pki_signature_algorithm(algorithm).unwrap(), expected);
+        }
     }
 }

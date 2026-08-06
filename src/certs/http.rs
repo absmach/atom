@@ -83,18 +83,52 @@ pub async fn ocsp(State(state): State<AppState>, body: Bytes) -> Result<Response
     .await
     {
         Ok(der) => der,
-        Err(AppError::BadRequest(_)) => {
-            service::unsuccessful_ocsp(ocsp::response::OcspRespStatus::MalformedReq)?
+        Err(AppError::BadRequest(_)) | Err(AppError::PayloadTooLarge(_)) => {
+            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::MalformedRequest)?
+        }
+        Err(AppError::NotFound(_)) | Err(AppError::Unauthorized(_)) | Err(AppError::Forbidden) => {
+            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::Unauthorized)?
         }
         Err(err) => {
-            tracing::error!("OCSP response generation failed: {err}");
-            service::unsuccessful_ocsp(ocsp::response::OcspRespStatus::InternalError)?
+            tracing::error!(error = %err, "legacy OCSP response generation failed");
+            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::InternalError)?
         }
     };
+    ocsp_http_response(der)
+}
+
+pub async fn issuer_ocsp(
+    Path(issuer_id): Path<Uuid>,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let der = match service::issuer_ocsp_response(&state.pool, &state.config, issuer_id, &body)
+        .await
+    {
+        Ok(der) => der,
+        Err(AppError::BadRequest(_)) | Err(AppError::PayloadTooLarge(_)) => {
+            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::MalformedRequest)?
+        }
+        Err(AppError::NotFound(_)) | Err(AppError::Unauthorized(_)) | Err(AppError::Forbidden) => {
+            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::Unauthorized)?
+        }
+        Err(err) => {
+            tracing::error!(issuer_id = %issuer_id, error = %err, "issuer OCSP response generation failed");
+            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::InternalError)?
+        }
+    };
+    ocsp_http_response(der)
+}
+
+fn ocsp_http_response(der: Vec<u8>) -> Result<Response, AppError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/ocsp-response"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
     );
     Ok((StatusCode::OK, headers, der).into_response())
 }

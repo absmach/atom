@@ -205,10 +205,11 @@ as unusable, disable or revoke it, and perform a new bootstrap; they must never
 log response bodies while investigating.
 
 This route is gated by `ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED`, which defaults
-to `false` in code, examples, and Compose. Keep it disabled in production until
-PR-010 completes per-issuer CRL and OCSP publication. The legacy
-`issueCertificate` mutation remains available as the explicit v1 migration
-path and is not silently redirected to managed authorities.
+to `false` in code, examples, and Compose. Per-issuer CRL and OCSP publication
+is available; operators may enable generated-key bootstrap only after verifying
+that every relying party consumes the managed issuer URLs and trust bundle. The
+legacy `issueCertificate` mutation remains available as the explicit v1
+migration path and is not silently redirected to managed authorities.
 
 ## Issuer-aware renewal (v2)
 
@@ -349,6 +350,37 @@ credential and subject state. Deployments should combine that resolver denial
 with short certificate lifetimes instead of waiting for a relying party's next
 CRL poll.
 
+## Per-issuer OCSP
+
+Each managed leaf issuer answers DER OCSP requests at
+`POST /certs/issuers/{issuer_id}/ocsp`. The responder accepts SHA-1 and SHA-256
+CertIDs, resolves the exact issuer plus serial, and returns signed `good`,
+`revoked`, or `unknown` status. A serial issued by another authority is always
+`unknown`. Revoked responses carry the immutable revocation time and the
+recorded RFC 5280 reason.
+
+Responses are signed directly by the route issuer and embed its validated chain
+to the retained root. The signature algorithm identifier is selected from the
+actual signing key. `retiring` and `retired` issuers remain available until
+their certificate expires, so relying parties must retain old issuer URLs and
+trust material for their full validation window. Atom does not use a delegated
+OCSP responder in this release.
+
+`producedAt` and `thisUpdate` describe the current database evaluation;
+`nextUpdate` is no more than five minutes later and never exceeds issuer expiry.
+Responses use `Cache-Control: no-store, max-age=0`, because revocation becomes
+authoritative immediately. A single request-level nonce of 1–32 bytes is
+echoed; absent nonces stay absent. Unsupported hashes, malformed DER, duplicate
+or misplaced nonces, more than 16 CertIDs, and requests larger than 16 KiB are
+rejected with bounded processing. Unknown issuer identifiers produce the same
+RFC `unauthorized` response without tenant detail.
+
+The original `POST /certs/ocsp` endpoint remains the compatibility route for
+the configured file-backed v1 issuer. It now uses the same bounded parser,
+nonce policy, response timing, and key-derived signature encoding, but it keeps
+the legacy global-serial data model. Managed certificates and all new
+integrations must use the per-issuer endpoint carried in the certificate AIA.
+
 ## Legacy CA files
 
 The original v1 issuer remains available for backward compatibility and loads
@@ -402,6 +434,7 @@ GET  /certs/trust-bundle.pem
 GET  /certs/crl
 GET  /certs/issuers/{issuer_id}/crl
 POST /certs/ocsp
+POST /certs/issuers/{issuer_id}/ocsp
 ```
 
 `/certs/trust-bundle.pem` is assembled from current database authority state on
@@ -412,7 +445,8 @@ Atom restart.
 
 `/certs/crl` remains the compatibility route for the legacy file-backed issuer.
 Managed-authority clients should use the issuer-specific route carried by their
-certificate's CRL distribution point.
+certificate's CRL distribution point. Likewise, `/certs/ocsp` is the legacy
+file-backed route; managed clients use their issuer-specific AIA URL.
 
 ## Runtime Lookup
 
