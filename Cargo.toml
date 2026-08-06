@@ -20,6 +20,8 @@ serde_json = "1"
 jsonschema = { version = "0.18", default-features = false }
 uuid = { version = "1", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+const-oid = { version = "0.9", features = ["db"] }
+der = { version = "0.7", features = ["alloc", "derive", "oid"] }
 jsonwebtoken = "9"
 openidconnect = "4.0.1"
 argon2 = { version = "0.5", features = ["std"] }
@@ -42,9 +44,11 @@ lettre = { version = "0.11.21", default-features = false, features = ["builder",
 minijinja = { version = "2", default-features = false, features = ["serde"] }
 url = "2"
 rcgen = { version = "0.14.8", features = ["pem", "x509-parser", "aws_lc_rs"] }
-ocsp = "0.4.0"
 ring = "0.17"
+spki = { version = "0.7", features = ["alloc"] }
 time = "0.3"
+x509-cert = "0.2"
+x509-ocsp = "0.2.1"
 x509-parser = "0.18.1"
 yasna = "0.6"
 zeroize = "1"

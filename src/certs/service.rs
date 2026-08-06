@@ -1,12 +1,8 @@
-use chrono::{DateTime, Datelike, Timelike, Utc};
-use ocsp::{
-    common::asn1::{GeneralizedTime, Oid},
-    oid::{ALGO_SHA1_DOT, ALGO_SHA256_WITH_RSA_ENCRYPTION_DOT, OCSP_RESPONSE_BASIC_DOT},
-    request::OcspRequest,
-    response::{
-        CertStatus, CertStatusCode, CrlReason, OcspRespStatus, OcspResponse, OneResp, ResponderId,
-        ResponseData, RevokedInfo,
-    },
+use chrono::{DateTime, Utc};
+use const_oid::{db::rfc6960::ID_PKIX_OCSP_NONCE, ObjectIdentifier};
+use der::{
+    asn1::{BitString, GeneralizedTime, Null, OctetString},
+    Decode, Encode,
 };
 use rcgen::{
     CertificateParams, CertificateRevocationListParams, CertificateSigningRequestParams, DnType,
@@ -16,10 +12,19 @@ use rcgen::{
 use ring::{digest, rand, rand::SecureRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use spki::AlgorithmIdentifierOwned;
 use sqlx::Acquire;
 use std::fs;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+use x509_cert::{
+    ext::{pkix::CrlReason as X509CrlReason, Extension},
+    Certificate as X509Certificate,
+};
+use x509_ocsp::{
+    ext::Nonce, BasicOcspResponse, CertStatus, OcspGeneralizedTime, OcspRequest, OcspResponse,
+    OcspResponseStatus, ResponderId, ResponseData, RevokedInfo, SingleResponse, Version,
+};
 use x509_parser::pem::parse_x509_pem;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -39,6 +44,9 @@ const ISSUER_CRL_LOCK_DOMAIN: i64 = 0x504b_4939_4352_4c00;
 const LEAF_CLOCK_SKEW_SECS: i64 = 300;
 const CRL_TTL_HOURS: i64 = 24;
 const SERIAL_INSERT_ATTEMPTS: usize = 3;
+pub const OCSP_REQUEST_MAX_BYTES: usize = 16 * 1024;
+const OCSP_MAX_SINGLE_REQUESTS: usize = 16;
+const OCSP_VALIDITY_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone)]
 pub struct IssueCertificate {
@@ -275,8 +283,6 @@ pub struct CertificateIssuer {
     issuer: Issuer<'static, KeyPair>,
     key_pair: KeyPair,
     certificate_der: Vec<u8>,
-    issuer_name_hash_sha1: Vec<u8>,
-    issuer_key_hash_sha1: Vec<u8>,
 }
 
 struct PersistCertificate {
@@ -377,7 +383,6 @@ fn build_issuer(
     let issuer =
         Issuer::from_ca_cert_pem(&cert.pem, KeyPair::from_pem(key_pem).map_err(rcgen_err)?)
             .map_err(rcgen_err)?;
-    let (issuer_name_hash_sha1, issuer_key_hash_sha1) = issuer_sha1_hashes_from_der(&cert.der)?;
     Ok(CertificateIssuer {
         issuer_kind,
         chain_pem,
@@ -388,8 +393,6 @@ fn build_issuer(
         issuer,
         key_pair,
         certificate_der: cert.der,
-        issuer_name_hash_sha1,
-        issuer_key_hash_sha1,
     })
 }
 
@@ -1599,61 +1602,133 @@ pub async fn ocsp_response(
     request_der: &[u8],
 ) -> Result<Vec<u8>, AppError> {
     let loaded = require_issuer(config, issuer)?;
-    let request = OcspRequest::parse(request_der)
-        .map_err(|_| AppError::bad_request("invalid OCSP request"))?;
+    let request = parse_ocsp_request(request_der)?;
+    let nonce = request_nonce(&request)?;
     let now = Utc::now();
-    let this_update = generalized_time(now)?;
-    let next_update = Some(generalized_time(now + chrono::Duration::hours(1))?);
-    let mut one_responses = Vec::with_capacity(request.tbs_request.request_list.len());
+    let next_update =
+        (now + chrono::Duration::seconds(OCSP_VALIDITY_SECONDS)).min(loaded.issuer_not_after);
+    if next_update <= now {
+        return Err(AppError::not_found("legacy OCSP issuer is expired"));
+    }
+    let this_update = ocsp_time(now)?;
+    let next_update = ocsp_time(next_update)?;
+    let mut responses = Vec::with_capacity(request.tbs_request.request_list.len());
     for one in &request.tbs_request.request_list {
-        let issuer_matches = certid_issuer_matches(
-            &one.certid,
-            &loaded.issuer_name_hash_sha1,
-            &loaded.issuer_key_hash_sha1,
-        )?;
+        let issuer_matches = certid_issuer_matches(&one.req_cert, &loaded.certificate_der)?;
         let status = if issuer_matches {
-            let serial = serial_from_ocsp_request(&one.certid.serial_num)?;
+            let serial = serial_from_ocsp_request(&one.req_cert)?;
             match repo::certificate_by_serial(pool, &serial).await {
-                Ok(cert) if cert.status == "active" => CertStatus::new(CertStatusCode::Good, None),
+                Ok(cert) if cert.status == "active" => CertStatus::good(),
                 Ok(cert) => {
                     let metadata = metadata_from_value(&cert.metadata)?;
                     let revoked_at = metadata.revoked_at.unwrap_or_else(Utc::now);
-                    CertStatus::new(
-                        CertStatusCode::Revoked,
-                        Some(RevokedInfo::new(
-                            generalized_time(revoked_at)?,
-                            Some(CrlReason::OcspRevokeUnspecified),
+                    CertStatus::revoked(RevokedInfo {
+                        revocation_time: ocsp_time(revoked_at)?,
+                        revocation_reason: Some(ocsp_revocation_reason(
+                            metadata
+                                .revocation_reason
+                                .as_deref()
+                                .unwrap_or("unspecified"),
                         )),
-                    )
+                    })
                 }
-                Err(AppError::NotFound(_)) => CertStatus::new(CertStatusCode::Unknown, None),
+                Err(AppError::NotFound(_)) => CertStatus::unknown(),
                 Err(err) => return Err(err),
             }
         } else {
-            CertStatus::new(CertStatusCode::Unknown, None)
+            CertStatus::unknown()
         };
-        one_responses.push(OneResp {
-            cid: one.certid.clone(),
+        responses.push(SingleResponse {
+            cert_id: one.req_cert.clone(),
             cert_status: status,
             this_update,
-            next_update,
-            one_resp_ext: None,
+            next_update: Some(next_update),
+            single_extensions: None,
         });
     }
+    let certificate_chain = certificate_chain_from_pem(&loaded.chain_pem)?;
+    encode_signed_ocsp(
+        certificate_chain,
+        responses,
+        nonce.as_deref(),
+        this_update,
+        |response_data_der| {
+            let algorithm = pki_core::pki_signature_algorithm(loaded.key_pair.algorithm())?;
+            let signature = loaded.key_pair.sign(response_data_der).map_err(rcgen_err)?;
+            Ok((algorithm, signature))
+        },
+    )
+}
 
-    let responder = ResponderId::new_key_hash(&loaded.issuer_key_hash_sha1);
-    let data = ResponseData::new(responder, this_update, one_responses, None);
-    let data_der = data.to_der().map_err(ocsp_err)?;
-    let signature = loaded.key_pair.sign(&data_der).map_err(rcgen_err)?;
-    let oid = Oid::new_from_dot(ALGO_SHA256_WITH_RSA_ENCRYPTION_DOT).map_err(ocsp_err)?;
-    let response_type = Oid::new_from_dot(OCSP_RESPONSE_BASIC_DOT).map_err(ocsp_err)?;
-    let basic = basic_ocsp_response_der(
-        &data_der,
-        &oid,
-        &signature,
-        &[loaded.certificate_der.as_slice()],
-    )?;
-    successful_ocsp_response_der(&response_type, &basic)
+/// Build an issuer-scoped OCSP response from the exact issuer/serial identity.
+/// The request is parsed before issuer lookup so malformed input has identical
+/// behavior for known and unknown route identifiers.
+pub async fn issuer_ocsp_response(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    issuer_id: Uuid,
+    request_der: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let request = parse_ocsp_request(request_der)?;
+    let nonce = request_nonce(&request)?;
+    let authority = authority_repo::authority_by_id(pool, issuer_id).await?;
+    validate_ocsp_authority(&authority, Utc::now())?;
+    let signer =
+        pki_core::PkiArtifactSigner::from_managed_authority(&authority, &config.pki_ca_keys)
+            .map_err(|error| {
+                AppError::Internal(anyhow::anyhow!(
+                    "managed OCSP signer is unavailable: {error}"
+                ))
+            })?;
+    let certificate_chain = signer.certificate_chain_der().map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "managed OCSP signer chain is unavailable: {error}"
+        ))
+    })?;
+    let issuer_der = certificate_chain
+        .first()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("managed OCSP issuer chain is empty")))?;
+    let now = Utc::now();
+    let issuer_not_after = authority
+        .not_after
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("managed OCSP issuer has no expiry")))?;
+    let next_update =
+        (now + chrono::Duration::seconds(OCSP_VALIDITY_SECONDS)).min(issuer_not_after);
+    if next_update <= now {
+        return Err(AppError::not_found("OCSP responder is unavailable"));
+    }
+    let this_update = ocsp_time(now)?;
+    let next_update = ocsp_time(next_update)?;
+    let mut responses = Vec::with_capacity(request.tbs_request.request_list.len());
+    for one in &request.tbs_request.request_list {
+        let issuer_matches = certid_issuer_matches(&one.req_cert, issuer_der)?;
+        let cert_status = if issuer_matches {
+            let serial = serial_from_ocsp_request(&one.req_cert)?;
+            managed_ocsp_status(pool, issuer_id, &serial).await?
+        } else {
+            // A CertID for another issuer is deliberately indistinguishable
+            // from an unissued serial under this public responder.
+            CertStatus::unknown()
+        };
+        responses.push(SingleResponse {
+            cert_id: one.req_cert.clone(),
+            cert_status,
+            this_update,
+            next_update: Some(next_update),
+            single_extensions: None,
+        });
+    }
+    encode_signed_ocsp(
+        certificate_chain,
+        responses,
+        nonce.as_deref(),
+        this_update,
+        |response_data_der| {
+            let signature = signer.sign_ocsp_response_data(response_data_der)?;
+            let algorithm = signature.algorithm();
+            Ok((algorithm, signature.into_bytes()))
+        },
+    )
 }
 
 pub async fn resolve_certificate_identity(
@@ -2245,17 +2320,118 @@ fn certificate_der_from_pem(certificate_pem: &str) -> Result<Vec<u8>, AppError> 
         .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid certificate PEM")))
 }
 
-fn issuer_sha1_hashes_from_der(certificate_der: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AppError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OcspHashAlgorithm {
+    Sha1,
+    Sha256,
+}
+
+const SHA1_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
+const SHA256_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
+
+fn parse_ocsp_request(request_der: &[u8]) -> Result<OcspRequest, AppError> {
+    if request_der.is_empty() {
+        return Err(AppError::bad_request("empty OCSP request"));
+    }
+    if request_der.len() > OCSP_REQUEST_MAX_BYTES {
+        return Err(AppError::payload_too_large("OCSP request is too large"));
+    }
+    let request = OcspRequest::from_der(request_der)
+        .map_err(|_| AppError::bad_request("malformed OCSP request"))?;
+    if request.tbs_request.request_list.is_empty()
+        || request.tbs_request.request_list.len() > OCSP_MAX_SINGLE_REQUESTS
+    {
+        return Err(AppError::bad_request(
+            "OCSP request must contain between one and sixteen CertIDs",
+        ));
+    }
+    for one in &request.tbs_request.request_list {
+        if let Some(extensions) = &one.single_request_extensions {
+            for extension in extensions {
+                if extension.extn_id == ID_PKIX_OCSP_NONCE || extension.critical {
+                    return Err(AppError::bad_request(
+                        "unsupported OCSP single-request extension",
+                    ));
+                }
+            }
+        }
+        // Resolve the algorithm while the request is still in the bounded
+        // validation phase. This rejects unsupported hashes before any issuer
+        // or certificate lookup can reveal state.
+        ocsp_hash_algorithm(&one.req_cert)?;
+    }
+    if let Some(extensions) = &request.tbs_request.request_extensions {
+        for extension in extensions {
+            if extension.extn_id != ID_PKIX_OCSP_NONCE && extension.critical {
+                return Err(AppError::bad_request(
+                    "unsupported critical OCSP request extension",
+                ));
+            }
+        }
+    }
+    Ok(request)
+}
+
+fn request_nonce(request: &OcspRequest) -> Result<Option<Vec<u8>>, AppError> {
+    let Some(extensions) = &request.tbs_request.request_extensions else {
+        return Ok(None);
+    };
+    let mut nonce = None;
+    for extension in extensions
+        .iter()
+        .filter(|extension| extension.extn_id == ID_PKIX_OCSP_NONCE)
+    {
+        if nonce.is_some() {
+            return Err(AppError::bad_request("duplicate OCSP nonce extension"));
+        }
+        let decoded = Nonce::from_der(extension.extn_value.as_bytes())
+            .map_err(|_| AppError::bad_request("malformed OCSP nonce extension"))?;
+        let bytes = decoded.0.as_bytes();
+        if !(1..=32).contains(&bytes.len()) {
+            return Err(AppError::bad_request(
+                "OCSP nonce must contain between one and thirty-two bytes",
+            ));
+        }
+        nonce = Some(bytes.to_vec());
+    }
+    Ok(nonce)
+}
+
+fn ocsp_hash_algorithm(certid: &x509_ocsp::CertId) -> Result<OcspHashAlgorithm, AppError> {
+    let parameters_supported = match &certid.hash_algorithm.parameters {
+        None => true,
+        Some(parameters) => parameters
+            .to_der()
+            .map(|encoded| encoded.as_slice() == [0x05, 0x00])
+            .unwrap_or(false),
+    };
+    if !parameters_supported {
+        return Err(AppError::bad_request(
+            "unsupported OCSP hash algorithm parameters",
+        ));
+    }
+    match certid.hash_algorithm.oid {
+        SHA1_OID => Ok(OcspHashAlgorithm::Sha1),
+        SHA256_OID => Ok(OcspHashAlgorithm::Sha256),
+        _ => Err(AppError::bad_request("unsupported OCSP CertID hash")),
+    }
+}
+
+fn issuer_hashes_from_der(
+    certificate_der: &[u8],
+    algorithm: OcspHashAlgorithm,
+) -> Result<(Vec<u8>, Vec<u8>), AppError> {
     let (_, cert) = x509_parser::parse_x509_certificate(certificate_der)
         .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid issuer certificate DER")))?;
-    let name_hash = digest::digest(
-        &digest::SHA1_FOR_LEGACY_USE_ONLY,
-        cert.tbs_certificate.subject.as_raw(),
-    )
-    .as_ref()
-    .to_vec();
+    let digest_algorithm = match algorithm {
+        OcspHashAlgorithm::Sha1 => &digest::SHA1_FOR_LEGACY_USE_ONLY,
+        OcspHashAlgorithm::Sha256 => &digest::SHA256,
+    };
+    let name_hash = digest::digest(digest_algorithm, cert.tbs_certificate.subject.as_raw())
+        .as_ref()
+        .to_vec();
     let key_hash = digest::digest(
-        &digest::SHA1_FOR_LEGACY_USE_ONLY,
+        digest_algorithm,
         cert.tbs_certificate
             .subject_pki
             .subject_public_key
@@ -2267,27 +2443,91 @@ fn issuer_sha1_hashes_from_der(certificate_der: &[u8]) -> Result<(Vec<u8>, Vec<u
     Ok((name_hash, key_hash))
 }
 
-fn certid_issuer_matches(
-    certid: &ocsp::common::asn1::CertId,
-    issuer_name_hash_sha1: &[u8],
-    issuer_key_hash_sha1: &[u8],
-) -> Result<bool, AppError> {
-    let sha1 = Oid::new_from_dot(ALGO_SHA1_DOT).map_err(ocsp_err)?;
-    Ok(certid.hash_algo == sha1
-        && certid.issuer_name_hash == issuer_name_hash_sha1
-        && certid.issuer_key_hash == issuer_key_hash_sha1)
+fn certid_issuer_matches(certid: &x509_ocsp::CertId, issuer_der: &[u8]) -> Result<bool, AppError> {
+    let algorithm = ocsp_hash_algorithm(certid)?;
+    let (issuer_name_hash, issuer_key_hash) = issuer_hashes_from_der(issuer_der, algorithm)?;
+    Ok(certid.issuer_name_hash.as_bytes() == issuer_name_hash
+        && certid.issuer_key_hash.as_bytes() == issuer_key_hash)
 }
 
-fn serial_from_ocsp_request(serial: &[u8]) -> Result<String, AppError> {
-    let trimmed = serial
-        .iter()
-        .skip_while(|byte| **byte == 0)
-        .copied()
-        .collect::<Vec<_>>();
-    if trimmed.is_empty() {
+fn serial_from_ocsp_request(certid: &x509_ocsp::CertId) -> Result<String, AppError> {
+    let serial = certid.serial_number.as_bytes();
+    if serial.is_empty() {
         return Err(AppError::bad_request("invalid certificate serial number"));
     }
-    normalize_serial(&hex::encode(trimmed))
+    normalize_serial(&hex::encode(serial))
+}
+
+fn validate_ocsp_authority(
+    authority: &AuthorityRecord,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let lifecycle_retained = matches!(
+        authority.status,
+        AuthorityStatus::Active | AuthorityStatus::Retiring | AuthorityStatus::Retired
+    );
+    if !authority.kind.can_issue_leaf_credentials()
+        || !lifecycle_retained
+        || !authority.key_backend.can_sign()
+        || authority
+            .not_before
+            .is_none_or(|not_before| not_before > now)
+        || authority.not_after.is_none_or(|not_after| not_after <= now)
+    {
+        return Err(AppError::not_found("OCSP responder is unavailable"));
+    }
+    Ok(())
+}
+
+async fn managed_ocsp_status(
+    pool: &sqlx::PgPool,
+    issuer_id: Uuid,
+    serial_number: &str,
+) -> Result<CertStatus, AppError> {
+    let certificate = match repo::certificate_by_issuer_serial(pool, issuer_id, serial_number).await
+    {
+        Ok(certificate) => certificate,
+        Err(AppError::NotFound(_)) => return Ok(CertStatus::unknown()),
+        Err(error) => return Err(error),
+    };
+    match certificate.status.as_str() {
+        "active" => Ok(CertStatus::good()),
+        "revoked" => {
+            let revocation = repo::certificate_revocation_by_id(pool, certificate.id)
+                .await
+                .map_err(|error| {
+                    AppError::Internal(anyhow::anyhow!(
+                        "revoked certificate has no immutable revocation record: {error}"
+                    ))
+                })?;
+            if revocation.issuer_id != Some(issuer_id) || revocation.serial_number != serial_number
+            {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "certificate revocation record does not match its issuer identity"
+                )));
+            }
+            Ok(CertStatus::revoked(RevokedInfo {
+                revocation_time: ocsp_time(revocation.revoked_at)?,
+                revocation_reason: Some(ocsp_revocation_reason(&revocation.reason)),
+            }))
+        }
+        _ => Ok(CertStatus::unknown()),
+    }
+}
+
+fn ocsp_revocation_reason(reason: &str) -> X509CrlReason {
+    match reason {
+        "key_compromise" => X509CrlReason::KeyCompromise,
+        "ca_compromise" => X509CrlReason::CaCompromise,
+        "affiliation_changed" => X509CrlReason::AffiliationChanged,
+        "superseded" => X509CrlReason::Superseded,
+        "cessation_of_operation" => X509CrlReason::CessationOfOperation,
+        "certificate_hold" => X509CrlReason::CertificateHold,
+        "remove_from_crl" => X509CrlReason::RemoveFromCRL,
+        "privilege_withdrawn" => X509CrlReason::PrivilegeWithdrawn,
+        "aa_compromise" => X509CrlReason::AaCompromise,
+        _ => X509CrlReason::Unspecified,
+    }
 }
 
 fn should_regenerate_crl(state: &repo::CrlState, now: DateTime<Utc>) -> bool {
@@ -2435,16 +2675,12 @@ fn to_offset(value: DateTime<Utc>) -> Result<OffsetDateTime, AppError> {
         .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid certificate timestamp")))
 }
 
-fn generalized_time(value: DateTime<Utc>) -> Result<GeneralizedTime, AppError> {
-    GeneralizedTime::new(
-        value.year(),
-        value.month(),
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second(),
-    )
-    .map_err(ocsp_err)
+fn ocsp_time(value: DateTime<Utc>) -> Result<OcspGeneralizedTime, AppError> {
+    let seconds = u64::try_from(value.timestamp())
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid OCSP timestamp")))?;
+    GeneralizedTime::from_unix_duration(std::time::Duration::from_secs(seconds))
+        .map(OcspGeneralizedTime)
+        .map_err(der_err)
 }
 
 fn normalize_fingerprint(value: &str) -> String {
@@ -2455,84 +2691,139 @@ fn normalize_fingerprint(value: &str) -> String {
         .collect()
 }
 
-fn basic_ocsp_response_der(
-    response_data_der: &[u8],
-    signature_oid: &Oid,
-    signature: &[u8],
-    certs: &[&[u8]],
-) -> Result<Vec<u8>, AppError> {
-    let mut body = response_data_der.to_vec();
-    body.extend(signature_oid.to_der_with_null().map_err(ocsp_err)?);
-    body.extend(der_bit_string(signature));
-    if !certs.is_empty() {
-        let cert_list = certs
-            .iter()
-            .flat_map(|cert| cert.iter().copied())
-            .collect::<Vec<_>>();
-        body.extend(der_tlv(0xa0, der_tlv(0x30, cert_list)));
+fn certificate_chain_from_pem(chain_pem: &str) -> Result<Vec<Vec<u8>>, AppError> {
+    let mut remaining = chain_pem.as_bytes();
+    let mut certificates = Vec::new();
+    while !remaining.iter().all(u8::is_ascii_whitespace) {
+        let (rest, pem) = parse_x509_pem(remaining)
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid OCSP signer chain PEM")))?;
+        if pem.label != "CERTIFICATE" {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "OCSP signer chain contains non-certificate material"
+            )));
+        }
+        certificates.push(pem.contents);
+        remaining = rest;
     }
-    Ok(der_tlv(0x30, body))
-}
-
-fn successful_ocsp_response_der(
-    response_type: &Oid,
-    basic_der: &[u8],
-) -> Result<Vec<u8>, AppError> {
-    let mut response_bytes = response_type.to_der_raw().map_err(ocsp_err)?;
-    response_bytes.extend(der_tlv(0x04, basic_der.to_vec()));
-    let mut body = vec![0x0a, 0x01, OcspRespStatus::Successful as u8];
-    body.extend(der_tlv(0xa0, der_tlv(0x30, response_bytes)));
-    Ok(der_tlv(0x30, body))
-}
-
-fn der_bit_string(data: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(data.len() + 1);
-    body.push(0);
-    body.extend_from_slice(data);
-    der_tlv(0x03, body)
-}
-
-fn der_tlv(tag: u8, value: Vec<u8>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 5 + value.len());
-    out.push(tag);
-    out.extend(der_len(value.len()));
-    out.extend(value);
-    out
-}
-
-fn der_len(len: usize) -> Vec<u8> {
-    if len <= 127 {
-        return vec![len as u8];
+    if certificates.is_empty() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "OCSP signer chain is empty"
+        )));
     }
-    let bytes = len
-        .to_be_bytes()
-        .into_iter()
-        .skip_while(|byte| *byte == 0)
-        .collect::<Vec<_>>();
-    let mut out = Vec::with_capacity(bytes.len() + 1);
-    out.push(0x80 | bytes.len() as u8);
-    out.extend(bytes);
-    out
+    Ok(certificates)
+}
+
+fn encode_signed_ocsp<F>(
+    certificate_chain_der: Vec<Vec<u8>>,
+    responses: Vec<SingleResponse>,
+    nonce: Option<&[u8]>,
+    produced_at: OcspGeneralizedTime,
+    sign: F,
+) -> Result<Vec<u8>, AppError>
+where
+    F: FnOnce(&[u8]) -> Result<(pki_core::PkiSignatureAlgorithm, Vec<u8>), AppError>,
+{
+    let certificates = certificate_chain_der
+        .iter()
+        .map(|certificate_der| {
+            X509Certificate::from_der(certificate_der).map_err(|_| {
+                AppError::Internal(anyhow::anyhow!(
+                    "OCSP signer chain contains invalid certificate DER"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let responder_name = certificates
+        .first()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("OCSP signer chain is empty")))?
+        .tbs_certificate
+        .subject
+        .clone();
+    let response_extensions = nonce
+        .map(|nonce| {
+            let nonce_der = Nonce::new(nonce.to_vec())
+                .map_err(der_err)?
+                .to_der()
+                .map_err(der_err)?;
+            Ok(vec![Extension {
+                extn_id: ID_PKIX_OCSP_NONCE,
+                critical: false,
+                extn_value: OctetString::new(nonce_der).map_err(der_err)?,
+            }])
+        })
+        .transpose()?;
+    let response_data = ResponseData {
+        version: Version::default(),
+        responder_id: ResponderId::ByName(responder_name),
+        produced_at,
+        responses,
+        response_extensions,
+    };
+    let response_data_der = response_data.to_der().map_err(der_err)?;
+    let (algorithm, signature) = sign(&response_data_der)?;
+    let basic = BasicOcspResponse {
+        tbs_response_data: response_data,
+        signature_algorithm: ocsp_signature_algorithm_identifier(algorithm),
+        signature: BitString::from_bytes(&signature).map_err(der_err)?,
+        certs: Some(certificates),
+    };
+    OcspResponse::successful(basic)
+        .map_err(der_err)?
+        .to_der()
+        .map_err(der_err)
+}
+
+fn ocsp_signature_algorithm_identifier(
+    algorithm: pki_core::PkiSignatureAlgorithm,
+) -> AlgorithmIdentifierOwned {
+    use pki_core::PkiSignatureAlgorithm;
+
+    let (oid, rsa_parameters) = match algorithm {
+        PkiSignatureAlgorithm::RsaPkcs1Sha256 => {
+            (ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"), true)
+        }
+        PkiSignatureAlgorithm::RsaPkcs1Sha384 => {
+            (ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.12"), true)
+        }
+        PkiSignatureAlgorithm::RsaPkcs1Sha512 => {
+            (ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.13"), true)
+        }
+        PkiSignatureAlgorithm::EcdsaSha256 => {
+            (ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"), false)
+        }
+        PkiSignatureAlgorithm::EcdsaSha384 => {
+            (ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"), false)
+        }
+        PkiSignatureAlgorithm::EcdsaSha512 => {
+            (ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4"), false)
+        }
+        PkiSignatureAlgorithm::Ed25519 => (ObjectIdentifier::new_unwrap("1.3.101.112"), false),
+    };
+    AlgorithmIdentifierOwned {
+        oid,
+        parameters: rsa_parameters.then(|| Null.into()),
+    }
 }
 
 fn rcgen_err(err: rcgen::Error) -> AppError {
     AppError::Internal(anyhow::anyhow!("certificate error: {err}"))
 }
 
-fn ocsp_err(err: ocsp::err::OcspError) -> AppError {
-    AppError::Internal(anyhow::anyhow!("OCSP error: {err:?}"))
+fn der_err(error: der::Error) -> AppError {
+    AppError::Internal(anyhow::anyhow!("OCSP DER error: {error}"))
 }
 
-pub fn unsuccessful_ocsp(status: OcspRespStatus) -> Result<Vec<u8>, AppError> {
-    OcspResponse::new_non_success(status)
-        .map_err(ocsp_err)?
-        .to_der()
-        .map_err(ocsp_err)
+pub fn unsuccessful_ocsp(status: OcspResponseStatus) -> Result<Vec<u8>, AppError> {
+    OcspResponse {
+        response_status: status,
+        response_bytes: None,
+    }
+    .to_der()
+    .map_err(der_err)
 }
 
 #[cfg(test)]
 mod tests {
-    use ocsp::common::asn1::CertId;
     use rcgen::BasicConstraints;
     use std::{fs, path::PathBuf};
 
@@ -2816,14 +3107,30 @@ mod tests {
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let cert = params.self_signed(&key).expect("cert");
         let der = certificate_der_from_pem(&cert.pem()).expect("der");
-        let (name_hash, key_hash) = issuer_sha1_hashes_from_der(&der).expect("hashes");
-        let oid = Oid::new_from_dot(ALGO_SHA1_DOT).expect("oid");
-        let serial = vec![1, 2, 3, 4];
-        let good = CertId::new(oid.clone(), &name_hash, &key_hash, &serial);
-        let bad = CertId::new(oid, &[0; 20], &key_hash, &serial);
+        for (algorithm, oid) in [
+            (OcspHashAlgorithm::Sha1, SHA1_OID),
+            (OcspHashAlgorithm::Sha256, SHA256_OID),
+        ] {
+            let (name_hash, key_hash) = issuer_hashes_from_der(&der, algorithm).expect("hashes");
+            let serial = [1, 2, 3, 4];
+            let good = x509_ocsp::CertId {
+                hash_algorithm: AlgorithmIdentifierOwned {
+                    oid,
+                    parameters: Some(Null.into()),
+                },
+                issuer_name_hash: OctetString::new(name_hash).expect("name hash"),
+                issuer_key_hash: OctetString::new(key_hash.clone()).expect("key hash"),
+                serial_number: x509_cert::serial_number::SerialNumber::new(&serial)
+                    .expect("serial"),
+            };
+            let bad = x509_ocsp::CertId {
+                issuer_name_hash: OctetString::new(vec![0; key_hash.len()]).expect("bad hash"),
+                ..good.clone()
+            };
 
-        assert!(certid_issuer_matches(&good, &name_hash, &key_hash).unwrap());
-        assert!(!certid_issuer_matches(&bad, &name_hash, &key_hash).unwrap());
+            assert!(certid_issuer_matches(&good, &der).unwrap());
+            assert!(!certid_issuer_matches(&bad, &der).unwrap());
+        }
     }
 
     #[test]
