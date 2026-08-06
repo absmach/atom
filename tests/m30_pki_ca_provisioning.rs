@@ -49,7 +49,7 @@ async fn ca_provisioning_is_validated_idempotent_and_restart_safe() {
     // Wrong parent signature is retained as a failed authority.
     let pending = begin_tenant(&pool, &ca_keys, tenant_id).await;
     assert_generated_ca_csr(&pending, BasicConstraints::Constrained(0));
-    let wrong_root = test_root("Wrong Root", -1, 365);
+    let wrong_root = test_root("PR-003 Offline Root", -1, 365);
     let wrong_parent_cert = sign_csr(&pending, &wrong_root, |_| {});
     assert_failed(import_signed(&pool, &ca_keys, pending.id, &wrong_parent_cert).await);
 
@@ -253,6 +253,7 @@ fn sign_csr(
         CertificateSigningRequestParams::from_pem(pending.csr_pem.as_deref().unwrap()).unwrap();
     csr.params.not_before = OffsetDateTime::now_utc() - TimeDuration::minutes(1);
     csr.params.not_after = OffsetDateTime::now_utc() + TimeDuration::days(30);
+    csr.params.use_authority_key_identifier_extension = true;
     mutate(&mut csr);
     csr.signed_by(&Issuer::from_params(&root.params, &root.key))
         .unwrap()
@@ -268,6 +269,7 @@ fn sign_with_wrong_key(pending: &AuthorityRecord, root: &TestRoot) -> String {
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.key_identifier_method = KeyIdMethod::Sha256;
+    params.use_authority_key_identifier_extension = true;
     params.not_before = OffsetDateTime::now_utc() - TimeDuration::minutes(1);
     params.not_after = OffsetDateTime::now_utc() + TimeDuration::days(30);
     params
