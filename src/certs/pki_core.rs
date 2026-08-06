@@ -98,6 +98,22 @@ pub struct PkiIssuer {
     crl_distribution_point_url: String,
 }
 
+/// Restricted signing surface for retained publication artifacts. Unlike a
+/// leaf issuer, this type carries no discovery URLs and cannot be passed to
+/// certificate issuance helpers.
+pub struct PkiArtifactSigner {
+    certificate_pem: String,
+    signing_key: PkiSigningKey,
+}
+
+struct ManagedAuthorityMaterial {
+    certificate_pem: String,
+    chain_pem: String,
+    signing_key: PkiSigningKey,
+    not_before: OffsetDateTime,
+    not_after: OffsetDateTime,
+}
+
 impl fmt::Debug for PkiIssuer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PkiIssuer")
@@ -174,42 +190,6 @@ impl PkiIssuer {
                 "issuing authority is not active and valid for leaf issuance",
             ));
         }
-        Self::from_managed_authority_material(authority, ca_keys)
-    }
-
-    /// Load a retained managed issuer for CRL/OCSP signing. Retiring and
-    /// retired keys deliberately remain usable for publication, but revoked,
-    /// expired, provisioning, and failed authorities never regain signing
-    /// authority through this artifact path.
-    pub fn from_managed_authority_for_artifacts(
-        authority: &AuthorityRecord,
-        ca_keys: &PkiCaKeyConfig,
-    ) -> Result<Self, AppError> {
-        if !matches!(
-            authority.status,
-            super::authority::AuthorityStatus::Active
-                | super::authority::AuthorityStatus::Retiring
-                | super::authority::AuthorityStatus::Retired
-        ) {
-            return Err(AppError::bad_request(
-                "authority is not eligible for artifact signing",
-            ));
-        }
-        Self::from_managed_authority_material(authority, ca_keys)
-    }
-
-    fn from_managed_authority_material(
-        authority: &AuthorityRecord,
-        ca_keys: &PkiCaKeyConfig,
-    ) -> Result<Self, AppError> {
-        if authority.key_backend != AuthorityKeyBackend::EncryptedDatabase {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "managed authority key backend is not available"
-            )));
-        }
-        let certificate_pem =
-            required_authority_field(authority.certificate_pem.as_deref(), "certificate")?;
-        let chain_pem = required_authority_field(authority.chain_pem.as_deref(), "chain")?;
         let ocsp_url = required_authority_field(authority.ocsp_url.as_deref(), "OCSP URL")?;
         let ca_issuers_url =
             required_authority_field(authority.ca_issuers_url.as_deref(), "CA issuers URL")?;
@@ -220,63 +200,50 @@ impl PkiIssuer {
         validate_route(ocsp_url, "OCSP")?;
         validate_route(ca_issuers_url, "CA issuers")?;
         validate_route(crl_distribution_point_url, "CRL distribution point")?;
-
-        let certificate_der = one_certificate_der(certificate_pem, "issuer certificate")?;
-        let (_, certificate) =
-            x509_parser::parse_x509_certificate(&certificate_der).map_err(|_| {
-                AppError::Internal(anyhow::anyhow!("stored invalid issuer certificate"))
-            })?;
-        validate_issuer_certificate(&certificate)?;
-        validate_chain(&certificate_der, chain_pem)?;
-
-        let fingerprint = hex::encode(digest::digest(&digest::SHA256, &certificate_der));
-        if authority.fingerprint_sha256.as_deref() != Some(&fingerprint)
-            || authority.not_before.map(|value| value.timestamp())
-                != Some(certificate.validity().not_before.timestamp())
-            || authority.not_after.map(|value| value.timestamp())
-                != Some(certificate.validity().not_after.timestamp())
-        {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "stored issuer metadata does not match its certificate"
-            )));
-        }
-
-        let context = AuthorityKeyContext {
-            authority_id: authority.id,
-            tenant_id: authority.tenant_id,
-            version: authority.version,
-        };
-        let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
-        let key =
-            EncryptedAuthorityKey::from_authority(authority).map_err(managed_key_provider_error)?;
-        let public = provider
-            .public_key(context, &key)
-            .map_err(managed_key_provider_error)?;
-        if public.subject_public_key_info_der != certificate.public_key().raw {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "managed authority key does not match its certificate"
-            )));
-        }
-        let public_key = PublicKey::from_public_key_der(&public.subject_public_key_info_der)
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid managed authority key")))?;
-        let raw_public_key = public_key.to_encoded_point(false).as_bytes().to_vec();
-        let not_before = certificate.validity().not_before.to_datetime();
-        let not_after = certificate.validity().not_after.to_datetime();
+        let material = managed_authority_material(authority, ca_keys)?;
 
         Ok(Self {
-            certificate_pem: pem_encode_certificate(&certificate_der),
-            chain_pem: chain_pem.to_string(),
-            signing_key: PkiSigningKey::EncryptedDatabase {
-                provider,
-                context,
-                key,
-                raw_public_key,
-            },
-            not_before,
-            not_after,
+            certificate_pem: material.certificate_pem,
+            chain_pem: material.chain_pem,
+            signing_key: material.signing_key,
+            not_before: material.not_before,
+            not_after: material.not_after,
             ocsp_url: ocsp_url.to_string(),
             ca_issuers_url: ca_issuers_url.to_string(),
             crl_distribution_point_url: crl_distribution_point_url.to_string(),
+        })
+    }
+}
+
+impl PkiArtifactSigner {
+    /// Load a retained managed leaf issuer for CRL/OCSP signing. Discovery
+    /// routes are deliberately not required: old issuers must keep publishing
+    /// even if they predate the route metadata migration.
+    pub fn from_managed_authority(
+        authority: &AuthorityRecord,
+        ca_keys: &PkiCaKeyConfig,
+    ) -> Result<Self, AppError> {
+        let now = Utc::now();
+        if !authority.kind.can_issue_leaf_credentials()
+            || !matches!(
+                authority.status,
+                super::authority::AuthorityStatus::Active
+                    | super::authority::AuthorityStatus::Retiring
+                    | super::authority::AuthorityStatus::Retired
+            )
+            || !authority
+                .not_before
+                .is_some_and(|not_before| not_before <= now)
+            || !authority.not_after.is_some_and(|not_after| now < not_after)
+        {
+            return Err(AppError::bad_request(
+                "authority is not eligible for artifact signing",
+            ));
+        }
+        let material = managed_authority_material(authority, ca_keys)?;
+        Ok(Self {
+            certificate_pem: material.certificate_pem,
+            signing_key: material.signing_key,
         })
     }
 
@@ -286,6 +253,72 @@ impl PkiIssuer {
         let crl = params.signed_by(&signer).map_err(core_encoding_error)?;
         Ok(crl.der().to_vec())
     }
+}
+
+fn managed_authority_material(
+    authority: &AuthorityRecord,
+    ca_keys: &PkiCaKeyConfig,
+) -> Result<ManagedAuthorityMaterial, AppError> {
+    if authority.key_backend != AuthorityKeyBackend::EncryptedDatabase {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "managed authority key backend is not available"
+        )));
+    }
+    let certificate_pem =
+        required_authority_field(authority.certificate_pem.as_deref(), "certificate")?;
+    let chain_pem = required_authority_field(authority.chain_pem.as_deref(), "chain")?;
+    let certificate_der = one_certificate_der(certificate_pem, "issuer certificate")?;
+    let (_, certificate) = x509_parser::parse_x509_certificate(&certificate_der)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("stored invalid issuer certificate")))?;
+    validate_issuer_certificate(&certificate)?;
+    validate_chain(&certificate_der, chain_pem)?;
+
+    let fingerprint = hex::encode(digest::digest(&digest::SHA256, &certificate_der));
+    if authority.fingerprint_sha256.as_deref() != Some(&fingerprint)
+        || authority.not_before.map(|value| value.timestamp())
+            != Some(certificate.validity().not_before.timestamp())
+        || authority.not_after.map(|value| value.timestamp())
+            != Some(certificate.validity().not_after.timestamp())
+    {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "stored issuer metadata does not match its certificate"
+        )));
+    }
+
+    let context = AuthorityKeyContext {
+        authority_id: authority.id,
+        tenant_id: authority.tenant_id,
+        version: authority.version,
+    };
+    let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
+    let key =
+        EncryptedAuthorityKey::from_authority(authority).map_err(managed_key_provider_error)?;
+    let public = provider
+        .public_key(context, &key)
+        .map_err(managed_key_provider_error)?;
+    if public.subject_public_key_info_der != certificate.public_key().raw {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "managed authority key does not match its certificate"
+        )));
+    }
+    let public_key = PublicKey::from_public_key_der(&public.subject_public_key_info_der)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid managed authority key")))?;
+    let raw_public_key = public_key.to_encoded_point(false).as_bytes().to_vec();
+    let not_before = certificate.validity().not_before.to_datetime();
+    let not_after = certificate.validity().not_after.to_datetime();
+
+    Ok(ManagedAuthorityMaterial {
+        certificate_pem: pem_encode_certificate(&certificate_der),
+        chain_pem: chain_pem.to_string(),
+        signing_key: PkiSigningKey::EncryptedDatabase {
+            provider,
+            context,
+            key,
+            raw_public_key,
+        },
+        not_before,
+        not_after,
+    })
 }
 
 #[derive(Debug, Clone)]

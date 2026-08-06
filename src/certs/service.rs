@@ -1559,7 +1559,7 @@ pub async fn issuer_crl(
         return Err(AppError::not_found("issuer is expired"));
     }
     let signer =
-        pki_core::PkiIssuer::from_managed_authority_for_artifacts(&authority, &config.pki_ca_keys)?;
+        pki_core::PkiArtifactSigner::from_managed_authority(&authority, &config.pki_ca_keys)?;
     let crl_der = signer.sign_crl(CertificateRevocationListParams {
         this_update,
         next_update,

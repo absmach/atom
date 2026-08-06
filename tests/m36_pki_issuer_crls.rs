@@ -282,6 +282,18 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         .unwrap();
     assert_eq!(old.status, AuthorityStatus::Retiring);
     assert!(PkiIssuer::from_managed_authority(&old, &config.pki_ca_keys).is_err());
+    // Retained artifact signing must not depend on discovery-route metadata
+    // added after the original authority could have been provisioned.
+    sqlx::query(
+        r#"UPDATE pki_authorities
+           SET ocsp_url = NULL, ca_issuers_url = NULL,
+               crl_distribution_point_url = NULL
+           WHERE id = $1"#,
+    )
+    .bind(issuer_a.id)
+    .execute(&pool)
+    .await
+    .unwrap();
     revoke(
         &pool,
         retiring_leaf.credential_id,
