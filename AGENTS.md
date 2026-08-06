@@ -30,6 +30,10 @@ src/
   │                       RequireManage extractor + has_global_manage() helper
   keys.rs              — ES256 signing keys (primary/standby/retired), encryption at rest
   grpc.rs              — Tonic services: AuthService, AuthzService.Check, CertificateService
+  broker_auth/         — the broker auth callout: Atom serving FluxMQ's
+  │                       `fluxmq.auth.v1.AuthService` directly (off by default)
+  │  topic.rs          — the configurable topic→object grammar
+  │  service.rs        — Authenticate/Authorize over the existing credential + PDP paths
   graphql/             — schema + per-domain resolvers (the live admin/API surface)
   db.rs                — pool creation (configurable pool)
   models/
@@ -220,6 +224,55 @@ startup; a configured-but-unreadable file fails before the server reports
 must then be confined to a private network or a service mesh that provides
 transport security, and a startup warning is logged. (The HTTP rate limiter does
 not cover gRPC; see backlog #10.)
+
+### Broker auth callout
+
+A message broker delegates connect-time credential checks and per-topic access
+control to an external gRPC service. Atom implements that contract itself
+(`src/broker_auth/`), so a broker can be pointed straight at Atom with **no
+adapter service in between**. The proto is vendored verbatim from FluxMQ at
+`proto/broker/v1/auth.proto`; its `package fluxmq.auth.v1` line is part of the
+wire contract (the dialled path is `/fluxmq.auth.v1.AuthService/Authorize`) and
+must not be renamed. Check for drift with a `diff` against the FluxMQ checkout.
+
+Config (`ATOM_BROKER_*`), all optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ATOM_BROKER_AUTH_ENABLED` | `false` | mount the callout |
+| `ATOM_BROKER_TOPIC_TEMPLATE` | `{resource}/#` | comma-separated templates, tried in order |
+| `ATOM_BROKER_TOPIC_REF` | `alias` | `alias` or `uuid` — how a bound segment names an object |
+| `ATOM_BROKER_CREDENTIAL_KIND` | `password` | `password` or `shared_key` |
+
+**Off by default for a security reason, not a rollout one.** It is the only gRPC
+service here with no bearer token to check — a broker's callout client cannot
+send one — so it authenticates its caller at the transport, via
+`ATOM_GRPC_TLS_CLIENT_CA_PATH`. Mounted on a plaintext listener, anything that
+can reach the port can authenticate and authorize as any principal. Enable it
+with a client CA that signs brokers and nothing else. A startup warning fires if
+it is enabled without one.
+
+Two invariants worth not relearning:
+
+- **Denials are answers, not errors.** Every rejection — bad password, unknown
+  entity, unparseable topic, policy deny, *rate limit* — returns a successful RPC
+  carrying a false verdict. Only infrastructure failure returns a gRPC error. A
+  broker wraps this callout in a circuit breaker, and a tripped breaker rejects
+  **every** client connection; one device retrying a stale password must not be
+  able to take the broker's whole auth path down. Rate limiting is on that list
+  because it is the failure a bad client can trigger at will.
+- **Tenant comes from the subject, not from config or the topic.** Authenticate
+  resolves the identifier across tenants and the entity's own tenant comes back
+  with it, so the zero-configuration case needs no tenant in the topic and no
+  username grammar. A `{tenant}` template segment, when present, only scopes
+  alias resolution — it is deliberately **not** checked against the subject's
+  tenant, because cross-tenant grants are legitimate and that call belongs to
+  the PDP, not to a hardcoded equality test.
+
+An adapter service is still right where the mapping needs more than a grammar —
+route resolution, multi-service composition. Both speak the same wire contract,
+so a deployment picks one by pointing the broker's `auth.external.url` at Atom
+or at the adapter.
 
 ## Metrics
 
