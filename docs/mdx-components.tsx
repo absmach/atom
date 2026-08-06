@@ -5,6 +5,7 @@ import { Callout } from 'fumadocs-ui/components/callout';
 import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 import type { MDXComponents } from 'mdx/types';
 import { Mermaid } from './components/mermaid';
+import { DocImage } from './components/doc-image';
 
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
@@ -17,6 +18,9 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     Mermaid,
     Tab,
     Tabs,
+    // Overrides defaultComponents' next/image-backed img -- see
+    // components/doc-image.tsx for why.
+    img: DocImage,
     ...components,
   };
 }

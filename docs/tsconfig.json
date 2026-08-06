@@ -20,5 +20,7 @@
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  // worker/ runs in the Workers runtime (Cloudflare global types), not the
+  // Next.js/DOM one this tsconfig targets -- see worker/tsconfig.json.
+  "exclude": ["node_modules", "worker"]
 }
