@@ -213,7 +213,7 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
     unsupported_parameters.tbs_request.request_list[0]
         .req_cert
         .hash_algorithm
-        .parameters = Some(OctetString::new([1]).unwrap().into());
+        .parameters = Some(der::asn1::Any::from_der(&[0x04, 0x01, 0x01]).unwrap());
     assert_bad_request(
         service::issuer_ocsp_response(
             &pool,
