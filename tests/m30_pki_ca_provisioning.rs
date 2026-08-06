@@ -83,7 +83,10 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
     .fetch_one(&pool)
     .await
     .expect("provisioning outbox event");
-    assert_eq!(outbox_payload["event"], "pki.authority.provisioning_started");
+    assert_eq!(
+        outbox_payload["event"],
+        "pki.authority.provisioning_started"
+    );
     assert_eq!(outbox_payload["target_kind"], "pki_authority");
     assert_eq!(outbox_payload["tenant_id"], tenant_id.to_string());
     assert_eq!(outbox_payload["details"]["status"], "pending_signature");
