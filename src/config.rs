@@ -483,6 +483,18 @@ impl Config {
         let public_base_url = std::env::var("ATOM_PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".into());
         let ui_auth_callback = public_url(&public_base_url, "/auth/callback");
+        let signing_keys = signing_keys_from_env()?;
+        let pki_ca_keys = pki_ca_keys_from_env()?;
+        if let (Some(signing_kek), Some(ca_kek)) = (
+            signing_keys.key_encryption_key.as_ref(),
+            pki_ca_keys.key_encryption_key.as_ref(),
+        ) {
+            if signing_kek.expose() == ca_kek.expose() {
+                anyhow::bail!(
+                    "ATOM_PKI_CA_KEY_ENCRYPTION_KEY must not reuse ATOM_KEY_ENCRYPTION_KEY"
+                );
+            }
+        }
         Ok(Config {
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
             db_pool: db_pool_from_env()?,
@@ -491,8 +503,8 @@ impl Config {
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             grpc_tls: grpc_tls_from_env()?,
-            signing_keys: signing_keys_from_env()?,
-            pki_ca_keys: pki_ca_keys_from_env()?,
+            signing_keys,
+            pki_ca_keys,
             audit_policy: AuditPolicyConfig {
                 hot_path_allow_db_enabled: env_bool_default(
                     "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
@@ -1294,11 +1306,35 @@ mod tests {
             "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
             "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         );
+        let err = Config::from_env().expect_err("reused signing and CA KEK");
+        assert!(err
+            .to_string()
+            .contains("must not reuse ATOM_KEY_ENCRYPTION_KEY"));
+
+        std::env::set_var(
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
+            "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=",
+        );
         std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID", " ");
         let err = Config::from_env().expect_err("blank CA key id");
         assert!(err
             .to_string()
             .contains("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID"));
+
+        std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID", "local-ca:v1");
+        let cfg = Config::from_env().expect("distinct CA KEK");
+        assert_ne!(
+            cfg.signing_keys
+                .key_encryption_key
+                .as_ref()
+                .expect("signing KEK")
+                .expose(),
+            cfg.pki_ca_keys
+                .key_encryption_key
+                .as_ref()
+                .expect("CA KEK")
+                .expose(),
+        );
 
         clear_hardening_env();
     }
