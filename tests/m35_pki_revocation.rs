@@ -7,11 +7,7 @@ mod common;
 
 use async_graphql::{Request, Variables};
 use atom::{
-    auth::AuthContext,
-    certs::{profile, service},
-    graphql::build_schema,
-    models::enums::TenantStatus,
-    tenants,
+    auth::AuthContext, certs::service, graphql::build_schema, models::enums::TenantStatus, tenants,
 };
 use rcgen::{CertificateParams, DnType, KeyPair};
 use serde_json::{json, Value};
@@ -37,8 +33,8 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
 
     let exact = issue_managed(&pool, &config, tenant_a, entity_a, "exact").await;
     let unaffected = issue_managed(&pool, &config, tenant_b, entity_b, "unaffected").await;
-    set_artifact_clean(&pool, issuer_a.id, &issuer_a.fingerprint_sha256).await;
-    set_artifact_clean(&pool, issuer_b.id, &issuer_b.fingerprint_sha256).await;
+    set_artifact_clean(&pool, issuer_a.id, issuer_a.fingerprint_sha256.as_deref()).await;
+    set_artifact_clean(&pool, issuer_b.id, issuer_b.fingerprint_sha256.as_deref()).await;
 
     // Authorization is evaluated against the exact resolved credential and
     // rechecked under lock, so another tenant cannot revoke it.
@@ -95,7 +91,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
 
     // Repeated revocation is a no-op: it returns the original evidence and
     // does not enqueue a second lifecycle event or rewrite reason/time.
-    let event_count = event_count(&pool, "certificate.revoke", exact.credential_id).await;
+    let first_event_count = event_count(&pool, "certificate.revoke", exact.credential_id).await;
     let replay = schema
         .execute(revoke_request(
             common::admin_id(),
@@ -110,7 +106,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     assert_eq!(replay["revokedAt"], first_revoked_at);
     assert_eq!(
         event_count(&pool, "certificate.revoke", exact.credential_id).await,
-        event_count
+        first_event_count
     );
     assert_audit_and_outbox(&pool, exact.credential_id, issuer_a.id).await;
 
@@ -273,7 +269,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     // A transaction failure rolls credential state, immutable evidence, and
     // issuer dirtiness back together.
     let rollback_cert = issue_managed(&pool, &config, tenant_b, entity_b, "rollback").await;
-    set_artifact_clean(&pool, issuer_b.id, &issuer_b.fingerprint_sha256).await;
+    set_artifact_clean(&pool, issuer_b.id, issuer_b.fingerprint_sha256.as_deref()).await;
     let mut rollback_tx = pool.begin().await.unwrap();
     service::revoke_certificate_v2_in_tx(
         &mut rollback_tx,
@@ -301,7 +297,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     // insert failure must undo the revocation trigger's status, evidence, and
     // exact issuer dirty mark.
     let outbox_failure = issue_managed(&pool, &config, tenant_b, entity_b, "outbox-failure").await;
-    set_artifact_clean(&pool, issuer_b.id, &issuer_b.fingerprint_sha256).await;
+    set_artifact_clean(&pool, issuer_b.id, issuer_b.fingerprint_sha256.as_deref()).await;
     install_rejecting_outbox_trigger(&pool).await;
     let failed = schema
         .execute(revoke_request(
@@ -390,7 +386,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     set_artifact_clean(
         &pool,
         lifecycle_issuer.id,
-        &lifecycle_issuer.fingerprint_sha256,
+        lifecycle_issuer.fingerprint_sha256.as_deref(),
     )
     .await;
     tenants::repo::soft_delete_tenant_with_audit(
@@ -470,17 +466,9 @@ async fn issue_managed(
     entity_id: Uuid,
     key: &str,
 ) -> service::CertificateRecord {
-    let profile = profile::resolve_for_subject(
-        pool,
-        &profile::load_subject(pool, entity_id).await.unwrap(),
-        "client",
-    )
-    .await
-    .unwrap();
     let issued = service::issue_certificate_from_csr_v2(
         pool,
         config,
-        common::admin_id(),
         Some(tenant_id),
         service::IssueCertificateFromCsrV2 {
             entity_id,
@@ -491,7 +479,6 @@ async fn issue_managed(
     )
     .await
     .unwrap();
-    assert_eq!(issued.certificate.profile_id, Some(profile.id));
     issued.certificate
 }
 
@@ -527,8 +514,7 @@ fn auth(entity_id: Uuid, tenant_id: Option<Uuid>) -> AuthContext {
         entity_id,
         tenant_id,
         session_id: None,
-        credential_id: None,
-        credential_scoped: false,
+        ..Default::default()
     }
 }
 
@@ -587,7 +573,8 @@ async fn assert_revocation_row(
     let _: chrono::DateTime<chrono::Utc> = row.get("revoked_at");
 }
 
-async fn set_artifact_clean(pool: &PgPool, issuer_id: Uuid, fingerprint: &str) {
+async fn set_artifact_clean(pool: &PgPool, issuer_id: Uuid, fingerprint: Option<&str>) {
+    let fingerprint = fingerprint.expect("managed issuer fingerprint");
     sqlx::query(
         r#"INSERT INTO certificate_crl_state
               (issuer_fingerprint_sha256, issuer_id, crl_number, dirty)
