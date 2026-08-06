@@ -297,6 +297,35 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     assert!(!revocation_exists(&pool, rollback_cert.credential_id).await);
     assert!(!artifact_dirty(&pool, issuer_b.id).await);
 
+    // The GraphQL/outbox boundary is atomic too: a forced lifecycle-event
+    // insert failure must undo the revocation trigger's status, evidence, and
+    // exact issuer dirty mark.
+    let outbox_failure = issue_managed(&pool, &config, tenant_b, entity_b, "outbox-failure").await;
+    set_artifact_clean(&pool, issuer_b.id, &issuer_b.fingerprint_sha256).await;
+    install_rejecting_outbox_trigger(&pool).await;
+    let failed = schema
+        .execute(revoke_request(
+            common::admin_id(),
+            None,
+            json!({
+                "credentialId": outbox_failure.credential_id,
+                "reason": "transaction_failure"
+            }),
+        ))
+        .await;
+    drop_rejecting_outbox_trigger(&pool).await;
+    assert!(!failed.errors.is_empty());
+    assert_eq!(
+        certificate_status(&pool, outbox_failure.credential_id).await,
+        "active"
+    );
+    assert!(!revocation_exists(&pool, outbox_failure.credential_id).await);
+    assert!(!artifact_dirty(&pool, issuer_b.id).await);
+    assert_eq!(
+        event_count(&pool, "certificate.revoke", outbox_failure.credential_id).await,
+        0
+    );
+
     // Entity and tenant suspension/freeze fail closed without inventing a
     // revocation. Tenant deletion then performs durable lifecycle revocation.
     let lifecycle_tenant = common::pki::create_tenant(&pool, "pki-revoke-lifecycle").await;
@@ -652,4 +681,40 @@ async fn assert_tenant_delete_event(pool: &PgPool, tenant_id: Uuid, credential_i
         .unwrap()
         .contains(&json!(credential_id)));
     assert!(!payload.to_string().contains("PRIVATE KEY"));
+}
+
+async fn install_rejecting_outbox_trigger(pool: &PgPool) {
+    sqlx::query(
+        r#"CREATE OR REPLACE FUNCTION m35_reject_certificate_revoke_event()
+           RETURNS trigger AS $$
+           BEGIN
+             IF NEW.event = 'certificate.revoke' THEN
+               RAISE EXCEPTION 'forced PR-008 outbox failure';
+             END IF;
+             RETURN NEW;
+           END;
+           $$ LANGUAGE plpgsql"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"CREATE TRIGGER m35_reject_certificate_revoke_event
+           BEFORE INSERT ON event_outbox
+           FOR EACH ROW EXECUTE FUNCTION m35_reject_certificate_revoke_event()"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn drop_rejecting_outbox_trigger(pool: &PgPool) {
+    sqlx::query("DROP TRIGGER m35_reject_certificate_revoke_event ON event_outbox")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION m35_reject_certificate_revoke_event()")
+        .execute(pool)
+        .await
+        .unwrap();
 }
