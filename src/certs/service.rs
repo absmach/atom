@@ -1959,4 +1959,14 @@ mod tests {
         expired.next_update = Some(now - chrono::Duration::seconds(1));
         assert!(should_regenerate_crl(&expired, now));
     }
+
+    #[test]
+    fn one_time_private_key_debug_is_redacted() {
+        let secret = "-----BEGIN PRIVATE KEY-----\ntest-secret\n-----END PRIVATE KEY-----";
+        let key = OneTimePrivateKey::new(secret.to_string());
+        let debug = format!("{key:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains("test-secret"));
+    }
 }
