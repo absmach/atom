@@ -225,7 +225,7 @@ async fn enforce_input_and_rate_limits(
 
     // Global entities share a platform enrollment bucket represented by the
     // nil UUID; tenant entities use their immutable tenant UUID.
-    let tenant_scope = subject.tenant_id.unwrap_or_else(Uuid::nil);
+    let tenant_scope = subject.tenant_id.unwrap_or(Uuid::nil());
     let tenant = repo::consume_rate_limit(
         &mut tx,
         RateLimitScope::Tenant,

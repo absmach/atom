@@ -627,11 +627,11 @@ async fn login_token(
     secret: &str,
     kind: CredentialKind,
 ) -> String {
-    let keys = state.keys.read().await;
+    let primary = state.keys.read().await.primary.clone();
     identity_service::login_credential_with_tenant(
         &state.pool,
         &state.config,
-        &keys.primary,
+        &primary,
         identity_service::CredentialLoginRequest {
             identifier: &entity_id.to_string(),
             secret,

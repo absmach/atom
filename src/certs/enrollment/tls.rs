@@ -76,6 +76,7 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
     let router = http::create_router(state);
     let mut acceptor = prepared.acceptor;
     let mut trust_refresh = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));
+    trust_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     trust_refresh.tick().await;
     tracing::info!(%address, "PKI enrollment listener ready (in-process optional mTLS)");
 
