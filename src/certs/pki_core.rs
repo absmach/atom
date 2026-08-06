@@ -9,10 +9,10 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use p256::{elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePublicKey, PublicKey};
 use rcgen::{
-    CertificateParams, CertificateSigningRequestParams, CrlDistributionPoint, CustomExtension,
-    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PublicKeyData,
-    RsaKeySize, SanType, SerialNumber, SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
-    PKCS_ECDSA_P384_SHA384, PKCS_ED25519, PKCS_RSA_SHA256,
+    CertificateParams, CertificateRevocationListParams, CertificateSigningRequestParams,
+    CrlDistributionPoint, CustomExtension, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, PublicKeyData, RsaKeySize, SanType, SerialNumber, SignatureAlgorithm,
+    SigningKey, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519, PKCS_RSA_SHA256,
 };
 use ring::{digest, rand, rand::SecureRandom};
 use time::{Duration, OffsetDateTime};
@@ -174,9 +174,37 @@ impl PkiIssuer {
                 "issuing authority is not active and valid for leaf issuance",
             ));
         }
+        Self::from_managed_authority_material(authority, ca_keys)
+    }
+
+    /// Load a retained managed issuer for CRL/OCSP signing. Retiring and
+    /// retired keys deliberately remain usable for publication, but revoked,
+    /// expired, provisioning, and failed authorities never regain signing
+    /// authority through this artifact path.
+    pub fn from_managed_authority_for_artifacts(
+        authority: &AuthorityRecord,
+        ca_keys: &PkiCaKeyConfig,
+    ) -> Result<Self, AppError> {
+        if !matches!(
+            authority.status,
+            super::authority::AuthorityStatus::Active
+                | super::authority::AuthorityStatus::Retiring
+                | super::authority::AuthorityStatus::Retired
+        ) {
+            return Err(AppError::bad_request(
+                "authority is not eligible for artifact signing",
+            ));
+        }
+        Self::from_managed_authority_material(authority, ca_keys)
+    }
+
+    fn from_managed_authority_material(
+        authority: &AuthorityRecord,
+        ca_keys: &PkiCaKeyConfig,
+    ) -> Result<Self, AppError> {
         if authority.key_backend != AuthorityKeyBackend::EncryptedDatabase {
             return Err(AppError::Internal(anyhow::anyhow!(
-                "managed authority key backend is not available for leaf issuance"
+                "managed authority key backend is not available"
             )));
         }
         let certificate_pem =
@@ -250,6 +278,13 @@ impl PkiIssuer {
             ca_issuers_url: ca_issuers_url.to_string(),
             crl_distribution_point_url: crl_distribution_point_url.to_string(),
         })
+    }
+
+    pub fn sign_crl(&self, params: CertificateRevocationListParams) -> Result<Vec<u8>, AppError> {
+        let signer = Issuer::from_ca_cert_pem(&self.certificate_pem, &self.signing_key)
+            .map_err(core_encoding_error)?;
+        let crl = params.signed_by(&signer).map_err(core_encoding_error)?;
+        Ok(crl.der().to_vec())
     }
 }
 

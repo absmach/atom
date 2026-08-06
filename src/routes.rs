@@ -66,6 +66,10 @@ pub fn create_router(state: AppState) -> Router {
             get(certs::authority::http::trust_bundle),
         )
         .route("/certs/crl", get(certs::http::crl))
+        .route(
+            "/certs/issuers/:issuer_id/crl",
+            get(certs::http::issuer_crl),
+        )
         .route("/certs/ocsp", post(certs::http::ocsp))
         // GraphQL
         .route(

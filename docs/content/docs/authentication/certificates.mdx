@@ -326,6 +326,29 @@ suspension and tenant freeze/delete fail closed in runtime resolution. Tenant
 or entity deletion also records exact revocation evidence for every certificate
 it transitions; restoring the subject never reactivates those certificates.
 
+## Per-issuer CRLs
+
+Each managed leaf issuer publishes its own DER-encoded CRL at
+`/certs/issuers/{issuer_id}/crl`. A CRL contains only revocations for
+certificates signed by that exact issuer, preserves the recorded RFC 5280 reason
+code, and is signed through the issuer's configured key provider. During CA
+rotation, `retiring` and `retired` issuers continue publishing their retained
+CRLs even though they cannot issue new leaves. An `expired` issuer may serve a
+still-valid cached artifact, but it cannot sign a replacement.
+
+The response uses `application/pkix-crl`, an ETag, bounded `Cache-Control`, and
+`If-None-Match` support. Pollers should retain every issuer URL needed by their
+certificate-validation window; a new issuer has a separate CRL and does not
+replace the old issuer's artifact. CRL numbers increase monotonically for the
+physical CA, including when legacy fingerprint-keyed state is adopted into the
+issuer-keyed cache.
+
+CRLs are compliance and interoperability artifacts, not Atom's primary
+revocation control. Runtime access is denied immediately from authoritative
+credential and subject state. Deployments should combine that resolver denial
+with short certificate lifetimes instead of waiting for a relying party's next
+CRL poll.
+
 ## Legacy CA files
 
 The original v1 issuer remains available for backward compatibility and loads
@@ -377,6 +400,7 @@ These endpoints are public because clients and runtimes need to verify certifica
 GET  /certs/ca-chain
 GET  /certs/trust-bundle.pem
 GET  /certs/crl
+GET  /certs/issuers/{issuer_id}/crl
 POST /certs/ocsp
 ```
 
@@ -385,6 +409,10 @@ every request. It returns an ETag derived from the bundle, accepts
 `If-None-Match`, and includes cache directives so relying parties can poll
 cheaply and notice a newly provisioned or rotated tenant authority without an
 Atom restart.
+
+`/certs/crl` remains the compatibility route for the legacy file-backed issuer.
+Managed-authority clients should use the issuer-specific route carried by their
+certificate's CRL distribution point.
 
 ## Runtime Lookup
 
