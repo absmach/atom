@@ -32,11 +32,21 @@ pub enum CertificateRenewalRequestClaim {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct CrlState {
+    pub issuer_fingerprint_sha256: String,
     pub crl_number: i64,
     pub crl_der: Option<Vec<u8>>,
+    pub crl_sha256: Option<String>,
     pub this_update: Option<DateTime<Utc>>,
     pub next_update: Option<DateTime<Utc>>,
     pub dirty: bool,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct IssuerRevocationEntry {
+    pub credential_id: Uuid,
+    pub serial_number: String,
+    pub reason: String,
+    pub revoked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -621,7 +631,8 @@ pub async fn crl_state_tx(
 ) -> Result<CrlState, AppError> {
     sqlx::query(
         r#"
-        INSERT INTO certificate_crl_state (issuer_fingerprint_sha256, crl_number, dirty)
+        INSERT INTO certificate_crl_state
+            (issuer_fingerprint_sha256, crl_number, dirty)
         VALUES ($1, 0, TRUE)
         ON CONFLICT (issuer_fingerprint_sha256) DO NOTHING
         "#,
@@ -633,9 +644,11 @@ pub async fn crl_state_tx(
 
     sqlx::query_as::<_, CrlState>(
         r#"
-        SELECT crl_number, crl_der, this_update, next_update, dirty
+        SELECT issuer_fingerprint_sha256, crl_number, crl_der, crl_sha256,
+               this_update, next_update, dirty
         FROM certificate_crl_state
         WHERE issuer_fingerprint_sha256 = $1
+        FOR UPDATE
         "#,
     )
     .bind(issuer_fingerprint_sha256)
@@ -649,6 +662,7 @@ pub async fn store_crl_tx(
     issuer_fingerprint_sha256: &str,
     crl_number: i64,
     crl_der: &[u8],
+    crl_sha256: &str,
     this_update: DateTime<Utc>,
     next_update: DateTime<Utc>,
 ) -> Result<(), AppError> {
@@ -657,20 +671,138 @@ pub async fn store_crl_tx(
         UPDATE certificate_crl_state
         SET crl_number = $1,
             crl_der = $2,
-            this_update = $3,
-            next_update = $4,
+            crl_sha256 = $3,
+            this_update = $4,
+            next_update = $5,
             dirty = FALSE,
             updated_at = now()
-        WHERE issuer_fingerprint_sha256 = $5
+        WHERE issuer_fingerprint_sha256 = $6
         "#,
     )
     .bind(crl_number)
     .bind(crl_der)
+    .bind(crl_sha256)
     .bind(this_update)
     .bind(next_update)
     .bind(issuer_fingerprint_sha256)
     .execute(&mut **tx)
     .await
     .map_err(AppError::Database)?;
+    Ok(())
+}
+
+pub async fn issuer_crl_state(
+    pool: &PgPool,
+    issuer_id: Uuid,
+) -> Result<Option<CrlState>, AppError> {
+    sqlx::query_as::<_, CrlState>(
+        r#"
+        SELECT issuer_fingerprint_sha256, crl_number, crl_der, crl_sha256,
+               this_update, next_update, dirty
+        FROM certificate_crl_state
+        WHERE issuer_id = $1
+        "#,
+    )
+    .bind(issuer_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)
+}
+
+pub async fn issuer_crl_state_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    issuer_id: Uuid,
+    issuer_fingerprint_sha256: &str,
+) -> Result<CrlState, AppError> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO certificate_crl_state
+            (issuer_fingerprint_sha256, issuer_id, crl_number, dirty)
+        VALUES ($1, $2, 0, TRUE)
+        ON CONFLICT (issuer_fingerprint_sha256) DO UPDATE
+        SET issuer_id = EXCLUDED.issuer_id,
+            updated_at = now()
+        WHERE certificate_crl_state.issuer_id IS NULL
+           OR certificate_crl_state.issuer_id = EXCLUDED.issuer_id
+        "#,
+    )
+    .bind(issuer_fingerprint_sha256)
+    .bind(issuer_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::conflict(
+            "CRL fingerprint is already assigned to another issuer",
+        ));
+    }
+
+    sqlx::query_as::<_, CrlState>(
+        r#"
+        SELECT issuer_fingerprint_sha256, crl_number, crl_der, crl_sha256,
+               this_update, next_update, dirty
+        FROM certificate_crl_state
+        WHERE issuer_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(issuer_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AppError::Database)
+}
+
+pub async fn issuer_revocations_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    issuer_id: Uuid,
+) -> Result<Vec<IssuerRevocationEntry>, AppError> {
+    sqlx::query_as::<_, IssuerRevocationEntry>(
+        r#"
+        SELECT credential_id, serial_number, reason, revoked_at
+        FROM certificate_revocations
+        WHERE issuer_id = $1
+        ORDER BY revoked_at, credential_id
+        "#,
+    )
+    .bind(issuer_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AppError::Database)
+}
+
+pub async fn store_issuer_crl_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    issuer_id: Uuid,
+    crl_number: i64,
+    crl_der: &[u8],
+    crl_sha256: &str,
+    this_update: DateTime<Utc>,
+    next_update: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE certificate_crl_state
+        SET crl_number = $1,
+            crl_der = $2,
+            crl_sha256 = $3,
+            this_update = $4,
+            next_update = $5,
+            dirty = FALSE,
+            updated_at = now()
+        WHERE issuer_id = $6
+        "#,
+    )
+    .bind(crl_number)
+    .bind(crl_der)
+    .bind(crl_sha256)
+    .bind(this_update)
+    .bind(next_update)
+    .bind(issuer_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::not_found("issuer CRL state not found"));
+    }
     Ok(())
 }

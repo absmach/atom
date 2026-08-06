@@ -35,6 +35,7 @@ use super::{
 };
 
 const CRL_REGEN_LOCK_ID: i64 = 0x0041_544f_4d43_524c;
+const ISSUER_CRL_LOCK_DOMAIN: i64 = 0x504b_4939_4352_4c00;
 const LEAF_CLOCK_SKEW_SECS: i64 = 300;
 const CRL_TTL_HOURS: i64 = 24;
 const SERIAL_INSERT_ATTEMPTS: usize = 3;
@@ -157,6 +158,16 @@ pub struct BulkCertificateRevocationResult {
     pub credential_ids: Vec<Uuid>,
     pub issuer_ids: Vec<Uuid>,
     pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrlArtifact {
+    pub der: Vec<u8>,
+    pub sha256: String,
+    pub crl_number: i64,
+    pub this_update: DateTime<Utc>,
+    pub next_update: DateTime<Utc>,
+    pub cache_hit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1420,11 +1431,10 @@ pub async fn generate_crl(
 
     let state = repo::crl_state_tx(&mut tx, &loaded.issuer_fingerprint_sha256).await?;
     let now_chrono = Utc::now();
-    if !should_regenerate_crl(&state, now_chrono) {
-        if let Some(crl_der) = state.crl_der {
-            tx.commit().await.map_err(AppError::Database)?;
-            return Ok(crl_der);
-        }
+    if let Some(cached) = cached_crl_artifact(&state, &loaded.issuer_fingerprint_sha256, now_chrono)
+    {
+        tx.commit().await.map_err(AppError::Database)?;
+        return Ok(cached.der);
     }
 
     let revoked = repo::revoked_certificates(pool, &loaded.issuer_fingerprint_sha256).await?;
@@ -1454,17 +1464,132 @@ pub async fn generate_crl(
     .signed_by(&loaded.issuer)
     .map_err(rcgen_err)?;
     let crl_der = crl.der().as_ref().to_vec();
+    let crl_sha256 = sha256_hex(&crl_der);
     repo::store_crl_tx(
         &mut tx,
         &loaded.issuer_fingerprint_sha256,
         crl_number,
         &crl_der,
+        &crl_sha256,
         to_chrono(now)?,
         to_chrono(next_update)?,
     )
     .await?;
     tx.commit().await.map_err(AppError::Database)?;
     Ok(crl_der)
+}
+
+/// Generate or return a validator-ready CRL for one managed leaf issuer.
+/// Clean cache reads avoid the signing lock; dirty/missing/expired/corrupt
+/// entries serialize on an issuer-derived advisory lock and recheck state.
+pub async fn issuer_crl(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    issuer_id: Uuid,
+) -> Result<CrlArtifact, AppError> {
+    let authority = authority_repo::authority_by_id(pool, issuer_id).await?;
+    validate_crl_authority_role(&authority)?;
+    let now = Utc::now();
+    let fingerprint = authority
+        .fingerprint_sha256
+        .as_deref()
+        .ok_or_else(|| AppError::not_found("issuer has no published certificate"))?;
+    let cached = match repo::issuer_crl_state(pool, issuer_id).await? {
+        Some(state) => cached_crl_artifact(&state, fingerprint, now),
+        None => None,
+    };
+    if let Some(cached) = cached {
+        validate_crl_authority_retention(&authority, true, now)?;
+        return Ok(cached);
+    }
+    validate_crl_authority_retention(&authority, false, now)?;
+
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let lock_id = issuer_crl_lock_id(issuer_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    // Hold the authority lifecycle row stable until signing and persistence
+    // commit. Retirement remains allowed for later requests, while revocation
+    // or expiry cannot race this publication operation.
+    let authority =
+        authority_repo::lock_authority_for_certificate_authentication(&mut tx, issuer_id).await?;
+    validate_crl_authority_role(&authority)?;
+    let now = Utc::now();
+    validate_crl_authority_retention(&authority, false, now)?;
+    let fingerprint = authority
+        .fingerprint_sha256
+        .as_deref()
+        .ok_or_else(|| AppError::not_found("issuer has no published certificate"))?;
+    let state = repo::issuer_crl_state_tx(&mut tx, issuer_id, fingerprint).await?;
+    if let Some(cached) = cached_crl_artifact(&state, fingerprint, now) {
+        tx.commit().await.map_err(AppError::Database)?;
+        return Ok(cached);
+    }
+
+    let revoked_certs = repo::issuer_revocations_tx(&mut tx, issuer_id)
+        .await?
+        .into_iter()
+        .map(|entry| {
+            Ok(RevokedCertParams {
+                serial_number: SerialNumber::from(serial_bytes(&entry.serial_number)?),
+                revocation_time: to_offset(entry.revoked_at)?,
+                reason_code: Some(crl_revocation_reason(&entry.reason)),
+                invalidity_date: None,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let crl_number = state
+        .crl_number
+        .checked_add(1)
+        .filter(|number| *number > 0)
+        .ok_or_else(|| AppError::conflict("issuer CRL number is exhausted"))?;
+    let this_update = OffsetDateTime::from_unix_timestamp(now.timestamp())
+        .map_err(|_| AppError::bad_request("invalid CRL timestamp"))?;
+    let desired_next_update = this_update + Duration::hours(CRL_TTL_HOURS);
+    let issuer_not_after = authority
+        .not_after
+        .ok_or_else(|| AppError::not_found("issuer has no validity window"))?;
+    let issuer_not_after = to_offset(issuer_not_after)?;
+    let next_update = desired_next_update.min(issuer_not_after);
+    if next_update <= this_update {
+        return Err(AppError::not_found("issuer is expired"));
+    }
+    let signer =
+        pki_core::PkiArtifactSigner::from_managed_authority(&authority, &config.pki_ca_keys)?;
+    let crl_der = signer.sign_crl(CertificateRevocationListParams {
+        this_update,
+        next_update,
+        crl_number: SerialNumber::from(crl_number as u64),
+        issuing_distribution_point: None,
+        revoked_certs,
+        key_identifier_method: KeyIdMethod::Sha256,
+    })?;
+    let crl_sha256 = sha256_hex(&crl_der);
+    let this_update = to_chrono(this_update)?;
+    let next_update = to_chrono(next_update)?;
+    repo::store_issuer_crl_tx(
+        &mut tx,
+        issuer_id,
+        crl_number,
+        &crl_der,
+        &crl_sha256,
+        this_update,
+        next_update,
+    )
+    .await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(CrlArtifact {
+        der: crl_der,
+        sha256: crl_sha256,
+        crl_number,
+        this_update,
+        next_update,
+        cache_hit: false,
+    })
 }
 
 pub async fn ocsp_response(
@@ -2174,6 +2299,103 @@ fn should_regenerate_crl(state: &repo::CrlState, now: DateTime<Utc>) -> bool {
             .unwrap_or(true)
 }
 
+fn cached_crl_artifact(
+    state: &repo::CrlState,
+    issuer_fingerprint_sha256: &str,
+    now: DateTime<Utc>,
+) -> Option<CrlArtifact> {
+    if should_regenerate_crl(state, now) {
+        return None;
+    }
+    if state.issuer_fingerprint_sha256 != issuer_fingerprint_sha256 {
+        return None;
+    }
+    let der = state.crl_der.as_ref()?;
+    let sha256 = state.crl_sha256.as_ref()?;
+    if sha256_hex(der) != *sha256 {
+        return None;
+    }
+    let Ok((remaining, _)) = x509_parser::parse_x509_crl(der) else {
+        return None;
+    };
+    if !remaining.is_empty() {
+        return None;
+    }
+    Some(CrlArtifact {
+        der: der.clone(),
+        sha256: sha256.clone(),
+        crl_number: state.crl_number,
+        this_update: state.this_update?,
+        next_update: state.next_update?,
+        cache_hit: true,
+    })
+}
+
+fn validate_crl_authority_role(authority: &AuthorityRecord) -> Result<(), AppError> {
+    if authority.kind.can_issue_leaf_credentials() {
+        Ok(())
+    } else {
+        Err(AppError::not_found(
+            "authority role does not publish leaf certificate CRLs",
+        ))
+    }
+}
+
+fn validate_crl_authority_retention(
+    authority: &AuthorityRecord,
+    serving_cached: bool,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let status_allowed = matches!(
+        authority.status,
+        AuthorityStatus::Active | AuthorityStatus::Retiring | AuthorityStatus::Retired
+    );
+    let expired = authority.status == AuthorityStatus::Expired
+        || authority
+            .not_after
+            .map(|not_after| not_after <= now)
+            .unwrap_or(true);
+    if serving_cached
+        && (status_allowed || authority.status == AuthorityStatus::Expired)
+        && authority.status != AuthorityStatus::Revoked
+    {
+        return Ok(());
+    }
+    if status_allowed && !expired {
+        Ok(())
+    } else {
+        Err(AppError::not_found(
+            "authority has no publishable CRL for this lifecycle state",
+        ))
+    }
+}
+
+fn issuer_crl_lock_id(issuer_id: Uuid) -> i64 {
+    let bytes = issuer_id.as_bytes();
+    let first = i64::from_be_bytes(bytes[..8].try_into().expect("UUID first half"));
+    let second = i64::from_be_bytes(bytes[8..].try_into().expect("UUID second half"));
+    first ^ second ^ ISSUER_CRL_LOCK_DOMAIN
+}
+
+fn crl_revocation_reason(reason: &str) -> RevocationReason {
+    match reason {
+        "key_compromise" => RevocationReason::KeyCompromise,
+        "ca_compromise" => RevocationReason::CaCompromise,
+        "affiliation_changed" => RevocationReason::AffiliationChanged,
+        "superseded" => RevocationReason::Superseded,
+        "cessation_of_operation" => RevocationReason::CessationOfOperation,
+        "certificate_hold" => RevocationReason::CertificateHold,
+        "remove_from_crl" => RevocationReason::RemoveFromCrl,
+        "privilege_withdrawn" => RevocationReason::PrivilegeWithdrawn,
+        "aa_compromise" => RevocationReason::AaCompromise,
+        _ => RevocationReason::Unspecified,
+    }
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    hex::encode(digest::digest(&digest::SHA256, value).as_ref())
+}
+
 fn is_unique_violation(err: &AppError) -> bool {
     matches!(
         err,
@@ -2608,8 +2830,10 @@ mod tests {
     fn crl_cache_regenerates_only_when_dirty_missing_or_expired() {
         let now = Utc::now();
         let fresh = repo::CrlState {
+            issuer_fingerprint_sha256: "a".repeat(64),
             crl_number: 1,
             crl_der: Some(vec![1, 2, 3]),
+            crl_sha256: Some(sha256_hex(&[1, 2, 3])),
             this_update: Some(now),
             next_update: Some(now + chrono::Duration::hours(1)),
             dirty: false,
@@ -2627,6 +2851,50 @@ mod tests {
         let mut expired = fresh;
         expired.next_update = Some(now - chrono::Duration::seconds(1));
         assert!(should_regenerate_crl(&expired, now));
+    }
+
+    #[test]
+    fn crl_reason_codes_follow_rfc_5280_values() {
+        assert_eq!(
+            crl_revocation_reason("key_compromise"),
+            RevocationReason::KeyCompromise
+        );
+        assert_eq!(
+            crl_revocation_reason("ca_compromise"),
+            RevocationReason::CaCompromise
+        );
+        assert_eq!(
+            crl_revocation_reason("affiliation_changed"),
+            RevocationReason::AffiliationChanged
+        );
+        assert_eq!(
+            crl_revocation_reason("superseded"),
+            RevocationReason::Superseded
+        );
+        assert_eq!(
+            crl_revocation_reason("cessation_of_operation"),
+            RevocationReason::CessationOfOperation
+        );
+        assert_eq!(
+            crl_revocation_reason("certificate_hold"),
+            RevocationReason::CertificateHold
+        );
+        assert_eq!(
+            crl_revocation_reason("remove_from_crl"),
+            RevocationReason::RemoveFromCrl
+        );
+        assert_eq!(
+            crl_revocation_reason("privilege_withdrawn"),
+            RevocationReason::PrivilegeWithdrawn
+        );
+        assert_eq!(
+            crl_revocation_reason("aa_compromise"),
+            RevocationReason::AaCompromise
+        );
+        assert_eq!(
+            crl_revocation_reason("operator_specific_reason"),
+            RevocationReason::Unspecified
+        );
     }
 
     #[test]
