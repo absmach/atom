@@ -8,7 +8,7 @@ mod common;
 use async_graphql::{Request, Variables};
 use atom::{
     auth::AuthContext,
-    certs::{enrollment, lifecycle, service},
+    certs::{enrollment::service as enrollment, lifecycle, service},
     config::PkiLifecycleConfig,
     graphql::build_schema,
     identity, metrics,
@@ -320,7 +320,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
         "active"
     );
     assert_eq!(
-        certificate_status(&pool, renewed_b.credential_id).await,
+        certificate_status(&pool, renewed_b.certificate.credential_id).await,
         "active"
     );
 
