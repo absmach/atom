@@ -1,5 +1,9 @@
 # PR-009 — Per-Issuer CRL Generation and Routes
 
+## Status
+
+Implemented by the PR-009 delivery branch.
+
 ## Objective
 
 Publish standards-compliant CRLs for every issuer while retaining legacy artifacts during migration and rotation.
