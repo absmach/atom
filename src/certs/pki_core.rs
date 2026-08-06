@@ -7,9 +7,11 @@ use std::{collections::HashSet, fmt, net::IpAddr};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
+use p256::{elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePublicKey, PublicKey};
 use rcgen::{
     CertificateParams, CertificateSigningRequestParams, CrlDistributionPoint, CustomExtension,
-    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
+    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PublicKeyData,
+    SanType, SerialNumber, SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
 };
 use ring::{digest, rand, rand::SecureRandom};
 use time::{Duration, OffsetDateTime};
@@ -21,8 +23,15 @@ use x509_parser::{
 };
 use yasna::{models::ObjectIdentifier, Tag};
 
-use crate::error::AppError;
+use crate::{config::PkiCaKeyConfig, error::AppError};
 
+use super::authority::{
+    key_provider::{
+        AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError,
+        EncryptedAuthorityKey, EncryptedDatabaseKeyProvider,
+    },
+    AuthorityKeyBackend, AuthorityRecord,
+};
 use super::profile::{
     CertificateProfile, ExtendedKeyUsage, KeyAlgorithm, KeyUsage, SanRule, SanRuleMode,
     StoredSubject,
@@ -33,10 +42,53 @@ const AIA_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 1, 1];
 const OCSP_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 1];
 const CA_ISSUERS_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 2];
 
+enum PkiSigningKey {
+    Local(KeyPair),
+    EncryptedDatabase {
+        provider: EncryptedDatabaseKeyProvider,
+        context: AuthorityKeyContext,
+        key: EncryptedAuthorityKey,
+        raw_public_key: Vec<u8>,
+    },
+}
+
+impl PublicKeyData for PkiSigningKey {
+    fn der_bytes(&self) -> &[u8] {
+        match self {
+            Self::Local(key) => key.der_bytes(),
+            Self::EncryptedDatabase { raw_public_key, .. } => raw_public_key,
+        }
+    }
+
+    fn algorithm(&self) -> &'static SignatureAlgorithm {
+        match self {
+            Self::Local(key) => key.algorithm(),
+            Self::EncryptedDatabase { .. } => &PKCS_ECDSA_P256_SHA256,
+        }
+    }
+}
+
+impl SigningKey for PkiSigningKey {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+        match self {
+            Self::Local(key) => key.sign(message),
+            Self::EncryptedDatabase {
+                provider,
+                context,
+                key,
+                ..
+            } => provider
+                .sign(*context, key, message)
+                .map(|signature| signature.bytes)
+                .map_err(|_| rcgen::Error::RemoteKeyError),
+        }
+    }
+}
+
 pub struct PkiIssuer {
     certificate_pem: String,
     chain_pem: String,
-    key_pair: KeyPair,
+    signing_key: PkiSigningKey,
     not_before: OffsetDateTime,
     not_after: OffsetDateTime,
     ocsp_url: String,
@@ -99,7 +151,97 @@ impl PkiIssuer {
         Ok(Self {
             certificate_pem: pem_encode_certificate(&certificate_der),
             chain_pem: chain_pem.to_string(),
-            key_pair,
+            signing_key: PkiSigningKey::Local(key_pair),
+            not_before,
+            not_after,
+            ocsp_url: ocsp_url.to_string(),
+            ca_issuers_url: ca_issuers_url.to_string(),
+            crl_distribution_point_url: crl_distribution_point_url.to_string(),
+        })
+    }
+
+    /// Load an active managed issuer without materializing a plaintext CA key.
+    /// The provider decrypts only inside each signing operation and immediately
+    /// drops its ephemeral signing-key value afterwards.
+    pub fn from_managed_authority(
+        authority: &AuthorityRecord,
+        ca_keys: &PkiCaKeyConfig,
+    ) -> Result<Self, AppError> {
+        if !authority.can_issue_leaves_at(Utc::now()) {
+            return Err(AppError::bad_request(
+                "issuing authority is not active and valid for leaf issuance",
+            ));
+        }
+        if authority.key_backend != AuthorityKeyBackend::EncryptedDatabase {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "managed authority key backend is not available for leaf issuance"
+            )));
+        }
+        let certificate_pem =
+            required_authority_field(authority.certificate_pem.as_deref(), "certificate")?;
+        let chain_pem = required_authority_field(authority.chain_pem.as_deref(), "chain")?;
+        let ocsp_url = required_authority_field(authority.ocsp_url.as_deref(), "OCSP URL")?;
+        let ca_issuers_url =
+            required_authority_field(authority.ca_issuers_url.as_deref(), "CA issuers URL")?;
+        let crl_distribution_point_url = required_authority_field(
+            authority.crl_distribution_point_url.as_deref(),
+            "CRL distribution point URL",
+        )?;
+        validate_route(ocsp_url, "OCSP")?;
+        validate_route(ca_issuers_url, "CA issuers")?;
+        validate_route(crl_distribution_point_url, "CRL distribution point")?;
+
+        let certificate_der = one_certificate_der(certificate_pem, "issuer certificate")?;
+        let (_, certificate) =
+            x509_parser::parse_x509_certificate(&certificate_der).map_err(|_| {
+                AppError::Internal(anyhow::anyhow!("stored invalid issuer certificate"))
+            })?;
+        validate_issuer_certificate(&certificate)?;
+        validate_chain(&certificate_der, chain_pem)?;
+
+        let fingerprint = hex::encode(digest::digest(&digest::SHA256, &certificate_der));
+        if authority.fingerprint_sha256.as_deref() != Some(&fingerprint)
+            || authority.not_before.map(|value| value.timestamp())
+                != Some(certificate.validity().not_before.timestamp())
+            || authority.not_after.map(|value| value.timestamp())
+                != Some(certificate.validity().not_after.timestamp())
+        {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "stored issuer metadata does not match its certificate"
+            )));
+        }
+
+        let context = AuthorityKeyContext {
+            authority_id: authority.id,
+            tenant_id: authority.tenant_id,
+            version: authority.version,
+        };
+        let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
+        let key =
+            EncryptedAuthorityKey::from_authority(authority).map_err(managed_key_provider_error)?;
+        let public = provider
+            .public_key(context, &key)
+            .map_err(managed_key_provider_error)?;
+        if public.subject_public_key_info_der != certificate.public_key().raw {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "managed authority key does not match its certificate"
+            )));
+        }
+        let public_key = PublicKey::from_public_key_der(&public.subject_public_key_info_der)
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid managed authority key")))?;
+        let raw_public_key = public_key.to_encoded_point(false).as_bytes().to_vec();
+        let not_before = certificate.validity().not_before.to_datetime();
+        let not_after = certificate.validity().not_after.to_datetime();
+
+        Ok(Self {
+            certificate_pem: pem_encode_certificate(&certificate_der),
+            chain_pem: chain_pem.to_string(),
+            signing_key: PkiSigningKey::EncryptedDatabase {
+                provider,
+                context,
+                key,
+                raw_public_key,
+            },
             not_before,
             not_after,
             ocsp_url: ocsp_url.to_string(),
@@ -228,7 +370,7 @@ pub fn issue_from_csr_at(
         params,
         public_key: parsed.params.public_key,
     };
-    let signer = Issuer::from_ca_cert_pem(&issuer.certificate_pem, &issuer.key_pair)
+    let signer = Issuer::from_ca_cert_pem(&issuer.certificate_pem, &issuer.signing_key)
         .map_err(core_encoding_error)?;
     let certificate = signing_request
         .signed_by(&signer)
@@ -736,6 +878,18 @@ fn validate_route(value: &str, label: &str) -> Result<(), AppError> {
         return Err(AppError::bad_request(format!("invalid {label} URL")));
     }
     Ok(())
+}
+
+fn required_authority_field<'a>(value: Option<&'a str>, label: &str) -> Result<&'a str, AppError> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("managed authority {label} is missing")))
+}
+
+fn managed_key_provider_error(error: AuthorityKeyProviderError) -> AppError {
+    AppError::Internal(anyhow::anyhow!(
+        "managed authority key provider failed: {error}"
+    ))
 }
 
 fn rcgen_key_usage(usage: KeyUsage) -> KeyUsagePurpose {
