@@ -43,12 +43,10 @@ pub fn create_router(state: AppState) -> Router {
         .enrollment
         .max_csr_bytes
         .saturating_add(16 * 1024);
-    let est_body_limit = state
-        .config
-        .enrollment
-        .max_csr_bytes
-        .saturating_mul(4)
+    let est_body_limit = est::maximum_der_csr_bytes(state.config.enrollment.max_csr_bytes)
+        .saturating_add(2)
         .saturating_div(3)
+        .saturating_mul(4)
         .saturating_add(16 * 1024);
     Router::new()
         .route("/pki/enroll", post(first_enrollment))
