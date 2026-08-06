@@ -1,16 +1,22 @@
 mod common;
 
+use async_graphql::Request as GraphqlRequest;
 use atom::{
+    auth::AuthContext,
     certs::authority::{
         provisioning, repo, AuthorityKeyBackend, AuthorityKind, AuthorityRecord, AuthorityStatus,
     },
-    config::PkiCaKeyConfig,
+    config::{Config, PkiCaKeyConfig},
+    graphql::build_schema,
+    keys::{ActiveKeys, LoadedKey},
+    state::AppState,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
     DnType, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
 };
+use serde_json::Value;
 use sqlx::PgPool;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
@@ -20,6 +26,67 @@ struct TestRoot {
     params: CertificateParams,
     key: KeyPair,
     pem: String,
+}
+
+#[tokio::test]
+#[ignore]
+async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
+    let pool = common::pool().await;
+    let root = test_root("PR-003 Audit Root", -1, 365);
+    import_root(&pool, &root.pem).await;
+    let tenant_id = create_tenant(&pool, "pki-audit").await;
+    let schema = build_schema(graphql_state(pool.clone()));
+
+    let response = schema
+        .execute(
+            GraphqlRequest::new(format!(
+                r#"
+                mutation {{
+                  beginTenantAuthorityProvisioning(tenantId: "{tenant_id}") {{
+                    id
+                    status
+                  }}
+                }}
+                "#
+            ))
+            .data(AuthContext {
+                entity_id: common::admin_id(),
+                tenant_id: None,
+                session_id: None,
+                ..Default::default()
+            }),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let body: Value = response.data.into_json().expect("GraphQL JSON");
+    let authority_id: Uuid = body["beginTenantAuthorityProvisioning"]["id"]
+        .as_str()
+        .expect("authority ID")
+        .parse()
+        .expect("authority UUID");
+
+    let audit_details: Value = sqlx::query_scalar(
+        "SELECT details FROM audit_logs WHERE event = 'pki.authority.provisioning_started' AND target_id = $1",
+    )
+    .bind(authority_id)
+    .fetch_one(&pool)
+    .await
+    .expect("provisioning audit event");
+    assert_eq!(audit_details["status"], "pending_signature");
+    assert!(audit_details.get("csr_pem").is_none());
+    assert!(audit_details.get("key_reference").is_none());
+
+    let outbox_payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1",
+    )
+    .bind(authority_id)
+    .fetch_one(&pool)
+    .await
+    .expect("provisioning outbox event");
+    assert_eq!(outbox_payload["event"], "pki.authority.provisioning_started");
+    assert_eq!(outbox_payload["target_kind"], "pki_authority");
+    assert_eq!(outbox_payload["tenant_id"], tenant_id.to_string());
+    assert_eq!(outbox_payload["details"]["status"], "pending_signature");
 }
 
 #[tokio::test]
@@ -379,6 +446,27 @@ async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
         .await
         .unwrap();
     id
+}
+
+fn graphql_state(pool: PgPool) -> AppState {
+    let mut config = Config::for_tests();
+    config.events.amqp_url = Some("amqp://unused-in-this-test".to_string());
+    let primary = LoadedKey {
+        kid: "test".into(),
+        public_key_pem: String::new(),
+        private_key_pem: String::new(),
+        x_b64: String::new(),
+        y_b64: String::new(),
+    };
+    AppState::new(
+        pool,
+        config,
+        ActiveKeys {
+            primary,
+            standby: None,
+        },
+        None,
+    )
 }
 
 async fn set_parent_validity(
