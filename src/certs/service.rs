@@ -2739,19 +2739,19 @@ where
         .tbs_certificate
         .subject
         .clone();
-    let response_extensions = nonce
-        .map(|nonce| {
-            let nonce_der = Nonce::new(nonce.to_vec())
-                .map_err(der_err)?
-                .to_der()
-                .map_err(der_err)?;
-            Ok(vec![Extension {
-                extn_id: ID_PKIX_OCSP_NONCE,
-                critical: false,
-                extn_value: OctetString::new(nonce_der).map_err(der_err)?,
-            }])
-        })
-        .transpose()?;
+    let response_extensions = if let Some(nonce) = nonce {
+        let nonce_der = Nonce::new(nonce.to_vec())
+            .map_err(der_err)?
+            .to_der()
+            .map_err(der_err)?;
+        Some(vec![Extension {
+            extn_id: ID_PKIX_OCSP_NONCE,
+            critical: false,
+            extn_value: OctetString::new(nonce_der).map_err(der_err)?,
+        }])
+    } else {
+        None
+    };
     let response_data = ResponseData {
         version: Version::default(),
         responder_id: ResponderId::ByName(responder_name),
