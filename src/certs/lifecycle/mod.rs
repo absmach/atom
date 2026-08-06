@@ -269,13 +269,36 @@ pub async fn bulk_revoke(
                 items.push(item);
             }
             Err(error) => {
+                let error_code = public_error_code(&error);
+                audit::write(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    audit::AuditEvent {
+                        actor_entity_id: Some(actor_entity_id),
+                        tenant_id: candidate.tenant_id,
+                        target_kind: Some("credential"),
+                        target_id: Some(candidate.credential_id),
+                        event: "certificate.bulk_revoke",
+                        outcome: error.audit_outcome(),
+                        details: serde_json::json!({
+                            "selector_kind": selector.kind(),
+                            "selector_id": selector.id(),
+                            "issuer_id": candidate.issuer_id,
+                            "credential_id": candidate.credential_id,
+                            "entity_id": candidate.entity_id,
+                            "tenant_id": candidate.tenant_id,
+                            "error_code": error_code,
+                        }),
+                    },
+                )
+                .await;
                 items.push(BulkRevocationItem {
                     credential_id: candidate.credential_id,
                     issuer_id: candidate.issuer_id,
                     entity_id: candidate.entity_id,
                     tenant_id: candidate.tenant_id,
                     outcome: "failed",
-                    error_code: Some(public_error_code(&error)),
+                    error_code: Some(error_code),
                 });
                 return Ok(BulkRevocationBatch {
                     items,

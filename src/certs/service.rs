@@ -1021,7 +1021,7 @@ async fn renew_certificate_in_tx_inner(
     )
     .await?;
     if input.revoke_old {
-        revoke_certificate_in_tx(tx, &serial, Some("superseded".into())).await?;
+        revoke_certificate_in_tx_inner(tx, &serial, Some("superseded".into())).await?;
     }
     Ok(issued)
 }
@@ -1280,6 +1280,16 @@ pub async fn revoke_certificate_in_tx(
     serial_number: &str,
     reason: Option<String>,
 ) -> Result<CertificateRecord, AppError> {
+    let result = revoke_certificate_in_tx_inner(tx, serial_number, reason).await;
+    record_lifecycle_operation("revocation", &result);
+    result
+}
+
+async fn revoke_certificate_in_tx_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    serial_number: &str,
+    reason: Option<String>,
+) -> Result<CertificateRecord, AppError> {
     let serial = normalize_serial(serial_number)?;
     let current = repo::legacy_certificate_by_serial(&mut **tx, &serial).await?;
     if current.issuer_id.is_some() {
@@ -1287,7 +1297,7 @@ pub async fn revoke_certificate_in_tx(
             "managed certificate revocation requires an exact v2 selector",
         ));
     }
-    let result = revoke_certificate_v2_in_tx(
+    let result = revoke_certificate_v2_in_tx_inner(
         tx,
         RevokeCertificateV2 {
             selector: CertificateRevocationSelector::CredentialId(current.id),
@@ -1521,19 +1531,17 @@ pub async fn list_certificates(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<CertificateRecord>, AppError> {
-    Ok(list_certificates_filtered(
+    let status = status.map(validate_certificate_status).transpose()?;
+    let rows = repo::list_certificates(
         pool,
-        CertificateListFilter {
-            entity_id,
-            tenant_id,
-            status,
-            limit,
-            offset,
-            ..CertificateListFilter::default()
-        },
+        entity_id,
+        tenant_id,
+        status.as_deref(),
+        limit.clamp(1, 100),
+        offset.max(0),
     )
-    .await?
-    .items)
+    .await?;
+    rows.into_iter().map(record_from_row).collect()
 }
 
 pub async fn list_certificates_filtered(

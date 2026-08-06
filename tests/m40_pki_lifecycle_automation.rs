@@ -353,6 +353,21 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(partial["items"][1]["outcome"], "failed");
     assert_eq!(partial["items"][1]["errorCode"], "invalid_certificate");
     assert_eq!(partial["nextCursor"], ordered[0].to_string());
+    let failed_audit: (String, String) = sqlx::query_as(
+        r#"
+        SELECT outcome, details->>'error_code'
+        FROM audit_logs
+        WHERE event = 'certificate.bulk_revoke' AND target_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(ordered[1])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(failed_audit.0, "error");
+    assert_eq!(failed_audit.1, "invalid_certificate");
     sqlx::query("UPDATE credentials SET metadata = $2 WHERE id = $1")
         .bind(ordered[1])
         .bind(original_metadata)
@@ -462,7 +477,9 @@ async fn issue(
         Some(tenant_id),
         service::IssueCertificateFromCsrV2 {
             entity_id,
-            ttl_secs: None,
+            // Keep ordinary fixtures outside the one-day default renewal
+            // threshold; boundary fixtures explicitly rewrite their windows.
+            ttl_secs: Some(7 * 86_400),
             csr_pem: csr(),
             idempotency_key: format!("m40-{key}"),
         },
@@ -585,6 +602,18 @@ async fn outbox_count(pool: &PgPool, event: &str) -> i64 {
 }
 
 async fn assert_certificate_event(pool: &PgPool, credential_id: Uuid, window: &str) {
+    let expected: (Option<Uuid>, Uuid, Option<Uuid>) = sqlx::query_as(
+        r#"
+        SELECT c.issuer_id, c.entity_id, e.tenant_id
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.id = $1
+        "#,
+    )
+    .bind(credential_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
     let details: Value = sqlx::query_scalar(
         "SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.expiring' AND payload->>'target_id' = $1",
     )
@@ -593,6 +622,9 @@ async fn assert_certificate_event(pool: &PgPool, credential_id: Uuid, window: &s
     .await
     .unwrap();
     assert_eq!(details["credential_id"], credential_id.to_string());
+    assert_eq!(details["issuer_id"], json!(expected.0));
+    assert_eq!(details["entity_id"], expected.1.to_string());
+    assert_eq!(details["tenant_id"], json!(expected.2));
     assert_eq!(details["window"], window);
     for key in ["issuer_id", "credential_id", "entity_id", "tenant_id"] {
         assert!(details.get(key).is_some(), "missing {key}: {details}");

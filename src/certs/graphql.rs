@@ -29,6 +29,7 @@ impl CertificateQuery {
         service::ca_chain(&state.config, state.certificate_issuer.as_deref()).map_err(gql_error)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn certificates(
         &self,
         ctx: &Context<'_>,
@@ -56,7 +57,7 @@ impl CertificateQuery {
             .transpose()?;
         let tenant_filter = if let Some(entity_id) = entity_id {
             require_entity_credential_read(state, &auth, entity_id).await?;
-            None
+            tenant_id
         } else {
             resolve_list_tenant_filter(state, &auth, auth.tenant_id, tenant_id).await?
         };
