@@ -283,7 +283,36 @@ Certificate operations use Atom credential authorization:
 
 Credential authority follows the target entity's `tenant_id`, not tenant membership. Tenant admins may manage certificates only for tenant-owned entities in their tenant unless explicit platform policy delegates authority.
 
-The GraphQL certificate list supports optional `entityId`, `tenantId`, and `status` filters. Platform readers/managers can list globally; tenant readers/managers can list tenant-owned certificate credentials.
+The GraphQL certificate list supports optional `entityId`, `tenantId`,
+`issuerId`, `status`, `expiresFrom`, and `expiresBefore` filters. Expiry bounds
+are inclusive/exclusive respectively, pagination is stable over expiry plus
+credential ID, and tenant authorization filtering happens in SQL. Platform
+readers/managers can list globally; tenant readers/managers can list
+tenant-owned certificate credentials.
+
+### Lifecycle automation
+
+The optional lifecycle sweeper surfaces renewal and critical-expiry windows by
+emitting exactly one `certificate.expiring` event per credential per window.
+Renewal windows are derived from the credential's stored profile threshold or
+the applicable referenced, tenant-default, or platform-default profile.
+Notification claims and outbox records commit atomically, and an advisory
+transaction lock prevents duplicate work across replicas and restarts. Managed
+authorities similarly emit `certificate.authority_expiring` inside the
+configured rotation lead time.
+
+`bulkRevokeCertificates` accepts exactly one tenant, issuer, or principal-group
+selector and processes a bounded page. The result reports each attempted
+credential and a cursor after the last contiguous success, so a caller can fix a
+failure and resume without repeating completed revocations. Every successful
+item retains the normal per-certificate authorization, audit, outbox, immutable
+revocation evidence, and issuer-specific CRL-dirty behavior.
+
+Lifecycle metrics cover issuance, renewal, revocation, enrollment, expiry
+buckets, authority time to expiry, and CRL size and generation duration. They
+use bounded operational labels and omit identifiers, certificate subjects, key
+material, and other secrets. Disabling the sweeper preserves the existing
+interactive certificate behavior.
 
 ---
 

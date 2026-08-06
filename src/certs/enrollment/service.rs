@@ -67,6 +67,10 @@ pub async fn enroll(
     )
     .await;
     crate::metrics::record_pki_enrollment("first", outcome(&result));
+    crate::metrics::record_pki_lifecycle_operation(
+        "enrollment",
+        lifecycle_outcome(&result),
+    );
     result
 }
 
@@ -124,6 +128,10 @@ pub async fn re_enroll(
 ) -> Result<EnrollmentResponse, AppError> {
     let result = re_enroll_inner(state, peer, input).await;
     crate::metrics::record_pki_enrollment("reenroll", outcome(&result));
+    crate::metrics::record_pki_lifecycle_operation(
+        "enrollment",
+        lifecycle_outcome(&result),
+    );
     result
 }
 
@@ -346,5 +354,13 @@ fn outcome(result: &Result<EnrollmentResponse, AppError>) -> &'static str {
         Err(AppError::RateLimited { .. }) => "rate_limited",
         Err(AppError::Unauthorized(_) | AppError::Forbidden) => "denied",
         Err(_) => "error",
+    }
+}
+
+fn lifecycle_outcome(result: &Result<EnrollmentResponse, AppError>) -> &'static str {
+    if result.is_ok() {
+        "success"
+    } else {
+        "failure"
     }
 }

@@ -1,5 +1,7 @@
 # PR-015 — Certificate Lifecycle Automation and Fleet Operations
 
+Implemented by the PR-015 delivery branch.
+
 ## Objective
 
 Make certificate expiry visible and actionable before it becomes an outage, and
