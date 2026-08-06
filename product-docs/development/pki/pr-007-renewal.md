@@ -1,5 +1,9 @@
 # PR-007 — Issuer-Aware Certificate Renewal
 
+## Status
+
+Implemented by the PR-007 delivery branch.
+
 ## Objective
 
 Renew existing certificates into the tenant's current active issuer while preserving history and safe rotation.

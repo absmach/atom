@@ -127,6 +127,94 @@ pub async fn provision_tenant_issuer(
         .unwrap()
 }
 
+pub async fn provision_platform_leaf_issuer(
+    pool: &PgPool,
+    config: &Config,
+    root: &TestRoot,
+) -> AuthorityRecord {
+    let mut tx = pool.begin().await.unwrap();
+    provisioning::import_root_in_tx(&mut tx, &root.pem)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let pending = provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &config.pki_ca_keys)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let signed = sign_authority_csr(&pending, root);
+    let mut tx = pool.begin().await.unwrap();
+    let imported = provisioning::import_signed_authority_in_tx(
+        &mut tx,
+        &config.pki_ca_keys,
+        pending.id,
+        &signed,
+    )
+    .await
+    .unwrap();
+    assert!(imported.succeeded(), "{:?}", imported.validation_error);
+    tx.commit().await.unwrap();
+    sqlx::query(
+        r#"UPDATE pki_authorities
+           SET ocsp_url = $2, ca_issuers_url = $3,
+               crl_distribution_point_url = $4
+           WHERE id = $1"#,
+    )
+    .bind(imported.authority.id)
+    .bind(OCSP_URL)
+    .bind(CA_ISSUERS_URL)
+    .bind(CRL_URL)
+    .execute(pool)
+    .await
+    .unwrap();
+    authority_repo::authority_by_id(pool, imported.authority.id)
+        .await
+        .unwrap()
+}
+
+pub async fn rotate_tenant_issuer(
+    pool: &PgPool,
+    config: &Config,
+    root: &TestRoot,
+    tenant_id: Uuid,
+) -> AuthorityRecord {
+    let mut tx = pool.begin().await.unwrap();
+    let pending =
+        provisioning::begin_tenant_authority_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    let signed = sign_authority_csr(&pending, root);
+    let mut tx = pool.begin().await.unwrap();
+    let imported = provisioning::import_signed_authority_in_tx(
+        &mut tx,
+        &config.pki_ca_keys,
+        pending.id,
+        &signed,
+    )
+    .await
+    .unwrap();
+    assert!(imported.succeeded(), "{:?}", imported.validation_error);
+    tx.commit().await.unwrap();
+    sqlx::query(
+        r#"UPDATE pki_authorities
+           SET ocsp_url = $2, ca_issuers_url = $3,
+               crl_distribution_point_url = $4
+           WHERE id = $1"#,
+    )
+    .bind(imported.authority.id)
+    .bind(OCSP_URL)
+    .bind(CA_ISSUERS_URL)
+    .bind(CRL_URL)
+    .execute(pool)
+    .await
+    .unwrap();
+    authority_repo::authority_by_id(pool, imported.authority.id)
+        .await
+        .unwrap()
+}
+
 fn sign_authority_csr(pending: &AuthorityRecord, root: &TestRoot) -> String {
     let mut csr =
         CertificateSigningRequestParams::from_pem(pending.csr_pem.as_deref().unwrap()).unwrap();
@@ -157,6 +245,19 @@ pub async fn create_entity(pool: &PgPool, tenant_id: Uuid, prefix: &str) -> Uuid
     .bind(id)
     .bind(format!("{prefix}-{id}"))
     .bind(tenant_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+pub async fn create_global_entity(pool: &PgPool, prefix: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+    )
+    .bind(id)
+    .bind(format!("{prefix}-{id}"))
     .execute(pool)
     .await
     .unwrap();
