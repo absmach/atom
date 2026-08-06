@@ -271,6 +271,7 @@ pub struct IssuedCertificate {
     pub not_after: DateTime<Utc>,
     pub profile_id: uuid::Uuid,
     pub profile_name: String,
+    pub renewal_threshold_seconds: u64,
     pub dns_names: Vec<String>,
     pub ip_addresses: Vec<IpAddr>,
 }
@@ -475,6 +476,7 @@ pub fn issue_from_csr_at(
         not_after: to_chrono(not_after)?,
         profile_id: profile.id,
         profile_name: profile.name.clone(),
+        renewal_threshold_seconds: profile.renewal_threshold_seconds,
         dns_names: approved_sans.dns_names,
         ip_addresses: approved_sans.ip_addresses,
     })

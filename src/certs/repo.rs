@@ -24,6 +24,12 @@ pub enum CertificateIssuanceRequestClaim {
     Replay { credential_id: Uuid },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertificateRenewalRequestClaim {
+    New { renewal_id: Uuid },
+    Replay { credential_id: Uuid },
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct CrlState {
     pub crl_number: i64,
@@ -189,6 +195,94 @@ pub async fn complete_certificate_issuance_request(
     Ok(())
 }
 
+pub async fn claim_certificate_renewal(
+    tx: &mut Transaction<'_, Postgres>,
+    previous_credential_id: Uuid,
+    request_key_hash: &str,
+    request_fingerprint_sha256: &str,
+    key_mode: &str,
+) -> Result<CertificateRenewalRequestClaim, AppError> {
+    let renewal_id = Uuid::new_v4();
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO certificate_renewals (
+            id, previous_credential_id, request_key_hash,
+            request_fingerprint_sha256, key_mode
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (previous_credential_id) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(renewal_id)
+    .bind(previous_credential_id)
+    .bind(request_key_hash)
+    .bind(request_fingerprint_sha256)
+    .bind(key_mode)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    if inserted.is_some() {
+        return Ok(CertificateRenewalRequestClaim::New { renewal_id });
+    }
+
+    let existing = sqlx::query_as::<_, (String, String, String, Option<Uuid>)>(
+        r#"
+        SELECT request_key_hash, request_fingerprint_sha256, key_mode,
+               replacement_credential_id
+        FROM certificate_renewals
+        WHERE previous_credential_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(previous_credential_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if existing.0 != request_key_hash
+        || existing.1 != request_fingerprint_sha256
+        || existing.2 != key_mode
+    {
+        return Err(AppError::conflict(
+            "certificate was already renewed by a different request",
+        ));
+    }
+    existing
+        .3
+        .map(|credential_id| CertificateRenewalRequestClaim::Replay { credential_id })
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "stored certificate renewal request is incomplete"
+            ))
+        })
+}
+
+pub async fn complete_certificate_renewal(
+    tx: &mut Transaction<'_, Postgres>,
+    renewal_id: Uuid,
+    replacement_credential_id: Uuid,
+) -> Result<(), AppError> {
+    let completed = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE certificate_renewals
+        SET replacement_credential_id = $2, completed_at = now()
+        WHERE id = $1 AND replacement_credential_id IS NULL
+        RETURNING id
+        "#,
+    )
+    .bind(renewal_id)
+    .bind(replacement_credential_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+    if completed.is_none() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "certificate renewal request could not be completed"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn certificate_by_serial<'e, E>(
     executor: E,
     serial_number: &str,
@@ -238,6 +332,26 @@ where
     )
     .bind(credential_id)
     .fetch_one(executor)
+    .await
+    .map_err(db_err)
+}
+
+pub async fn lock_certificate_by_id(
+    tx: &mut Transaction<'_, Postgres>,
+    credential_id: Uuid,
+) -> Result<CertificateCredential, AppError> {
+    sqlx::query_as::<_, CertificateCredential>(
+        r#"
+        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
+               c.expires_at, c.created_at
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.kind = 'certificate' AND c.id = $1
+        FOR UPDATE OF c
+        "#,
+    )
+    .bind(credential_id)
+    .fetch_one(&mut **tx)
     .await
     .map_err(db_err)
 }

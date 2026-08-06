@@ -30,7 +30,7 @@ use crate::{
 };
 
 use super::{
-    authority::{repo as authority_repo, AuthorityKind, AuthorityRecord},
+    authority::{repo as authority_repo, AuthorityKind, AuthorityRecord, AuthorityStatus},
     pki_core, profile, repo,
 };
 
@@ -76,6 +76,41 @@ pub struct RenewCertificate {
     pub revoke_old: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum RenewalKeySource {
+    Csr(String),
+    Generated,
+}
+
+impl RenewalKeySource {
+    pub(crate) fn mode(&self) -> &'static str {
+        match self {
+            Self::Csr(_) => "csr",
+            Self::Generated => "generated",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RenewCertificateV2 {
+    pub credential_id: Uuid,
+    pub ttl_secs: Option<u64>,
+    pub key_source: RenewalKeySource,
+    pub revoke_old: bool,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CertificateRenewalAuthorization {
+    Operator {
+        expected_entity_id: Uuid,
+        expected_tenant_id: Option<Uuid>,
+    },
+    PresentedCertificate {
+        credential_id: Uuid,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CertificateMetadata {
     pub certificate_pem: String,
@@ -95,6 +130,12 @@ pub struct CertificateMetadata {
     pub profile_name: Option<String>,
     #[serde(default)]
     pub identity_uri: Option<String>,
+    #[serde(default)]
+    pub renewed_from_credential_id: Option<Uuid>,
+    #[serde(default)]
+    pub renewal_threshold_seconds: Option<u64>,
+    #[serde(default)]
+    pub renewal_due_at: Option<DateTime<Utc>>,
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
     pub issued_from_csr: bool,
@@ -119,6 +160,8 @@ pub struct CertificateRecord {
     pub profile_id: Option<Uuid>,
     pub profile_name: Option<String>,
     pub identity_uri: Option<String>,
+    pub renewed_from_credential_id: Option<Uuid>,
+    pub renewal_due_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -650,8 +693,15 @@ pub async fn issue_certificate_from_csr_v2_in_tx(
         )?;
         let chain_pem = issued.chain_pem.clone();
         let mut attempt_tx = tx.begin().await.map_err(AppError::Database)?;
-        let outcome =
-            persist_managed_certificate(&mut attempt_tx, input.entity_id, &authority, issued).await;
+        let outcome = persist_managed_certificate(
+            &mut attempt_tx,
+            input.entity_id,
+            &authority,
+            issued,
+            true,
+            None,
+        )
+        .await;
         match outcome {
             Ok(certificate) => {
                 repo::complete_certificate_issuance_request(
@@ -739,8 +789,15 @@ pub async fn issue_generated_certificate_v2_in_tx(
         )?;
         let chain_pem = issued.chain_pem.clone();
         let mut attempt_tx = tx.begin().await.map_err(AppError::Database)?;
-        let outcome =
-            persist_managed_certificate(&mut attempt_tx, input.entity_id, &authority, issued).await;
+        let outcome = persist_managed_certificate(
+            &mut attempt_tx,
+            input.entity_id,
+            &authority,
+            issued,
+            false,
+            None,
+        )
+        .await;
         match outcome {
             Ok(certificate) => {
                 attempt_tx.commit().await.map_err(AppError::Database)?;
@@ -827,6 +884,226 @@ pub async fn renew_certificate_in_tx(
         revoke_certificate_in_tx(tx, &serial, Some("superseded".into())).await?;
     }
     Ok(issued)
+}
+
+pub async fn renew_certificate_v2(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    authorization: CertificateRenewalAuthorization,
+    input: RenewCertificateV2,
+) -> Result<IssuedCertificate, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let issued = renew_certificate_v2_in_tx(&mut tx, config, authorization, input).await?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(issued)
+}
+
+/// Exact-credential, issuer-aware renewal. Operator authorization is bound to
+/// the entity and tenant observed before the transaction; certificate
+/// authorization is bound to the exact credential that authenticated the
+/// caller. The transport never supplies tenant, entity, issuer, or profile.
+pub async fn renew_certificate_v2_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &Config,
+    authorization: CertificateRenewalAuthorization,
+    input: RenewCertificateV2,
+) -> Result<IssuedCertificate, AppError> {
+    validate_idempotency_key(&input.idempotency_key)?;
+    if matches!(&input.key_source, RenewalKeySource::Generated)
+        && !config.pki_generated_key_issuance_enabled
+    {
+        return Err(AppError::Forbidden);
+    }
+
+    let old = repo::lock_certificate_by_id(tx, input.credential_id).await?;
+    let (_, stored_tenant_id) = identity::repo::lock_active_entity(tx, old.entity_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("entity not found"))?;
+    if old.tenant_id != stored_tenant_id {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "locked certificate scope changed during renewal"
+        )));
+    }
+    validate_renewal_authorization(&old, authorization)?;
+
+    let old_metadata = metadata_from_value(&old.metadata)?;
+    let now = Utc::now();
+    validate_renewal_source(tx, &old, &old_metadata, authorization, now).await?;
+    let threshold_seconds = renewal_threshold_for_certificate(
+        tx,
+        old.entity_id,
+        old_metadata.profile_id,
+        old_metadata.renewal_threshold_seconds,
+    )
+    .await?;
+    let renewal_due_at = renewal_due_at(
+        old_metadata.not_before,
+        old_metadata.not_after,
+        threshold_seconds,
+    )?;
+    if matches!(
+        authorization,
+        CertificateRenewalAuthorization::PresentedCertificate { .. }
+    ) && now < renewal_due_at
+    {
+        return Err(AppError::bad_request(format!(
+            "certificate renewal is not due until {}",
+            renewal_due_at.to_rfc3339()
+        )));
+    }
+
+    let key_mode = input.key_source.mode();
+    let request_key_hash = renewal_request_key_hash(&input.idempotency_key);
+    let request_fingerprint = renewal_request_fingerprint(
+        input.credential_id,
+        input.ttl_secs,
+        input.revoke_old,
+        key_mode,
+        match &input.key_source {
+            RenewalKeySource::Csr(csr_pem) => csr_pem.as_bytes(),
+            RenewalKeySource::Generated => &[],
+        },
+    );
+    let renewal_id = match repo::claim_certificate_renewal(
+        tx,
+        input.credential_id,
+        &request_key_hash,
+        &request_fingerprint,
+        key_mode,
+    )
+    .await?
+    {
+        repo::CertificateRenewalRequestClaim::New { renewal_id } => renewal_id,
+        repo::CertificateRenewalRequestClaim::Replay { credential_id } => {
+            let certificate =
+                record_from_row(repo::fetch_certificate_by_id(&mut **tx, credential_id).await?)?;
+            if certificate.renewed_from_credential_id != Some(input.credential_id) {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "stored certificate renewal link is inconsistent"
+                )));
+            }
+            return Ok(IssuedCertificate {
+                chain_pem: certificate.chain_pem.clone(),
+                certificate,
+                private_key_pem: None,
+                idempotent_replay: true,
+            });
+        }
+    };
+
+    let subject = profile::load_subject(&mut **tx, old.entity_id).await?;
+    if subject.tenant_id() != stored_tenant_id {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "locked entity scope changed during certificate renewal"
+        )));
+    }
+    let certificate_profile = profile::resolve_for_subject_in_tx(tx, &subject, "client").await?;
+    let authority = authority_repo::lock_active_leaf_issuer_for_scope(tx, stored_tenant_id).await?;
+    validate_issuer_scope(&authority, stored_tenant_id)?;
+    let issuer = pki_core::PkiIssuer::from_managed_authority(&authority, &config.pki_ca_keys)?;
+    let (csr_pem, mut generated) = match input.key_source {
+        RenewalKeySource::Csr(csr_pem) => (csr_pem, None),
+        RenewalKeySource::Generated => {
+            let generated = pki_core::generate_leaf_request(&certificate_profile)?;
+            (generated.csr_pem().to_string(), Some(generated))
+        }
+    };
+
+    for attempt in 0..SERIAL_INSERT_ATTEMPTS {
+        let issued = pki_core::issue_from_csr(
+            &certificate_profile,
+            &subject,
+            &issuer,
+            pki_core::IssueFromCsr {
+                csr_pem: &csr_pem,
+                requested_ttl_seconds: input.ttl_secs,
+            },
+        )?;
+        let chain_pem = issued.chain_pem.clone();
+        let mut attempt_tx = tx.begin().await.map_err(AppError::Database)?;
+        let outcome = persist_managed_certificate(
+            &mut attempt_tx,
+            old.entity_id,
+            &authority,
+            issued,
+            key_mode == "csr",
+            Some(old.id),
+        )
+        .await;
+        match outcome {
+            Ok(certificate) => {
+                if input.revoke_old {
+                    let mut metadata = old.metadata.clone();
+                    metadata["revoked_at"] = json!(Utc::now());
+                    metadata["revocation_reason"] = json!("superseded");
+                    repo::revoke_certificate(&mut **attempt_tx, old.id, metadata).await?;
+                    // PR-008 replaces this global dirty mark with an exact
+                    // issuer-keyed update. Credential status is still changed
+                    // atomically and is immediately authoritative in Atom.
+                    repo::mark_crl_dirty_tx(&mut attempt_tx).await?;
+                }
+                repo::complete_certificate_renewal(
+                    &mut attempt_tx,
+                    renewal_id,
+                    certificate.credential_id,
+                )
+                .await?;
+                attempt_tx.commit().await.map_err(AppError::Database)?;
+                let private_key_pem = generated
+                    .take()
+                    .map(pki_core::GeneratedLeafRequest::into_private_key_pem)
+                    .map(OneTimePrivateKey::from_zeroizing);
+                return Ok(IssuedCertificate {
+                    certificate,
+                    private_key_pem,
+                    chain_pem: Some(chain_pem),
+                    idempotent_replay: false,
+                });
+            }
+            Err(error) if is_unique_violation(&error) => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
+                if attempt + 1 == SERIAL_INSERT_ATTEMPTS {
+                    return Err(AppError::conflict(
+                        "failed to allocate a unique certificate serial number",
+                    ));
+                }
+            }
+            Err(error) => {
+                attempt_tx.rollback().await.map_err(AppError::Database)?;
+                return Err(error);
+            }
+        }
+    }
+
+    Err(AppError::conflict(
+        "failed to allocate a unique certificate serial number",
+    ))
+}
+
+/// Resolve a certificate's renewal window from its stored profile snapshot,
+/// falling back to the referenced/effective profile for pre-PR-007 rows.
+pub async fn certificate_renewal_due_at(
+    pool: &sqlx::PgPool,
+    credential_id: Uuid,
+) -> Result<DateTime<Utc>, AppError> {
+    let row = repo::certificate_by_id(pool, credential_id).await?;
+    let metadata = metadata_from_value(&row.metadata)?;
+    if let Some(due_at) = metadata.renewal_due_at {
+        return Ok(due_at);
+    }
+    let threshold_seconds = if let Some(value) = metadata.renewal_threshold_seconds {
+        value
+    } else if let Some(profile_id) = metadata.profile_id {
+        profile::profile_by_id(pool, profile_id)
+            .await?
+            .renewal_threshold_seconds()
+    } else {
+        let subject = profile::load_subject(pool, row.entity_id).await?;
+        profile::resolve_for_subject(pool, &subject, "client")
+            .await?
+            .renewal_threshold_seconds()
+    };
+    renewal_due_at(metadata.not_before, metadata.not_after, threshold_seconds)
 }
 
 pub async fn revoke_certificate(
@@ -1184,6 +1461,9 @@ async fn persist_certificate(
         profile_id: None,
         profile_name: None,
         identity_uri: None,
+        renewed_from_credential_id: None,
+        renewal_threshold_seconds: None,
+        renewal_due_at: None,
         not_before: input.not_before,
         not_after: input.not_after,
         issued_from_csr: input.issued_from_csr,
@@ -1214,6 +1494,8 @@ async fn persist_managed_certificate(
     entity_id: Uuid,
     authority: &AuthorityRecord,
     issued: pki_core::IssuedCertificate,
+    issued_from_csr: bool,
+    renewed_from_credential_id: Option<Uuid>,
 ) -> Result<CertificateRecord, AppError> {
     let issuer_serial_number = authority.serial_number.clone().ok_or_else(|| {
         AppError::Internal(anyhow::anyhow!("managed issuer serial number is missing"))
@@ -1221,6 +1503,11 @@ async fn persist_managed_certificate(
     let issuer_fingerprint_sha256 = authority.fingerprint_sha256.clone().ok_or_else(|| {
         AppError::Internal(anyhow::anyhow!("managed issuer fingerprint is missing"))
     })?;
+    let renewal_due_at = renewal_due_at(
+        issued.not_before,
+        issued.not_after,
+        issued.renewal_threshold_seconds,
+    )?;
     let metadata = CertificateMetadata {
         certificate_pem: issued.certificate_pem,
         chain_pem: Some(issued.chain_pem),
@@ -1242,9 +1529,12 @@ async fn persist_managed_certificate(
         profile_id: Some(issued.profile_id),
         profile_name: Some(issued.profile_name),
         identity_uri: Some(issued.identity_uri),
+        renewed_from_credential_id,
+        renewal_threshold_seconds: Some(issued.renewal_threshold_seconds),
+        renewal_due_at: Some(renewal_due_at),
         not_before: issued.not_before,
         not_after: issued.not_after,
-        issued_from_csr: true,
+        issued_from_csr,
         revoked_at: None,
         revocation_reason: None,
     };
@@ -1282,6 +1572,8 @@ fn record_from_row(row: repo::CertificateCredential) -> Result<CertificateRecord
         profile_id: metadata.profile_id,
         profile_name: metadata.profile_name,
         identity_uri: metadata.identity_uri,
+        renewed_from_credential_id: metadata.renewed_from_credential_id,
+        renewal_due_at: metadata.renewal_due_at,
         expires_at: row.expires_at,
         created_at: row.created_at,
         revoked_at: metadata.revoked_at,
@@ -1348,6 +1640,170 @@ fn issuance_request_fingerprint(entity_id: Uuid, ttl_secs: Option<u64>, csr_pem:
         None => context.update(&[0]),
     }
     context.update(csr_pem);
+    hex::encode(context.finish())
+}
+
+fn validate_renewal_authorization(
+    old: &repo::CertificateCredential,
+    authorization: CertificateRenewalAuthorization,
+) -> Result<(), AppError> {
+    let authorized = match authorization {
+        CertificateRenewalAuthorization::Operator {
+            expected_entity_id,
+            expected_tenant_id,
+        } => old.entity_id == expected_entity_id && old.tenant_id == expected_tenant_id,
+        CertificateRenewalAuthorization::PresentedCertificate { credential_id } => {
+            old.id == credential_id
+        }
+    };
+    if authorized {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+async fn validate_renewal_source(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    old: &repo::CertificateCredential,
+    metadata: &CertificateMetadata,
+    authorization: CertificateRenewalAuthorization,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    if old.status == "revoked" {
+        return match authorization {
+            CertificateRenewalAuthorization::Operator { .. } => {
+                Err(AppError::bad_request("cannot renew a revoked certificate"))
+            }
+            CertificateRenewalAuthorization::PresentedCertificate { .. } => {
+                Err(AppError::Unauthorized("certificate revoked".into()))
+            }
+        };
+    }
+    if old.status != "active" {
+        return Err(AppError::Unauthorized("certificate is not active".into()));
+    }
+    let expires_at = old
+        .expires_at
+        .ok_or_else(|| AppError::bad_request("cannot renew a certificate without an expiry"))?;
+
+    if matches!(
+        authorization,
+        CertificateRenewalAuthorization::Operator { .. }
+    ) {
+        // An explicitly authorized operator is the recovery path for an
+        // expired (but never revoked) subject certificate.
+        return Ok(());
+    }
+
+    if metadata.not_before > now {
+        return Err(AppError::Unauthorized(
+            "certificate is not yet valid".into(),
+        ));
+    }
+    if expires_at <= now {
+        return Err(AppError::Unauthorized("certificate expired".into()));
+    }
+
+    if let Some(issuer_id) = old.issuer_id {
+        let issuer = authority_repo::lock_authority_for_certificate_authentication(tx, issuer_id)
+            .await
+            .map_err(|_| AppError::Unauthorized("certificate issuer is unavailable".into()))?;
+        let scope_matches = match old.tenant_id {
+            Some(tenant_id) => {
+                issuer.kind == AuthorityKind::TenantIntermediate
+                    && issuer.tenant_id == Some(tenant_id)
+            }
+            None => issuer.kind == AuthorityKind::PlatformLeafIssuer && issuer.tenant_id.is_none(),
+        };
+        if !scope_matches
+            || !matches!(
+                issuer.status,
+                AuthorityStatus::Active | AuthorityStatus::Retiring
+            )
+        {
+            return Err(AppError::Unauthorized(
+                "certificate issuer is not trusted for renewal".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn renewal_threshold_for_certificate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entity_id: Uuid,
+    profile_id: Option<Uuid>,
+    stored_threshold_seconds: Option<u64>,
+) -> Result<u64, AppError> {
+    if let Some(value) = stored_threshold_seconds {
+        return Ok(value);
+    }
+    if let Some(profile_id) = profile_id {
+        return Ok(profile::profile_by_id(&mut **tx, profile_id)
+            .await?
+            .renewal_threshold_seconds());
+    }
+    let subject = profile::load_subject(&mut **tx, entity_id).await?;
+    Ok(profile::resolve_for_subject_in_tx(tx, &subject, "client")
+        .await?
+        .renewal_threshold_seconds())
+}
+
+fn renewal_due_at(
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+    threshold_seconds: u64,
+) -> Result<DateTime<Utc>, AppError> {
+    if threshold_seconds == 0 {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "stored certificate renewal threshold is invalid"
+        )));
+    }
+    let threshold = i64::try_from(threshold_seconds).map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "stored certificate renewal threshold is too large"
+        ))
+    })?;
+    let due_at = not_after
+        .checked_sub_signed(chrono::Duration::seconds(threshold))
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "stored certificate renewal window is invalid"
+            ))
+        })?;
+    Ok(due_at.max(not_before))
+}
+
+fn renewal_request_key_hash(value: &str) -> String {
+    let mut context = digest::Context::new(&digest::SHA256);
+    context.update(b"atom:pki:certificate-renewal-key:v1\0");
+    context.update(value.as_bytes());
+    hex::encode(context.finish())
+}
+
+fn renewal_request_fingerprint(
+    credential_id: Uuid,
+    ttl_secs: Option<u64>,
+    revoke_old: bool,
+    key_mode: &str,
+    request_material: &[u8],
+) -> String {
+    let mut context = digest::Context::new(&digest::SHA256);
+    context.update(b"atom:pki:certificate-renewal-request:v1\0");
+    context.update(credential_id.as_bytes());
+    match ttl_secs {
+        Some(ttl) => {
+            context.update(&[1]);
+            context.update(&ttl.to_be_bytes());
+        }
+        None => context.update(&[0]),
+    }
+    context.update(&[u8::from(revoke_old)]);
+    context.update(&(key_mode.len() as u64).to_be_bytes());
+    context.update(key_mode.as_bytes());
+    context.update(&(request_material.len() as u64).to_be_bytes());
+    context.update(request_material);
     hex::encode(context.finish())
 }
 

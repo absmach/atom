@@ -364,6 +364,40 @@ impl CertificateMutation {
         Ok(issued.into())
     }
 
+    /// Exact-credential managed renewal using a subject-owned CSR.
+    async fn renew_certificate_from_csr_v2(
+        &self,
+        ctx: &Context<'_>,
+        input: RenewCertificateFromCsrV2Input,
+    ) -> Result<IssuedCertificate> {
+        renew_certificate_v2(
+            ctx,
+            parse_id(input.credential_id, "credentialId")?,
+            input.ttl_secs,
+            input.revoke_old.unwrap_or(false),
+            input.idempotency_key,
+            service::RenewalKeySource::Csr(input.csr_pem),
+        )
+        .await
+    }
+
+    /// Exact-credential managed renewal with a new one-time private key.
+    async fn renew_generated_certificate_v2(
+        &self,
+        ctx: &Context<'_>,
+        input: RenewGeneratedCertificateV2Input,
+    ) -> Result<IssuedCertificate> {
+        renew_certificate_v2(
+            ctx,
+            parse_id(input.credential_id, "credentialId")?,
+            input.ttl_secs,
+            input.revoke_old.unwrap_or(false),
+            input.idempotency_key,
+            service::RenewalKeySource::Generated,
+        )
+        .await
+    }
+
     async fn revoke_certificate(
         &self,
         ctx: &Context<'_>,
@@ -436,6 +470,95 @@ impl CertificateMutation {
     }
 }
 
+async fn renew_certificate_v2(
+    ctx: &Context<'_>,
+    credential_id: Uuid,
+    ttl_secs: Option<u64>,
+    revoke_old: bool,
+    idempotency_key: String,
+    key_source: service::RenewalKeySource,
+) -> Result<IssuedCertificate> {
+    let auth = require_auth(ctx)?;
+    let state = ctx.data::<AppState>()?;
+    let old = service::certificate_by_id(&state.pool, credential_id)
+        .await
+        .map_err(gql_error)?;
+    require_certificate_rotate(state, &auth, &old).await?;
+    let key_mode = key_source.mode();
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|error| gql_error(db_err(error)))?;
+    let issued = service::renew_certificate_v2_in_tx(
+        &mut tx,
+        &state.config,
+        service::CertificateRenewalAuthorization::Operator {
+            expected_entity_id: old.entity_id,
+            expected_tenant_id: old.tenant_id,
+        },
+        service::RenewCertificateV2 {
+            credential_id,
+            ttl_secs,
+            key_source,
+            revoke_old,
+            idempotency_key,
+        },
+    )
+    .await
+    .map_err(gql_error)?;
+    let details = serde_json::json!({
+        "old_credential_id": old.credential_id,
+        "new_credential_id": issued.certificate.credential_id,
+        "old_serial_number": old.serial_number,
+        "new_serial_number": issued.certificate.serial_number,
+        "old_issuer_id": old.issuer_id,
+        "new_issuer_id": issued.certificate.issuer_id,
+        "profile_id": issued.certificate.profile_id,
+        "key_mode": key_mode,
+        "revoke_old": revoke_old,
+        "replay": issued.idempotent_replay,
+        "managed": true,
+    });
+    if issued.idempotent_replay {
+        tx.commit()
+            .await
+            .map_err(|error| gql_error(db_err(error)))?;
+        audit::write(
+            &state.pool,
+            false,
+            audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: old.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(old.credential_id),
+                event: "certificate.renew_replayed",
+                outcome: AuditOutcome::Allow,
+                details,
+            },
+        )
+        .await;
+    } else {
+        audit::commit_with_audit(
+            &state.pool,
+            tx,
+            state.config.events.enabled(),
+            &audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: old.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(old.credential_id),
+                event: "certificate.renew",
+                outcome: AuditOutcome::Allow,
+                details,
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+    }
+    Ok(issued.into())
+}
+
 #[derive(InputObject)]
 pub struct IssueCertificateInput {
     pub entity_id: ID,
@@ -471,6 +594,23 @@ pub struct RenewCertificateInput {
     pub serial_number: String,
     pub ttl_secs: Option<u64>,
     pub revoke_old: Option<bool>,
+}
+
+#[derive(InputObject)]
+pub struct RenewCertificateFromCsrV2Input {
+    pub credential_id: ID,
+    pub ttl_secs: Option<u64>,
+    pub csr_pem: String,
+    pub revoke_old: Option<bool>,
+    pub idempotency_key: String,
+}
+
+#[derive(InputObject)]
+pub struct RenewGeneratedCertificateV2Input {
+    pub credential_id: ID,
+    pub ttl_secs: Option<u64>,
+    pub revoke_old: Option<bool>,
+    pub idempotency_key: String,
 }
 
 #[derive(InputObject)]
@@ -581,6 +721,25 @@ impl Certificate {
 
     async fn identity_uri(&self) -> Option<&str> {
         self.0.identity_uri.as_deref()
+    }
+
+    async fn renewed_from_credential_id(&self) -> Option<ID> {
+        self.0
+            .renewed_from_credential_id
+            .map(|id| ID(id.to_string()))
+    }
+
+    async fn renewal_due_at(&self, ctx: &Context<'_>) -> Result<String> {
+        let due_at = match self.0.renewal_due_at {
+            Some(value) => value,
+            None => {
+                let state = ctx.data::<AppState>()?;
+                service::certificate_renewal_due_at(&state.pool, self.0.credential_id)
+                    .await
+                    .map_err(gql_error)?
+            }
+        };
+        Ok(due_at.to_rfc3339())
     }
 
     async fn expires_at(&self) -> Option<String> {
