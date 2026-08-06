@@ -23,6 +23,7 @@ use x509_parser::{certification_request::X509CertificationRequest, prelude::From
 use yasna::models::ObjectIdentifier;
 
 use crate::{
+    audit,
     auth::{self, AuthContext},
     certs::{
         authority::provisioning,
@@ -42,6 +43,8 @@ const PKCS8_MEDIA_TYPE: &str = "application/pkcs8";
 const TRANSFER_ENCODING_BASE64: &str = "base64";
 const SERVER_KEYGEN_BOUNDARY: &str = "atom-est-serverkeygen-boundary";
 const BASIC_CHALLENGE: &str = "Basic realm=\"Atom EST\"";
+const CSR_PEM_HEADER: &str = "-----BEGIN CERTIFICATE REQUEST-----\n";
+const CSR_PEM_FOOTER: &str = "-----END CERTIFICATE REQUEST-----\n";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -67,10 +70,13 @@ async fn simple_enroll(
     body: Bytes,
 ) -> Result<Response, EstError> {
     require_media_type(&headers, PKCS10_MEDIA_TYPE)?;
-    let csr_der = decode_request_body(state.config.enrollment.max_csr_bytes, &body)?;
+    let csr_der = decode_request_body(
+        maximum_der_csr_bytes(state.config.enrollment.max_csr_bytes),
+        &body,
+    )?;
     validate_csr(&csr_der)?;
     let auth = authenticate_http(&state, &headers).await?;
-    let response = service::enroll(
+    let result = service::enroll(
         &state,
         auth.clone(),
         service::EnrollmentInput {
@@ -79,7 +85,24 @@ async fn simple_enroll(
             idempotency_key: idempotency_key("simpleenroll", &auth, &csr_der),
         },
     )
-    .await?;
+    .await;
+    if let Err(ref error) = result {
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: auth.tenant_id,
+                target_kind: "credential",
+                target_id: None,
+                event: "certificate.enroll",
+            },
+            &serde_json::json!({"mode": "first", "transport": "est"}),
+            error,
+        )
+        .await;
+    }
+    let response = result?;
     enrollment_response(&response)
 }
 
@@ -93,10 +116,13 @@ async fn simple_reenroll(
     let peer = peer
         .map(|Extension(peer)| peer)
         .ok_or_else(|| AppError::unauthorized("a verified client certificate is required"))?;
-    let csr_der = decode_request_body(state.config.enrollment.max_csr_bytes, &body)?;
+    let csr_der = decode_request_body(
+        maximum_der_csr_bytes(state.config.enrollment.max_csr_bytes),
+        &body,
+    )?;
     validate_csr(&csr_der)?;
     let peer_fingerprint = digest::digest(&digest::SHA256, peer.as_der());
-    let response = service::re_enroll(
+    let result = service::re_enroll(
         &state,
         peer,
         service::EnrollmentInput {
@@ -109,7 +135,28 @@ async fn simple_reenroll(
             ),
         },
     )
-    .await?;
+    .await;
+    if let Err(ref error) = result {
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &audit::AuditMeta {
+                actor_entity_id: None,
+                tenant_id: None,
+                target_kind: "credential",
+                target_id: None,
+                event: "certificate.reenroll",
+            },
+            &serde_json::json!({
+                "mode": "reenroll",
+                "peer_fingerprint_sha256": hex::encode(peer_fingerprint.as_ref()),
+                "transport": "est",
+            }),
+            error,
+        )
+        .await;
+    }
+    let response = result?;
     enrollment_response(&response)
 }
 
@@ -119,11 +166,31 @@ async fn server_keygen(
     body: Bytes,
 ) -> Result<Response, EstError> {
     require_media_type(&headers, PKCS10_MEDIA_TYPE)?;
-    let csr_der = decode_request_body(state.config.enrollment.max_csr_bytes, &body)?;
+    let csr_der = decode_request_body(
+        maximum_der_csr_bytes(state.config.enrollment.max_csr_bytes),
+        &body,
+    )?;
     validate_csr(&csr_der)?;
     let auth = authenticate_http(&state, &headers).await?;
 
-    let generated = service::enroll_generated(&state, auth).await?;
+    let result = service::enroll_generated(&state, auth.clone()).await;
+    if let Err(ref error) = result {
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: auth.tenant_id,
+                target_kind: "credential",
+                target_id: None,
+                event: "certificate.enroll",
+            },
+            &serde_json::json!({"mode": "serverkeygen", "transport": "est"}),
+            error,
+        )
+        .await;
+    }
+    let generated = result?;
     let key_der = private_key_info_der(generated.private_key_pem.expose())?;
     let certs_der = certs_only_der(&format!(
         "{}{}",
@@ -255,6 +322,36 @@ fn decode_request_body(max_der: usize, body: &[u8]) -> Result<Vec<u8>, AppError>
     Ok(der)
 }
 
+ 
+/// Derive the largest DER request whose canonical PEM representation still
+/// fits the enrollment service's representation-independent CSR limit.
+pub(super) fn maximum_der_csr_bytes(max_pem_bytes: usize) -> usize {
+    let mut low = 0usize;
+    let mut high = max_pem_bytes;
+    while low < high {
+        let midpoint = low + (high - low) / 2 + 1;
+        if csr_pem_encoded_len(midpoint) <= max_pem_bytes {
+            low = midpoint;
+        } else {
+            high = midpoint - 1;
+        }
+    }
+    low
+}
+
+fn csr_pem_encoded_len(der_len: usize) -> usize {
+    let base64_len = der_len
+        .saturating_add(2)
+        .saturating_div(3)
+        .saturating_mul(4);
+    let line_breaks = base64_len.saturating_add(63).saturating_div(64);
+    CSR_PEM_HEADER
+        .len()
+        .saturating_add(base64_len)
+        .saturating_add(line_breaks)
+        .saturating_add(CSR_PEM_FOOTER.len())
+}
+
 fn validate_csr(der: &[u8]) -> Result<(), AppError> {
     let (remaining, _) = X509CertificationRequest::from_der(der)
         .map_err(|_| AppError::bad_request("malformed certificate signing request"))?;
@@ -268,12 +365,12 @@ fn validate_csr(der: &[u8]) -> Result<(), AppError> {
 
 fn csr_pem(der: &[u8]) -> String {
     let encoded = STANDARD.encode(der);
-    let mut pem = String::from("-----BEGIN CERTIFICATE REQUEST-----\n");
+    let mut pem = String::from(CSR_PEM_HEADER);
     for chunk in encoded.as_bytes().chunks(64) {
         pem.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
         pem.push('\n');
     }
-    pem.push_str("-----END CERTIFICATE REQUEST-----\n");
+    pem.push_str(CSR_PEM_FOOTER);
     pem
 }
 
@@ -522,6 +619,26 @@ mod tests {
         assert!(matches!(
             decode_request_body(64 * 1024, b"%%%"),
             Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn der_limit_accounts_for_pem_envelope_and_line_wrapping() {
+        let configured_limit = 1024;
+        let maximum_der = maximum_der_csr_bytes(configured_limit);
+        assert!(csr_pem(&vec![0; maximum_der]).len() <= configured_limit);
+        assert!(csr_pem(&vec![0; maximum_der + 1]).len() > configured_limit);
+
+        let accepted = vec![0; maximum_der];
+        let accepted_body = STANDARD.encode(&accepted);
+        assert_eq!(
+            decode_request_body(maximum_der, accepted_body.as_bytes()).unwrap(),
+            accepted
+        );
+        let rejected_body = STANDARD.encode(vec![0; maximum_der + 1]);
+        assert!(matches!(
+            decode_request_body(maximum_der, rejected_body.as_bytes()),
+            Err(AppError::PayloadTooLarge(_))
         ));
     }
 }
