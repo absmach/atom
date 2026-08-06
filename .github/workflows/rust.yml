@@ -37,6 +37,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install independent EST interoperability client
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+
+      - name: Build pinned GlobalSign EST client
+        run: |
+          go install github.com/globalsign/est/cmd/estclient@v1.0.7
+          echo "ATOM_EST_CLIENT=$(go env GOPATH)/bin/estclient" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
