@@ -22,6 +22,9 @@ pub struct Config {
     /// In-process TLS for the gRPC server. `None` = plaintext (the transport
     /// must then be secured by the deployment: private network / service mesh).
     pub grpc_tls: Option<GrpcTlsConfig>,
+    /// Dedicated public TLS listener for subject certificate enrollment.
+    /// Disabled by default; when enabled, TLS is always terminated in process.
+    pub enrollment: EnrollmentConfig,
     pub signing_keys: SigningKeyConfig,
     pub pki_ca_keys: PkiCaKeyConfig,
     pub audit_policy: AuditPolicyConfig,
@@ -327,6 +330,45 @@ pub struct RateLimitPolicyConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentTlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentConfig {
+    pub enabled: bool,
+    pub listen_addr: String,
+    pub tls: Option<EnrollmentTlsConfig>,
+    pub entity_rate_limit: RateLimitPolicyConfig,
+    pub tenant_rate_limit: RateLimitPolicyConfig,
+    pub max_csr_bytes: usize,
+    pub max_connections: usize,
+    pub trust_bundle_refresh_secs: u64,
+}
+
+impl Default for EnrollmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: "0.0.0.0:8443".to_string(),
+            tls: None,
+            entity_rate_limit: RateLimitPolicyConfig {
+                max_requests: 10,
+                window_secs: 60,
+            },
+            tenant_rate_limit: RateLimitPolicyConfig {
+                max_requests: 1_000,
+                window_secs: 60,
+            },
+            max_csr_bytes: 64 * 1024,
+            max_connections: 256,
+            trust_bundle_refresh_secs: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RateLimitConfig {
     pub enabled: bool,
     pub auth_routes: RateLimitPolicyConfig,
@@ -606,6 +648,7 @@ impl Config {
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             grpc_tls: grpc_tls_from_env()?,
+            enrollment: enrollment_from_env()?,
             signing_keys,
             pki_ca_keys,
             audit_policy: AuditPolicyConfig {
@@ -702,6 +745,7 @@ impl Config {
             listen_addr: "127.0.0.1:0".into(),
             grpc_addr: "127.0.0.1:0".into(),
             grpc_tls: None,
+            enrollment: EnrollmentConfig::default(),
             signing_keys: SigningKeyConfig {
                 allow_plaintext_signing_keys: true,
                 // Provide a deterministic KEK so tests exercise encryption at rest
@@ -1173,6 +1217,64 @@ fn broker_auth_from_env() -> Result<BrokerAuthConfig> {
     })
 }
 
+fn enrollment_from_env() -> Result<EnrollmentConfig> {
+    let default = EnrollmentConfig::default();
+    let enabled = env_bool_default("ATOM_PKI_ENROLLMENT_ENABLED", default.enabled);
+    let cert_path = nonempty_env("ATOM_PKI_ENROLLMENT_TLS_CERT_PATH");
+    let key_path = nonempty_env("ATOM_PKI_ENROLLMENT_TLS_KEY_PATH");
+    let tls = match (cert_path, key_path) {
+        (Some(cert_path), Some(key_path)) => Some(EnrollmentTlsConfig {
+            cert_path,
+            key_path,
+        }),
+        (None, None) => None,
+        _ => anyhow::bail!(
+            "enrollment TLS requires both ATOM_PKI_ENROLLMENT_TLS_CERT_PATH and ATOM_PKI_ENROLLMENT_TLS_KEY_PATH"
+        ),
+    };
+    if enabled && tls.is_none() {
+        anyhow::bail!(
+            "ATOM_PKI_ENROLLMENT_ENABLED requires enrollment TLS certificate and key paths"
+        );
+    }
+
+    let cfg = EnrollmentConfig {
+        enabled,
+        listen_addr: std::env::var("ATOM_PKI_ENROLLMENT_LISTEN_ADDR")
+            .unwrap_or(default.listen_addr),
+        tls,
+        entity_rate_limit: rate_limit_policy_from_env(
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_WINDOW_SECS",
+            default.entity_rate_limit,
+        )?,
+        tenant_rate_limit: rate_limit_policy_from_env(
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_WINDOW_SECS",
+            default.tenant_rate_limit,
+        )?,
+        max_csr_bytes: env_parse("ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES", default.max_csr_bytes)?,
+        max_connections: env_parse(
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
+            default.max_connections,
+        )?,
+        trust_bundle_refresh_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
+            default.trust_bundle_refresh_secs,
+        )?,
+    };
+    if cfg.max_csr_bytes == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES must be greater than zero");
+    }
+    if cfg.max_connections == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS must be greater than zero");
+    }
+    if cfg.trust_bundle_refresh_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS must be greater than zero");
+    }
+    Ok(cfg)
+}
+
 fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -1518,6 +1620,43 @@ mod tests {
         clear_hardening_env();
     }
 
+    #[test]
+    fn enrollment_listener_is_opt_in_and_requires_in_process_tls() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert!(!cfg.enrollment.enabled);
+        assert!(cfg.enrollment.tls.is_none());
+        assert_eq!(cfg.enrollment.max_csr_bytes, 64 * 1024);
+
+        std::env::set_var("ATOM_PKI_ENROLLMENT_ENABLED", "true");
+        let err = Config::from_env().expect_err("enabled listener without TLS");
+        assert!(err.to_string().contains("requires enrollment TLS"));
+
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_CERT_PATH", "/tls/server.pem");
+        let err = Config::from_env().expect_err("partial TLS configuration");
+        assert!(err.to_string().contains("requires both"));
+
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_KEY_PATH", "/tls/server-key.pem");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT", "7");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT", "70");
+        let cfg = Config::from_env().expect("enrollment config");
+        assert!(cfg.enrollment.enabled);
+        assert_eq!(cfg.enrollment.entity_rate_limit.max_requests, 7);
+        assert_eq!(cfg.enrollment.tenant_rate_limit.max_requests, 70);
+        assert_eq!(
+            cfg.enrollment
+                .tls
+                .as_ref()
+                .map(|tls| tls.cert_path.as_str()),
+            Some("/tls/server.pem")
+        );
+
+        clear_hardening_env();
+    }
+
     /// Sets `DATABASE_URL` to a fixture value for config-parsing tests and
     /// restores the prior value (or unsets it) on drop, so DB-gated tests that
     /// share the same test binary keep the real `DATABASE_URL`.
@@ -1597,6 +1736,17 @@ mod tests {
             "ATOM_GRPC_TLS_CERT_PATH",
             "ATOM_GRPC_TLS_KEY_PATH",
             "ATOM_GRPC_TLS_CLIENT_CA_PATH",
+            "ATOM_PKI_ENROLLMENT_ENABLED",
+            "ATOM_PKI_ENROLLMENT_LISTEN_ADDR",
+            "ATOM_PKI_ENROLLMENT_TLS_CERT_PATH",
+            "ATOM_PKI_ENROLLMENT_TLS_KEY_PATH",
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_WINDOW_SECS",
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_WINDOW_SECS",
+            "ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES",
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
+            "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             "ATOM_EMAIL_TEMPLATES_DIR",
         ] {
             std::env::remove_var(name);

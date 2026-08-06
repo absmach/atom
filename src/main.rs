@@ -80,6 +80,10 @@ async fn main() -> anyhow::Result<()> {
     purge::spawn_purge_cleanup(state.clone());
     events::spawn_event_publisher(state.clone());
 
+    // Enrollment is a separate public TLS surface. Prepare it before spawning
+    // any server so bad TLS material or a bad bind address fails startup.
+    let enrollment_server = certs::enrollment::tls::prepare(&state).await?;
+
     // Spawn gRPC server on a separate port; runs concurrently with HTTP. It
     // installs its own shutdown listener and drains on SIGINT/SIGTERM.
     let grpc_state = state.clone();
@@ -87,6 +91,15 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = grpc::serve(grpc_listener, grpc_state, grpc_tls).await {
             tracing::error!("grpc server exited: {e}");
         }
+    });
+
+    let enrollment_handle = enrollment_server.map(|server| {
+        let enrollment_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = certs::enrollment::tls::serve(server, enrollment_state).await {
+                tracing::error!(%error, "PKI enrollment server exited");
+            }
+        })
     });
 
     let app = routes::create_router(state);
@@ -105,6 +118,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("http server stopped; waiting for grpc to drain");
     if let Err(e) = grpc_handle.await {
         tracing::error!("grpc task join error: {e}");
+    }
+    if let Some(handle) = enrollment_handle {
+        if let Err(error) = handle.await {
+            tracing::error!(%error, "PKI enrollment task join error");
+        }
     }
 
     Ok(())

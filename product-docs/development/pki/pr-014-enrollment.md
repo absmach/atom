@@ -1,5 +1,7 @@
 # PR-014 — Subject Enrollment and Re-Enrollment
 
+Implemented by the PR-014 delivery branch.
+
 ## Objective
 
 Let a subject obtain and replace its own certificate without an operator in the

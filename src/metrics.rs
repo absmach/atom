@@ -44,6 +44,9 @@ pub const CALLOUT_DURATION: &str = "atom_callout_call_duration_seconds";
 /// Counter of CA key-provider operations. Labels are bounded to provider,
 /// operation, and outcome; authority and tenant identifiers are never labels.
 pub const PKI_KEY_PROVIDER_OPERATIONS: &str = "atom_pki_key_provider_operations_total";
+/// Counter of subject enrollment operations. Labels are the bounded native
+/// modes (`first`/`reenroll`) and outcomes; identities are never labels.
+pub const PKI_ENROLLMENT_OPERATIONS: &str = "atom_pki_enrollment_operations_total";
 
 #[cfg(feature = "metrics")]
 mod backend {
@@ -150,6 +153,15 @@ mod backend {
         )
         .increment(1);
     }
+
+    pub fn record_pki_enrollment(mode: &'static str, outcome: &'static str) {
+        metrics::counter!(
+            PKI_ENROLLMENT_OPERATIONS,
+            "mode" => mode,
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -194,10 +206,12 @@ mod backend {
         _outcome: &'static str,
     ) {
     }
+    #[inline]
+    pub fn record_pki_enrollment(_mode: &'static str, _outcome: &'static str) {}
 }
 
 pub use backend::{
     enabled, init, record_audit_db_suppressed, record_audit_failure, record_callout,
-    record_decision, record_outbox_exhausted, record_outbox_publish_failure,
+    record_decision, record_outbox_exhausted, record_outbox_publish_failure, record_pki_enrollment,
     record_pki_key_provider_operation, record_rate_limit_rejection, render,
 };

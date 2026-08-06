@@ -115,7 +115,8 @@ Exit gate:
 
 ### Milestone D — Runtime and operations
 
-Includes PR-011, PR-014, PR-015, and PR-012.
+Includes PR-011, PR-014, PR-015, and PR-012. PR-011 and PR-014 are implemented;
+PR-015 and PR-012 remain in this milestone.
 
 Exit gate:
 

@@ -195,6 +195,31 @@ Certificate fingerprints are SHA-256 over certificate DER, not over PEM text.
 
 ---
 
+## Native Subject Enrollment
+
+PR-014 adds a dedicated public TLS listener for subject-driven managed
+certificate enrollment. `POST /pki/enroll` authenticates an existing Atom
+access token or login session and derives the subject from that credential.
+`POST /pki/reenroll` ignores bearer and proxy identity assertions; it accepts
+only the leaf certificate verified by Atom's in-process TLS handshake and maps
+that DER to the exact credential through the v2 runtime resolver.
+
+Both adapters accept only CSR, optional TTL, and idempotency key. Tenant,
+entity, issuer, profile, and downstream product concepts are absent. One
+internal enrollment service applies durable entity/tenant rate limits and
+reuses managed CSR issuance or exact-credential renewal, including transaction,
+audit, and outbox semantics. Responses return the issued leaf and chain plus
+the stored profile's renewal threshold and due time.
+
+The listener is opt-in with `ATOM_PKI_ENROLLMENT_ENABLED=true` and requires
+`ATOM_PKI_ENROLLMENT_TLS_CERT_PATH` plus
+`ATOM_PKI_ENROLLMENT_TLS_KEY_PATH`. It binds
+`ATOM_PKI_ENROLLMENT_LISTEN_ADDR` (default `0.0.0.0:8443`). Expired, revoked,
+unknown, or otherwise inactive certificate subjects must recover through first
+enrollment with a still-active non-certificate credential.
+
+---
+
 ## Interfaces
 
 GraphQL management APIs expose:
@@ -213,6 +238,11 @@ Public PKI endpoints expose standard unauthenticated artifacts:
 - `GET /certs/ca-chain`
 - `GET /certs/crl`
 - `POST /certs/ocsp`
+
+The dedicated TLS enrollment listener exposes authenticated native operations:
+
+- `POST /pki/enroll`
+- `POST /pki/reenroll`
 
 Runtime services use Atom gRPC:
 

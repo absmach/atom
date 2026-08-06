@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.7", features = ["json", "macros"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "service", "tokio"] }
 async-graphql = { version = "=7.2.1", default-features = false }
 async-graphql-value = "=7.2.1"
 async-graphql-axum = "=7.0.13"
@@ -49,6 +51,8 @@ minijinja = { version = "2", default-features = false, features = ["serde"] }
 url = "2"
 rcgen = { version = "0.14.8", features = ["pem", "x509-parser", "aws_lc_rs"] }
 ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
 spki = { version = "0.7", features = ["alloc"] }
 time = "0.3"
 x509-cert = "0.2"
@@ -56,6 +60,7 @@ x509-ocsp = "0.2.1"
 x509-parser = "0.18.1"
 yasna = "0.6"
 zeroize = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", optional = true, default-features = false }
 lapin = { version = "4.10.0", default-features = false, features = [
