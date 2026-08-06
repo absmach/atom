@@ -1,5 +1,9 @@
 # PR-003 — Root and Tenant CA Provisioning
 
+## Status
+
+Implemented by the PR-003 delivery branch.
+
 ## Objective
 
 Implement controlled CA lifecycle operations for offline-root import and tenant-intermediate provisioning.

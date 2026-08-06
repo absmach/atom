@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod key_provider;
+pub mod graphql;
+pub mod http;
+pub mod provisioning;
 pub mod repo;
 
 /// Position of a CA in Atom's managed trust hierarchy.
@@ -77,14 +80,14 @@ pub struct AuthorityRecord {
     pub status: AuthorityStatus,
     pub issuance_enabled: bool,
     pub subject: String,
-    pub serial_number: String,
-    pub fingerprint_sha256: String,
+    pub serial_number: Option<String>,
+    pub fingerprint_sha256: Option<String>,
     pub subject_key_id: Option<String>,
     pub authority_key_id: Option<String>,
-    pub certificate_pem: String,
-    pub chain_pem: String,
-    pub not_before: DateTime<Utc>,
-    pub not_after: DateTime<Utc>,
+    pub certificate_pem: Option<String>,
+    pub chain_pem: Option<String>,
+    pub not_before: Option<DateTime<Utc>>,
+    pub not_after: Option<DateTime<Utc>>,
     pub key_backend: AuthorityKeyBackend,
     pub key_reference: Option<String>,
     pub encrypted_private_key: Option<Vec<u8>>,
@@ -93,6 +96,9 @@ pub struct AuthorityRecord {
     pub wrapped_dek_nonce: Option<Vec<u8>>,
     pub key_encryption_key_id: Option<String>,
     pub encryption_algorithm: Option<String>,
+    pub provisioning_mode: String,
+    pub csr_pem: Option<String>,
+    pub failure_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub activated_at: Option<DateTime<Utc>>,
@@ -115,11 +121,14 @@ impl fmt::Debug for AuthorityRecord {
             .field("fingerprint_sha256", &self.fingerprint_sha256)
             .field("subject_key_id", &self.subject_key_id)
             .field("authority_key_id", &self.authority_key_id)
-            .field("certificate_pem", &self.certificate_pem)
-            .field("chain_pem", &self.chain_pem)
+            .field("certificate_present", &self.certificate_pem.is_some())
+            .field("chain_present", &self.chain_pem.is_some())
             .field("not_before", &self.not_before)
             .field("not_after", &self.not_after)
             .field("key_backend", &self.key_backend)
+            .field("provisioning_mode", &self.provisioning_mode)
+            .field("csr_present", &self.csr_pem.is_some())
+            .field("failure_reason", &self.failure_reason)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .field("activated_at", &self.activated_at)
@@ -137,8 +146,8 @@ impl AuthorityRecord {
             && self.status == AuthorityStatus::Active
             && self.issuance_enabled
             && self.key_backend.can_sign()
-            && self.not_before <= now
-            && now < self.not_after
+            && self.not_before.is_some_and(|not_before| not_before <= now)
+            && self.not_after.is_some_and(|not_after| now < not_after)
     }
 }
 
