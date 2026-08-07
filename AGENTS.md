@@ -31,7 +31,7 @@ src/
   keys.rs              — ES256 signing keys (primary/standby/retired), encryption at rest
   grpc.rs              — Tonic services: AuthService, AuthzService.Check, CertificateService
   broker_auth/         — the broker auth callout: Atom serving FluxMQ's
-  │                       `fluxmq.auth.v1.AuthService` directly (off by default)
+  │                       `broker.auth.v1.AuthService` directly (off by default)
   │  topic.rs          — the configurable topic→object grammar
   │  service.rs        — Authenticate/Authorize over the existing credential + PDP paths
   graphql/             — schema + per-domain resolvers (the live admin/API surface)
@@ -204,6 +204,14 @@ cargo test -- --include-ignored
 # Lint
 cargo clippy -- -D warnings
 cargo fmt --check
+
+# Protobuf. The Rust bindings are NOT checked in — build.rs runs tonic-build on
+# every compile into cargo's OUT_DIR, so editing a .proto and rebuilding is
+# enough for code. `make proto` also regenerates apidocs/grpc-reference.md,
+# which IS checked in and goes stale silently without it.
+make proto
+make proto-lint    # protos Atom owns
+make proto-check   # vendored broker contract vs upstream
 ```
 
 Environment variables: copy `.env.example` to `.env`. Required: `DATABASE_URL`. Signing uses ES256 keys bootstrapped/loaded at startup — there is no `JWT_SECRET`. `ATOM_KEY_ENCRYPTION_KEY` is the single root AES-256-GCM key encrypting all recoverable secrets at rest (signing private keys and retrievable credential secrets such as shared keys); it is required to create shared keys.
@@ -231,9 +239,26 @@ A message broker delegates connect-time credential checks and per-topic access
 control to an external gRPC service. Atom implements that contract itself
 (`src/broker_auth/`), so a broker can be pointed straight at Atom with **no
 adapter service in between**. The proto is vendored verbatim from FluxMQ at
-`proto/broker/v1/auth.proto`; its `package fluxmq.auth.v1` line is part of the
-wire contract (the dialled path is `/fluxmq.auth.v1.AuthService/Authorize`) and
-must not be renamed. Check for drift with a `diff` against the FluxMQ checkout.
+`proto/broker/v1/auth.proto` as a **byte-identical** copy, so drift is a plain
+`diff` — `scripts/check-vendored-proto.sh`, which CI runs against the ref pinned
+in `proto/broker/v1/REF`. Atom's notes live beside it in `VENDOR.md`, never in
+the proto itself: a check that has to forgive expected differences stops
+catching the one that matters.
+
+Because Atom does not own that file, it is excluded from `buf.yaml`'s lint and
+breaking rules (its style is upstream's, and editing it would break the
+byte-for-byte match) and from `buf.gen.yaml`'s inputs — `protoc-gen-doc` writes
+one file per invocation, so including a second package does not extend
+`apidocs/grpc-reference.md`, it **replaces** it and Atom's own gRPC surface
+vanishes from the docs.
+
+The `package broker.auth.v1` line **is** the contract — the path a broker dials
+is derived from it. It is vendor-neutral on purpose: the messages carry no
+FluxMQ concept, so naming the package after one implementation would put that
+name in every peer's public wire surface. Changing it is a breaking wire change:
+a broker dialling the new path against a service still serving the old one gets
+`UNIMPLEMENTED`, so Atom, the broker, and any adapter service must be deployed
+together.
 
 Config (`ATOM_BROKER_*`), all optional:
 

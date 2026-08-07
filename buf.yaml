@@ -8,8 +8,18 @@ lint:
     - STANDARD
   except:
     - RPC_REQUEST_RESPONSE_UNIQUE
+  # proto/broker/v1/auth.proto is vendored verbatim from FluxMQ (see its
+  # VENDOR.md). Atom does not own its style and cannot fix it without breaking
+  # the byte-for-byte match the drift check depends on, so linting it would
+  # only produce failures no one here can act on.
+  ignore:
+    - proto/broker/v1
 
 breaking:
   use:
     - FILE
-
+  # Same file, different reason: a change here is upstream's, and it is caught
+  # by scripts/check-vendored-proto.sh, which reports it as drift with the
+  # context needed to judge it.
+  ignore:
+    - proto/broker/v1
