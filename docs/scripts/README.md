@@ -96,6 +96,34 @@ The script does two things, in order:
 If you re-run the same command for an existing path, it overwrites the object in place and
 purges again -- that's the intended way to update an image without changing its URL.
 
+## Previewing images locally
+
+`pnpm run dev` (plain `next dev`) never shows doc images, published or not -- it's a bare
+Next.js dev server with no knowledge of `wrangler.jsonc`'s Worker/routing config, so the
+image-proxy Worker never runs and `/docs/atom/img/*` 404s. This is expected, not a bug; it's
+fine for content/layout work where the images themselves don't matter.
+
+To actually see real, published images locally, run the site the same way it's deployed
+(`pnpm run deploy` uses plain `wrangler deploy`, **not** `wrangler pages deploy` -- this repo
+is a Workers-with-static-assets project, not a Pages project, so `wrangler pages dev` is the
+wrong command and won't pick up the R2 binding at all):
+
+```bash
+pnpm run preview        # build + wrangler dev in one step
+```
+
+This runs the real Worker in front of the real static export, and -- because
+`wrangler.jsonc`'s R2 binding has `"remote": true` -- `IMAGES_BUCKET` connects to the actual
+`websites-images` bucket instead of an empty local simulator, so any image already published
+via `publish-image.mjs` (or the one you're about to publish) renders exactly as it would in
+production. Requires being logged in (`wrangler whoami`; `wrangler login` if not) with access
+to the account that owns `websites-images` -- no token file needed for this, remote bindings
+piggyback on your own Wrangler OAuth session, separate from `publish-image.mjs`'s
+maintainer-only `CLOUDFLARE_API_TOKEN`.
+
+Needs `wrangler` >= 4.120.0 -- earlier versions have a bug where a remote R2 binding throws
+`SyntaxError: Unexpected end of JSON input` instead of actually proxying to R2.
+
 ## Local development
 
 `public/img/` is gitignored. For a `next dev` preview with working images, drop the file
@@ -107,15 +135,7 @@ deployed output either way, so a leftover local copy can never accidentally ship
 the R2-backed version.
 
 To test the actual production path -- Worker + static assets + R2 binding together, the way
-Cloudflare will actually serve it -- run:
-
-```bash
-pnpm run preview   # builds, then `wrangler dev`
-```
-
-By default this talks to a local simulated R2 bucket (empty unless you've seeded it with
-`wrangler r2 object put ... --local`). Add `"remote": true` to the `r2_buckets` binding in
-`wrangler.jsonc` temporarily if you want `wrangler dev` to read the real bucket instead.
+Cloudflare will actually serve it -- see "Previewing images locally" above.
 
 ## Migrating the existing images (one-time, already done)
 
