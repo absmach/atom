@@ -1,21 +1,16 @@
 // Copyright (c) Abstract Machines
 // SPDX-License-Identifier: Apache-2.0
 
-// Vendored verbatim from FluxMQ `proto/auth/v1/auth.proto`. Atom implements
-// `AuthService` so a broker can call it directly, with no adapter service in
-// between. Check for drift with:
-//
-//   diff proto/broker/v1/auth.proto \
-//        $FLUXMQ/proto/auth/v1/auth.proto
-//
-// The `package` line is part of the wire contract — the gRPC path a broker
-// dials is `/fluxmq.auth.v1.AuthService/Authorize`, derived from the proto
-// package plus service name. Renaming it here silently stops matching.
-// `HookService` is vendored for completeness but is not implemented.
-
 syntax = "proto3";
 
-package fluxmq.auth.v1;
+// The package is vendor-neutral on purpose. These services are a generic
+// broker-callout contract — the messages carry no FluxMQ concept, and other
+// brokers and providers implement them — but the proto package is what a caller
+// dials (`/broker.auth.v1.AuthService/Authorize`), so naming it after one
+// implementation would put that implementation's name in every peer's public
+// wire surface. The Go import path is derived from this file's location, not
+// from the package, so it is unaffected.
+package broker.auth.v1;
 
 // AuthService is a callout service for external authentication and
 // authorization. Broker implementations call this service during connection

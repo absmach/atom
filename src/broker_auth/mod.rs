@@ -6,7 +6,7 @@
 //! service in between.
 //!
 //! The contract is deliberately the broker's, not Atom's: the wire path a
-//! broker dials is `/fluxmq.auth.v1.AuthService/...`, derived from the vendored
+//! broker dials is `/broker.auth.v1.AuthService/...`, derived from the vendored
 //! proto's package. Everything Atom needs beyond that — how a topic names an
 //! object — is configuration, so Atom never learns a particular deployment's
 //! topic vocabulary. See [`topic`] for the grammar.

@@ -1,4 +1,4 @@
-//! The `fluxmq.auth.v1.AuthService` implementation.
+//! The `broker.auth.v1.AuthService` implementation.
 //!
 //! ## Denials are answers, not errors
 //!
@@ -33,7 +33,7 @@ use super::topic::TopicMatch;
 // Generated from the vendored proto/broker/v1/auth.proto. The module path is
 // the proto package, which is also the gRPC wire path a broker dials.
 pub mod proto {
-    tonic::include_proto!("fluxmq.auth.v1");
+    tonic::include_proto!("broker.auth.v1");
 }
 
 pub use proto::auth_service_server::AuthServiceServer as BrokerAuthServiceServer;
