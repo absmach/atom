@@ -12,7 +12,9 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "0.7", features = ["json", "macros"] }
 async-graphql = { version = "=7.2.1", default-features = false }
+async-graphql-value = "=7.2.1"
 async-graphql-axum = "=7.0.13"
+async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate", "macros", "derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +41,7 @@ base64 = "0.22"
 tonic = { version = "0.12", features = ["tls"] }
 tonic-health = "0.12"
 prost = "0.13"
+prost-types = "0.13"
 lettre = { version = "0.11.21", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
 minijinja = { version = "2", default-features = false, features = ["serde"] }
 url = "2"
@@ -55,6 +58,10 @@ lapin = { version = "4.10.0", default-features = false, features = [
     "rustls--ring",
     "rustls-webpki-roots-certs",
 ] }
+# Used by src/callout/http.rs for calling out to external policy services.
+# rustls (not native-tls) so the deployment does not need OpenSSL at build/run
+# time; matches lapin's TLS backend.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [features]
 # Metrics are on by default. Disable at compile time for maximum-performance

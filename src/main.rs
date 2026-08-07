@@ -1,6 +1,7 @@
 use anyhow::Context;
 use atom::{
-    audit, bootstrap, certs, config, db, events, grpc, identity, keys, metrics, purge, routes,
+    audit, bootstrap, callout, certs, config, db, events, grpc, identity, keys, metrics, purge,
+    routes,
     state::{self, GrpcRuntimeStatus},
 };
 use tracing_subscriber::EnvFilter;
@@ -50,7 +51,11 @@ async fn main() -> anyhow::Result<()> {
     // startup instead of leaving HTTP up with a permanently failing gRPC task.
     let grpc_tls = grpc::load_tls_config(&cfg).await?;
 
-    let mut state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer);
+    let callouts_config = callout::CalloutsConfig::load_from_env().await?;
+    let callout_service = callout::CalloutService::build(callouts_config).await?;
+
+    let mut state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer)
+        .with_callouts(callout_service);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await

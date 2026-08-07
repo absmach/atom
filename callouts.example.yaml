@@ -1,0 +1,97 @@
+# Atom callout configuration (example).
+#
+# Point Atom at this file with ATOM_CALLOUTS_FILE=/path/to/callouts.yaml.
+# Set ATOM_CALLOUTS_ENABLED=false to force-disable callouts without removing
+# the file (kill-switch). Environment overrides per endpoint:
+#
+#   ATOM_CALLOUT_<UPPER_ID>_URL           # HTTP endpoint url
+#   ATOM_CALLOUT_<UPPER_ID>_ADDRESS       # gRPC endpoint address
+#   ATOM_CALLOUT_<UPPER_ID>_TIMEOUT_MS
+#
+# Non-alphanumeric characters in the endpoint id are replaced with `_`
+# (so `policy-gate` → `POLICY_GATE`).
+#
+# Callouts run *after* authentication and *before* atom's own scope gates /
+# PDP / repo mutations. On a DENY, atom short-circuits the operation with the
+# reason returned by the external policy service. On transport error /
+# timeout the endpoint's `on_error:` policy applies (default: `deny` — atom's
+# default-deny invariant).
+#
+# Wire shape (both transports): see proto/atom/v1/callout.proto for the
+# canonical envelope. HTTP POST sends it as JSON; HTTP GET flattens it into
+# a query string (magistrala v0.14 parity).
+
+callouts:
+
+  # ── Reusable transport definitions. Each has an id referenced from `operations:`.
+  endpoints:
+
+    # HTTP POST — the common case. mTLS shown; drop `client_cert_path` /
+    # `client_key_path` for server-auth-only TLS, or drop the entire `tls:`
+    # block for plaintext (deployment must then confine the transport to a
+    # trusted network).
+    - id: policy-gate-http
+      transport: http
+      url: https://policy.internal/authz
+      method: POST                        # POST | GET (default POST)
+      timeout_ms: 500                     # default 500
+      headers:
+        X-Atom-Source: atom
+      tls:
+        ca_path: /etc/atom/certs/policy-ca.pem
+        client_cert_path: /etc/atom/certs/atom.pem
+        client_key_path:  /etc/atom/certs/atom.key
+        insecure_skip_verify: false
+      on_error: deny                      # deny | allow (default deny)
+
+    # gRPC transport — the external service must implement
+    # `atom.v1.callout.Callout/Check` (see proto/atom/v1/callout.proto).
+    - id: policy-gate-grpc
+      transport: grpc
+      address: https://policy.internal:9443
+      timeout_ms: 300
+      tls:
+        ca_path: /etc/atom/certs/policy-ca.pem
+        # mTLS optional — same fields as HTTP.
+        # `insecure_skip_verify` is not supported for gRPC (fails at startup).
+      on_error: deny
+
+  # ── Per-operation rules. If a GraphQL resolver or gRPC method is not
+  # listed here, no callout runs — the operation proceeds through atom's own
+  # gates untouched.
+  operations:
+
+    # GraphQL: resolver name matches. Multiple endpoints run in order and
+    # every one must ALLOW for the operation to proceed. On the first DENY,
+    # atom short-circuits with the endpoint's reason.
+    - name: createEntity
+      surface: graphql
+      endpoints: [policy-gate-http]
+      include:                            # Dot-path whitelist over the envelope.
+        - actor.entity_id
+        - actor.tenant_id
+        - args.input.name
+        - args.input.kind
+      extra:                              # Static kv merged into `extra`.
+        entity_type: entity
+
+    - name: revokeCredential
+      surface: graphql
+      endpoints: [policy-gate-http, policy-gate-grpc]  # both must allow
+      include:
+        - actor.entity_id
+        - args.id
+
+    # gRPC: fully-qualified method name — service/method. atom currently
+    # supports callout hooks on all gRPC methods; add or remove entries as
+    # needed. The `args` payload contains a hand-picked set of fields per
+    # method (see src/grpc.rs); the include list further narrows them.
+    - name: atom.v1.AuthzService/Check
+      surface: grpc
+      endpoints: [policy-gate-grpc]
+      include:
+        - actor.entity_id
+        - args.subject_id
+        - args.action
+        - args.object_kind
+        - args.object_id

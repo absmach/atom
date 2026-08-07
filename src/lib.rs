@@ -11,6 +11,7 @@ pub mod authz;
 pub mod bootstrap;
 pub mod broker_auth;
 pub mod build_info;
+pub mod callout;
 pub mod certs;
 pub mod config;
 pub mod crypto;

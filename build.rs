@@ -7,8 +7,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-env=ATOM_VERSION={version}");
     println!("cargo:rustc-env=ATOM_REVISION={revision}");
 
+    // Callout service — atom is the *client* here (talks out to an external
+    // policy service), but tonic-build generates the client and server sides
+    // together and only the client is wired into main. Uses well-known Struct
+    // for the free-form args/extra payload.
+    // Client + server: server is unused in production (atom is only ever the
+    // client here), but tests implement a mock server against this proto.
     tonic_build::configure().compile_protos(
-        &["proto/atom/v1/atom.proto", "proto/broker/v1/auth.proto"],
+        &[
+            "proto/atom/v1/atom.proto",
+            "proto/broker/v1/auth.proto",
+            "proto/atom/v1/callout.proto",
+        ],
         &["proto"],
     )?;
     Ok(())

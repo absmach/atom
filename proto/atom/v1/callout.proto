@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package atom.v1.callout;
+
+import "google/protobuf/struct.proto";
+
+// Callout is the wire contract atom speaks with an external policy service.
+//
+// Atom sends one Check() per intercepted operation, before executing it. The
+// external service inspects the operation, actor and per-operation args, and
+// replies with ALLOW (proceed) or DENY (short-circuit with the given reason).
+// Multiple endpoints may be chained in config; atom calls them in order and
+// fails fast on the first non-ALLOW response.
+//
+// See docs in AGENTS.md and callouts.example.yaml for the config-side view.
+service Callout {
+  rpc Check(CalloutRequest) returns (CalloutResponse);
+}
+
+message CalloutRequest {
+  // Operation identifier — a GraphQL resolver name (e.g. "createEntity") or a
+  // fully-qualified gRPC method ("atom.v1.AuthzService/Check").
+  string operation = 1;
+
+  // Which atom surface the call is originating from.
+  string surface = 2;  // "graphql" | "grpc"
+
+  // Correlation id atom assigns to each callout request.
+  string request_id = 3;
+
+  // RFC-3339 UTC timestamp when the callout was issued.
+  string time = 4;
+
+  // The authenticated caller. Populated from atom's AuthContext post-authn,
+  // so it is safe to trust here for policy evaluation.
+  Actor actor = 5;
+
+  // The operation's arguments, filtered by the per-operation `include:` list
+  // in atom's config. A whitelist is applied and a hard denylist strips
+  // any obviously-sensitive keys (secret, password, key) as a safety net.
+  google.protobuf.Struct args = 6;
+
+  // Static key/value pairs merged in from config (`extra:` per operation).
+  google.protobuf.Struct extra = 7;
+}
+
+message Actor {
+  string entity_id     = 1;
+  string tenant_id     = 2;
+  string scope         = 3;  // "session" | "access_token" | ""
+  string credential_id = 4;
+  string source_ip     = 5;
+  string user_agent    = 6;
+}
+
+message CalloutResponse {
+  // DENY is the zero value on purpose: an unset/undecodable response evaluates
+  // to a deny, matching atom's default-deny invariant.
+  enum Decision {
+    DENY  = 0;
+    ALLOW = 1;
+  }
+
+  Decision decision = 1;
+
+  // Human-readable reason surfaced back to the caller on deny.
+  string reason = 2;
+}

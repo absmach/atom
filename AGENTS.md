@@ -316,6 +316,56 @@ route resolution, multi-service composition. Both speak the same wire contract,
 so a deployment picks one by pointing the broker's `auth.external.url` at Atom
 or at the adapter.
 
+## Callouts (external policy hooks)
+
+Atom can consult an external policy service before executing configured
+GraphQL resolvers or gRPC methods, and refuse the operation on a DENY.
+Pattern is a Rust port of magistrala v0.14's `pkg/callout` + per-domain
+middlewares.
+
+- **Config-driven**, per-operation opt-in. `callouts.yaml` (loaded when
+  `ATOM_CALLOUTS_FILE` is set) lists reusable HTTP or gRPC `endpoints:` and a
+  set of `operations:` that opt in by resolver name (GraphQL) or
+  fully-qualified method (gRPC). Kill-switch: `ATOM_CALLOUTS_ENABLED=false`.
+  Env overrides per endpoint id: `ATOM_CALLOUT_<UPPER_ID>_URL`, `_ADDRESS`,
+  `_TIMEOUT_MS`. See `callouts.example.yaml`.
+- **Two transports, one wire shape.** HTTP (POST/GET, TLS + mTLS via reqwest)
+  and gRPC (tonic client of `atom.v1.callout.Callout/Check` — see
+  `proto/atom/v1/callout.proto`). Both send the same canonical envelope
+  (operation, surface, request_id, time, actor, args, extra); GET flattens
+  it to a query string for magistrala v0.14 parity.
+- **Field selection.** Each operation entry has an `include:` list of
+  dot-paths (`actor.entity_id`, `args.input.name`) — a whitelist. `extra:` is
+  a static payload merged in from config. Independent of `include:`, a hard
+  denylist strips keys named `secret`, `password`, or `key` at any depth as
+  a safety net.
+- **Chain semantics.** Multiple endpoints per operation run **sequentially,
+  fail-fast** — all must ALLOW for the operation to proceed. First non-ALLOW
+  short-circuits with the endpoint's reason. Transport error / timeout
+  applies the per-endpoint `on_error:` policy (default `deny` — matches
+  atom's default-deny invariant).
+- **Where it runs in the request pipeline.** For both surfaces:
+  authn → **callout** → scope gates (`RequireManage` / `require_any_capability`) →
+  PDP → repo mutation. The extension owns the "before" hook only; overrides
+  and post-hooks are deliberately out of scope for v1 (post-execution
+  notifications remain the AMQP event outbox's job).
+- **GraphQL wiring**: `graphql::callout_ext::CalloutExtensionFactory`
+  registered on the schema builder. `parse_query` walks the parsed document,
+  resolves variables, and records one pending callout per top-level field
+  that has a matching entry in `CalloutService`. `execute` runs the chain
+  and returns `Response::from_errors(...)` on the first DENY. Adding a new
+  GraphQL op to callouts is config-only.
+- **gRPC wiring**: each of the ~6 gRPC methods calls a shared
+  `callout_check_grpc(...)` helper in `src/grpc.rs`, keyed by a `const`
+  operation name (`callout_ops::*`). Adding a *new* gRPC method to callouts
+  is config + one line here — deliberate, since the gRPC surface is small
+  and generic prost reflection wasn't worth the complexity.
+- **Metrics + audit.** `atom_callout_calls_total{operation, endpoint,
+  transport, result}` and `atom_callout_call_duration_seconds` through the
+  metrics façade. Every DENY writes an `audit_logs` row
+  (`event="callout.deny"`, target_kind="callout", details include operation
+  + endpoint id + reason) fire-and-forget through `audit::write`.
+
 ## Metrics
 
 Prometheus metrics are exposed at `GET /metrics` (text exposition). All metric
