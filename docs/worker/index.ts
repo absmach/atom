@@ -39,12 +39,30 @@ function notFound(): Response {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith(IMG_PREFIX)) {
       return env.ASSETS.fetch(request);
     }
+
+    // env.IMAGES_BUCKET.get() is an R2 binding call, not an HTTP
+    // subrequest -- it never touches Cloudflare's HTTP cache. Without
+    // explicitly writing the response into the Cache API, every request
+    // (from every visitor, at every edge location) would re-read from R2,
+    // no matter what Cache-Control header gets set on the returned
+    // Response. Using the request's own URL (unmodified) as the cache key
+    // keeps this purgeable by the existing purge-by-URL call in
+    // scripts/publish-image.mjs.
+    const cache = caches.default;
+    const cacheKey = new Request(request.url, request);
+
+    const cached = await cache.match(cacheKey);
+    if (cached) return cached;
 
     const key = `${R2_KEY_PREFIX}/${url.pathname.slice(IMG_PREFIX.length)}`;
     const object = await env.IMAGES_BUCKET.get(key);
@@ -54,10 +72,16 @@ export default {
     object.writeHttpMetadata(headers);
     headers.set("etag", object.httpEtag);
     headers.set("content-length", String(object.size));
-    // Short browser TTL (revalidates quickly) + long edge TTL (until
-    // purged explicitly by scripts/publish-image.mjs on upload).
-    headers.set("cache-control", "public, max-age=300, s-maxage=31536000");
+    // Browser TTL long enough to skip most repeat-visit requests, short
+    // enough to self-heal within the hour if a purge is ever missed. Edge
+    // TTL is effectively unbounded -- scripts/publish-image.mjs purges it
+    // explicitly and immediately on every upload, so there's no benefit to
+    // a shorter one, and every edge location that has ever served an image
+    // now actually caches it (see the Cache API use above).
+    headers.set("cache-control", "public, max-age=3600, s-maxage=31536000");
 
-    return new Response(object.body, { headers });
+    const response = new Response(object.body, { headers });
+    ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    return response;
   },
 };
