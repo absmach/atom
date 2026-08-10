@@ -3,11 +3,19 @@
 //! Run with a disposable SoftHSM token:
 //! `cargo test --test m42_pki_pkcs11 -- --include-ignored --test-threads=1`.
 
+mod common;
+
 use atom::{
-    certs::authority::key_provider::{
-        AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider,
-        AuthorityKeyProviderError, AuthorityKeyProviderStatus, EncryptedDatabaseKeyProvider,
-        ManagedAuthorityKeyProvider, Pkcs11KeyProvider,
+    certs::{
+        authority::{
+            key_provider::{
+                validate_startup, AuthorityKeyAlgorithm, AuthorityKeyContext,
+                AuthorityKeyProvider, AuthorityKeyProviderError, AuthorityKeyProviderStatus,
+                EncryptedDatabaseKeyProvider, ManagedAuthorityKeyProvider, Pkcs11KeyProvider,
+            },
+            provisioning, AuthorityKeyBackend,
+        },
+        pki_core::PkiArtifactSigner,
     },
     config::{PkiCaKeyConfig, PkiCaProvisioningBackend, PkiPkcs11Config, SecretBytes, SecretText},
 };
@@ -47,9 +55,9 @@ fn context() -> AuthorityKeyContext {
     }
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires the disposable SoftHSM token configured by CI"]
-fn softhsm_enforces_the_pr013_provider_contract() {
+async fn softhsm_enforces_the_pr013_provider_contract() {
     let Some(correct_config) = provider_config(
         &std::env::var("ATOM_PKI_PKCS11_USER_PIN").unwrap_or_else(|_| "123456".to_string()),
     ) else {
@@ -127,7 +135,7 @@ fn softhsm_enforces_the_pr013_provider_contract() {
         .expect("existing encrypted-database authority");
     let pkcs11_config = PkiCaKeyConfig {
         provisioning_backend: PkiCaProvisioningBackend::Pkcs11,
-        pkcs11: Some(correct_config),
+        pkcs11: Some(correct_config.clone()),
         ..encrypted_config
     };
     let selected =
@@ -162,6 +170,108 @@ fn softhsm_enforces_the_pr013_provider_contract() {
     provider
         .destroy(authority_context, &mut recovered.key)
         .expect("clean recovered test object");
+
+    let pool = common::pool().await;
+    let mut app_config = common::pki::managed_config(false, false);
+    app_config.pki_ca_keys.provisioning_backend = PkiCaProvisioningBackend::Pkcs11;
+    app_config.pki_ca_keys.pkcs11 = Some(correct_config.clone());
+    let root = common::pki::test_root("PR-013 offline root");
+    let tenant = common::pki::create_tenant(&pool, "pkcs11-tenant").await;
+    let issuer = common::pki::provision_tenant_issuer(&pool, &app_config, &root, tenant).await;
+    assert_eq!(issuer.key_backend, AuthorityKeyBackend::Pkcs11);
+    assert!(issuer
+        .key_reference
+        .as_deref()
+        .is_some_and(|reference| reference.starts_with("pkcs11:v1:id=")));
+    assert!(issuer.encrypted_private_key.is_none());
+    validate_startup(&pool, &app_config.pki_ca_keys)
+        .await
+        .expect("persisted token keys match their certificates");
+
+    let original_certificate = issuer.certificate_pem.as_deref().expect("issuer certificate");
+    sqlx::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
+        .bind(issuer.id)
+        .bind(&root.pem)
+        .execute(&pool)
+        .await
+        .expect("inject mismatched public certificate");
+    assert!(validate_startup(&pool, &app_config.pki_ca_keys)
+        .await
+        .expect_err("wrong key/certificate pair")
+        .to_string()
+        .contains("does not match its certificate"));
+    sqlx::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
+        .bind(issuer.id)
+        .bind(original_certificate)
+        .execute(&pool)
+        .await
+        .expect("restore issuer certificate");
+
+    let platform_leaf_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pki_authorities WHERE kind = 'platform_leaf_issuer'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("platform leaf count");
+    let mut unavailable_keys = app_config.pki_ca_keys.clone();
+    unavailable_keys
+        .pkcs11
+        .as_mut()
+        .expect("PKCS#11 config")
+        .module_path = "/definitely/missing/libpkcs11.so".to_string();
+    let mut tx = pool.begin().await.expect("outage transaction");
+    provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &unavailable_keys)
+        .await
+        .expect_err("provider outage");
+    tx.rollback().await.expect("outage rollback");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pki_authorities WHERE kind = 'platform_leaf_issuer'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("platform leaf count after outage"),
+        platform_leaf_count,
+        "provider outage cannot corrupt authority lifecycle state"
+    );
+
+    let rotated_tenant = common::pki::create_tenant(&pool, "encrypted-rotation").await;
+    let mut rotated_keys = app_config.pki_ca_keys.clone();
+    rotated_keys.provisioning_backend = PkiCaProvisioningBackend::EncryptedDatabase;
+    let mut tx = pool.begin().await.expect("rotation transaction");
+    let rotated = provisioning::provision_tenant_automatically_in_tx(
+        &mut tx,
+        &rotated_keys,
+        rotated_tenant,
+    )
+    .await
+    .expect("cross-provider rotation");
+    assert!(rotated.succeeded(), "{:?}", rotated.validation_error);
+    tx.commit().await.expect("commit rotated authority");
+    assert_eq!(
+        rotated.authority.key_backend,
+        AuthorityKeyBackend::EncryptedDatabase
+    );
+    validate_startup(&pool, &rotated_keys)
+        .await
+        .expect("both retained providers remain available");
+
+    let artifact_message = b"retained issuer OCSP response data";
+    let artifact_signature = PkiArtifactSigner::from_managed_authority(&issuer, &rotated_keys)
+        .expect("retained PKCS#11 artifact signer")
+        .sign_ocsp_response_data(artifact_message)
+        .expect("retained artifact signature");
+    let (_, issuer_pem) = x509_parser::pem::parse_x509_pem(original_certificate.as_bytes())
+        .expect("issuer PEM");
+    let (_, issuer_certificate) = x509_parser::parse_x509_certificate(&issuer_pem.contents)
+        .expect("issuer certificate");
+    VerifyingKey::from_public_key_der(issuer_certificate.public_key().raw)
+        .expect("issuer public key")
+        .verify(
+            artifact_message,
+            &Signature::from_der(&artifact_signature.bytes).expect("artifact DER signature"),
+        )
+        .expect("old provider signs retained artifacts after rotation");
 }
 
 fn verify_token_object_policy(config: &PkiPkcs11Config, key_reference: &str) {
