@@ -2,14 +2,9 @@
 --
 -- `object_group_entities` / `object_group_resources` keyed membership by the
 -- member alone, so an entity or resource could belong to at most one object
--- group. That forbids overlapping object sets ("Customer A meters" and
--- "Building 5 meters" intersecting without either containing the other), which
--- a hierarchy cannot express. Membership is a grouping primitive; the
--- constraint is removed rather than any product semantics added.
---
--- Both member tables move together. Splitting them would leave a permanent
--- asymmetry in tables that are read by the same queries and the same scope
--- predicate.
+-- group — forbidding overlapping sets ("Customer A meters" and "Building 5
+-- meters" intersecting without either containing the other). Both member
+-- tables move together; they're read by the same queries and scope predicate.
 
 -- Data-preserving: every existing row already has a distinct member id, so it
 -- is trivially distinct under the wider key too.
@@ -31,17 +26,13 @@ DROP INDEX idx_object_group_resources_group;
 CREATE INDEX idx_object_group_entities_entity ON object_group_entities(entity_id);
 CREATE INDEX idx_object_group_resources_resource ON object_group_resources(resource_id);
 
--- ─── Scope predicate: one membership → a set of memberships ────────────────────
--- `grant_scope_matches` is the single scope predicate shared by every authorized
--- listing reader, mirroring the PDP's Rust `scope_values_match` (a parity test
--- pins them together). Its `p_parent_group UUID` argument assumed one membership
--- and would have silently ignored grants held through an object's other groups.
--- It becomes `p_parent_groups UUID[]`: a group scope matches when it names ANY
--- of the object's groups.
---
--- The group arms are rewritten from string equality against a single group id to
--- the split/`= ANY` form already used by the tree arms — still sublink-free, so
--- PostgreSQL can inline the function into the listing queries.
+-- `grant_scope_matches` is the scope predicate shared by every authorized
+-- listing reader, mirroring the PDP's Rust `scope_values_match` (a parity
+-- test pins them together). Its `p_parent_group UUID` argument assumed one
+-- membership; it becomes `p_parent_groups UUID[]`, matching when a scope
+-- names ANY of the object's groups. The group arms move to the same
+-- split/`= ANY` form the tree arms already use — still sublink-free, so
+-- Postgres can inline the function into the listing queries.
 DROP FUNCTION grant_scope_matches(TEXT, TEXT, TEXT, TEXT, UUID, UUID, UUID, UUID[]);
 
 CREATE FUNCTION grant_scope_matches(
