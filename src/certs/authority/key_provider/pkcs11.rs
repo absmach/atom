@@ -9,7 +9,7 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicU32, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Mutex, OnceLock, RwLock,
     },
     thread,
     time::{Duration, Instant},
@@ -138,7 +138,7 @@ struct Pkcs11Runtime {
     module_path: String,
     token_label: String,
     context: Mutex<Option<Pkcs11>>,
-    operation_lock: Mutex<()>,
+    lifecycle_lock: RwLock<()>,
     circuit: Mutex<CircuitState>,
     in_flight: AtomicU32,
 }
@@ -149,7 +149,7 @@ impl Pkcs11Runtime {
             module_path: config.module_path.clone(),
             token_label: config.token_label.clone(),
             context: Mutex::new(None),
-            operation_lock: Mutex::new(()),
+            lifecycle_lock: RwLock::new(()),
             circuit: Mutex::new(CircuitState::default()),
             in_flight: AtomicU32::new(0),
         }
@@ -255,18 +255,16 @@ impl Pkcs11KeyProvider {
     pub fn new(config: PkiPkcs11Config) -> Self {
         let runtime_key = format!("{}\0{}", config.module_path, config.token_label);
         let runtimes = RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()));
-        let runtime = runtimes
+        let mut runtimes = runtimes
             .lock()
-            .ok()
-            .and_then(|mut runtimes| {
-                if let Some(runtime) = runtimes.get(&runtime_key) {
-                    return Some(Arc::clone(runtime));
-                }
-                let runtime = Arc::new(Pkcs11Runtime::new(&config));
-                runtimes.insert(runtime_key, Arc::clone(&runtime));
-                Some(runtime)
-            })
-            .unwrap_or_else(|| Arc::new(Pkcs11Runtime::new(&config)));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runtime = if let Some(runtime) = runtimes.get(&runtime_key) {
+            Arc::clone(runtime)
+        } else {
+            let runtime = Arc::new(Pkcs11Runtime::new(&config));
+            runtimes.insert(runtime_key, Arc::clone(&runtime));
+            runtime
+        };
         Self { config, runtime }
     }
 
@@ -304,12 +302,7 @@ impl Pkcs11KeyProvider {
             let spawned = thread::Builder::new()
                 .name(format!("atom-pkcs11-{operation}"))
                 .spawn(move || {
-                    let result = provider
-                        .runtime
-                        .operation_lock
-                        .lock()
-                        .map_err(|_| AuthorityKeyProviderError::ProviderUnavailable)
-                        .and_then(|_serial| function(&provider));
+                    let result = function(&provider);
                     drop(in_flight);
                     let _ = sender.send(result);
                 });
@@ -390,6 +383,11 @@ impl Pkcs11KeyProvider {
         &self,
         context: AuthorityKeyContext,
     ) -> Result<GeneratedAuthorityKey<Pkcs11AuthorityKey>, AuthorityKeyProviderError> {
+        let _lifecycle = self
+            .runtime
+            .lifecycle_lock
+            .write()
+            .map_err(|_| AuthorityKeyProviderError::ProviderUnavailable)?;
         let key = Pkcs11AuthorityKey::for_context(context);
         let object_id = key.object_id.clone();
         let label = format!("atom-pki-{}", hex::encode(&object_id)).into_bytes();
@@ -442,6 +440,11 @@ impl Pkcs11KeyProvider {
         context: AuthorityKeyContext,
         key: &Pkcs11AuthorityKey,
     ) -> Result<AuthorityPublicKey, AuthorityKeyProviderError> {
+        let _lifecycle = self
+            .runtime
+            .lifecycle_lock
+            .read()
+            .map_err(|_| AuthorityKeyProviderError::ProviderUnavailable)?;
         key.ensure_usable(context)?;
         let object_id = key.object_id.clone();
         self.session(|session| {
@@ -460,6 +463,11 @@ impl Pkcs11KeyProvider {
         key: &Pkcs11AuthorityKey,
         message: &[u8],
     ) -> Result<AuthoritySignature, AuthorityKeyProviderError> {
+        let _lifecycle = self
+            .runtime
+            .lifecycle_lock
+            .read()
+            .map_err(|_| AuthorityKeyProviderError::ProviderUnavailable)?;
         key.ensure_usable(context)?;
         let object_id = key.object_id.clone();
         self.session(|session| {
@@ -484,6 +492,11 @@ impl Pkcs11KeyProvider {
         context: AuthorityKeyContext,
         key: &Pkcs11AuthorityKey,
     ) -> Result<(), AuthorityKeyProviderError> {
+        let _lifecycle = self
+            .runtime
+            .lifecycle_lock
+            .read()
+            .map_err(|_| AuthorityKeyProviderError::ProviderUnavailable)?;
         key.ensure_usable(context)?;
         let object_id = key.object_id.clone();
         self.session(|session| {
@@ -500,6 +513,11 @@ impl Pkcs11KeyProvider {
         context: AuthorityKeyContext,
         key: &Pkcs11AuthorityKey,
     ) -> Result<(), AuthorityKeyProviderError> {
+        let _lifecycle = self
+            .runtime
+            .lifecycle_lock
+            .write()
+            .map_err(|_| AuthorityKeyProviderError::ProviderUnavailable)?;
         key.ensure_usable(context)?;
         let object_id = key.object_id.clone();
         self.session(|session| {

@@ -49,7 +49,7 @@ const CA_ISSUERS_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 2];
 enum PkiSigningKey {
     Local(KeyPair),
     Managed {
-        provider: ManagedAuthorityKeyProvider,
+        provider: Box<ManagedAuthorityKeyProvider>,
         context: AuthorityKeyContext,
         key: ManagedAuthorityKey,
         raw_public_key: Vec<u8>,
@@ -393,7 +393,7 @@ fn managed_authority_material(
         certificate_pem: pem_encode_certificate(&certificate_der),
         chain_pem: chain_pem.to_string(),
         signing_key: PkiSigningKey::Managed {
-            provider,
+            provider: Box::new(provider),
             context,
             key,
             raw_public_key,
