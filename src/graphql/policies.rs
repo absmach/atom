@@ -281,6 +281,29 @@ impl PolicyQuery {
         })
     }
 
+    /// Direct policies, filtered forward by subject and/or backward by object.
+    ///
+    /// `objectId` answers "who has been granted access to this object" — the
+    /// reverse of the subject filters. It returns every direct policy whose
+    /// permission block **names** the object:
+    ///
+    /// * `object` — the block targets that object id;
+    /// * `group_direct_objects` — the object is a direct member of the block's
+    ///   object group;
+    /// * `group_descendant_objects` — the object is a member of a descendant of
+    ///   the block's object group.
+    ///
+    /// **This is a policy lookup, not effective access.** Blocks that reach the
+    /// object without naming it — `platform`, `tenant`, `object_kind` and
+    /// `object_type` scopes — are deliberately **not** returned, because they
+    /// grant over a whole class rather than over this object. Treating this
+    /// result as "everyone who can see X" will under-report; that question needs
+    /// a separate effective-access query with different semantics.
+    ///
+    /// `objectKind` (e.g. `entity`) and `objectType` (namespaced, e.g.
+    /// `entity:device`) are co-filters that disambiguate an id across kinds.
+    /// They require `objectId` and are rejected without it. Omitting `objectId`
+    /// leaves the listing exactly as it was before the object filter existed.
     #[allow(clippy::too_many_arguments)]
     async fn direct_policies(
         &self,
@@ -289,6 +312,9 @@ impl PolicyQuery {
         subject_kind: Option<GqlSubjectKind>,
         subject_id: Option<ID>,
         permission_block_id: Option<ID>,
+        object_id: Option<ID>,
+        object_kind: Option<String>,
+        object_type: Option<String>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<DirectPolicyList> {
@@ -296,6 +322,9 @@ impl PolicyQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         require_policy_read(&state.pool, &auth, tenant_id).await?;
+        let object_kind = object_kind
+            .map(|value| parse_object_kind(value, "objectKind"))
+            .transpose()?;
         let list = authz_repo::list_direct_policies(
             &state.pool,
             ListDirectPolicies {
@@ -303,6 +332,9 @@ impl PolicyQuery {
                 subject_kind: parse_optional_subject_kind(subject_kind),
                 subject_id: parse_optional_id(subject_id, "subjectId")?,
                 permission_block_id: parse_optional_id(permission_block_id, "permissionBlockId")?,
+                object_id: parse_optional_id(object_id, "objectId")?,
+                object_kind,
+                object_type,
                 limit: limit.map(i64::from).unwrap_or(20),
                 offset: offset.map(i64::from).unwrap_or(0),
             },

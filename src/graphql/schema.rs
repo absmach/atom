@@ -496,6 +496,62 @@ mod tests {
         );
     }
 
+    /// The exclusion is surprising unless it is written down where a caller
+    /// reads it, so the field description is part of the deliverable, not a
+    /// nicety: `directPolicies(objectId:)` returns policies *naming* the
+    /// object, never everyone who can reach it.
+    #[tokio::test]
+    async fn direct_policies_documents_that_the_object_filter_is_not_effective_access() {
+        let schema = build_schema(test_state());
+
+        let response = schema
+            .execute(Request::new(
+                r#"
+                {
+                  __schema {
+                    queryType {
+                      fields {
+                        name
+                        description
+                        args { name }
+                      }
+                    }
+                  }
+                }
+                "#,
+            ))
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().expect("json data");
+        let field = data["__schema"]["queryType"]["fields"]
+            .as_array()
+            .expect("field array")
+            .iter()
+            .find(|field| field["name"] == "directPolicies")
+            .expect("directPolicies field")
+            .clone();
+
+        let args = field_names(&field["args"]);
+        for arg in ["objectId", "objectKind", "objectType"] {
+            assert!(args.contains(arg), "missing {arg} argument");
+        }
+
+        let description = field["description"]
+            .as_str()
+            .expect("directPolicies must carry a field description");
+        for excluded in ["platform", "tenant", "object_kind", "object_type"] {
+            assert!(
+                description.contains(excluded),
+                "the description must name the excluded {excluded} scope"
+            );
+        }
+        assert!(
+            description.contains("not effective access"),
+            "the description must say the result is not effective access"
+        );
+    }
+
     fn test_state() -> AppState {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://atom:atom@localhost/atom_test")
