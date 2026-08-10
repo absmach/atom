@@ -1015,8 +1015,9 @@ pub async fn list_tenant_members(
     let q = search_pattern(q);
 
     let items = sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM tenant_memberships tm
            JOIN entities e ON e.id = tm.entity_id
            WHERE tm.tenant_id = $1
@@ -1066,8 +1067,9 @@ pub async fn list_tenant_assignable_entities(
     let q = search_pattern(Some(q));
 
     let items = sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
            WHERE e.kind = 'human'
              AND e.status = 'active'

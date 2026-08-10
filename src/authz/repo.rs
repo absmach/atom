@@ -5114,6 +5114,7 @@ async fn authorized_entity_ids(
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
+    let external_id = crate::models::external_id::normalize_external_id(params.external_id);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let sql = r#"WITH RECURSIVE target_groups(id) AS (
@@ -5152,6 +5153,7 @@ async fn authorized_entity_ids(
                              WHERE gep.entity_id = e.id
                                AND gep.group_id IN (SELECT id FROM target_groups)))
                      AND ($13::jsonb IS NULL OR e.attributes @> $13::jsonb)
+                     AND ($14::text IS NULL OR e.external_id = $14)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
@@ -5234,6 +5236,7 @@ async fn authorized_entity_ids(
         .bind(offset)
         .bind(ceiling_credential_id)
         .bind(attributes_contains)
+        .bind(external_id)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -5294,6 +5297,7 @@ pub async fn authorized_resource_kinds_with_ceiling(
             tenant_id,
             q: None,
             attributes_contains: None,
+            external_id: None,
             profile_id: None,
             entity_status: None,
             group_type: None,

@@ -5,6 +5,7 @@ pub mod api_endpoint;
 pub mod capability;
 pub mod entity;
 pub mod enums;
+pub mod external_id;
 pub mod group;
 pub mod policy;
 pub mod profile;

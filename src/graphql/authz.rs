@@ -53,6 +53,7 @@ impl AuthzQuery {
                 tenant_id,
                 q: input.q,
                 attributes_contains: None,
+                external_id: None,
                 profile_id: None,
                 entity_status: None,
                 group_type: None,

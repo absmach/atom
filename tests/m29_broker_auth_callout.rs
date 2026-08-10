@@ -90,6 +90,7 @@ async fn make_device(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) {
             profile_version_id: None,
             name: name.clone(),
             alias: Some(slug("meter")),
+            external_id: None,
             tenant_id,
             attributes: json!({}),
         },

@@ -134,8 +134,8 @@ export const crudResources: CrudResource[] = [
     icon: Fingerprint,
     queryName: "entities",
     tenantFilter: true,
-    listQuery: `query Entities($tenantId: ID, $kind: EntityKind, $status: EntityStatus, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { entities(tenantId: $tenantId, kind: $kind, status: $status, deleted: $deleted, limit: $limit, offset: $offset) { total items { id kind profileId profileVersionId name alias tenantId objectGroupIds attributes status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
-    createMutation: `mutation CreateEntity($input: CreateEntityInput!) { createEntity(input: $input) { id kind profileId profileVersionId name alias tenantId status createdAt updatedAt } }`,
+    listQuery: `query Entities($tenantId: ID, $kind: EntityKind, $status: EntityStatus, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { entities(tenantId: $tenantId, kind: $kind, status: $status, deleted: $deleted, limit: $limit, offset: $offset) { total items { id kind profileId profileVersionId name alias externalId tenantId objectGroupIds attributes status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
+    createMutation: `mutation CreateEntity($input: CreateEntityInput!) { createEntity(input: $input) { id kind profileId profileVersionId name alias externalId tenantId status createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteEntity($id: ID!) { deleteEntity(id: $id) }`,
     restoreMutation: `mutation RestoreEntity($id: ID!) { restoreEntity(id: $id) }`,
     purgeMutation: `mutation PurgeEntity($id: ID!) { purgeEntity(id: $id) }`,
@@ -165,6 +165,7 @@ export const crudResources: CrudResource[] = [
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "alias", label: "Alias", priority: "medium" },
+      { key: "externalId", label: "External ID", priority: "medium" },
       { key: "kind", label: "Kind", priority: "high" },
       { key: "profileId", label: "Profile", priority: "medium" },
       { key: "status", label: "Status", priority: "high" },
@@ -179,6 +180,7 @@ export const crudResources: CrudResource[] = [
       {
         id: "demo-entity",
         name: "sensor-gateway-01",
+        externalId: "SN-001",
         kind: "device",
         status: "active",
         tenantId: "factory-a",
