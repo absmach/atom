@@ -1,12 +1,13 @@
-//! Entity `external_id` integration tests (ATOM-06).
+//! Entity `external_id` integration tests.
 //!
 //! `external_id` holds an identifier assigned outside Atom — a serial number, a
 //! MAC address, an employee number, a SKU. Atom stores, indexes and enforces
 //! uniqueness on it but never interprets it, so these tests are mostly about
 //! what Atom must *not* do to the value.
 //!
-//! Two decisions here are one-way doors, and both are pinned by an explicit
-//! test rather than left to whichever client writes first:
+//! Two normalization decisions are fixed and cannot be safely changed once
+//! data exists, so both are pinned by an explicit test rather than left to
+//! whichever client writes first:
 //!
 //! * **Case-sensitive** — `ABC123` and `abc123` are two entities
 //!   (`external_id_is_case_sensitive`).
@@ -92,7 +93,7 @@ async fn create(pool: &PgPool, req: CreateEntity) -> Entity {
         .expect("create entity")
 }
 
-// ─── Criterion 1: arbitrary strings round-trip byte-identical ────────────────
+// ─── Arbitrary strings round-trip byte-identical ───────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -178,12 +179,11 @@ async fn over_long_external_ids_are_rejected_with_an_actionable_error() {
     let p = pool().await;
     let tenant_id = make_tenant(&p).await;
 
-    // The PRD's test plan asks for a ~1KB round-trip; the sanity cap this
-    // implementation adopted (255 chars, see `models::external_id`) makes that a
-    // rejection instead — an index entry over a multi-kilobyte value is
-    // pathological, and past ~2704 bytes Postgres refuses the insert outright
-    // with an unreadable internal error. The rejection must be a plain
-    // validation message, not that internal error.
+    // A ~1KB value must be rejected, not silently truncated or accepted: an
+    // index entry over a multi-kilobyte value is pathological, and past
+    // ~2704 bytes Postgres refuses the insert outright with an unreadable
+    // internal error. The rejection must be a plain validation message
+    // (see the cap in `models::external_id`), not that internal error.
     let kilobyte = "x".repeat(1024);
     let err = identity_repo::create_entity(&p, device(Some(tenant_id), Some(&kilobyte)))
         .await
@@ -208,7 +208,7 @@ async fn over_long_external_ids_are_rejected_with_an_actionable_error() {
     );
 }
 
-// ─── Decision 1 (one-way door): case sensitivity ─────────────────────────────
+// ─── Case sensitivity ───────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -235,7 +235,7 @@ async fn external_id_is_case_sensitive() {
     assert_eq!(found, vec![upper_entity.id]);
 }
 
-// ─── Decision 2 (one-way door): whitespace ───────────────────────────────────
+// ─── Whitespace ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -312,7 +312,7 @@ async fn the_schema_enforces_the_trim_and_length_decisions_against_direct_writes
     }
 }
 
-// ─── Criteria 2–4: uniqueness scope ──────────────────────────────────────────
+// ─── Uniqueness scope ───────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -456,7 +456,7 @@ async fn many_entities_may_have_no_external_id() {
     }
 }
 
-// ─── Criterion 7: mutable, and clearable ─────────────────────────────────────
+// ─── Mutable, and clearable ─────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -522,7 +522,7 @@ async fn an_omitted_external_id_leaves_the_stored_value_untouched() {
     assert_eq!(renamed.external_id.as_deref(), Some(serial.as_str()));
 }
 
-// ─── Criterion 8: soft delete frees the value; restore can conflict ──────────
+// ─── Soft delete frees the value; restore can conflict ────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -597,7 +597,7 @@ async fn restore_succeeds_when_the_external_id_was_not_reused() {
     assert_eq!(restored.external_id.as_deref(), Some(serial.as_str()));
 }
 
-// ─── Criterion 5: the filter matches exactly, scoped, and uses the index ─────
+// ─── The filter matches exactly, scoped, and uses the index ───────────────────
 
 /// The live `entities(externalId:)` path: the authorized listing the resolver
 /// calls, run as the seeded platform admin.
@@ -772,7 +772,7 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
     );
 }
 
-// ─── Criterion 9: the value travels on the domain events ─────────────────────
+// ─── The value travels on the domain events ────────────────────────────────
 
 async fn latest_outbox_details(pool: &PgPool, target_id: Uuid, event: &str) -> serde_json::Value {
     sqlx::query_scalar::<_, serde_json::Value>(
@@ -860,7 +860,7 @@ async fn create_and_update_events_carry_the_external_id() {
     );
 }
 
-// ─── Criterion 10: existing entities are unaffected ──────────────────────────
+// ─── Existing entities are unaffected ──────────────────────────────────────
 
 #[tokio::test]
 #[ignore]

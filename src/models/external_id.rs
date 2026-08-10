@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn is_case_sensitive() {
-        // The one-way door: never case-folded, unlike `alias`.
+        // Never case-folded, unlike `alias`.
         assert_eq!(
             validate_external_id_opt(Some("ABC123".into())).unwrap(),
             Some("ABC123".to_string())
