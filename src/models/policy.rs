@@ -119,13 +119,10 @@ pub struct CreateDirectPolicy {
 ///
 /// The subject-side filters (`subject_kind` / `subject_id`) answer "what does
 /// this subject hold". The object-side filters (`object_id` and its
-/// `object_kind` / `object_type` co-filters) answer the reverse — "which direct
-/// policies name this object". Both sides are ANDed when supplied together.
-///
-/// The object side only covers permission blocks that *name* the object:
-/// `object`, `group_direct_objects` and `group_descendant_objects`. Blocks that
-/// reach the object without naming it (`platform`, `tenant`, `object_kind`,
-/// `object_type`) are deliberately excluded — see `list_direct_policies`.
+/// `object_kind` / `object_type` co-filters) answer the reverse — "which
+/// direct policies name this object". Both sides are ANDed when supplied
+/// together; see `list_direct_policies` for which scope modes count as
+/// "naming" the object.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListDirectPolicies {
     pub tenant_id: Option<Uuid>,

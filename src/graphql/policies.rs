@@ -283,30 +283,20 @@ impl PolicyQuery {
 
     /// Direct policies, filtered forward by subject and/or backward by object.
     ///
-    /// `objectId` answers "who has been granted access to this object" — the
-    /// reverse of the subject filters. It returns every direct policy whose
-    /// permission block **names** the object:
+    /// `objectId` returns every direct policy whose permission block **names**
+    /// the object: `object` (direct), `group` (the object *is* the named
+    /// group), `group_direct_objects`/`group_descendant_objects` (object is a
+    /// member/descendant-member of the block's group), or
+    /// `group_child_groups`/`group_descendant_groups` (object is a group
+    /// covered by the block's hierarchy scope).
     ///
-    /// * `object` — the block targets that object id;
-    /// * `group` — the block targets an object group id directly;
-    /// * `group_direct_objects` — the object is a direct member of the block's
-    ///   object group;
-    /// * `group_descendant_objects` — the object is a member of a descendant of
-    ///   the block's object group;
-    /// * `group_child_groups` / `group_descendant_groups` — the object is an
-    ///   object group covered by the block's group hierarchy scope.
+    /// **Not effective access.** Blocks that reach the object without naming
+    /// it (`platform`, `tenant`, `object_kind`, `object_type`) are excluded —
+    /// this answers "who is this object shared with", not "who can see it".
     ///
-    /// **This is a policy lookup, not effective access.** Blocks that reach the
-    /// object without naming it — `platform`, `tenant`, `object_kind` and
-    /// `object_type` scopes — are deliberately **not** returned, because they
-    /// grant over a whole class rather than over this object. Treating this
-    /// result as "everyone who can see X" will under-report; that question needs
-    /// a separate effective-access query with different semantics.
-    ///
-    /// `objectKind` (e.g. `entity`) and `objectType` (namespaced, e.g.
-    /// `entity:device`) are co-filters that disambiguate an id across kinds.
-    /// They require `objectId` and are rejected without it. Omitting `objectId`
-    /// leaves the listing exactly as it was before the object filter existed.
+    /// `objectKind`/`objectType` are co-filters that disambiguate an id across
+    /// kinds; they require `objectId`. Omitting `objectId` is unchanged from
+    /// today's subject-only listing.
     #[allow(clippy::too_many_arguments)]
     async fn direct_policies(
         &self,

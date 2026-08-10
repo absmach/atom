@@ -4239,18 +4239,14 @@ pub async fn create_direct_policy(
     create_direct_policy_with_audit(pool, false, None, req).await
 }
 
-/// Resolves the target object's own object groups and every ancestor of those
-/// groups, carrying the object's real `(object_kind, object_type)` in the shape
-/// a permission block records it, so a block's declared scope can be compared
-/// exactly the way the PDP compares it (`grant_scope_matches`, migration 001).
+/// Resolves the object's own object groups and every ancestor of those
+/// groups, carrying `(object_kind, object_type)` in the shape a permission
+/// block records it, so a block's declared scope can be compared the way the
+/// PDP compares it (`grant_scope_matches`, migration 001).
 ///
-/// The walk is anchored at the object and goes *upward*, so its cost is bounded
-/// by the group tree's depth — not by how many blocks exist in the tenant.
-/// Cycles cannot occur: `set_group_parent` rejects them before insert.
-///
-/// The membership joins are ordinary set-returning joins over every matching
-/// row. An object may sit in more than one object group, and each membership
-/// must produce its own match; nothing here may collapse to a single row.
+/// Anchored at the object and walks *upward*, so cost is bounded by tree
+/// depth, not block count. The membership joins return every matching row —
+/// an object in several groups must produce a match for each.
 const DIRECT_POLICY_OBJECT_CTE: &str = r#"WITH RECURSIVE object_parent_groups(group_id, object_kind, object_type) AS (
              SELECT oge.group_id, 'entity'::text, 'entity:' || e.kind
              FROM object_group_entities oge
@@ -4365,23 +4361,15 @@ fn validate_direct_policy_object_filter(
 
 /// Lists direct policies, filtered by subject, by object, or by both.
 ///
-/// **The object filter is a policy lookup, not an effective-access
-/// computation.** With `object_id` set, the result is every direct policy whose
-/// permission block *names* that object:
-///
-/// - `object` — the block targets the object id directly;
-/// - `group` — the block targets an object group id directly;
-/// - `group_direct_objects` — the object is a direct member of the block's
-///   object group;
-/// - `group_descendant_objects` — the object is a member of a descendant of the
-///   block's object group;
-/// - `group_child_groups` / `group_descendant_groups` — the object is an object
-///   group covered by the block's group hierarchy scope.
-///
-/// Blocks that reach the object without naming it — `platform`, `tenant`,
-/// `object_kind`, `object_type` — are **not** returned. A caller that reads this
-/// as "everyone who can access X" will under-report; that question is a
-/// different query with different semantics.
+/// **The object filter is a policy lookup, not effective access.** With
+/// `object_id` set, the result is every direct policy whose permission block
+/// *names* that object: `object` (direct), `group` (the object is the named
+/// group), `group_direct_objects`/`group_descendant_objects` (member/
+/// descendant-member of the block's group), or `group_child_groups`/
+/// `group_descendant_groups` (a group covered by the block's hierarchy
+/// scope). Blocks that reach the object without naming it (`platform`,
+/// `tenant`, `object_kind`, `object_type`) are **not** returned — reading
+/// this as "everyone who can access X" will under-report.
 pub async fn list_direct_policies(
     pool: &PgPool,
     params: ListDirectPolicies,
