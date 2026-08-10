@@ -1,5 +1,5 @@
-//! DB-gated tests for the broker auth callout — Atom serving FluxMQ's
-//! `fluxmq.auth.v1.AuthService` directly, with no adapter service in between.
+//! DB-gated tests for the broker auth callout — Atom serving
+//! `broker.auth.v1.AuthService` directly, with no adapter service in between.
 //!
 //! Run with:
 //! ```bash
