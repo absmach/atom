@@ -277,8 +277,9 @@ fn total(data: &Value) -> i64 {
 
 // ─── tests ───────────────────────────────────────────────────────────────────
 
-/// Acceptance criteria 1-4 in one shape: a device reachable four ways, and only
-/// the three blocks that *name* it come back.
+/// A device reachable four ways — a direct object block, direct group
+/// membership, descendant group membership, and a tenant-scoped block — and
+/// only the three blocks that *name* it come back.
 #[tokio::test]
 #[ignore]
 async fn object_lookup_returns_naming_blocks_and_excludes_class_scoped_ones() {
@@ -362,9 +363,9 @@ async fn object_lookup_returns_naming_blocks_and_excludes_class_scoped_ones() {
     assert_eq!(total(&data), 3, "exactly the three naming blocks match");
 }
 
-/// Criterion 3 at every level of a 3-deep tree. `group_descendant_objects`
-/// matches through strict ancestors only — an object sitting directly in the
-/// block's own group is the `group_direct_objects` case, which is how the PDP
+/// Exercises a 3-deep tree at every level. `group_descendant_objects` matches
+/// through strict ancestors only — an object sitting directly in the block's
+/// own group is the `group_direct_objects` case, which is how the PDP
 /// (`grant_scope_matches`, migration 001) draws the line.
 #[tokio::test]
 #[ignore]
@@ -546,8 +547,8 @@ async fn object_lookup_includes_group_hierarchy_scopes_for_group_objects() {
     assert_eq!(total(&data), 4);
 }
 
-/// Criterion 5. A group block only names the objects of its declared kind and
-/// type, and the co-filters narrow further.
+/// A group block only names the objects of its declared kind and type, and
+/// the co-filters narrow further.
 #[tokio::test]
 #[ignore]
 async fn object_kind_and_type_co_filters_narrow_the_lookup() {
@@ -679,7 +680,6 @@ async fn co_filters_narrow_object_blocks_only_where_the_block_records_a_kind() {
     );
 }
 
-/// Criterion 6.
 #[tokio::test]
 #[ignore]
 async fn object_and_subject_filters_intersect() {
@@ -721,8 +721,8 @@ async fn object_and_subject_filters_intersect() {
     assert!(!returned.contains(&alice_on_other.to_string()));
 }
 
-/// Criterion 7: the reverse direction is the same policy-read operation on the
-/// tenant as the forward one, and is refused without it.
+/// The reverse direction is the same policy-read operation on the tenant as
+/// the forward one, and is refused without it.
 #[tokio::test]
 #[ignore]
 async fn callers_without_policy_read_are_refused() {
@@ -744,8 +744,8 @@ async fn callers_without_policy_read_are_refused() {
     );
 }
 
-/// Criterion 8: without `objectId` the listing is the subject-forward query it
-/// has always been, class-scoped blocks included.
+/// Without `objectId` the listing is the subject-forward query it has always
+/// been, class-scoped blocks included.
 #[tokio::test]
 #[ignore]
 async fn omitting_object_id_leaves_the_subject_listing_unchanged() {
