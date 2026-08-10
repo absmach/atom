@@ -32,21 +32,31 @@ use serde::{Deserialize, Deserializer};
 /// and 255 is far beyond any real serial, MAC or SKU.
 pub const MAX_EXTERNAL_ID_LEN: usize = 255;
 
-/// Trim an external identifier for storage or lookup. Whitespace-only (and
-/// empty) input is absent, not a value. Case is preserved.
-///
-/// This is the lookup-side normalization: it never fails, so an over-long
-/// filter value simply matches nothing instead of erroring.
-pub fn normalize_external_id(external_id: Option<String>) -> Option<String> {
+fn trim_external_id(external_id: Option<String>) -> Option<String> {
     external_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
+/// Trim an external identifier for storage or lookup. Whitespace-only (and
+/// empty) input is absent, not a value. Case is preserved.
+///
+/// This is the lookup-side normalization: it never fails, so an invalid filter
+/// value simply matches nothing instead of erroring.
+pub fn normalize_external_id(external_id: Option<String>) -> Option<String> {
+    trim_external_id(external_id).map(|value| {
+        if value.contains('\0') {
+            "x".repeat(MAX_EXTERNAL_ID_LEN + 1)
+        } else {
+            value
+        }
+    })
+}
+
 /// Normalize an optional external identifier for a write, enforcing the length
 /// cap. Empty/whitespace-only is treated as absent (`None`).
 pub fn validate_external_id_opt(external_id: Option<String>) -> Result<Option<String>, AppError> {
-    let external_id = normalize_external_id(external_id);
+    let external_id = trim_external_id(external_id);
     if let Some(value) = external_id.as_deref() {
         if value.chars().count() > MAX_EXTERNAL_ID_LEN {
             return Err(AppError::bad_request(format!(
@@ -200,6 +210,11 @@ mod tests {
             normalize_external_id(Some(over_cap.clone())),
             Some(over_cap),
             "an over-long filter must match nothing, not error"
+        );
+        assert_eq!(
+            normalize_external_id(Some("ab\0cd".into())),
+            Some("x".repeat(MAX_EXTERNAL_ID_LEN + 1)),
+            "a NUL-bearing filter must match nothing without binding a NUL to Postgres"
         );
         assert_eq!(normalize_external_id(Some("  ".into())), None);
     }
