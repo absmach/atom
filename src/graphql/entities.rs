@@ -76,6 +76,7 @@ impl EntityQuery {
         ctx: &Context<'_>,
         q: Option<String>,
         kind: Option<GqlEntityKind>,
+        external_id: Option<String>,
         profile_id: Option<ID>,
         tenant_id: Option<ID>,
         parent_group_id: Option<ID>,
@@ -103,6 +104,7 @@ impl EntityQuery {
                 entity_model::ListEntities {
                     q,
                     kind: parsed_kind,
+                    external_id,
                     profile_id,
                     tenant_id,
                     status: parsed_status,
@@ -132,6 +134,7 @@ impl EntityQuery {
                 tenant_id,
                 q,
                 attributes_contains: None,
+                external_id,
                 profile_id,
                 entity_status: parsed_status,
                 group_type: None,
@@ -170,6 +173,8 @@ fn entity_update_fields(input: &UpdateEntityInput) -> Vec<&'static str> {
         input.name.is_some().then_some("name"),
         input.kind.is_some().then_some("kind"),
         (!matches!(input.alias, async_graphql::MaybeUndefined::Undefined)).then_some("alias"),
+        (!matches!(input.external_id, async_graphql::MaybeUndefined::Undefined))
+            .then_some("external_id"),
         input.tenant_id.is_some().then_some("tenant_id"),
         input.profile_id.is_some().then_some("profile_id"),
         input
@@ -216,6 +221,7 @@ impl EntityMutation {
             "kind": kind,
             "name": input.name,
             "alias": input.alias,
+            "external_id": input.external_id,
         });
 
         let result = async {
@@ -239,6 +245,7 @@ impl EntityMutation {
                     profile_version_id,
                     name: input.name,
                     alias: input.alias,
+                    external_id: input.external_id,
                     tenant_id,
                     attributes: input.attributes.unwrap_or_default(),
                 },
@@ -307,6 +314,7 @@ impl EntityMutation {
                     name: input.name,
                     kind: parse_optional_entity_kind(input.kind),
                     alias: input.alias.into(),
+                    external_id: input.external_id.into(),
                     tenant_id,
                     profile_id,
                     profile_version_id,
@@ -678,6 +686,7 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
                 name: None,
                 kind: None,
                 alias: None,
+                external_id: None,
                 tenant_id: None,
                 profile_id: None,
                 profile_version_id: None,

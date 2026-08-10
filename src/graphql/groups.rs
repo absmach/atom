@@ -261,6 +261,7 @@ async fn authorized_group_list(
             tenant_id,
             q,
             attributes_contains: None,
+            external_id: None,
             profile_id: None,
             entity_status: status,
             group_type,

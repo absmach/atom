@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    error::{db_err, restore_conflict, AppError},
+    error::{db_err, entity_write_conflict, restore_conflict, AppError},
     models::{
         entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
         enums::EntityKind,
@@ -71,27 +71,31 @@ pub async fn create_entity_with_audit(
     .await?;
     let is_human = kind == EntityKind::Human;
     let alias = crate::models::alias::validate_alias_opt(req.alias)?;
+    let external_id = crate::models::external_id::validate_external_id_opt(req.external_id)?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let entity = sqlx::query_as::<_, Entity>(
         r#"INSERT INTO entities
-           (id, kind, name, alias, tenant_id, profile_id, profile_version_id, attributes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at"#,
+           (id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
+            attributes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING id, kind, name, alias, external_id, tenant_id, profile_id,
+                     profile_version_id, status, attributes, deleted_at, deleted_by,
+                     created_at, updated_at"#,
     )
     .bind(id)
     .bind(kind)
     .bind(req.name)
     .bind(alias)
+    .bind(external_id)
     .bind(req.tenant_id)
     .bind(profile_id)
     .bind(profile_version_id)
     .bind(attrs)
     .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)?;
+    .map_err(entity_write_conflict)?;
 
     if is_human {
         add_authenticated_user_membership_in_tx(&mut tx, entity.id).await?;
@@ -111,6 +115,7 @@ pub async fn create_entity_with_audit(
             "kind": entity.kind,
             "name": entity.name,
             "alias": entity.alias,
+            "external_id": entity.external_id,
         }),
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
@@ -149,7 +154,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
                   status, attributes, deleted_at, deleted_by, created_at, updated_at
            FROM entities
            WHERE id = $1 AND deleted_at IS NULL"#,
@@ -169,7 +174,7 @@ pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Ent
     }
 
     sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
                   status, attributes, deleted_at, deleted_by, created_at, updated_at
            FROM entities
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
@@ -192,6 +197,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     let include_descendants = params.include_descendants;
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
+    let external_id = crate::models::external_id::normalize_external_id(params.external_id);
 
     let items = sqlx::query_as::<_, Entity>(
         r#"WITH RECURSIVE target_groups(id) AS (
@@ -202,8 +208,9 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                JOIN target_groups tg ON tg.id = gh.parent_id
                WHERE $7::boolean
            )
-           SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+           SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
            LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
            WHERE ($1::text IS NULL OR e.kind = $1)
@@ -215,6 +222,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
              AND ($10::text = 'all'
                   OR ($10::text = 'live' AND e.deleted_at IS NULL)
                   OR ($10::text = 'deleted' AND e.deleted_at IS NOT NULL))
+             AND ($11::text IS NULL OR e.external_id = $11)
            ORDER BY e.created_at DESC
            LIMIT $8 OFFSET $9"#,
     )
@@ -228,6 +236,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(limit)
     .bind(offset)
     .bind(deleted)
+    .bind(external_id.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -252,7 +261,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
              AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND e.deleted_at IS NULL)
-                  OR ($8::text = 'deleted' AND e.deleted_at IS NOT NULL))"#,
+                  OR ($8::text = 'deleted' AND e.deleted_at IS NOT NULL))
+             AND ($9::text IS NULL OR e.external_id = $9)"#,
     )
     .bind(kind)
     .bind(profile_id)
@@ -262,6 +272,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(parent_group_id)
     .bind(include_descendants)
     .bind(deleted)
+    .bind(external_id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -291,6 +302,10 @@ pub async fn update_entity_with_audit(
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
+
+    let external_id = crate::models::external_id::validate_external_id_update(req.external_id)?;
+    let external_id_is_set = external_id.is_some();
+    let external_id = external_id.flatten();
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let current_tenant_id: Option<Option<Uuid>> =
@@ -336,10 +351,12 @@ pub async fn update_entity_with_audit(
                status             = COALESCE($7, status),
                attributes         = COALESCE($8, attributes),
                alias              = CASE WHEN $9 THEN $10 ELSE alias END,
+               external_id        = CASE WHEN $11 THEN $12 ELSE external_id END,
                updated_at         = now()
            WHERE id = $1 AND deleted_at IS NULL
-           RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at"#,
+           RETURNING id, kind, name, alias, external_id, tenant_id, profile_id,
+                     profile_version_id, status, attributes, deleted_at, deleted_by,
+                     created_at, updated_at"#,
     )
     .bind(id)
     .bind(req.name)
@@ -351,11 +368,13 @@ pub async fn update_entity_with_audit(
     .bind(attributes)
     .bind(alias_is_set)
     .bind(alias)
+    .bind(external_id_is_set)
+    .bind(external_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("entity {id} not found")),
-        other => AppError::Database(other),
+        other => entity_write_conflict(other),
     })?;
 
     if let Some(parent_group_id) = parent_group_id {
@@ -367,6 +386,25 @@ pub async fn update_entity_with_audit(
         }
     }
 
+    // The caller builds `audit_details` before the write, so it cannot know the
+    // resulting identifier. Consumers denormalize `external_id` onto their own
+    // rows (Magistrala keeps it on every message), so the event has to carry the
+    // value the entity now has — not merely the fact that it changed.
+    //
+    // Only on the generic `entity.update`. This function also serves the status
+    // transitions (`entity.enable`/`disable`/`suspend`), which carry empty
+    // details by design and cannot change the identifier — restating it there
+    // would rewrite existing event payloads for no consumer's benefit.
+    let mut details = audit_details;
+    if event_name == "entity.update" {
+        if let Some(fields) = details.as_object_mut() {
+            fields.insert(
+                "external_id".to_string(),
+                serde_json::json!(entity.external_id),
+            );
+        }
+    }
+
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,
         tenant_id: entity.tenant_id,
@@ -374,7 +412,7 @@ pub async fn update_entity_with_audit(
         target_id: Some(id),
         event: event_name,
         outcome: crate::models::enums::AuditOutcome::Allow,
-        details: audit_details,
+        details,
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(entity)
@@ -1892,8 +1930,9 @@ pub async fn remove_group_member_with_audit(
 
 pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Entity>, AppError> {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
            JOIN principal_group_members gm ON gm.entity_id = e.id
            WHERE gm.group_id = $1 AND e.deleted_at IS NULL
@@ -1985,8 +2024,9 @@ pub async fn create_ownership(
 
 pub async fn list_owned(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Entity>, AppError> {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
            JOIN ownerships o ON o.owned_id = e.id
            WHERE o.owner_id = $1 AND e.deleted_at IS NULL
