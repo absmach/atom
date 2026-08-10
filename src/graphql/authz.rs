@@ -16,8 +16,8 @@ use crate::{
 use super::{
     auth::{gql_error, require_auth, require_explain_access},
     types::{
-        parse_id, parse_optional_id, AuthorizedObjectIdList, AuthorizedObjectIdsInput,
-        AuthzCheckInput, AuthzExplainResponse, AuthzResponse,
+        parse_id, parse_optional_entity_status, parse_optional_id, AuthorizedObjectIdList,
+        AuthorizedObjectIdsInput, AuthzCheckInput, AuthzExplainResponse, AuthzResponse,
     },
 };
 
@@ -35,13 +35,18 @@ impl AuthzQuery {
         let state = ctx.data::<AppState>()?;
         let subject_id = parse_id(input.subject_id, "subjectId")?;
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
+        let profile_id = parse_optional_id(input.profile_id, "profileId")?;
+        let parent_group_id = parse_optional_id(input.parent_group_id, "parentGroupId")?;
+        let entity_status = parse_optional_entity_status(input.entity_status);
         access::require_authz_check_access(&state.pool, &auth, subject_id, tenant_id)
             .await
             .map_err(gql_error)?;
         // A scoped token listing its own authorized set gets the ceiling-filtered
         // answer (owner ∩ unconditional ceiling entries) straight from the SQL; a
         // delegated listing about another subject is unaffected, mirroring
-        // `authzCheck` semantics.
+        // `authzCheck` semantics. The filters below narrow that same result set —
+        // they are conjunctive with it, applied in the query alongside the
+        // ceiling, never a separate widening step.
         let response = authz_repo::authorized_object_ids(
             &state.pool,
             &auth,
@@ -52,13 +57,13 @@ impl AuthzQuery {
                 object_type: input.object_type,
                 tenant_id,
                 q: input.q,
-                attributes_contains: None,
-                external_id: None,
-                profile_id: None,
-                entity_status: None,
+                attributes_contains: input.attributes_contains,
+                external_id: input.external_id,
+                profile_id,
+                entity_status,
                 group_type: None,
-                parent_group_id: None,
-                include_descendants: false,
+                parent_group_id,
+                include_descendants: input.include_descendants.unwrap_or(false),
                 limit: input.limit.map(i64::from).unwrap_or(100),
                 offset: input.offset.map(i64::from).unwrap_or(0),
             },
