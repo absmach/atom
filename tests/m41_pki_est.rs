@@ -415,7 +415,14 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     .await
     .unwrap();
     assert_eq!(no_peer.status, 401, "{}", no_peer.body);
-    assert!(no_peer.headers.contains("www-authenticate: Basic"));
+    assert!(
+        no_peer
+            .headers
+            .to_ascii_lowercase()
+            .contains("www-authenticate: basic"),
+        "{}",
+        no_peer.headers
+    );
 
     // The independent client also parses serverkeygen's multipart response.
     // Each invocation returns a different PKCS#8 key exactly once, and no key
