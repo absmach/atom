@@ -18,8 +18,8 @@ use crate::{config::PkiCaKeyConfig, error::AppError};
 
 use super::{
     key_provider::{
-        AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider, EncryptedAuthorityKey,
-        EncryptedDatabaseKeyProvider,
+        AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider, ManagedAuthorityKey,
+        ManagedAuthorityKeyProvider,
     },
     repo, AuthorityKind, AuthorityRecord, AuthorityStatus,
 };
@@ -63,17 +63,17 @@ struct ParsedAuthorityCertificate {
 }
 
 struct ProviderSigningKey<'a> {
-    provider: &'a EncryptedDatabaseKeyProvider,
+    provider: &'a ManagedAuthorityKeyProvider,
     context: AuthorityKeyContext,
-    key: &'a EncryptedAuthorityKey,
+    key: &'a ManagedAuthorityKey,
     raw_public_key: Vec<u8>,
 }
 
 impl ProviderSigningKey<'_> {
     fn new<'a>(
-        provider: &'a EncryptedDatabaseKeyProvider,
+        provider: &'a ManagedAuthorityKeyProvider,
         context: AuthorityKeyContext,
-        key: &'a EncryptedAuthorityKey,
+        key: &'a ManagedAuthorityKey,
     ) -> Result<ProviderSigningKey<'a>, AppError> {
         let public = provider
             .public_key(context, key)
@@ -356,9 +356,12 @@ pub async fn begin_retirement_in_tx(
         return Err(AppError::conflict("only an active authority can retire"));
     }
     if authority.key_backend.can_sign() {
-        let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
-        let key = EncryptedAuthorityKey::from_authority(&authority).map_err(key_provider_error)?;
-        provider.retire(&key).map_err(key_provider_error)?;
+        let provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, &authority)
+            .map_err(key_provider_error)?;
+        let key = ManagedAuthorityKey::from_authority(&authority).map_err(key_provider_error)?;
+        provider
+            .retire(authority_key_context(&authority), &key)
+            .map_err(key_provider_error)?;
     }
     repo::transition_authority(
         tx,
@@ -432,7 +435,8 @@ async fn create_pending_authority(
         tenant_id,
         version,
     };
-    let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
+    let provider =
+        ManagedAuthorityKeyProvider::for_provisioning(ca_keys).map_err(key_provider_error)?;
     let generated = provider
         .generate(context, AuthorityKeyAlgorithm::EcdsaP256Sha256)
         .map_err(key_provider_error)?;
@@ -443,7 +447,8 @@ async fn create_pending_authority(
         .serialize_request(&signing_key)
         .map_err(rcgen_error)?;
     let csr_pem = csr.pem().map_err(rcgen_error)?;
-    repo::insert_pending_authority(
+    let mut key = generated.key;
+    let inserted = repo::insert_pending_authority(
         tx,
         &repo::PendingAuthorityInsert {
             id: authority_id,
@@ -454,10 +459,21 @@ async fn create_pending_authority(
             subject: &subject,
             csr_pem: &csr_pem,
             provisioning_mode,
-            key: &generated.key,
+            key: &key,
         },
     )
-    .await
+    .await;
+    if inserted.is_err() {
+        if let Err(error) = provider.destroy(context, &mut key) {
+            tracing::error!(
+                provider = ?provider.backend(),
+                authority_id = %authority_id,
+                error = %error,
+                "failed to remove authority key after database insertion failure"
+            );
+        }
+    }
+    inserted
 }
 
 fn sign_pending_authority(
@@ -465,14 +481,18 @@ fn sign_pending_authority(
     authority: &AuthorityRecord,
     parent: &AuthorityRecord,
 ) -> Result<String, AppError> {
-    let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
-    let child_key = EncryptedAuthorityKey::from_authority(authority).map_err(key_provider_error)?;
+    let child_provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, authority)
+        .map_err(key_provider_error)?;
+    let child_key = ManagedAuthorityKey::from_authority(authority).map_err(key_provider_error)?;
     let child_context = authority_key_context(authority);
-    let child_signing_key = ProviderSigningKey::new(&provider, child_context, &child_key)?;
+    let child_signing_key = ProviderSigningKey::new(&child_provider, child_context, &child_key)?;
 
-    let parent_key = EncryptedAuthorityKey::from_authority(parent).map_err(key_provider_error)?;
+    let parent_provider =
+        ManagedAuthorityKeyProvider::for_authority(ca_keys, parent).map_err(key_provider_error)?;
+    let parent_key = ManagedAuthorityKey::from_authority(parent).map_err(key_provider_error)?;
     let parent_context = authority_key_context(parent);
-    let parent_signing_key = ProviderSigningKey::new(&provider, parent_context, &parent_key)?;
+    let parent_signing_key =
+        ProviderSigningKey::new(&parent_provider, parent_context, &parent_key)?;
     let parent_pem = parent
         .certificate_pem
         .as_deref()
@@ -522,8 +542,9 @@ fn validate_imported_authority(
         ));
     }
 
-    let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
-    let key = EncryptedAuthorityKey::from_authority(authority).map_err(key_provider_error)?;
+    let provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, authority)
+        .map_err(key_provider_error)?;
+    let key = ManagedAuthorityKey::from_authority(authority).map_err(key_provider_error)?;
     let public = provider
         .public_key(authority_key_context(authority), &key)
         .map_err(key_provider_error)?;

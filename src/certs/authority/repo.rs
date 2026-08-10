@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::error::{db_err, AppError};
 
-use super::{key_provider::EncryptedAuthorityKey, AuthorityKind, AuthorityRecord, AuthorityStatus};
+use super::{key_provider::ManagedAuthorityKey, AuthorityKind, AuthorityRecord, AuthorityStatus};
 
 const PROVISIONING_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_504b_4933;
 
@@ -229,6 +229,26 @@ pub async fn encrypted_key_requirements(
     .map_err(db_err)
 }
 
+/// Return PKCS#11-backed authorities for fail-closed startup validation. The
+/// selected rows contain public certificate metadata and opaque references;
+/// they cannot contain encrypted or plaintext private-key bytes by constraint.
+pub async fn pkcs11_authorities(pool: &PgPool) -> Result<Vec<AuthorityRecord>, AppError> {
+    let query = format!(
+        "SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE key_backend = 'pkcs11' ORDER BY id"
+    );
+    sqlx::query_as::<_, AuthorityRecord>(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)
+}
+
+pub async fn kms_authority_count(pool: &PgPool) -> Result<i64, AppError> {
+    sqlx::query_scalar("SELECT count(*) FROM pki_authorities WHERE key_backend = 'kms'")
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)
+}
+
 pub struct PendingAuthorityInsert<'a> {
     pub id: Uuid,
     pub tenant_id: Option<Uuid>,
@@ -238,7 +258,7 @@ pub struct PendingAuthorityInsert<'a> {
     pub subject: &'a str,
     pub csr_pem: &'a str,
     pub provisioning_mode: &'a str,
-    pub key: &'a EncryptedAuthorityKey,
+    pub key: &'a ManagedAuthorityKey,
 }
 
 pub struct CompletedAuthority {
@@ -419,17 +439,18 @@ pub async fn insert_pending_authority(
     tx: &mut Transaction<'_, Postgres>,
     input: &PendingAuthorityInsert<'_>,
 ) -> Result<AuthorityRecord, AppError> {
+    let key = input.key.columns();
     sqlx::query(
         r#"INSERT INTO pki_authorities (
                id, tenant_id, parent_id, kind, version, status,
-               issuance_enabled, subject, key_backend, encrypted_private_key,
-               private_key_nonce, wrapped_dek, wrapped_dek_nonce,
-               key_encryption_key_id, encryption_algorithm, provisioning_mode,
-               csr_pem
+               issuance_enabled, subject, key_backend, key_reference,
+               encrypted_private_key, private_key_nonce, wrapped_dek,
+               wrapped_dek_nonce, key_encryption_key_id, encryption_algorithm,
+               provisioning_mode, csr_pem
            ) VALUES (
                $1, $2, $3, $4, $5, 'pending_signature',
-               false, $6, 'encrypted_database', $7,
-               $8, $9, $10, $11, $12, $13, $14
+               false, $6, $7, $8, $9,
+               $10, $11, $12, $13, $14, $15, $16
            )"#,
     )
     .bind(input.id)
@@ -438,12 +459,14 @@ pub async fn insert_pending_authority(
     .bind(input.kind)
     .bind(input.version)
     .bind(input.subject)
-    .bind(&input.key.encrypted_private_key)
-    .bind(&input.key.private_key_nonce)
-    .bind(&input.key.wrapped_dek)
-    .bind(&input.key.wrapped_dek_nonce)
-    .bind(&input.key.key_encryption_key_id)
-    .bind(&input.key.encryption_algorithm)
+    .bind(key.backend)
+    .bind(key.key_reference)
+    .bind(key.encrypted_private_key)
+    .bind(key.private_key_nonce)
+    .bind(key.wrapped_dek)
+    .bind(key.wrapped_dek_nonce)
+    .bind(key.key_encryption_key_id)
+    .bind(key.encryption_algorithm)
     .bind(input.provisioning_mode)
     .bind(input.csr_pem)
     .execute(&mut **tx)
