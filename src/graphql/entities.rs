@@ -476,16 +476,19 @@ impl EntityMutation {
         result.map(|_| true).map_err(gql_error)
     }
 
-    async fn set_entity_parent_group(
+    /// Add the entity to an object group. Membership is many-to-many, so this
+    /// adds to the set rather than replacing it, and re-adding an existing
+    /// membership is an idempotent no-op.
+    async fn add_entity_to_object_group(
         &self,
         ctx: &Context<'_>,
         entity_id: ID,
-        group_id: ID,
+        object_group_id: ID,
     ) -> Result<Entity> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
-        let group_id = parse_id(group_id, "groupId")?;
+        let group_id = parse_id(object_group_id, "objectGroupId")?;
         let result = async {
             let entity = repo::get_entity(&state.pool, entity_id).await?;
             let group = repo::get_group(&state.pool, group_id).await?;
@@ -503,7 +506,7 @@ impl EntityMutation {
                 ],
             )
             .await?;
-            repo::set_entity_parent_group_with_audit(
+            repo::add_entity_to_object_group_with_audit(
                 &state.pool,
                 state.config.events.enabled(),
                 Some(auth.entity_id),
@@ -519,7 +522,7 @@ impl EntityMutation {
                 tenant_id: None,
                 target_kind: "entity",
                 target_id: Some(entity_id),
-                event: "entity.parent_group.set",
+                event: "entity.object_group.add",
             };
             let details = serde_json::json!({ "group_id": group_id });
             audit::observe_error(
@@ -534,34 +537,61 @@ impl EntityMutation {
         result.map(Entity::from).map_err(gql_error)
     }
 
-    async fn add_entity_to_object_group(
+    /// Remove the entity from **one** object group; its other memberships, and
+    /// the grants that flow through them, are untouched.
+    async fn remove_entity_from_object_group(
         &self,
         ctx: &Context<'_>,
         entity_id: ID,
         object_group_id: ID,
     ) -> Result<Entity> {
-        self.set_entity_parent_group(ctx, entity_id, object_group_id)
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let entity_id = parse_id(entity_id, "entityId")?;
+        let group_id = parse_id(object_group_id, "objectGroupId")?;
+        let result = async {
+            require_entity_group_manage(state, &auth, entity_id).await?;
+            repo::remove_entity_from_object_group_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                entity_id,
+                group_id,
+            )
             .await
+        }
+        .await;
+        if let Err(ref err) = result {
+            let meta = audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: None,
+                target_kind: "entity",
+                target_id: Some(entity_id),
+                event: "entity.object_group.remove",
+            };
+            let details = serde_json::json!({ "group_id": group_id });
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+        result.map(Entity::from).map_err(gql_error)
     }
 
-    async fn clear_entity_parent_group(&self, ctx: &Context<'_>, entity_id: ID) -> Result<Entity> {
+    /// Remove the entity from **every** object group it belongs to. Kept
+    /// distinct from `removeEntityFromObjectGroup` so "clear the group" can
+    /// never be read as either one by accident.
+    async fn clear_entity_object_groups(&self, ctx: &Context<'_>, entity_id: ID) -> Result<Entity> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let result = async {
-            let entity = repo::get_entity(&state.pool, entity_id).await?;
-            crate::auth::require_any_capability(
-                &state.pool,
-                &auth,
-                &[
-                    ("manage", Scope::Object(entity_id)),
-                    ("write", Scope::Object(entity_id)),
-                    ("manage", scope_for_tenant(entity.tenant_id)),
-                    ("write", scope_for_tenant(entity.tenant_id)),
-                ],
-            )
-            .await?;
-            repo::clear_entity_parent_group_with_audit(
+            require_entity_group_manage(state, &auth, entity_id).await?;
+            repo::clear_entity_object_groups_with_audit(
                 &state.pool,
                 state.config.events.enabled(),
                 Some(auth.entity_id),
@@ -576,7 +606,7 @@ impl EntityMutation {
                 tenant_id: None,
                 target_kind: "entity",
                 target_id: Some(entity_id),
-                event: "entity.parent_group.clear",
+                event: "entity.object_groups.clear",
             };
             let details = serde_json::json!({});
             audit::observe_error(
@@ -589,14 +619,6 @@ impl EntityMutation {
             .await;
         }
         result.map(Entity::from).map_err(gql_error)
-    }
-
-    async fn remove_entity_from_object_group(
-        &self,
-        ctx: &Context<'_>,
-        entity_id: ID,
-    ) -> Result<Entity> {
-        self.clear_entity_parent_group(ctx, entity_id).await
     }
 
     async fn enable_entity(&self, ctx: &Context<'_>, id: ID) -> Result<Entity> {
@@ -733,6 +755,28 @@ async fn require_ownership_manage(
         &[
             ("manage", Scope::Object(owned_id)),
             ("manage", scope_for_tenant(owned.tenant_id)),
+        ],
+    )
+    .await
+}
+
+/// Group-membership mutations on an entity need write/manage over the entity
+/// itself (or its tenant). Shared by remove-from-one and remove-from-all so the
+/// two removal semantics cannot drift apart on authorization.
+async fn require_entity_group_manage(
+    state: &AppState,
+    auth: &AuthContext,
+    entity_id: uuid::Uuid,
+) -> std::result::Result<(), AppError> {
+    let entity = repo::get_entity(&state.pool, entity_id).await?;
+    crate::auth::require_any_capability(
+        &state.pool,
+        auth,
+        &[
+            ("manage", Scope::Object(entity_id)),
+            ("write", Scope::Object(entity_id)),
+            ("manage", scope_for_tenant(entity.tenant_id)),
+            ("write", scope_for_tenant(entity.tenant_id)),
         ],
     )
     .await
