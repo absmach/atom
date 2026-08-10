@@ -9,9 +9,7 @@ use atom::{
         AuthorityKeyProviderError, AuthorityKeyProviderStatus, EncryptedDatabaseKeyProvider,
         ManagedAuthorityKeyProvider, Pkcs11KeyProvider,
     },
-    config::{
-        PkiCaKeyConfig, PkiCaProvisioningBackend, PkiPkcs11Config, SecretBytes, SecretText,
-    },
+    config::{PkiCaKeyConfig, PkiCaProvisioningBackend, PkiPkcs11Config, SecretBytes, SecretText},
 };
 use cryptoki::{
     context::{CInitializeArgs, CInitializeFlags, Pkcs11},
@@ -80,16 +78,10 @@ fn softhsm_enforces_the_pr013_provider_contract() {
     assert_eq!(provider.health().status, AuthorityKeyProviderStatus::Ready);
     let authority_context = context();
     let generated = provider
-        .generate(
-            authority_context,
-            AuthorityKeyAlgorithm::EcdsaP256Sha256,
-        )
+        .generate(authority_context, AuthorityKeyAlgorithm::EcdsaP256Sha256)
         .expect("generate non-exportable key");
     let repeated = provider
-        .generate(
-            authority_context,
-            AuthorityKeyAlgorithm::EcdsaP256Sha256,
-        )
+        .generate(authority_context, AuthorityKeyAlgorithm::EcdsaP256Sha256)
         .expect("retry-safe generation");
     assert_eq!(generated.key.reference(), repeated.key.reference());
     assert_eq!(generated.public_key, repeated.public_key);
@@ -131,10 +123,7 @@ fn softhsm_enforces_the_pr013_provider_contract() {
     let encrypted = EncryptedDatabaseKeyProvider::new(encrypted_config.clone());
     let encrypted_context = context();
     let encrypted_key = encrypted
-        .generate(
-            encrypted_context,
-            AuthorityKeyAlgorithm::EcdsaP256Sha256,
-        )
+        .generate(encrypted_context, AuthorityKeyAlgorithm::EcdsaP256Sha256)
         .expect("existing encrypted-database authority");
     let pkcs11_config = PkiCaKeyConfig {
         provisioning_backend: PkiCaProvisioningBackend::Pkcs11,
@@ -163,10 +152,7 @@ fn softhsm_enforces_the_pr013_provider_contract() {
         AuthorityKeyProviderError::Destroyed
     );
     let mut recovered = provider
-        .generate(
-            authority_context,
-            AuthorityKeyAlgorithm::EcdsaP256Sha256,
-        )
+        .generate(authority_context, AuthorityKeyAlgorithm::EcdsaP256Sha256)
         .expect("re-create a deliberately destroyed test object");
     assert_eq!(recovered.key.reference(), repeated.key.reference());
     assert_ne!(
@@ -181,11 +167,7 @@ fn softhsm_enforces_the_pr013_provider_contract() {
 fn verify_token_object_policy(config: &PkiPkcs11Config, key_reference: &str) {
     let client = Pkcs11::new(&config.module_path).expect("load PKCS#11 module");
     match client.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
-        Ok(())
-        | Err(Pkcs11Error::Pkcs11(
-            RvError::CryptokiAlreadyInitialized,
-            _,
-        )) => {}
+        Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {}
         Err(error) => panic!("initialize PKCS#11: {error}"),
     }
     let slot = client
@@ -201,11 +183,7 @@ fn verify_token_object_policy(config: &PkiPkcs11Config, key_reference: &str) {
     let session = client.open_rw_session(slot).expect("session");
     let pin = AuthPin::new(config.user_pin.expose().to_string().into());
     match session.login(UserType::User, Some(&pin)) {
-        Ok(())
-        | Err(Pkcs11Error::Pkcs11(
-            RvError::UserAlreadyLoggedIn,
-            _,
-        )) => {}
+        Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
         Err(error) => panic!("login: {error}"),
     }
     let object_id = hex::decode(

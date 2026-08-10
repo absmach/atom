@@ -23,22 +23,15 @@ use cryptoki::{
     session::{Session, UserType},
     types::AuthPin,
 };
-use p256::{
-    ecdsa::Signature,
-    pkcs8::EncodePublicKey,
-    PublicKey,
-};
+use p256::{ecdsa::Signature, pkcs8::EncodePublicKey, PublicKey};
 use ring::digest;
 
-use crate::{
-    config::PkiPkcs11Config,
-    metrics,
-};
+use crate::{config::PkiPkcs11Config, metrics};
 
 use super::{
-    AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider,
-    AuthorityKeyProviderError, AuthorityKeyProviderHealth, AuthorityKeyProviderStatus,
-    AuthorityPublicKey, AuthoritySignature, AuthoritySignatureAlgorithm, GeneratedAuthorityKey,
+    AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError,
+    AuthorityKeyProviderHealth, AuthorityKeyProviderStatus, AuthorityPublicKey, AuthoritySignature,
+    AuthoritySignatureAlgorithm, GeneratedAuthorityKey,
 };
 use crate::certs::authority::{AuthorityKeyBackend, AuthorityRecord};
 
@@ -75,9 +68,7 @@ impl Pkcs11AuthorityKey {
         }
     }
 
-    pub fn from_authority(
-        authority: &AuthorityRecord,
-    ) -> Result<Self, AuthorityKeyProviderError> {
+    pub fn from_authority(authority: &AuthorityRecord) -> Result<Self, AuthorityKeyProviderError> {
         if authority.key_backend != AuthorityKeyBackend::Pkcs11 {
             return Err(AuthorityKeyProviderError::WrongBackend);
         }
@@ -99,8 +90,8 @@ impl Pkcs11AuthorityKey {
         {
             return Err(AuthorityKeyProviderError::InvalidKeyReference);
         }
-        let object_id = hex::decode(encoded)
-            .map_err(|_| AuthorityKeyProviderError::InvalidKeyReference)?;
+        let object_id =
+            hex::decode(encoded).map_err(|_| AuthorityKeyProviderError::InvalidKeyReference)?;
         Ok(Self {
             reference: reference.to_string(),
             object_id,
@@ -112,10 +103,7 @@ impl Pkcs11AuthorityKey {
         &self.reference
     }
 
-    fn ensure_usable(
-        &self,
-        context: AuthorityKeyContext,
-    ) -> Result<(), AuthorityKeyProviderError> {
+    fn ensure_usable(&self, context: AuthorityKeyContext) -> Result<(), AuthorityKeyProviderError> {
         if self.destroyed {
             return Err(AuthorityKeyProviderError::Destroyed);
         }
@@ -177,21 +165,14 @@ impl Pkcs11Runtime {
         }
         let client = Pkcs11::new(&self.module_path).map_err(map_pkcs11_error)?;
         match client.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
-            Ok(())
-            | Err(Pkcs11Error::Pkcs11(
-                RvError::CryptokiAlreadyInitialized,
-                _,
-            )) => {}
+            Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {}
             Err(error) => return Err(map_pkcs11_error(error)),
         }
         *cached = Some(client.clone());
         Ok(client)
     }
 
-    fn before_operation(
-        &self,
-        reset_after: Duration,
-    ) -> Result<(), AuthorityKeyProviderError> {
+    fn before_operation(&self, reset_after: Duration) -> Result<(), AuthorityKeyProviderError> {
         let mut circuit = self
             .circuit
             .lock()
@@ -296,10 +277,7 @@ impl Pkcs11KeyProvider {
     ) -> Result<T, AuthorityKeyProviderError>
     where
         T: Send + 'static,
-        F: Fn(&Pkcs11KeyProvider) -> Result<T, AuthorityKeyProviderError>
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(&Pkcs11KeyProvider) -> Result<T, AuthorityKeyProviderError> + Send + Sync + 'static,
     {
         let function = Arc::new(function);
         let timeout = Duration::from_millis(self.config.operation_timeout_ms);
@@ -311,10 +289,7 @@ impl Pkcs11KeyProvider {
                 final_result = Err(error);
                 break;
             }
-            let in_flight = match self
-                .runtime
-                .acquire_in_flight(self.config.max_in_flight)
-            {
+            let in_flight = match self.runtime.acquire_in_flight(self.config.max_in_flight) {
                 Ok(guard) => guard,
                 Err(error) => {
                     self.runtime
@@ -401,11 +376,7 @@ impl Pkcs11KeyProvider {
         let session = client.open_rw_session(slot).map_err(map_pkcs11_error)?;
         let pin = AuthPin::new(self.config.user_pin.expose().to_string().into());
         match session.login(UserType::User, Some(&pin)) {
-            Ok(())
-            | Err(Pkcs11Error::Pkcs11(
-                RvError::UserAlreadyLoggedIn,
-                _,
-            )) => {}
+            Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
             Err(error) => return Err(map_pkcs11_error(error)),
         }
         function(&session)
@@ -463,10 +434,7 @@ impl Pkcs11KeyProvider {
             };
             public_key(session, public)
         })?;
-        Ok(GeneratedAuthorityKey {
-            public_key,
-            key,
-        })
+        Ok(GeneratedAuthorityKey { public_key, key })
     }
 
     fn public_key_once(

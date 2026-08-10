@@ -553,14 +553,11 @@ pub(crate) struct AuthorityKeyColumns<'a> {
 }
 
 impl ManagedAuthorityKey {
-    pub fn from_authority(
-        authority: &AuthorityRecord,
-    ) -> Result<Self, AuthorityKeyProviderError> {
+    pub fn from_authority(authority: &AuthorityRecord) -> Result<Self, AuthorityKeyProviderError> {
         match authority.key_backend {
-            AuthorityKeyBackend::EncryptedDatabase => EncryptedAuthorityKey::from_authority(
-                authority,
-            )
-            .map(Self::EncryptedDatabase),
+            AuthorityKeyBackend::EncryptedDatabase => {
+                EncryptedAuthorityKey::from_authority(authority).map(Self::EncryptedDatabase)
+            }
             AuthorityKeyBackend::Pkcs11 => {
                 Pkcs11AuthorityKey::from_authority(authority).map(Self::Pkcs11)
             }
@@ -612,9 +609,7 @@ impl fmt::Debug for ManagedAuthorityKeyProvider {
 }
 
 impl ManagedAuthorityKeyProvider {
-    pub fn for_provisioning(
-        config: &PkiCaKeyConfig,
-    ) -> Result<Self, AuthorityKeyProviderError> {
+    pub fn for_provisioning(config: &PkiCaKeyConfig) -> Result<Self, AuthorityKeyProviderError> {
         match config.provisioning_backend {
             PkiCaProvisioningBackend::EncryptedDatabase => Ok(Self::EncryptedDatabase(
                 EncryptedDatabaseKeyProvider::new(config.clone()),
@@ -672,18 +667,22 @@ impl AuthorityKeyProvider for ManagedAuthorityKeyProvider {
         algorithm: AuthorityKeyAlgorithm,
     ) -> Result<GeneratedAuthorityKey<Self::Key>, AuthorityKeyProviderError> {
         match self {
-            Self::EncryptedDatabase(provider) => provider.generate(context, algorithm).map(
-                |generated| GeneratedAuthorityKey {
-                    public_key: generated.public_key,
-                    key: ManagedAuthorityKey::EncryptedDatabase(generated.key),
-                },
-            ),
-            Self::Pkcs11(provider) => provider.generate(context, algorithm).map(|generated| {
-                GeneratedAuthorityKey {
-                    public_key: generated.public_key,
-                    key: ManagedAuthorityKey::Pkcs11(generated.key),
-                }
-            }),
+            Self::EncryptedDatabase(provider) => {
+                provider
+                    .generate(context, algorithm)
+                    .map(|generated| GeneratedAuthorityKey {
+                        public_key: generated.public_key,
+                        key: ManagedAuthorityKey::EncryptedDatabase(generated.key),
+                    })
+            }
+            Self::Pkcs11(provider) => {
+                provider
+                    .generate(context, algorithm)
+                    .map(|generated| GeneratedAuthorityKey {
+                        public_key: generated.public_key,
+                        key: ManagedAuthorityKey::Pkcs11(generated.key),
+                    })
+            }
         }
     }
 
@@ -775,10 +774,9 @@ pub async fn validate_startup(pool: &PgPool, config: &PkiCaKeyConfig) -> Result<
     if config.provisioning_backend == PkiCaProvisioningBackend::Pkcs11
         || !pkcs11_authorities.is_empty()
     {
-        let provider_config = config
-            .pkcs11
-            .clone()
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!(AuthorityKeyProviderError::Unconfigured)))?;
+        let provider_config = config.pkcs11.clone().ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(AuthorityKeyProviderError::Unconfigured))
+        })?;
         let provider = Pkcs11KeyProvider::new(provider_config);
         if provider.health().status != AuthorityKeyProviderStatus::Ready {
             return Err(AppError::Internal(anyhow::anyhow!(

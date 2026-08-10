@@ -236,10 +236,7 @@ impl fmt::Debug for PkiPkcs11Config {
             .field("operation_timeout_ms", &self.operation_timeout_ms)
             .field("max_retries", &self.max_retries)
             .field("max_in_flight", &self.max_in_flight)
-            .field(
-                "circuit_failure_threshold",
-                &self.circuit_failure_threshold,
-            )
+            .field("circuit_failure_threshold", &self.circuit_failure_threshold)
             .field("circuit_reset_secs", &self.circuit_reset_secs)
             .finish()
     }
@@ -999,9 +996,7 @@ fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
             anyhow::bail!("ATOM_PKI_PKCS11_MAX_IN_FLIGHT must be greater than zero");
         }
         if circuit_failure_threshold == 0 {
-            anyhow::bail!(
-                "ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD must be greater than zero"
-            );
+            anyhow::bail!("ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD must be greater than zero");
         }
         if circuit_reset_secs == 0 {
             anyhow::bail!("ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS must be greater than zero");

@@ -31,8 +31,8 @@ use crate::{config::PkiCaKeyConfig, error::AppError};
 
 use super::authority::{
     key_provider::{
-        AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError,
-        ManagedAuthorityKey, ManagedAuthorityKeyProvider,
+        AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError, ManagedAuthorityKey,
+        ManagedAuthorityKeyProvider,
     },
     AuthorityKeyBackend, AuthorityRecord,
 };

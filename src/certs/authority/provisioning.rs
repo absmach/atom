@@ -485,11 +485,10 @@ fn sign_pending_authority(
         .map_err(key_provider_error)?;
     let child_key = ManagedAuthorityKey::from_authority(authority).map_err(key_provider_error)?;
     let child_context = authority_key_context(authority);
-    let child_signing_key =
-        ProviderSigningKey::new(&child_provider, child_context, &child_key)?;
+    let child_signing_key = ProviderSigningKey::new(&child_provider, child_context, &child_key)?;
 
-    let parent_provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, parent)
-        .map_err(key_provider_error)?;
+    let parent_provider =
+        ManagedAuthorityKeyProvider::for_authority(ca_keys, parent).map_err(key_provider_error)?;
     let parent_key = ManagedAuthorityKey::from_authority(parent).map_err(key_provider_error)?;
     let parent_context = authority_key_context(parent);
     let parent_signing_key =
