@@ -218,6 +218,15 @@ The listener is opt-in with `ATOM_PKI_ENROLLMENT_ENABLED=true` and requires
 unknown, or otherwise inactive certificate subjects must recover through first
 enrollment with a still-active non-certificate credential.
 
+PR-014b attaches RFC 7030 EST to that same listener and service boundary.
+`/.well-known/est/simpleenroll`, `simplereenroll`, `serverkeygen`, `csrattrs`,
+and `cacerts` translate only EST authentication and wire encodings. HTTP Basic
+or Bearer authentication bootstraps first enrollment; the exact verified TLS
+leaf authorizes re-enrollment. The authenticated subject remains the sole
+source of entity, tenant, profile, and issuer scope. `cacerts` encodes the
+PR-003 database trust bundle as certs-only PKCS#7, and `serverkeygen` delivers a
+non-persisted PKCS#8 key once in a multipart response.
+
 ---
 
 ## Interfaces
@@ -243,6 +252,14 @@ The dedicated TLS enrollment listener exposes authenticated native operations:
 
 - `POST /pki/enroll`
 - `POST /pki/reenroll`
+
+It also exposes RFC 7030 operations:
+
+- `GET /.well-known/est/cacerts`
+- `GET /.well-known/est/csrattrs`
+- `POST /.well-known/est/simpleenroll`
+- `POST /.well-known/est/simplereenroll`
+- `POST /.well-known/est/serverkeygen`
 
 Runtime services use Atom gRPC:
 

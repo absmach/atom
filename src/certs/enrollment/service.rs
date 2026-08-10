@@ -5,9 +5,11 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::AuthContext,
+    certs::profile::{self, KeyAlgorithmRule},
     certs::service::{
         self as certificates, CertificateRenewalAuthorization, IssueCertificateFromCsrV2,
-        RenewCertificateV2, RenewalKeySource, ResolveCertificateV2,
+        IssueGeneratedCertificateV2, OneTimePrivateKey, RenewCertificateV2, RenewalKeySource,
+        ResolveCertificateV2,
     },
     error::AppError,
     models::enums::AuditOutcome,
@@ -44,6 +46,12 @@ pub struct EnrollmentResponse {
     pub idempotent_replay: bool,
 }
 
+#[derive(Debug)]
+pub struct GeneratedEnrollmentResponse {
+    pub enrollment: EnrollmentResponse,
+    pub private_key_pem: OneTimePrivateKey,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Subject {
     entity_id: Uuid,
@@ -69,6 +77,89 @@ pub async fn enroll(
     crate::metrics::record_pki_enrollment("first", outcome(&result));
     crate::metrics::record_pki_lifecycle_operation("enrollment", lifecycle_outcome(&result));
     result
+}
+
+/// First enrollment with a server-generated key. Authentication and scope use
+/// the same subject boundary as CSR enrollment; the returned private key is a
+/// redacted, zeroizing one-time value and is never persisted by Atom.
+pub async fn enroll_generated(
+    state: &AppState,
+    auth: AuthContext,
+) -> Result<GeneratedEnrollmentResponse, AppError> {
+    let subject = Subject {
+        entity_id: auth.entity_id,
+        tenant_id: auth.tenant_id,
+    };
+    let result = enroll_generated_inner(state, subject).await;
+    crate::metrics::record_pki_enrollment("serverkeygen", outcome(&result));
+    crate::metrics::record_pki_lifecycle_operation("enrollment", lifecycle_outcome(&result));
+    result
+}
+
+async fn enroll_generated_inner(
+    state: &AppState,
+    subject: Subject,
+) -> Result<GeneratedEnrollmentResponse, AppError> {
+    enforce_rate_limits(state, subject).await?;
+
+    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+    let mut issued = certificates::issue_generated_certificate_v2_in_tx(
+        &mut tx,
+        &state.config,
+        subject.tenant_id,
+        IssueGeneratedCertificateV2 {
+            entity_id: subject.entity_id,
+            ttl_secs: None,
+        },
+    )
+    .await?;
+    let enrollment = response_from_issued(&issued)?;
+    let private_key_pem = issued.private_key_pem.take().ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "generated enrollment did not return a one-time private key"
+        ))
+    })?;
+    let details = serde_json::json!({
+        "mode": "serverkeygen",
+        "credential_id": enrollment.credential_id,
+        "serial_number": enrollment.serial_number,
+        "issuer_id": enrollment.issuer_id,
+        "profile_id": enrollment.profile_id,
+        "renewal_due_at": enrollment.renewal_due_at,
+        "generated_key": true,
+    });
+    commit_with_mode_audit(
+        state,
+        tx,
+        subject,
+        enrollment.credential_id,
+        false,
+        "certificate.enroll",
+        "certificate.enroll_replayed",
+        details,
+    )
+    .await?;
+    Ok(GeneratedEnrollmentResponse {
+        enrollment,
+        private_key_pem,
+    })
+}
+
+/// Resolve only the authenticated subject's applicable client profile and
+/// return its CSR key requirements. The EST adapter owns the ASN.1 transport;
+/// profile selection remains in this service boundary.
+pub async fn csr_requirements(
+    state: &AppState,
+    auth: &AuthContext,
+) -> Result<Vec<KeyAlgorithmRule>, AppError> {
+    let subject = profile::load_subject(&state.pool, auth.entity_id).await?;
+    if subject.tenant_id() != auth.tenant_id {
+        return Err(AppError::unauthorized(
+            "authenticated subject scope does not match the stored entity",
+        ));
+    }
+    let profile = profile::resolve_for_subject(&state.pool, &subject, "client").await?;
+    Ok(profile.permitted_key_algorithms().to_vec())
 }
 
 async fn enroll_inner(
@@ -208,6 +299,10 @@ async fn enforce_input_and_rate_limits(
         )));
     }
 
+    enforce_rate_limits(state, subject).await
+}
+
+async fn enforce_rate_limits(state: &AppState, subject: Subject) -> Result<(), AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
     let entity = repo::consume_rate_limit(
         &mut tx,
@@ -342,7 +437,7 @@ fn hide_peer_resolution_error(error: AppError) -> AppError {
     }
 }
 
-fn outcome(result: &Result<EnrollmentResponse, AppError>) -> &'static str {
+fn outcome<T>(result: &Result<T, AppError>) -> &'static str {
     match result {
         Ok(_) => "success",
         Err(AppError::RateLimited { .. }) => "rate_limited",
@@ -351,7 +446,7 @@ fn outcome(result: &Result<EnrollmentResponse, AppError>) -> &'static str {
     }
 }
 
-fn lifecycle_outcome(result: &Result<EnrollmentResponse, AppError>) -> &'static str {
+fn lifecycle_outcome<T>(result: &Result<T, AppError>) -> &'static str {
     if result.is_ok() {
         "success"
     } else {

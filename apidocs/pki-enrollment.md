@@ -1,6 +1,6 @@
-# Native PKI enrollment API
+# PKI enrollment APIs
 
-The native enrollment API is served only on the dedicated TLS listener
+The native and RFC 7030 EST enrollment APIs are served only on the dedicated TLS listener
 configured by `ATOM_PKI_ENROLLMENT_LISTEN_ADDR`. It is not mounted on Atom's
 main HTTP port.
 
@@ -60,3 +60,24 @@ include `Retry-After`.
 Expired, revoked, unknown, or inactive certificate subjects cannot use
 re-enrollment. Recover by calling first enrollment with an active
 non-certificate Atom credential.
+
+## RFC 7030 EST adapter
+
+The same listener exposes the standard EST paths below. EST is a wire adapter
+over the native enrollment service; the authenticated subject still determines
+the tenant, client profile, and active issuer. Atom does not implement an EST
+additional path segment, and no selector field is accepted.
+
+| Operation | Authentication | Request | Response |
+| --- | --- | --- | --- |
+| `GET /.well-known/est/cacerts` | none | empty | base64 certs-only PKCS#7 matching `/certs/trust-bundle.pem` |
+| `POST /.well-known/est/simpleenroll` | HTTP Basic Atom password credential, or Bearer token | base64 DER PKCS#10; `application/pkcs10` | base64 certs-only PKCS#7 |
+| `POST /.well-known/est/simplereenroll` | certificate being replaced in the TLS handshake | base64 DER PKCS#10; `application/pkcs10` | base64 certs-only PKCS#7 |
+| `POST /.well-known/est/serverkeygen` | HTTP Basic Atom password credential, or Bearer token | base64 DER PKCS#10; `application/pkcs10` | `multipart/mixed` containing a one-time PKCS#8 key and certs-only PKCS#7 |
+| `GET /.well-known/est/csrattrs` | HTTP Basic Atom password credential, or Bearer token | empty | base64 `application/csrattrs` derived from the applicable client profile |
+
+For HTTP Basic authentication, use the entity UUID as the username and its
+Atom password credential as the password. Atom derives scope from the
+credential; URL segments, query parameters, and headers cannot choose another
+tenant, issuer, entity, or profile. The generated private key returned by
+`serverkeygen` is zeroized after the response and is never persisted or logged.
