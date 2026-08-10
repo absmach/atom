@@ -276,11 +276,7 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .sign_ocsp_response_data(artifact_message)
         .expect("retained artifact signature")
         .into_bytes();
-    verify_certificate_signature(
-        original_certificate,
-        artifact_message,
-        &artifact_signature,
-    );
+    verify_certificate_signature(original_certificate, artifact_message, &artifact_signature);
 }
 
 #[tokio::test]
