@@ -379,5 +379,5 @@ fn verify_token_object_policy(config: &PkiPkcs11Config, key_reference: &str) {
     let value = session
         .get_attribute_info(private[0], &[AttributeType::Value])
         .expect("private value policy");
-    assert_eq!(value, vec![AttributeInfo::Sensitive]);
+    assert!(matches!(value.as_slice(), [AttributeInfo::Sensitive]));
 }
