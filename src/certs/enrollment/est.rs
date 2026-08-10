@@ -192,10 +192,7 @@ async fn server_keygen(
     }
     let generated = result?;
     let key_der = private_key_info_der(generated.private_key_pem.expose())?;
-    let certs_der = certs_only_der(&format!(
-        "{}{}",
-        generated.enrollment.certificate_pem, generated.enrollment.chain_pem
-    ))?;
+    let certs_der = certs_only_der(&generated.enrollment.certificate_pem)?;
     let body = format!(
         "--{SERVER_KEYGEN_BOUNDARY}\r\n\
          Content-Type: {PKCS8_MEDIA_TYPE}\r\n\
@@ -388,10 +385,7 @@ fn idempotency_key_with_subject(operation: &str, subject: &[u8], csr_der: &[u8])
 }
 
 fn enrollment_response(response: &service::EnrollmentResponse) -> Result<Response, EstError> {
-    certs_only_response(&format!(
-        "{}{}",
-        response.certificate_pem, response.chain_pem
-    ))
+    certs_only_response(&response.certificate_pem)
 }
 
 fn certs_only_response(certificates_pem: &str) -> Result<Response, EstError> {
