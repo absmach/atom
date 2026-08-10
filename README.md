@@ -271,9 +271,10 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 Compose mounts `./certs` at `/certs:ro`; a host `cargo run` reads the files
 directly, so use `./certs/...` paths there. The legacy production mode uses
 `ATOM_CERTS_CA_MODE=file_intermediate_issuer` with read-only files. The managed
-authority registry instead imports only the root certificate, stores generated
-CA keys envelope-encrypted in Postgres, and publishes its dynamic trust set at
-`GET /certs/trust-bundle.pem`; Atom never accepts a production root private key.
+authority registry instead imports only the root certificate and publishes its
+dynamic trust set at `GET /certs/trust-bundle.pem`. Managed CA keys may be
+envelope-encrypted in Postgres or generated as non-exportable PKCS#11 token
+objects; Atom never accepts a production root private key.
 
 ### Metrics
 
@@ -703,6 +704,10 @@ Generic application mapping:
 | `ATOM_CERTS_LEAF_MAX_TTL_SECS`                                                                                                 | `2592000`                                            | Maximum issued certificate lifetime                                                     |
 | `ATOM_PKI_CA_KEY_ENCRYPTION_KEY`                                                                                               | *(unset)*                                            | Dedicated base64-encoded 32-byte KEK required for managed CA keys                       |
 | `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID`                                                                                            | `local-ca:v1`                                        | Operator-visible identifier for the managed CA KEK                                      |
+| `ATOM_PKI_CA_KEY_BACKEND`                                                                                                     | `encrypted_database`                                 | Operator-selected backend for newly provisioned CAs: `encrypted_database` or `pkcs11`  |
+| `ATOM_PKI_PKCS11_MODULE_PATH` / `ATOM_PKI_PKCS11_TOKEN_LABEL` / `ATOM_PKI_PKCS11_USER_PIN`                                    | *(unset)*                                            | PKCS#11 module, token selector, and redacted login credential                           |
+| `ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS` / `ATOM_PKI_PKCS11_MAX_RETRIES` / `ATOM_PKI_PKCS11_MAX_IN_FLIGHT`                       | `2000` / `1` / `8`                                   | Bounded provider call, retry, and concurrency policy                                    |
+| `ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD` / `ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS`                                             | `3` / `30`                                           | Fail-closed PKCS#11 circuit policy                                                      |
 | `ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED`                                                                                      | `false`                                              | Enables managed one-time key bootstrap; keep off in production until PR-010             |
 | `ATOM_CERTS_CA_DIR`                                                                                                            | `./certs`                                            | Docker Compose host directory mounted at `/certs:ro`                                    |
 | `ATOM_EMAIL_TEMPLATES_HOST_DIR`                                                                                                | `./email-templates`                                  | Docker Compose host directory mounted at `/email-templates:ro`                          |

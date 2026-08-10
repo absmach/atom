@@ -37,6 +37,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Provision disposable SoftHSM PKCS#11 token
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client softhsm2
+          PKCS11_ROOT=/tmp/atom-softhsm
+          TOKEN_DIR="$PKCS11_ROOT/tokens"
+          BACKUP_DIR="$PKCS11_ROOT/tokens.backup"
+          mkdir -p "$TOKEN_DIR"
+          printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$TOKEN_DIR" > "$PKCS11_ROOT/softhsm2.conf"
+          export SOFTHSM2_CONF="$PKCS11_ROOT/softhsm2.conf"
+          softhsm2-util --init-token --free --label atom-pki-ci --so-pin 12345678 --pin 123456
+          cp -a "$TOKEN_DIR" "$BACKUP_DIR"
+          MODULE_PATH="$(dpkg -L libsofthsm2 | awk '/libsofthsm2[.]so$/{print; exit}')"
+          test -n "$MODULE_PATH"
+          {
+            echo "SOFTHSM2_CONF=$SOFTHSM2_CONF"
+            echo "ATOM_PKI_PKCS11_MODULE_PATH=$MODULE_PATH"
+            echo "ATOM_PKI_PKCS11_TOKEN_LABEL=atom-pki-ci"
+            echo "ATOM_PKI_PKCS11_USER_PIN=123456"
+          } >> "$GITHUB_ENV"
+
       - name: Install independent EST interoperability client
         uses: actions/setup-go@v5
         with:
@@ -104,3 +126,11 @@ jobs:
             esac
             run_one --test "$name"
           done
+
+      - name: Exercise PKCS#11 backup recovery runbook
+        run: |
+          set -euo pipefail
+          PKCS11_ROOT=/tmp/atom-softhsm
+          mv "$PKCS11_ROOT/tokens" "$PKCS11_ROOT/tokens.after-tests"
+          cp -a "$PKCS11_ROOT/tokens.backup" "$PKCS11_ROOT/tokens"
+          softhsm2-util --show-slots | grep -F 'Label:            atom-pki-ci'
