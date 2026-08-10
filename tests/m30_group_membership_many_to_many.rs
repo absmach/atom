@@ -284,6 +284,7 @@ async fn entity_belongs_to_every_group_it_is_added_to() {
                 kind: Some(EntityKind::Device),
                 profile_id: None,
                 tenant_id: Some(tenant_id),
+                attributes_contains: None,
                 status: None,
                 deleted: DeletedFilter::Live,
                 parent_group_id: Some(group),

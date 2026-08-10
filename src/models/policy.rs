@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::enums::{Effect, GrantKind, ScopeKind, SubjectKind};
+use super::enums::{Effect, GrantKind, ObjectKind, ScopeKind, SubjectKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PolicyBinding {
@@ -115,12 +115,31 @@ pub struct CreateDirectPolicy {
     pub permission_block_id: Uuid,
 }
 
+/// Filter for [`crate::authz::repo::list_direct_policies`].
+///
+/// The subject-side filters (`subject_kind` / `subject_id`) answer "what does
+/// this subject hold". The object-side filters (`object_id` and its
+/// `object_kind` / `object_type` co-filters) answer the reverse — "which
+/// direct policies name this object". Both sides are ANDed when supplied
+/// together; see `list_direct_policies` for which scope modes count as
+/// "naming" the object.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListDirectPolicies {
     pub tenant_id: Option<Uuid>,
     pub subject_kind: Option<SubjectKind>,
     pub subject_id: Option<Uuid>,
     pub permission_block_id: Option<Uuid>,
+    /// Reverse lookup: keep only policies whose permission block names this
+    /// object. `None` leaves the listing subject-forward, exactly as before.
+    pub object_id: Option<Uuid>,
+    /// Narrows `object_id` to blocks scoped to this object kind. A block that
+    /// records no kind (possible for `scope_mode = 'object'`, which identifies
+    /// the object by id alone) is not excluded by this filter.
+    pub object_kind: Option<ObjectKind>,
+    /// Narrows `object_id` to blocks scoped to this namespaced object type
+    /// (`object_kind:type`, e.g. `entity:device`). Same `NULL`-tolerant rule as
+    /// `object_kind`.
+    pub object_type: Option<String>,
     pub limit: i64,
     pub offset: i64,
 }

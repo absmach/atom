@@ -1,4 +1,5 @@
 use async_graphql::{Context, Object, Result, ID};
+use serde_json::Value;
 
 use crate::{
     audit,
@@ -78,6 +79,7 @@ impl EntityQuery {
         kind: Option<GqlEntityKind>,
         profile_id: Option<ID>,
         tenant_id: Option<ID>,
+        attributes_contains: Option<Value>,
         parent_group_id: Option<ID>,
         include_descendants: Option<bool>,
         status: Option<GqlEntityStatus>,
@@ -105,6 +107,7 @@ impl EntityQuery {
                     kind: parsed_kind,
                     profile_id,
                     tenant_id,
+                    attributes_contains,
                     status: parsed_status,
                     deleted,
                     parent_group_id,
@@ -131,7 +134,7 @@ impl EntityQuery {
                 object_type: parsed_kind.as_ref().map(entity_object_type),
                 tenant_id,
                 q,
-                attributes_contains: None,
+                attributes_contains,
                 profile_id,
                 entity_status: parsed_status,
                 group_type: None,

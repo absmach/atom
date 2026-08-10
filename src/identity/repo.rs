@@ -189,6 +189,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     let include_descendants = params.include_descendants;
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let items = sqlx::query_as::<_, Entity>(
         r#"WITH RECURSIVE target_groups(id) AS (
@@ -211,6 +212,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                      SELECT 1 FROM group_entity_parents gep
                      WHERE gep.entity_id = e.id
                        AND gep.group_id IN (SELECT id FROM target_groups)))
+             AND ($11::jsonb IS NULL OR e.attributes @> $11::jsonb)
              AND ($10::text = 'all'
                   OR ($10::text = 'live' AND e.deleted_at IS NULL)
                   OR ($10::text = 'deleted' AND e.deleted_at IS NOT NULL))
@@ -227,6 +229,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(limit)
     .bind(offset)
     .bind(deleted)
+    .bind(attributes_contains.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -251,6 +254,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                      SELECT 1 FROM group_entity_parents gep
                      WHERE gep.entity_id = e.id
                        AND gep.group_id IN (SELECT id FROM target_groups)))
+             AND ($9::jsonb IS NULL OR e.attributes @> $9::jsonb)
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND e.deleted_at IS NULL)
                   OR ($8::text = 'deleted' AND e.deleted_at IS NOT NULL))"#,
@@ -263,6 +267,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(parent_group_id)
     .bind(include_descendants)
     .bind(deleted)
+    .bind(attributes_contains)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -1191,6 +1196,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     let q = search_pattern(params.q);
     let parent_id = params.parent_id;
     let deleted = params.deleted.as_str();
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let items = sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
@@ -1203,6 +1209,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
              AND ($8::text IS NULL OR g.group_type = $8)
              AND (($4::uuid IS NULL AND $5::boolean = FALSE)
                   OR ($5::boolean = TRUE AND gh.parent_id = $4))
+             AND ($10::jsonb IS NULL OR g.attributes @> $10::jsonb)
              AND ($9::text = 'all'
                   OR ($9::text = 'live' AND g.deleted_at IS NULL)
                   OR ($9::text = 'deleted' AND g.deleted_at IS NOT NULL))
@@ -1218,6 +1225,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     .bind(offset)
     .bind(params.group_type.clone())
     .bind(deleted)
+    .bind(attributes_contains.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -1232,6 +1240,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
              AND ($6::text IS NULL OR g.group_type = $6)
              AND (($4::uuid IS NULL AND $5::boolean = FALSE)
                   OR ($5::boolean = TRUE AND gh.parent_id = $4))
+             AND ($8::jsonb IS NULL OR g.attributes @> $8::jsonb)
              AND ($7::text = 'all'
                   OR ($7::text = 'live' AND g.deleted_at IS NULL)
                   OR ($7::text = 'deleted' AND g.deleted_at IS NOT NULL))"#,
@@ -1243,6 +1252,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     .bind(parent_id.is_some())
     .bind(params.group_type)
     .bind(deleted)
+    .bind(attributes_contains)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -1492,6 +1502,7 @@ pub async fn list_child_groups(
         ListGroups {
             q: None,
             tenant_id: None,
+            attributes_contains: None,
             group_type: Some("object".to_string()),
             parent_id: Some(parent_id),
             status: None,

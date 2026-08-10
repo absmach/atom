@@ -4280,14 +4280,152 @@ pub async fn create_direct_policy(
     create_direct_policy_with_audit(pool, false, None, req).await
 }
 
+/// Resolves the object's own object groups and every ancestor of those
+/// groups, carrying `(object_kind, object_type)` in the shape a permission
+/// block records it, so a block's declared scope can be compared the way the
+/// PDP compares it (`grant_scope_matches`, migration 001).
+///
+/// Anchored at the object and walks *upward*, so cost is bounded by tree
+/// depth, not block count. The membership joins return every matching row —
+/// an object in several groups must produce a match for each.
+const DIRECT_POLICY_OBJECT_CTE: &str = r#"WITH RECURSIVE object_parent_groups(group_id, object_kind, object_type) AS (
+             SELECT oge.group_id, 'entity'::text, 'entity:' || e.kind
+             FROM object_group_entities oge
+             JOIN entities e ON e.id = oge.entity_id
+             WHERE oge.entity_id = $5::uuid AND e.deleted_at IS NULL
+             UNION ALL
+             SELECT ogr.group_id, 'resource'::text, 'resource:' || r.kind
+             FROM object_group_resources ogr
+             JOIN resources r ON r.id = ogr.resource_id
+             WHERE ogr.resource_id = $5::uuid AND r.deleted_at IS NULL
+             UNION ALL
+             SELECT ogh.parent_id, 'group'::text, 'group:object'
+             FROM object_group_hierarchy ogh
+             JOIN object_groups og ON og.id = ogh.child_id
+             WHERE ogh.child_id = $5::uuid AND og.deleted_at IS NULL
+           ),
+           object_ancestor_groups(group_id, object_kind, object_type) AS (
+             SELECT ogh.parent_id, opg.object_kind, opg.object_type
+             FROM object_parent_groups opg
+             JOIN object_group_hierarchy ogh ON ogh.child_id = opg.group_id
+             UNION ALL
+             SELECT ogh.parent_id, oag.object_kind, oag.object_type
+             FROM object_ancestor_groups oag
+             JOIN object_group_hierarchy ogh ON ogh.child_id = oag.group_id
+           )"#;
+
+/// The reverse-lookup predicate: does this policy's permission block name the
+/// object in `$5`, narrowed by the optional `$6` / `$7` co-filters?
+///
+/// Only scope modes that name a specific object, or a group object directly /
+/// through a group hierarchy, are considered. A `group_descendant_objects` block
+/// matches through *strict* ancestors of the object's own group, mirroring the
+/// PDP: an object directly in the block's group is the `group_direct_objects`
+/// case, not the descendant case.
+const DIRECT_POLICY_OBJECT_PREDICATE: &str = r#"($5::uuid IS NULL OR EXISTS (
+               SELECT 1 FROM permission_blocks pb
+               WHERE pb.id = direct_policies.permission_block_id
+                 AND ($6::text IS NULL OR pb.object_kind IS NULL OR pb.object_kind = $6)
+                 AND ($7::text IS NULL OR pb.object_type IS NULL OR pb.object_type = $7)
+                 AND (
+                   (pb.scope_mode = 'object' AND pb.object_id = $5)
+                   OR (pb.scope_mode = 'group'
+                       AND pb.group_id = $5
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND EXISTS (
+                         SELECT 1 FROM object_groups og
+                         WHERE og.id = $5
+                           AND og.deleted_at IS NULL))
+                   OR (pb.scope_mode = 'group_direct_objects' AND EXISTS (
+                         SELECT 1 FROM object_parent_groups opg
+                         WHERE opg.group_id = pb.group_id
+                           AND opg.object_kind = pb.object_kind
+                           AND opg.object_type = pb.object_type))
+                   OR (pb.scope_mode = 'group_descendant_objects' AND EXISTS (
+                         SELECT 1 FROM object_ancestor_groups oag
+                         WHERE oag.group_id = pb.group_id
+                           AND oag.object_kind = pb.object_kind
+                           AND oag.object_type = pb.object_type))
+                   OR (pb.scope_mode = 'group_child_groups'
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND EXISTS (
+                         SELECT 1 FROM object_parent_groups opg
+                         WHERE opg.group_id = pb.group_id
+                           AND opg.object_kind = 'group'))
+                   OR (pb.scope_mode = 'group_descendant_groups'
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND (
+                         EXISTS (
+                           SELECT 1 FROM object_parent_groups opg
+                           WHERE opg.group_id = pb.group_id
+                             AND opg.object_kind = 'group')
+                         OR EXISTS (
+                           SELECT 1 FROM object_ancestor_groups oag
+                           WHERE oag.group_id = pb.group_id
+                             AND oag.object_kind = 'group')))
+                 )
+             ))"#;
+
+/// `object_kind` / `object_type` only make sense alongside `object_id`: the
+/// reverse-lookup predicate is inert without it, so accepting them on their own
+/// would silently return the *unfiltered* listing. Reject instead.
+fn validate_direct_policy_object_filter(
+    object_id: Option<Uuid>,
+    object_kind: Option<ObjectKind>,
+    object_type: Option<&str>,
+) -> Result<(), AppError> {
+    if object_id.is_none() && (object_kind.is_some() || object_type.is_some()) {
+        return Err(AppError::bad_request(
+            "objectKind and objectType are co-filters for objectId and require it",
+        ));
+    }
+    if let Some(object_type) = object_type {
+        let (prefix, suffix) = object_type.split_once(':').ok_or_else(|| {
+            AppError::bad_request("objectType must be namespaced as object_kind:type")
+        })?;
+        if prefix.is_empty() || suffix.is_empty() {
+            return Err(AppError::bad_request(
+                "objectType must be namespaced as object_kind:type",
+            ));
+        }
+        if object_kind.is_some_and(|kind| kind.as_str() != prefix) {
+            return Err(AppError::bad_request(
+                "objectType namespace must match objectKind",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Lists direct policies, filtered by subject, by object, or by both.
+///
+/// **The object filter is a policy lookup, not effective access.** With
+/// `object_id` set, the result is every direct policy whose permission block
+/// *names* that object: `object` (direct), `group` (the object is the named
+/// group), `group_direct_objects`/`group_descendant_objects` (member/
+/// descendant-member of the block's group), or `group_child_groups`/
+/// `group_descendant_groups` (a group covered by the block's hierarchy
+/// scope). Blocks that reach the object without naming it (`platform`,
+/// `tenant`, `object_kind`, `object_type`) are **not** returned — reading
+/// this as "everyone who can access X" will under-report.
 pub async fn list_direct_policies(
     pool: &PgPool,
     params: ListDirectPolicies,
 ) -> Result<DirectPolicyList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let items = sqlx::query_as::<_, DirectPolicy>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
+    let object_type = normalize_optional_text(params.object_type);
+    validate_direct_policy_object_filter(
+        params.object_id,
+        params.object_kind,
+        object_type.as_deref(),
+    )?;
+    let items_sql = format!(
+        r#"{DIRECT_POLICY_OBJECT_CTE}
+           SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
            FROM direct_policies
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4297,21 +4435,27 @@ pub async fn list_direct_policies(
                (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
                OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
              )
+             AND {DIRECT_POLICY_OBJECT_PREDICATE}
            ORDER BY created_at DESC
-           LIMIT $5 OFFSET $6"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind.clone())
-    .bind(params.subject_id)
-    .bind(params.permission_block_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+           LIMIT $8 OFFSET $9"#
+    );
+    let items = sqlx::query_as::<_, DirectPolicy>(&items_sql)
+        .bind(params.tenant_id)
+        .bind(params.subject_kind.clone())
+        .bind(params.subject_id)
+        .bind(params.permission_block_id)
+        .bind(params.object_id)
+        .bind(params.object_kind)
+        .bind(&object_type)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
 
-    let total = sqlx::query_scalar(
-        r#"SELECT COUNT(*)
+    let total_sql = format!(
+        r#"{DIRECT_POLICY_OBJECT_CTE}
+           SELECT COUNT(*)
            FROM direct_policies
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4320,15 +4464,20 @@ pub async fn list_direct_policies(
              AND (
                (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
                OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
-             )"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind)
-    .bind(params.subject_id)
-    .bind(params.permission_block_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+             )
+             AND {DIRECT_POLICY_OBJECT_PREDICATE}"#
+    );
+    let total = sqlx::query_scalar(&total_sql)
+        .bind(params.tenant_id)
+        .bind(params.subject_kind)
+        .bind(params.subject_id)
+        .bind(params.permission_block_id)
+        .bind(params.object_id)
+        .bind(params.object_kind)
+        .bind(&object_type)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
 
     Ok(DirectPolicyList { items, total })
 }
@@ -4858,6 +5007,7 @@ async fn authorized_entity_ids(
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let sql = r#"WITH RECURSIVE target_groups(id) AS (
                    SELECT $8::uuid WHERE $8::uuid IS NOT NULL
@@ -4894,6 +5044,7 @@ async fn authorized_entity_ids(
                              SELECT 1 FROM group_entity_parents gep
                              WHERE gep.entity_id = e.id
                                AND gep.group_id IN (SELECT id FROM target_groups)))
+                     AND ($13::jsonb IS NULL OR e.attributes @> $13::jsonb)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
@@ -4975,6 +5126,7 @@ async fn authorized_entity_ids(
         .bind(limit)
         .bind(offset)
         .bind(ceiling_credential_id)
+        .bind(attributes_contains)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -5202,6 +5354,7 @@ async fn authorized_group_ids(
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
     let status = params.entity_status.map(|status| match status {
         crate::models::enums::EntityStatus::Active => "active".to_string(),
         crate::models::enums::EntityStatus::Inactive => "inactive".to_string(),
@@ -5244,6 +5397,7 @@ async fn authorized_group_ids(
                      AND ($5::text IS NULL OR g.name ILIKE $5 OR g.description ILIKE $5 OR g.attributes::text ILIKE $5)
                      AND ($8::text IS NULL OR g.status = $8)
                      AND ($6::uuid IS NULL OR gph.parent_id IN (SELECT id FROM target_groups))
+                     AND ($12::jsonb IS NULL OR g.attributes @> $12::jsonb)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
@@ -5320,6 +5474,7 @@ async fn authorized_group_ids(
         .bind(limit)
         .bind(offset)
         .bind(ceiling_credential_id)
+        .bind(attributes_contains)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -5889,4 +6044,70 @@ fn search_pattern(q: Option<String>) -> Option<String> {
     q.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device_id() -> Uuid {
+        Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid")
+    }
+
+    #[test]
+    fn object_filter_accepts_a_bare_object_id() {
+        assert!(validate_direct_policy_object_filter(Some(device_id()), None, None).is_ok());
+    }
+
+    #[test]
+    fn object_filter_accepts_a_subject_only_listing() {
+        assert!(validate_direct_policy_object_filter(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn object_filter_rejects_co_filters_without_an_object_id() {
+        assert!(
+            validate_direct_policy_object_filter(None, Some(ObjectKind::Entity), None).is_err(),
+            "objectKind alone would silently return the unfiltered listing"
+        );
+        assert!(
+            validate_direct_policy_object_filter(None, None, Some("entity:device")).is_err(),
+            "objectType alone would silently return the unfiltered listing"
+        );
+    }
+
+    #[test]
+    fn object_filter_requires_a_namespaced_object_type() {
+        assert!(
+            validate_direct_policy_object_filter(Some(device_id()), None, Some("device")).is_err()
+        );
+        assert!(
+            validate_direct_policy_object_filter(Some(device_id()), None, Some("entity:")).is_err()
+        );
+        assert!(
+            validate_direct_policy_object_filter(Some(device_id()), None, Some(":device")).is_err()
+        );
+        assert!(validate_direct_policy_object_filter(
+            Some(device_id()),
+            None,
+            Some("entity:device")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn object_filter_requires_the_type_namespace_to_match_the_kind() {
+        assert!(validate_direct_policy_object_filter(
+            Some(device_id()),
+            Some(ObjectKind::Resource),
+            Some("entity:device"),
+        )
+        .is_err());
+        assert!(validate_direct_policy_object_filter(
+            Some(device_id()),
+            Some(ObjectKind::Entity),
+            Some("entity:device"),
+        )
+        .is_ok());
+    }
 }
