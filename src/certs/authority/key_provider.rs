@@ -1126,8 +1126,12 @@ mod tests {
             },
         )
         .expect_err("wrong certificate key");
-        assert!(error
-            .to_string()
-            .contains("PKCS#11 authority key does not match its certificate"));
+        let AppError::Internal(error) = error else {
+            panic!("certificate mismatch must fail as an internal startup error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "PKCS#11 authority key does not match its certificate"
+        );
     }
 }
