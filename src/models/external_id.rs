@@ -1,35 +1,20 @@
 //! Entity `external_id` normalization.
 //!
-//! An `external_id` is an identifier assigned outside Atom — a serial number, a
-//! MAC address, an employee number, a SKU. It is a foreign key into someone
-//! else's namespace, so Atom stores, indexes and enforces uniqueness on it but
-//! never interprets it. There is deliberately **no format validation**:
-//! uppercase, `/`, `.`, interior spaces, embedded quotes and unicode are all
-//! valid. Consumers may impose their own rules (Magistrala rejects `/` because
-//! the value travels verbatim in a topic) — that is the consumer's rule, not
-//! Atom's.
+//! An `external_id` is a foreign key into someone else's namespace (serial
+//! number, MAC address, SKU), so it stays opaque — no format validation.
+//! Contrast with [`crate::models::alias`], a human-friendly handle Atom owns
+//! and constrains to a lowercase slug.
 //!
-//! Contrast with [`crate::models::alias`], which is the opposite trade: a
-//! human-friendly handle Atom owns and constrains to a lowercase slug.
-//!
-//! Two normalization decisions are fixed here and mirrored by CHECK constraints
-//! in `migrations/006_entity_external_id.sql`:
-//!
-//! * **Case-sensitive.** `ABC123` and `abc123` are two different entities. The
-//!   value is never case-folded. Vendor schemes may legitimately distinguish
-//!   case, and folding would silently merge two physical devices into one row
-//!   with no way back.
-//! * **Trimmed.** `"ABC123 "` and `"ABC123"` are the same entity. Leading and
-//!   trailing whitespace is a transport artifact (a trailing newline off a
-//!   serial console, a padded CSV cell), never data. Interior whitespace is
-//!   preserved.
+//! Two decisions, mirrored by CHECK constraints in
+//! `migrations/006_entity_external_id.sql`: **case-sensitive** (`ABC123` and
+//! `abc123` are different entities — vendor schemes may distinguish case, and
+//! folding is irreversible once two devices have merged) and **trimmed**
+//! (edge whitespace is a transport artifact; interior whitespace is kept).
 
 use crate::error::AppError;
 use serde::{Deserialize, Deserializer};
 
-/// Sanity cap, in characters (not bytes — matching Postgres `length()`). Not a
-/// format rule: a btree index entry over a multi-kilobyte value is pathological,
-/// and 255 is far beyond any real serial, MAC or SKU.
+/// Sanity cap, in characters (not bytes — matching Postgres `length()`).
 pub const MAX_EXTERNAL_ID_LEN: usize = 255;
 
 fn trim_external_id(external_id: Option<String>) -> Option<String> {
@@ -63,11 +48,8 @@ pub fn validate_external_id_opt(external_id: Option<String>) -> Result<Option<St
                 "externalId must be at most {MAX_EXTERNAL_ID_LEN} characters"
             )));
         }
-        // Not format validation — a physical limit of the storage type. A
-        // Postgres `TEXT` value cannot contain a NUL byte under any encoding, so
-        // this is unstorable rather than disallowed. Rejecting it here turns an
-        // opaque `22021 invalid byte sequence` 500 into a message the caller can
-        // act on.
+        // A Postgres TEXT column can't hold a NUL byte; reject it here with a
+        // clear message instead of a bare 500 from the database.
         if value.contains('\0') {
             return Err(AppError::bad_request(
                 "externalId must not contain a NUL byte",

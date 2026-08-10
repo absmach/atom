@@ -1,19 +1,5 @@
 //! Entity `external_id` integration tests.
 //!
-//! `external_id` holds an identifier assigned outside Atom — a serial number, a
-//! MAC address, an employee number, a SKU. Atom stores, indexes and enforces
-//! uniqueness on it but never interprets it, so these tests are mostly about
-//! what Atom must *not* do to the value.
-//!
-//! Two normalization decisions are fixed and cannot be safely changed once
-//! data exists, so both are pinned by an explicit test rather than left to
-//! whichever client writes first:
-//!
-//! * **Case-sensitive** — `ABC123` and `abc123` are two entities
-//!   (`external_id_is_case_sensitive`).
-//! * **Whitespace is trimmed** — `"ABC123 "` and `"ABC123"` are one entity
-//!   (`edge_whitespace_is_trimmed_so_padded_values_are_the_same_entity`).
-//!
 //! Run with:
 //! ```bash
 //! DATABASE_URL=postgres://... cargo test --test m31_entity_external_id -- --ignored
