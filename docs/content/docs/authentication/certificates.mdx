@@ -488,6 +488,30 @@ exact `renewal_threshold_seconds`, and `idempotent_replay`. Keep the CSR private
 key locally; it never enters Atom. Exact retries return the same certificate.
 The old certificate remains active for the normal renewal overlap window.
 
+The listener also exposes RFC 7030 EST for standards-based firmware and tools:
+
+```text
+GET  /.well-known/est/cacerts
+GET  /.well-known/est/csrattrs
+POST /.well-known/est/simpleenroll
+POST /.well-known/est/simplereenroll
+POST /.well-known/est/serverkeygen
+```
+
+EST requests and responses use the RFC media types and base64 transfer
+encoding. `simpleenroll`, `serverkeygen`, and `csrattrs` accept HTTP Basic with
+the entity UUID and its Atom password credential (or an Atom Bearer token).
+`simplereenroll` accepts only the certificate being replaced in the TLS
+handshake. `serverkeygen` returns a multipart PKCS#8 key and certs-only PKCS#7;
+the key is delivered once and never persisted. `cacerts` is the PKCS#7
+representation of the same database trust bundle as
+`/certs/trust-bundle.pem`.
+
+EST adds no subject selectors: an additional path segment is not mounted, and
+query parameters or headers cannot select an entity, tenant, issuer, or
+profile. Those values are resolved by the same subject-driven enrollment
+service used by the native adapter.
+
 Enable and bind the listener with:
 
 ```text

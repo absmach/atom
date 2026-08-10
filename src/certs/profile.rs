@@ -155,6 +155,10 @@ impl CertificateProfile {
         self.renewal_threshold_seconds
     }
 
+    pub fn permitted_key_algorithms(&self) -> &[KeyAlgorithmRule] {
+        &self.permitted_key_algorithms
+    }
+
     pub fn extended_key_usages(&self) -> &[ExtendedKeyUsage] {
         &self.extended_key_usages
     }
