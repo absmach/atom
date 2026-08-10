@@ -432,6 +432,101 @@ async fn direct_and_descendant_group_scopes_split_the_tree_at_each_level() {
     assert_eq!(total(&data), expected.len() as i64);
 }
 
+/// Group hierarchy scope modes name group objects through the object-group tree,
+/// so looking up a child group must return the direct child and descendant group
+/// policies that cover it.
+#[tokio::test]
+#[ignore]
+async fn object_lookup_includes_group_hierarchy_scopes_for_group_objects() {
+    let pool = common::pool().await;
+    let tenant_id = tenant(&pool).await;
+
+    let root = object_group(&pool, tenant_id).await;
+    let parent = object_group(&pool, tenant_id).await;
+    let child = object_group(&pool, tenant_id).await;
+    set_group_parent(&pool, tenant_id, parent, root).await;
+    set_group_parent(&pool, tenant_id, child, parent).await;
+
+    let child_scope = granted(
+        &pool,
+        tenant_id,
+        BlockSpec::new("group_child_groups", Some(tenant_id)).group(parent),
+    )
+    .await;
+    let descendant_from_parent = granted(
+        &pool,
+        tenant_id,
+        BlockSpec::new("group_descendant_groups", Some(tenant_id)).group(parent),
+    )
+    .await;
+    let descendant_from_root = granted(
+        &pool,
+        tenant_id,
+        BlockSpec::new("group_descendant_groups", Some(tenant_id)).group(root),
+    )
+    .await;
+
+    let sibling_parent = object_group(&pool, tenant_id).await;
+    let unrelated_child_scope = granted(
+        &pool,
+        tenant_id,
+        BlockSpec::new("group_child_groups", Some(tenant_id)).group(sibling_parent),
+    )
+    .await;
+
+    let schema = build_schema(state(pool));
+    let response = schema
+        .execute(authed(format!(
+            r#"{{ directPolicies(objectId: "{child}") {{ total items {{ id }} }} }}"#
+        )))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().expect("json data");
+    let returned = ids(&data);
+
+    for expected in [child_scope, descendant_from_parent, descendant_from_root] {
+        assert!(
+            returned.contains(&expected.to_string()),
+            "expected group hierarchy policy {expected} in {returned:?}"
+        );
+    }
+    assert!(
+        !returned.contains(&unrelated_child_scope.to_string()),
+        "an unrelated parent must not name the child group"
+    );
+    assert_eq!(total(&data), 3);
+
+    let narrowed_away = schema
+        .execute(authed(format!(
+            r#"{{ directPolicies(objectId: "{child}", objectKind: "resource") {{ total items {{ id }} }} }}"#
+        )))
+        .await;
+    assert!(
+        narrowed_away.errors.is_empty(),
+        "{:?}",
+        narrowed_away.errors
+    );
+    let data = narrowed_away.data.into_json().expect("json data");
+    assert_eq!(
+        total(&data),
+        0,
+        "objectKind must narrow implicit group scopes"
+    );
+
+    let matching_type = schema
+        .execute(authed(format!(
+            r#"{{ directPolicies(objectId: "{child}", objectKind: "group", objectType: "group:object") {{ total items {{ id }} }} }}"#
+        )))
+        .await;
+    assert!(
+        matching_type.errors.is_empty(),
+        "{:?}",
+        matching_type.errors
+    );
+    let data = matching_type.data.into_json().expect("json data");
+    assert_eq!(total(&data), 3);
+}
+
 /// Criterion 5. A group block only names the objects of its declared kind and
 /// type, and the co-filters narrow further.
 #[tokio::test]

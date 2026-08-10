@@ -291,7 +291,9 @@ impl PolicyQuery {
     /// * `group_direct_objects` — the object is a direct member of the block's
     ///   object group;
     /// * `group_descendant_objects` — the object is a member of a descendant of
-    ///   the block's object group.
+    ///   the block's object group;
+    /// * `group_child_groups` / `group_descendant_groups` — the object is an
+    ///   object group covered by the block's group hierarchy scope.
     ///
     /// **This is a policy lookup, not effective access.** Blocks that reach the
     /// object without naming it — `platform`, `tenant`, `object_kind` and

@@ -4261,6 +4261,11 @@ const DIRECT_POLICY_OBJECT_CTE: &str = r#"WITH RECURSIVE object_parent_groups(gr
              FROM object_group_resources ogr
              JOIN resources r ON r.id = ogr.resource_id
              WHERE ogr.resource_id = $5::uuid AND r.deleted_at IS NULL
+             UNION ALL
+             SELECT ogh.parent_id, 'group'::text, 'group:object'
+             FROM object_group_hierarchy ogh
+             JOIN object_groups og ON og.id = ogh.child_id
+             WHERE ogh.child_id = $5::uuid AND og.deleted_at IS NULL
            ),
            object_ancestor_groups(group_id, object_kind, object_type) AS (
              SELECT ogh.parent_id, opg.object_kind, opg.object_type
@@ -4275,10 +4280,11 @@ const DIRECT_POLICY_OBJECT_CTE: &str = r#"WITH RECURSIVE object_parent_groups(gr
 /// The reverse-lookup predicate: does this policy's permission block name the
 /// object in `$5`, narrowed by the optional `$6` / `$7` co-filters?
 ///
-/// Only the three scope modes that name a specific object are considered. A
-/// `group_descendant_objects` block matches through *strict* ancestors of the
-/// object's own group, mirroring the PDP: an object directly in the block's
-/// group is the `group_direct_objects` case, not the descendant case.
+/// Only scope modes that name a specific object, or a group object through a
+/// group hierarchy, are considered. A `group_descendant_objects` block matches
+/// through *strict* ancestors of the object's own group, mirroring the PDP: an
+/// object directly in the block's group is the `group_direct_objects` case, not
+/// the descendant case.
 const DIRECT_POLICY_OBJECT_PREDICATE: &str = r#"($5::uuid IS NULL OR EXISTS (
                SELECT 1 FROM permission_blocks pb
                WHERE pb.id = direct_policies.permission_block_id
@@ -4296,6 +4302,25 @@ const DIRECT_POLICY_OBJECT_PREDICATE: &str = r#"($5::uuid IS NULL OR EXISTS (
                          WHERE oag.group_id = pb.group_id
                            AND oag.object_kind = pb.object_kind
                            AND oag.object_type = pb.object_type))
+                   OR (pb.scope_mode = 'group_child_groups'
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND EXISTS (
+                         SELECT 1 FROM object_parent_groups opg
+                         WHERE opg.group_id = pb.group_id
+                           AND opg.object_kind = 'group'))
+                   OR (pb.scope_mode = 'group_descendant_groups'
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND (
+                         EXISTS (
+                           SELECT 1 FROM object_parent_groups opg
+                           WHERE opg.group_id = pb.group_id
+                             AND opg.object_kind = 'group')
+                         OR EXISTS (
+                           SELECT 1 FROM object_ancestor_groups oag
+                           WHERE oag.group_id = pb.group_id
+                             AND oag.object_kind = 'group')))
                  )
              ))"#;
 
@@ -4340,7 +4365,9 @@ fn validate_direct_policy_object_filter(
 /// - `group_direct_objects` — the object is a direct member of the block's
 ///   object group;
 /// - `group_descendant_objects` — the object is a member of a descendant of the
-///   block's object group.
+///   block's object group;
+/// - `group_child_groups` / `group_descendant_groups` — the object is an object
+///   group covered by the block's group hierarchy scope.
 ///
 /// Blocks that reach the object without naming it — `platform`, `tenant`,
 /// `object_kind`, `object_type` — are **not** returned. A caller that reads this
