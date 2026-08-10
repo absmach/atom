@@ -2397,6 +2397,12 @@ pub struct AuthorizedObjectIdsInput {
     pub object_type: Option<String>,
     pub tenant_id: Option<ID>,
     pub q: Option<String>,
+    pub attributes_contains: Option<Value>,
+    pub external_id: Option<String>,
+    pub profile_id: Option<ID>,
+    pub entity_status: Option<GqlEntityStatus>,
+    pub parent_group_id: Option<ID>,
+    pub include_descendants: Option<bool>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
 }
