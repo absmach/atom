@@ -57,6 +57,7 @@ pub struct ListEntities {
     pub kind: Option<EntityKind>,
     pub profile_id: Option<Uuid>,
     pub tenant_id: Option<Uuid>,
+    pub attributes_contains: Option<Value>,
     pub status: Option<EntityStatus>,
     #[serde(default)]
     pub deleted: DeletedFilter,

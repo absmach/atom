@@ -439,6 +439,58 @@ mod tests {
         assert!(arg_names.contains("derivedKind"));
     }
 
+    /// `entities`, `groups` and `resources` all carry a JSONB `attributes`
+    /// column, so all three expose the same containment filter under the same
+    /// name and type. Divergence here is the symmetry bug ATOM-01 fixed.
+    #[tokio::test]
+    async fn entity_group_and_resource_queries_expose_attributes_contains_filter() {
+        let schema = build_schema(test_state());
+
+        let response = schema
+            .execute(Request::new(
+                r#"
+                {
+                  __schema {
+                    queryType {
+                      fields {
+                        name
+                        args {
+                          name
+                          type { name }
+                        }
+                      }
+                    }
+                  }
+                }
+                "#,
+            ))
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().expect("json data");
+        let query_fields = data["__schema"]["queryType"]["fields"]
+            .as_array()
+            .expect("query fields");
+
+        for name in ["entities", "groups", "resources"] {
+            let field = query_fields
+                .iter()
+                .find(|field| field["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("missing query field {name}"));
+            let filter = field["args"]
+                .as_array()
+                .expect("args")
+                .iter()
+                .find(|arg| arg["name"].as_str() == Some("attributesContains"))
+                .unwrap_or_else(|| panic!("{name} is missing the attributesContains filter"));
+            assert_eq!(
+                filter["type"]["name"].as_str(),
+                Some("JSON"),
+                "{name}.attributesContains must be an optional JSON object"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn schema_enum_values_match_atom_storage_values() {
         let schema = build_schema(test_state());
