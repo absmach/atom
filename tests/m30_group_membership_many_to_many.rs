@@ -1,10 +1,10 @@
-//! ATOM-04 — many-to-many object group membership.
+//! Many-to-many object group membership.
 //!
 //! An entity or resource may belong to any number of object groups. The
-//! security-relevant case is the fourth acceptance criterion: a grant scoped to
-//! *either* of an object's groups must authorize it. Before this change the
-//! evaluation path read one arbitrary membership row through `fetch_optional`,
-//! so grants held through the object's other groups were silently ignored —
+//! security-relevant case is that a grant scoped to *either* of an object's
+//! groups must authorize it. A single-membership evaluation path would read
+//! one arbitrary membership row through `fetch_optional`, so grants held
+//! through the object's other groups would be silently ignored —
 //! non-deterministically, since which row won was unspecified.
 //!
 //! ```bash
@@ -246,7 +246,7 @@ async fn authorized(
     .expect("authorized listing")
 }
 
-// ─── Criteria 1 & 2 — an object belongs to several groups ─────────────────────
+// ─── An object belongs to several groups ───────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -325,7 +325,7 @@ async fn resource_belongs_to_every_group_it_is_added_to() {
     assert_eq!(groups, expected);
 }
 
-// ─── Criterion 3 — listings de-duplicate and count once ───────────────────────
+// ─── Listings de-duplicate and count once ──────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -419,12 +419,12 @@ async fn multi_group_membership_does_not_duplicate_listings_or_inflate_total() {
     );
 }
 
-// ─── Criterion 4 — a grant via EITHER group authorizes the object ─────────────
+// ─── A grant via EITHER group authorizes the object ───────────────────────────
 
-/// **The reason this PRD exists.** A device in G1 and G2, with the grant held
+/// The security-critical case: a device in G1 and G2, with the grant held
 /// only through G2, must be authorized — and symmetrically when the grant is
-/// held only through G1. The old evaluation path kept one arbitrary membership
-/// row, so one of these two directions failed depending on row order.
+/// held only through G1. An evaluation path that keeps one arbitrary
+/// membership row fails one of these two directions depending on row order.
 #[tokio::test]
 #[ignore]
 async fn grant_via_either_group_authorizes_the_entity() {
@@ -575,7 +575,7 @@ async fn grant_via_either_group_authorizes_the_resource() {
     }
 }
 
-// ─── Criterion 5 — removing one membership leaves the others intact ───────────
+// ─── Removing one membership leaves the others intact ─────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -650,7 +650,7 @@ async fn removing_one_group_leaves_the_other_membership_and_its_grants() {
     assert!(!pdp_allows(&pool, via_b, "entity", device).await);
 }
 
-// ─── Criterion 6 — descendant traversal across two subtrees ───────────────────
+// ─── Descendant traversal across two subtrees ──────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -710,7 +710,7 @@ async fn descendant_traversal_covers_every_subtree_the_object_sits_in() {
     );
 }
 
-// ─── Criterion 7 — re-adding is idempotent ────────────────────────────────────
+// ─── Re-adding is idempotent ────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -751,7 +751,7 @@ async fn re_adding_an_existing_membership_is_idempotent() {
     assert_eq!(resource_rows, 1);
 }
 
-// ─── Criterion 8 — cross-tenant membership stays rejected ─────────────────────
+// ─── Cross-tenant membership stays rejected ────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -866,7 +866,7 @@ async fn parent_group_id_attribute_is_rejected_on_create_and_update() {
     );
 }
 
-// ─── Criterion 9 — the migration preserves existing single memberships ────────
+// ─── The migration preserves existing single memberships ──────────────────────
 
 /// Seeds single memberships against the pre-change schema (migrations 001–004),
 /// then applies 005 and asserts every row survives unchanged, in a scratch

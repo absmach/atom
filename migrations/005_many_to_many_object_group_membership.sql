@@ -1,4 +1,4 @@
--- ATOM-04 — object group membership becomes many-to-many.
+-- Object group membership becomes many-to-many.
 --
 -- `object_group_entities` / `object_group_resources` keyed membership by the
 -- member alone, so an entity or resource could belong to at most one object

@@ -52,9 +52,9 @@ pub(crate) struct ProtectedObject {
     pub tenant_id: Option<Uuid>,
     pub attributes: Value,
     /// Every object group the object belongs to directly. Membership is
-    /// many-to-many (ATOM-04), so a group scope must be matched against the
-    /// whole set — taking one arbitrary group would silently drop grants held
-    /// through the others. Groups themselves still have at most one parent
+    /// many-to-many, so a group scope must be matched against the whole set —
+    /// taking one arbitrary group would silently drop grants held through the
+    /// others. Groups themselves still have at most one parent
     /// (the hierarchy stays a tree), so for a group object this holds 0 or 1 id.
     pub parent_group_ids: Vec<Uuid>,
     /// Recursive ancestors of every id in `parent_group_ids`, de-duplicated.
@@ -1364,9 +1364,9 @@ mod tests {
         ));
     }
 
-    /// Criterion 4 in miniature: with membership in two groups, a grant naming
-    /// *either* of them must match. Before ATOM-04 the target carried one group,
-    /// so a grant through the other was silently invisible.
+    /// With membership in two groups, a grant naming *either* of them must
+    /// match — taking only one group would make a grant through the other
+    /// silently invisible.
     #[test]
     fn group_object_type_matches_any_of_several_groups() {
         let group_a = Uuid::new_v4();
@@ -1866,8 +1866,8 @@ mod db_tests {
                 ancestors: vec![ancestor],
                 expected: false,
             },
-            // Many-to-many membership (ATOM-04): a direct-group scope naming
-            // *either* of the object's groups matches, in Rust and in SQL alike.
+            // A direct-group scope naming *either* of the object's groups
+            // matches, in Rust and in SQL alike.
             Case {
                 kind: ScopeKind::GroupObjectType,
                 text: "group_object_type",
