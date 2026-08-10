@@ -44,12 +44,10 @@ jobs:
           sudo apt-get install -y postgresql-client softhsm2
           PKCS11_ROOT=/tmp/atom-softhsm
           TOKEN_DIR="$PKCS11_ROOT/tokens"
-          BACKUP_DIR="$PKCS11_ROOT/tokens.backup"
           mkdir -p "$TOKEN_DIR"
           printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$TOKEN_DIR" > "$PKCS11_ROOT/softhsm2.conf"
           export SOFTHSM2_CONF="$PKCS11_ROOT/softhsm2.conf"
           softhsm2-util --init-token --free --label atom-pki-ci --so-pin 12345678 --pin 123456
-          cp -a "$TOKEN_DIR" "$BACKUP_DIR"
           MODULE_PATH="$(dpkg -L libsofthsm2 | awk '/libsofthsm2[.]so$/{print; exit}')"
           test -n "$MODULE_PATH"
           {
@@ -122,15 +120,25 @@ jobs:
             # fail CI on a compile error; run them manually per their own
             # module docs when broker infra is available.
             case "$name" in
-              m27_live_amqp_delivery|m28_amqp_mtls_local_principal) continue ;;
+              m27_live_amqp_delivery|m28_amqp_mtls_local_principal|m42_pki_pkcs11) continue ;;
             esac
             run_one --test "$name"
           done
+          # Leave the PKCS#11 integration database and populated token in place
+          # for the recovery proof in the following step.
+          run_one --test m42_pki_pkcs11
 
       - name: Exercise PKCS#11 backup recovery runbook
         run: |
           set -euo pipefail
           PKCS11_ROOT=/tmp/atom-softhsm
-          mv "$PKCS11_ROOT/tokens" "$PKCS11_ROOT/tokens.after-tests"
+          cp -a "$PKCS11_ROOT/tokens" "$PKCS11_ROOT/tokens.backup"
+          mv "$PKCS11_ROOT/tokens" "$PKCS11_ROOT/tokens.lost"
+          test ! -e "$PKCS11_ROOT/tokens"
           cp -a "$PKCS11_ROOT/tokens.backup" "$PKCS11_ROOT/tokens"
-          softhsm2-util --show-slots | grep -F 'Label:            atom-pki-ci'
+          softhsm2-util --show-slots | grep -F 'atom-pki-ci'
+          DATABASE_URL="postgres://atom:atom@localhost:5432/atom_test" \
+            ATOM_PKI_PKCS11_RECOVERY_CHECK=1 \
+            cargo test --test m42_pki_pkcs11 \
+              softhsm_restored_backup_can_sign_with_existing_authority -- \
+              --include-ignored --exact --test-threads=1

@@ -1,8 +1,8 @@
 //! Atom-owned CA signing boundary.
 //!
-//! The encrypted-database provider implemented here is deliberately independent
-//! of certificate issuance. Later providers (PKCS#11, KMS, or the legacy file
-//! bridge) can implement [`AuthorityKeyProvider`] without changing public APIs.
+//! The encrypted-database and PKCS#11 providers implemented here are deliberately
+//! independent of certificate issuance. Later providers (KMS or an isolated
+//! signer) can implement [`AuthorityKeyProvider`] without changing public APIs.
 
 use std::fmt;
 

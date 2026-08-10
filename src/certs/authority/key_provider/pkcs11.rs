@@ -538,9 +538,11 @@ impl Pkcs11KeyProvider {
         context: AuthorityKeyContext,
         result: Result<T, AuthorityKeyProviderError>,
     ) -> Result<T, AuthorityKeyProviderError> {
+        let operation_id = uuid::Uuid::new_v4();
         tracing::debug!(
             provider = PROVIDER_NAME,
             operation,
+            operation_id = %operation_id,
             authority_id = %context.authority_id,
             outcome = if result.is_ok() { "success" } else { "error" },
             "PKI provider operation completed"
