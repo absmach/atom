@@ -18,6 +18,7 @@ use atom::{
         pki_core::PkiArtifactSigner,
     },
     config::{PkiCaKeyConfig, PkiCaProvisioningBackend, PkiPkcs11Config, SecretBytes, SecretText},
+    error::AppError,
 };
 use cryptoki::{
     context::{CInitializeArgs, CInitializeFlags, Pkcs11},
@@ -212,11 +213,16 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .execute(&pool)
         .await
         .expect("inject mismatched public certificate");
-    assert!(validate_startup(&pool, &app_config.pki_ca_keys)
+    let error = validate_startup(&pool, &app_config.pki_ca_keys)
         .await
-        .expect_err("wrong key/certificate pair")
-        .to_string()
-        .contains("does not match its certificate"));
+        .expect_err("wrong key/certificate pair");
+    let AppError::Internal(error) = error else {
+        panic!("certificate mismatch must fail as an internal startup error");
+    };
+    assert_eq!(
+        error.to_string(),
+        "PKCS#11 authority key does not match its certificate"
+    );
     sqlx::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
         .bind(issuer.id)
         .bind(original_certificate)
