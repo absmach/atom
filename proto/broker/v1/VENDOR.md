@@ -4,11 +4,11 @@
 `proto/auth/v1/auth.proto`. Atom implements `AuthService` so a broker can call
 it directly, with no adapter service in between.
 
-| | |
-|---|---|
-| Source | https://github.com/absmach/fluxmq |
-| Path | `proto/auth/v1/auth.proto` |
-| Pinned ref | see `REF` in this directory |
+|            |                                   |
+| ---------- | --------------------------------- |
+| Source     | https://github.com/absmach/fluxmq |
+| Path       | `proto/auth/v1/auth.proto`        |
+| Pinned ref | see `REF` in this directory       |
 
 ## Why it is byte-identical
 
