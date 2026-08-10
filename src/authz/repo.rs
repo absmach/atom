@@ -647,8 +647,12 @@ pub async fn add_resource_to_object_group_with_audit(
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    add_resource_to_object_group_in_tx(&mut tx, resource_id, group_id).await?;
+    let inserted = add_resource_to_object_group_in_tx(&mut tx, resource_id, group_id).await?;
     let resource = fetch_resource(&mut *tx, resource_id).await?;
+    if !inserted {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(resource);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: resource.tenant_id,
@@ -729,7 +733,7 @@ async fn add_resource_to_object_group_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     resource_id: Uuid,
     group_id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     use sqlx::Row;
     let resource_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
@@ -774,7 +778,7 @@ async fn add_resource_to_object_group_in_tx(
     }
     // Additive: membership is a set, so re-adding an existing membership is an
     // idempotent no-op rather than a silent move between groups.
-    sqlx::query(
+    let result = sqlx::query(
         r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
            VALUES ($1, $2, $3)
            ON CONFLICT (group_id, resource_id) DO NOTHING"#,
@@ -785,7 +789,7 @@ async fn add_resource_to_object_group_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 /// `group_id = Some(..)` removes one membership; `None` removes them all. The
