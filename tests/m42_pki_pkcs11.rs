@@ -274,11 +274,12 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
     let artifact_signature = PkiArtifactSigner::from_managed_authority(&issuer, &rotated_keys)
         .expect("retained PKCS#11 artifact signer")
         .sign_ocsp_response_data(artifact_message)
-        .expect("retained artifact signature");
+        .expect("retained artifact signature")
+        .into_bytes();
     verify_certificate_signature(
         original_certificate,
         artifact_message,
-        &artifact_signature.bytes,
+        &artifact_signature,
     );
 }
 
@@ -315,8 +316,9 @@ async fn softhsm_restored_backup_can_sign_with_existing_authority() {
     let signature = PkiArtifactSigner::from_managed_authority(issuer, &ca_keys)
         .expect("restored artifact signer")
         .sign_ocsp_response_data(message)
-        .expect("post-recovery signature");
-    verify_certificate_signature(certificate_pem, message, &signature.bytes);
+        .expect("post-recovery signature")
+        .into_bytes();
+    verify_certificate_signature(certificate_pem, message, &signature);
 }
 
 fn verify_token_object_policy(config: &PkiPkcs11Config, key_reference: &str) {
