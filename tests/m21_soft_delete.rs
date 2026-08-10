@@ -606,6 +606,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             kind: None,
             profile_id: None,
             tenant_id: None,
+            attributes_contains: None,
             status: None,
             deleted: DeletedFilter::Live,
             parent_group_id: None,
@@ -627,6 +628,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             kind: None,
             profile_id: None,
             tenant_id: None,
+            attributes_contains: None,
             status: None,
             deleted: DeletedFilter::Deleted,
             parent_group_id: None,
@@ -658,6 +660,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         ListGroups {
             q: Some(group_name.clone()),
             tenant_id: None,
+            attributes_contains: None,
             group_type: Some("object".to_string()),
             parent_id: None,
             status: None,
@@ -674,6 +677,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         ListGroups {
             q: Some(group_name),
             tenant_id: None,
+            attributes_contains: None,
             group_type: Some("object".to_string()),
             parent_id: None,
             status: None,
