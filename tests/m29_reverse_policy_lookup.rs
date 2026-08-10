@@ -432,8 +432,8 @@ async fn direct_and_descendant_group_scopes_split_the_tree_at_each_level() {
     assert_eq!(total(&data), expected.len() as i64);
 }
 
-/// Group hierarchy scope modes name group objects through the object-group tree,
-/// so looking up a child group must return the direct child and descendant group
+/// `group` and group hierarchy scope modes name group objects, so looking up a
+/// child group must return the direct group, direct child, and descendant group
 /// policies that cover it.
 #[tokio::test]
 #[ignore]
@@ -447,6 +447,12 @@ async fn object_lookup_includes_group_hierarchy_scopes_for_group_objects() {
     set_group_parent(&pool, tenant_id, parent, root).await;
     set_group_parent(&pool, tenant_id, child, parent).await;
 
+    let direct_group = granted(
+        &pool,
+        tenant_id,
+        BlockSpec::new("group", Some(tenant_id)).group(child),
+    )
+    .await;
     let child_scope = granted(
         &pool,
         tenant_id,
@@ -473,6 +479,12 @@ async fn object_lookup_includes_group_hierarchy_scopes_for_group_objects() {
         BlockSpec::new("group_child_groups", Some(tenant_id)).group(sibling_parent),
     )
     .await;
+    let unrelated_direct_group = granted(
+        &pool,
+        tenant_id,
+        BlockSpec::new("group", Some(tenant_id)).group(sibling_parent),
+    )
+    .await;
 
     let schema = build_schema(state(pool));
     let response = schema
@@ -484,17 +496,24 @@ async fn object_lookup_includes_group_hierarchy_scopes_for_group_objects() {
     let data = response.data.into_json().expect("json data");
     let returned = ids(&data);
 
-    for expected in [child_scope, descendant_from_parent, descendant_from_root] {
+    for expected in [
+        direct_group,
+        child_scope,
+        descendant_from_parent,
+        descendant_from_root,
+    ] {
         assert!(
             returned.contains(&expected.to_string()),
             "expected group hierarchy policy {expected} in {returned:?}"
         );
     }
-    assert!(
-        !returned.contains(&unrelated_child_scope.to_string()),
-        "an unrelated parent must not name the child group"
-    );
-    assert_eq!(total(&data), 3);
+    for unexpected in [unrelated_child_scope, unrelated_direct_group] {
+        assert!(
+            !returned.contains(&unexpected.to_string()),
+            "an unrelated group must not name the child group"
+        );
+    }
+    assert_eq!(total(&data), 4);
 
     let narrowed_away = schema
         .execute(authed(format!(
@@ -524,7 +543,7 @@ async fn object_lookup_includes_group_hierarchy_scopes_for_group_objects() {
         matching_type.errors
     );
     let data = matching_type.data.into_json().expect("json data");
-    assert_eq!(total(&data), 3);
+    assert_eq!(total(&data), 4);
 }
 
 /// Criterion 5. A group block only names the objects of its declared kind and

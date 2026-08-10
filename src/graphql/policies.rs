@@ -288,6 +288,7 @@ impl PolicyQuery {
     /// permission block **names** the object:
     ///
     /// * `object` — the block targets that object id;
+    /// * `group` — the block targets an object group id directly;
     /// * `group_direct_objects` — the object is a direct member of the block's
     ///   object group;
     /// * `group_descendant_objects` — the object is a member of a descendant of

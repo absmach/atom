@@ -4280,11 +4280,11 @@ const DIRECT_POLICY_OBJECT_CTE: &str = r#"WITH RECURSIVE object_parent_groups(gr
 /// The reverse-lookup predicate: does this policy's permission block name the
 /// object in `$5`, narrowed by the optional `$6` / `$7` co-filters?
 ///
-/// Only scope modes that name a specific object, or a group object through a
-/// group hierarchy, are considered. A `group_descendant_objects` block matches
-/// through *strict* ancestors of the object's own group, mirroring the PDP: an
-/// object directly in the block's group is the `group_direct_objects` case, not
-/// the descendant case.
+/// Only scope modes that name a specific object, or a group object directly /
+/// through a group hierarchy, are considered. A `group_descendant_objects` block
+/// matches through *strict* ancestors of the object's own group, mirroring the
+/// PDP: an object directly in the block's group is the `group_direct_objects`
+/// case, not the descendant case.
 const DIRECT_POLICY_OBJECT_PREDICATE: &str = r#"($5::uuid IS NULL OR EXISTS (
                SELECT 1 FROM permission_blocks pb
                WHERE pb.id = direct_policies.permission_block_id
@@ -4292,6 +4292,14 @@ const DIRECT_POLICY_OBJECT_PREDICATE: &str = r#"($5::uuid IS NULL OR EXISTS (
                  AND ($7::text IS NULL OR pb.object_type IS NULL OR pb.object_type = $7)
                  AND (
                    (pb.scope_mode = 'object' AND pb.object_id = $5)
+                   OR (pb.scope_mode = 'group'
+                       AND pb.group_id = $5
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND EXISTS (
+                         SELECT 1 FROM object_groups og
+                         WHERE og.id = $5
+                           AND og.deleted_at IS NULL))
                    OR (pb.scope_mode = 'group_direct_objects' AND EXISTS (
                          SELECT 1 FROM object_parent_groups opg
                          WHERE opg.group_id = pb.group_id
@@ -4362,6 +4370,7 @@ fn validate_direct_policy_object_filter(
 /// permission block *names* that object:
 ///
 /// - `object` — the block targets the object id directly;
+/// - `group` — the block targets an object group id directly;
 /// - `group_direct_objects` — the object is a direct member of the block's
 ///   object group;
 /// - `group_descendant_objects` — the object is a member of a descendant of the
