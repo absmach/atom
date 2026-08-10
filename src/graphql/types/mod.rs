@@ -232,6 +232,12 @@ impl Entity {
         self.0.alias.as_deref()
     }
 
+    /// Identifier assigned outside Atom (serial number, MAC, SKU). Returned
+    /// byte-identical to what was stored.
+    async fn external_id(&self) -> Option<&str> {
+        self.0.external_id.as_deref()
+    }
+
     async fn tenant_id(&self) -> Option<ID> {
         self.0.tenant_id.map(id)
     }
@@ -1636,6 +1642,10 @@ pub struct CreateEntityInput {
     pub kind: Option<GqlEntityKind>,
     pub name: String,
     pub alias: Option<String>,
+    /// Identifier assigned outside Atom (serial number, MAC, SKU). Opaque and
+    /// unvalidated, case-sensitive, trimmed, unique per tenant among live
+    /// entities.
+    pub external_id: Option<String>,
     pub tenant_id: Option<ID>,
     pub attributes: Option<Value>,
 }
@@ -1645,6 +1655,8 @@ pub struct UpdateEntityInput {
     pub name: Option<String>,
     pub kind: Option<GqlEntityKind>,
     pub alias: MaybeUndefined<String>,
+    /// Omit to leave unchanged, or pass `null` to clear.
+    pub external_id: MaybeUndefined<String>,
     pub tenant_id: Option<ID>,
     pub profile_id: Option<ID>,
     pub profile_version_id: Option<ID>,

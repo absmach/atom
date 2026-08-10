@@ -11,6 +11,10 @@ pub struct Entity {
     pub kind: EntityKind,
     pub name: String,
     pub alias: Option<String>,
+    /// Identifier assigned outside Atom (serial number, MAC, SKU). Opaque,
+    /// case-sensitive, unique per tenant among live rows. See
+    /// [`crate::models::external_id`].
+    pub external_id: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub profile_id: Option<Uuid>,
     pub profile_version_id: Option<Uuid>,
@@ -30,6 +34,7 @@ pub struct CreateEntity {
     pub profile_version_id: Option<Uuid>,
     pub name: String,
     pub alias: Option<String>,
+    pub external_id: Option<String>,
     pub tenant_id: Option<Uuid>,
     #[serde(default)]
     pub attributes: Value,
@@ -44,6 +49,12 @@ pub struct UpdateEntity {
         deserialize_with = "crate::models::alias::deserialize_alias_update"
     )]
     pub alias: Option<Option<String>>,
+    /// Patch semantics: `None` leaves it unchanged, `Some(None)` clears it.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::external_id::deserialize_external_id_update"
+    )]
+    pub external_id: Option<Option<String>>,
     pub tenant_id: Option<Uuid>,
     pub profile_id: Option<Uuid>,
     pub profile_version_id: Option<Uuid>,
@@ -55,6 +66,9 @@ pub struct UpdateEntity {
 pub struct ListEntities {
     pub q: Option<String>,
     pub kind: Option<EntityKind>,
+    /// Exact-match filter (case-sensitive, trimmed). Not part of the `q`
+    /// substring search — an external identifier is looked up, not browsed.
+    pub external_id: Option<String>,
     pub profile_id: Option<Uuid>,
     pub tenant_id: Option<Uuid>,
     pub attributes_contains: Option<Value>,

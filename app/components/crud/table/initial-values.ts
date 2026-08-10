@@ -80,6 +80,7 @@ export function entityFormInitialValues(row: Row): EntityFormInitialValues {
     id: String(row.id),
     name: typeof row.name === "string" ? row.name : "",
     alias: typeof row.alias === "string" ? row.alias : "",
+    externalId: typeof row.externalId === "string" ? row.externalId : "",
     kind: (ENTITY_KINDS as readonly string[]).includes(rawKind)
       ? (rawKind as EntityFormInitialValues["kind"])
       : "human",

@@ -106,6 +106,7 @@ impl ResourceQuery {
                 tenant_id,
                 q,
                 attributes_contains,
+                external_id: None,
                 profile_id: None,
                 entity_status: None,
                 group_type: None,

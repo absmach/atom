@@ -671,6 +671,7 @@ async fn list_entities_without_attributes_contains_is_unfiltered() {
         atom::models::entity::ListEntities {
             q: None,
             kind: None,
+            external_id: None,
             profile_id: None,
             tenant_id: Some(tenant_id),
             attributes_contains: None,
