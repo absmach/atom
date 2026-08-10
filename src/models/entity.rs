@@ -71,6 +71,7 @@ pub struct ListEntities {
     pub external_id: Option<String>,
     pub profile_id: Option<Uuid>,
     pub tenant_id: Option<Uuid>,
+    pub attributes_contains: Option<Value>,
     pub status: Option<EntityStatus>,
     #[serde(default)]
     pub deleted: DeletedFilter,

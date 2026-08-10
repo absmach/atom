@@ -44,6 +44,7 @@ pub struct UpdateGroup {
 pub struct ListGroups {
     pub q: Option<String>,
     pub tenant_id: Option<Uuid>,
+    pub attributes_contains: Option<Value>,
     pub group_type: Option<String>,
     pub parent_id: Option<Uuid>,
     pub status: Option<EntityStatus>,

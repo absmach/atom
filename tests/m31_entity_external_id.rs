@@ -684,6 +684,7 @@ async fn the_admin_deleted_listing_filters_by_external_id_too() {
             external_id: Some(format!(" {serial} ")),
             profile_id: None,
             tenant_id: Some(tenant_id),
+            attributes_contains: None,
             status: None,
             deleted: DeletedFilter::Deleted,
             parent_group_id: None,

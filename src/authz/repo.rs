@@ -56,7 +56,7 @@ pub async fn create_resource_with_audit(
     } else {
         req.attributes
     };
-    let parent_group_id = parent_group_id_from_attrs(&attrs)?;
+    reject_parent_group_attribute(&attrs)?;
     let alias = crate::models::alias::validate_alias_opt(req.alias)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
@@ -76,9 +76,6 @@ pub async fn create_resource_with_audit(
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
-    if let Some(parent_group_id) = parent_group_id {
-        set_resource_parent_group_in_tx(&mut tx, resource.id, parent_group_id).await?;
-    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: resource.tenant_id,
@@ -166,11 +163,13 @@ pub async fn list_resources(
            SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes,
                   r.deleted_at, r.deleted_by, r.created_at, r.updated_at
            FROM resources r
-           LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
-             AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+             AND ($4::uuid IS NULL OR EXISTS (
+                     SELECT 1 FROM group_resource_parents grp
+                     WHERE grp.resource_id = r.id
+                       AND grp.group_id IN (SELECT id FROM target_groups)))
              AND ($9::jsonb IS NULL OR r.attributes @> $9::jsonb)
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND r.deleted_at IS NULL)
@@ -202,11 +201,13 @@ pub async fn list_resources(
            )
            SELECT COUNT(*)
            FROM resources r
-           LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
              AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
-             AND ($4::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+             AND ($4::uuid IS NULL OR EXISTS (
+                     SELECT 1 FROM group_resource_parents grp
+                     WHERE grp.resource_id = r.id
+                       AND grp.group_id IN (SELECT id FROM target_groups)))
              AND ($7::jsonb IS NULL OR r.attributes @> $7::jsonb)
              AND ($6::text = 'all'
                   OR ($6::text = 'live' AND r.deleted_at IS NULL)
@@ -234,12 +235,9 @@ pub async fn update_resource_with_audit(
     req: UpdateResource,
     updated_fields: Vec<&'static str>,
 ) -> Result<Resource, AppError> {
-    let parent_group_id = req
-        .attributes
-        .as_ref()
-        .and_then(|attrs| attrs.get("parent_group_id"))
-        .map(parent_group_id_from_value)
-        .transpose()?;
+    if let Some(attrs) = req.attributes.as_ref() {
+        reject_parent_group_attribute(attrs)?;
+    }
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
@@ -290,14 +288,6 @@ pub async fn update_resource_with_audit(
         sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
         other => AppError::Database(other),
     })?;
-    if let Some(parent_group_id) = parent_group_id {
-        match parent_group_id {
-            Some(parent_group_id) => {
-                set_resource_parent_group_in_tx(&mut tx, resource.id, parent_group_id).await?;
-            }
-            None => clear_resource_parent_group_in_tx(&mut tx, resource.id).await?,
-        }
-    }
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,
         tenant_id: resource.tenant_id,
@@ -624,26 +614,32 @@ pub async fn resolve_alias(
     })
 }
 
-pub async fn get_resource_parent_group(
+pub async fn get_resource_object_groups(
     pool: &PgPool,
     resource_id: Uuid,
-) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT group_id FROM group_resource_parents WHERE resource_id = $1")
-        .bind(resource_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_err)
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        r#"SELECT grp.group_id
+           FROM group_resource_parents grp
+           JOIN object_groups g ON g.id = grp.group_id AND g.deleted_at IS NULL
+           WHERE grp.resource_id = $1
+           ORDER BY grp.created_at, grp.group_id"#,
+    )
+    .bind(resource_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
 
-pub async fn set_resource_parent_group(
+pub async fn add_resource_to_object_group(
     pool: &PgPool,
     resource_id: Uuid,
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
-    set_resource_parent_group_with_audit(pool, false, None, resource_id, group_id).await
+    add_resource_to_object_group_with_audit(pool, false, None, resource_id, group_id).await
 }
 
-pub async fn set_resource_parent_group_with_audit(
+pub async fn add_resource_to_object_group_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
@@ -651,53 +647,93 @@ pub async fn set_resource_parent_group_with_audit(
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    set_resource_parent_group_in_tx(&mut tx, resource_id, group_id).await?;
+    let inserted = add_resource_to_object_group_in_tx(&mut tx, resource_id, group_id).await?;
     let resource = fetch_resource(&mut *tx, resource_id).await?;
+    if !inserted {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(resource);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: resource.tenant_id,
         target_kind: "resource",
         target_id: Some(resource_id),
-        event: "resource.parent_group.set",
+        event: "resource.object_group.add",
     };
     let details = serde_json::json!({ "group_id": group_id });
     crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(resource)
 }
 
-pub async fn clear_resource_parent_group(
+/// Remove the resource from **one** group, leaving its other memberships (and
+/// the grants that flow through them) intact.
+pub async fn remove_resource_from_object_group(
     pool: &PgPool,
     resource_id: Uuid,
+    group_id: Uuid,
 ) -> Result<Resource, AppError> {
-    clear_resource_parent_group_with_audit(pool, false, None, resource_id).await
+    remove_resource_from_object_group_with_audit(pool, false, None, resource_id, group_id).await
 }
 
-pub async fn clear_resource_parent_group_with_audit(
+pub async fn remove_resource_from_object_group_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     resource_id: Uuid,
+    group_id: Uuid,
 ) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    clear_resource_parent_group_in_tx(&mut tx, resource_id).await?;
+    delete_resource_object_groups_in_tx(&mut tx, resource_id, Some(group_id)).await?;
     let resource = fetch_resource(&mut *tx, resource_id).await?;
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: resource.tenant_id,
         target_kind: "resource",
         target_id: Some(resource_id),
-        event: "resource.parent_group.clear",
+        event: "resource.object_group.remove",
+    };
+    let details = serde_json::json!({ "group_id": group_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    Ok(resource)
+}
+
+/// Remove the resource from **every** group it belongs to. Distinct from
+/// [`remove_resource_from_object_group`] on purpose: with many-to-many
+/// membership "clear the group" is ambiguous, so each caller states which it
+/// means.
+pub async fn clear_resource_object_groups(
+    pool: &PgPool,
+    resource_id: Uuid,
+) -> Result<Resource, AppError> {
+    clear_resource_object_groups_with_audit(pool, false, None, resource_id).await
+}
+
+pub async fn clear_resource_object_groups_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    resource_id: Uuid,
+) -> Result<Resource, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    delete_resource_object_groups_in_tx(&mut tx, resource_id, None).await?;
+    let resource = fetch_resource(&mut *tx, resource_id).await?;
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: resource.tenant_id,
+        target_kind: "resource",
+        target_id: Some(resource_id),
+        event: "resource.object_groups.clear",
     };
     let details = serde_json::json!({});
     crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(resource)
 }
 
-async fn set_resource_parent_group_in_tx(
+async fn add_resource_to_object_group_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     resource_id: Uuid,
     group_id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     use sqlx::Row;
     let resource_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
@@ -740,13 +776,12 @@ async fn set_resource_parent_group_in_tx(
             "resource and parent group must belong to the same tenant",
         ));
     }
-    sqlx::query(
+    // Additive: membership is a set, so re-adding an existing membership is an
+    // idempotent no-op rather than a silent move between groups.
+    let result = sqlx::query(
         r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
            VALUES ($1, $2, $3)
-           ON CONFLICT (resource_id) DO UPDATE
-           SET group_id = EXCLUDED.group_id,
-               tenant_id = EXCLUDED.tenant_id,
-               updated_at = now()"#,
+           ON CONFLICT (group_id, resource_id) DO NOTHING"#,
     )
     .bind(group_id)
     .bind(resource_id)
@@ -754,12 +789,16 @@ async fn set_resource_parent_group_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
-async fn clear_resource_parent_group_in_tx(
+/// `group_id = Some(..)` removes one membership; `None` removes them all. The
+/// two callers name which they mean, so neither can inherit the other's
+/// behaviour by accident.
+async fn delete_resource_object_groups_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     resource_id: Uuid,
+    group_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
@@ -790,30 +829,32 @@ async fn clear_resource_parent_group_in_tx(
             "resource {resource_id} not found"
         )));
     }
-    sqlx::query("DELETE FROM object_group_resources WHERE resource_id = $1")
-        .bind(resource_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_err)?;
+    sqlx::query(
+        r#"DELETE FROM object_group_resources
+           WHERE resource_id = $1 AND ($2::uuid IS NULL OR group_id = $2)"#,
+    )
+    .bind(resource_id)
+    .bind(group_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
     Ok(())
 }
 
-fn parent_group_id_from_attrs(attrs: &Value) -> Result<Option<Uuid>, AppError> {
-    attrs
-        .get("parent_group_id")
-        .map(parent_group_id_from_value)
-        .transpose()
-        .map(Option::flatten)
-}
-
-fn parent_group_id_from_value(value: &Value) -> Result<Option<Uuid>, AppError> {
-    match value.as_str().map(str::trim) {
-        Some("") | None => Ok(None),
-        Some(raw) => raw
-            .parse::<Uuid>()
-            .map(Some)
-            .map_err(|_| AppError::bad_request("parent_group_id must be a UUID")),
+/// Object group membership is a set, and a scalar attribute cannot express one.
+/// The attribute write path is gone: membership is mutated only through the
+/// explicit `addResourceToObjectGroup` / `removeResourceFromObjectGroup` /
+/// `clearResourceObjectGroups` mutations. Rejecting the attribute rather than
+/// ignoring it keeps the break loud — a caller that still sends it would
+/// otherwise believe it had placed the resource in a group.
+fn reject_parent_group_attribute(attrs: &Value) -> Result<(), AppError> {
+    if attrs.get("parent_group_id").is_some() {
+        return Err(AppError::bad_request(
+            "the parent_group_id attribute is no longer supported; \
+             use addResourceToObjectGroup / removeResourceFromObjectGroup",
+        ));
     }
+    Ok(())
 }
 
 // ─── Roles ────────────────────────────────────────────────────────────────────
@@ -4239,14 +4280,152 @@ pub async fn create_direct_policy(
     create_direct_policy_with_audit(pool, false, None, req).await
 }
 
+/// Resolves the object's own object groups and every ancestor of those
+/// groups, carrying `(object_kind, object_type)` in the shape a permission
+/// block records it, so a block's declared scope can be compared the way the
+/// PDP compares it (`grant_scope_matches`, migration 001).
+///
+/// Anchored at the object and walks *upward*, so cost is bounded by tree
+/// depth, not block count. The membership joins return every matching row —
+/// an object in several groups must produce a match for each.
+const DIRECT_POLICY_OBJECT_CTE: &str = r#"WITH RECURSIVE object_parent_groups(group_id, object_kind, object_type) AS (
+             SELECT oge.group_id, 'entity'::text, 'entity:' || e.kind
+             FROM object_group_entities oge
+             JOIN entities e ON e.id = oge.entity_id
+             WHERE oge.entity_id = $5::uuid AND e.deleted_at IS NULL
+             UNION ALL
+             SELECT ogr.group_id, 'resource'::text, 'resource:' || r.kind
+             FROM object_group_resources ogr
+             JOIN resources r ON r.id = ogr.resource_id
+             WHERE ogr.resource_id = $5::uuid AND r.deleted_at IS NULL
+             UNION ALL
+             SELECT ogh.parent_id, 'group'::text, 'group:object'
+             FROM object_group_hierarchy ogh
+             JOIN object_groups og ON og.id = ogh.child_id
+             WHERE ogh.child_id = $5::uuid AND og.deleted_at IS NULL
+           ),
+           object_ancestor_groups(group_id, object_kind, object_type) AS (
+             SELECT ogh.parent_id, opg.object_kind, opg.object_type
+             FROM object_parent_groups opg
+             JOIN object_group_hierarchy ogh ON ogh.child_id = opg.group_id
+             UNION ALL
+             SELECT ogh.parent_id, oag.object_kind, oag.object_type
+             FROM object_ancestor_groups oag
+             JOIN object_group_hierarchy ogh ON ogh.child_id = oag.group_id
+           )"#;
+
+/// The reverse-lookup predicate: does this policy's permission block name the
+/// object in `$5`, narrowed by the optional `$6` / `$7` co-filters?
+///
+/// Only scope modes that name a specific object, or a group object directly /
+/// through a group hierarchy, are considered. A `group_descendant_objects` block
+/// matches through *strict* ancestors of the object's own group, mirroring the
+/// PDP: an object directly in the block's group is the `group_direct_objects`
+/// case, not the descendant case.
+const DIRECT_POLICY_OBJECT_PREDICATE: &str = r#"($5::uuid IS NULL OR EXISTS (
+               SELECT 1 FROM permission_blocks pb
+               WHERE pb.id = direct_policies.permission_block_id
+                 AND ($6::text IS NULL OR pb.object_kind IS NULL OR pb.object_kind = $6)
+                 AND ($7::text IS NULL OR pb.object_type IS NULL OR pb.object_type = $7)
+                 AND (
+                   (pb.scope_mode = 'object' AND pb.object_id = $5)
+                   OR (pb.scope_mode = 'group'
+                       AND pb.group_id = $5
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND EXISTS (
+                         SELECT 1 FROM object_groups og
+                         WHERE og.id = $5
+                           AND og.deleted_at IS NULL))
+                   OR (pb.scope_mode = 'group_direct_objects' AND EXISTS (
+                         SELECT 1 FROM object_parent_groups opg
+                         WHERE opg.group_id = pb.group_id
+                           AND opg.object_kind = pb.object_kind
+                           AND opg.object_type = pb.object_type))
+                   OR (pb.scope_mode = 'group_descendant_objects' AND EXISTS (
+                         SELECT 1 FROM object_ancestor_groups oag
+                         WHERE oag.group_id = pb.group_id
+                           AND oag.object_kind = pb.object_kind
+                           AND oag.object_type = pb.object_type))
+                   OR (pb.scope_mode = 'group_child_groups'
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND EXISTS (
+                         SELECT 1 FROM object_parent_groups opg
+                         WHERE opg.group_id = pb.group_id
+                           AND opg.object_kind = 'group'))
+                   OR (pb.scope_mode = 'group_descendant_groups'
+                       AND ($6::text IS NULL OR $6 = 'group')
+                       AND ($7::text IS NULL OR $7 = 'group:object')
+                       AND (
+                         EXISTS (
+                           SELECT 1 FROM object_parent_groups opg
+                           WHERE opg.group_id = pb.group_id
+                             AND opg.object_kind = 'group')
+                         OR EXISTS (
+                           SELECT 1 FROM object_ancestor_groups oag
+                           WHERE oag.group_id = pb.group_id
+                             AND oag.object_kind = 'group')))
+                 )
+             ))"#;
+
+/// `object_kind` / `object_type` only make sense alongside `object_id`: the
+/// reverse-lookup predicate is inert without it, so accepting them on their own
+/// would silently return the *unfiltered* listing. Reject instead.
+fn validate_direct_policy_object_filter(
+    object_id: Option<Uuid>,
+    object_kind: Option<ObjectKind>,
+    object_type: Option<&str>,
+) -> Result<(), AppError> {
+    if object_id.is_none() && (object_kind.is_some() || object_type.is_some()) {
+        return Err(AppError::bad_request(
+            "objectKind and objectType are co-filters for objectId and require it",
+        ));
+    }
+    if let Some(object_type) = object_type {
+        let (prefix, suffix) = object_type.split_once(':').ok_or_else(|| {
+            AppError::bad_request("objectType must be namespaced as object_kind:type")
+        })?;
+        if prefix.is_empty() || suffix.is_empty() {
+            return Err(AppError::bad_request(
+                "objectType must be namespaced as object_kind:type",
+            ));
+        }
+        if object_kind.is_some_and(|kind| kind.as_str() != prefix) {
+            return Err(AppError::bad_request(
+                "objectType namespace must match objectKind",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Lists direct policies, filtered by subject, by object, or by both.
+///
+/// **The object filter is a policy lookup, not effective access.** With
+/// `object_id` set, the result is every direct policy whose permission block
+/// *names* that object: `object` (direct), `group` (the object is the named
+/// group), `group_direct_objects`/`group_descendant_objects` (member/
+/// descendant-member of the block's group), or `group_child_groups`/
+/// `group_descendant_groups` (a group covered by the block's hierarchy
+/// scope). Blocks that reach the object without naming it (`platform`,
+/// `tenant`, `object_kind`, `object_type`) are **not** returned — reading
+/// this as "everyone who can access X" will under-report.
 pub async fn list_direct_policies(
     pool: &PgPool,
     params: ListDirectPolicies,
 ) -> Result<DirectPolicyList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let items = sqlx::query_as::<_, DirectPolicy>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
+    let object_type = normalize_optional_text(params.object_type);
+    validate_direct_policy_object_filter(
+        params.object_id,
+        params.object_kind,
+        object_type.as_deref(),
+    )?;
+    let items_sql = format!(
+        r#"{DIRECT_POLICY_OBJECT_CTE}
+           SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
            FROM direct_policies
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4256,21 +4435,27 @@ pub async fn list_direct_policies(
                (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
                OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
              )
+             AND {DIRECT_POLICY_OBJECT_PREDICATE}
            ORDER BY created_at DESC
-           LIMIT $5 OFFSET $6"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind.clone())
-    .bind(params.subject_id)
-    .bind(params.permission_block_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+           LIMIT $8 OFFSET $9"#
+    );
+    let items = sqlx::query_as::<_, DirectPolicy>(&items_sql)
+        .bind(params.tenant_id)
+        .bind(params.subject_kind.clone())
+        .bind(params.subject_id)
+        .bind(params.permission_block_id)
+        .bind(params.object_id)
+        .bind(params.object_kind)
+        .bind(&object_type)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
 
-    let total = sqlx::query_scalar(
-        r#"SELECT COUNT(*)
+    let total_sql = format!(
+        r#"{DIRECT_POLICY_OBJECT_CTE}
+           SELECT COUNT(*)
            FROM direct_policies
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4279,15 +4464,20 @@ pub async fn list_direct_policies(
              AND (
                (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
                OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
-             )"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind)
-    .bind(params.subject_id)
-    .bind(params.permission_block_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+             )
+             AND {DIRECT_POLICY_OBJECT_PREDICATE}"#
+    );
+    let total = sqlx::query_scalar(&total_sql)
+        .bind(params.tenant_id)
+        .bind(params.subject_kind)
+        .bind(params.subject_id)
+        .bind(params.permission_block_id)
+        .bind(params.object_id)
+        .bind(params.object_kind)
+        .bind(&object_type)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
 
     Ok(DirectPolicyList { items, total })
 }
@@ -4818,6 +5008,7 @@ async fn authorized_entity_ids(
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
     let external_id = crate::models::external_id::normalize_external_id(params.external_id);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let sql = r#"WITH RECURSIVE target_groups(id) AS (
                    SELECT $8::uuid WHERE $8::uuid IS NOT NULL
@@ -4839,9 +5030,10 @@ async fn authorized_entity_ids(
                ),
                candidates AS (
                    SELECT e.id, e.kind::text AS sub_kind, e.tenant_id, e.created_at,
-                          gep.group_id AS parent_group_id
+                          COALESCE((SELECT array_agg(gep.group_id)
+                                    FROM group_entity_parents gep
+                                    WHERE gep.entity_id = e.id), '{}'::uuid[]) AS parent_group_ids
                    FROM entities e
-                   LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
                    WHERE e.deleted_at IS NULL
                      AND (e.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = e.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
                      AND ($3::uuid IS NULL OR e.tenant_id = $3)
@@ -4849,14 +5041,18 @@ async fn authorized_entity_ids(
                      AND ($5::text IS NULL OR e.name ILIKE $5 OR e.attributes::text ILIKE $5)
                      AND ($6::uuid IS NULL OR e.profile_id = $6)
                      AND ($7::text IS NULL OR e.status::text = $7)
-                     AND ($8::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
-                     AND ($13::text IS NULL OR e.external_id = $13)
+                     AND ($8::uuid IS NULL OR EXISTS (
+                             SELECT 1 FROM group_entity_parents gep
+                             WHERE gep.entity_id = e.id
+                               AND gep.group_id IN (SELECT id FROM target_groups)))
+                     AND ($13::jsonb IS NULL OR e.attributes @> $13::jsonb)
+                     AND ($14::text IS NULL OR e.external_id = $14)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
                    FROM candidates c
-                   JOIN group_hierarchy gh ON gh.child_id = c.parent_group_id
-                   UNION ALL
+                   JOIN group_hierarchy gh ON gh.child_id = ANY(c.parent_group_ids)
+                   UNION
                    SELECT ca.object_id, gh.parent_id
                    FROM candidate_ancestors ca
                    JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
@@ -4880,7 +5076,7 @@ async fn authorized_entity_ids(
                                AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
                          )
                          AND grant_scope_matches(g.scope_kind, g.scope_ref, 'entity', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND NOT EXISTS (
@@ -4893,7 +5089,7 @@ async fn authorized_entity_ids(
                                AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
                          )
                          AND grant_scope_matches(g.scope_kind, g.scope_ref, 'entity', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND ($12::uuid IS NULL OR EXISTS (
@@ -4905,7 +5101,7 @@ async fn authorized_entity_ids(
                                AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
                          )
                          AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'entity', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    ))
                )
@@ -4932,6 +5128,7 @@ async fn authorized_entity_ids(
         .bind(limit)
         .bind(offset)
         .bind(ceiling_credential_id)
+        .bind(attributes_contains)
         .bind(external_id)
         .fetch_all(pool)
         .await
@@ -5060,22 +5257,26 @@ async fn authorized_resource_rows(
                ),
                candidates AS (
                    SELECT r.id, r.kind AS sub_kind, r.tenant_id, r.created_at,
-                          grp.group_id AS parent_group_id
+                          COALESCE((SELECT array_agg(grp.group_id)
+                                    FROM group_resource_parents grp
+                                    WHERE grp.resource_id = r.id), '{}'::uuid[]) AS parent_group_ids
                    FROM resources r
-                   LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
                    WHERE r.deleted_at IS NULL
                      AND (r.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = r.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
                      AND ($3::uuid IS NULL OR r.tenant_id = $3)
                      AND ($4::text IS NULL OR r.kind = $4 OR 'resource:' || r.kind = $4)
                      AND ($5::text IS NULL OR r.name ILIKE $5 OR r.attributes::text ILIKE $5)
-                     AND ($6::uuid IS NULL OR grp.group_id IN (SELECT id FROM target_groups))
+                     AND ($6::uuid IS NULL OR EXISTS (
+                             SELECT 1 FROM group_resource_parents grp
+                             WHERE grp.resource_id = r.id
+                               AND grp.group_id IN (SELECT id FROM target_groups)))
                      AND ($8::jsonb IS NULL OR r.attributes @> $8::jsonb)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
                    FROM candidates c
-                   JOIN group_hierarchy gh ON gh.child_id = c.parent_group_id
-                   UNION ALL
+                   JOIN group_hierarchy gh ON gh.child_id = ANY(c.parent_group_ids)
+                   UNION
                    SELECT ca.object_id, gh.parent_id
                    FROM candidate_ancestors ca
                    JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
@@ -5099,7 +5300,7 @@ async fn authorized_resource_rows(
                                AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
                          )
                          AND grant_scope_matches(g.scope_kind, g.scope_ref, 'resource', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND NOT EXISTS (
@@ -5112,7 +5313,7 @@ async fn authorized_resource_rows(
                                AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
                          )
                          AND grant_scope_matches(g.scope_kind, g.scope_ref, 'resource', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND ($11::uuid IS NULL OR EXISTS (
@@ -5124,7 +5325,7 @@ async fn authorized_resource_rows(
                                AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
                          )
                          AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'resource', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    ))
                )
@@ -5157,6 +5358,7 @@ async fn authorized_group_ids(
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
     let status = params.entity_status.map(|status| match status {
         crate::models::enums::EntityStatus::Active => "active".to_string(),
         crate::models::enums::EntityStatus::Inactive => "inactive".to_string(),
@@ -5188,7 +5390,8 @@ async fn authorized_group_ids(
                ),
                candidates AS (
                    SELECT g.id, 'group'::text AS sub_kind, g.tenant_id, g.created_at,
-                          gph.parent_id AS parent_group_id
+                          CASE WHEN gph.parent_id IS NULL THEN '{}'::uuid[]
+                               ELSE ARRAY[gph.parent_id] END AS parent_group_ids
                    FROM groups g
                    LEFT JOIN group_hierarchy gph ON gph.child_id = g.id
                    WHERE g.deleted_at IS NULL
@@ -5198,12 +5401,13 @@ async fn authorized_group_ids(
                      AND ($5::text IS NULL OR g.name ILIKE $5 OR g.description ILIKE $5 OR g.attributes::text ILIKE $5)
                      AND ($8::text IS NULL OR g.status = $8)
                      AND ($6::uuid IS NULL OR gph.parent_id IN (SELECT id FROM target_groups))
+                     AND ($12::jsonb IS NULL OR g.attributes @> $12::jsonb)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
                    FROM candidates c
-                   JOIN group_hierarchy gh ON gh.child_id = c.parent_group_id
-                   UNION ALL
+                   JOIN group_hierarchy gh ON gh.child_id = ANY(c.parent_group_ids)
+                   UNION
                    SELECT ca.object_id, gh.parent_id
                    FROM candidate_ancestors ca
                    JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
@@ -5227,7 +5431,7 @@ async fn authorized_group_ids(
                                AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
                          )
                          AND grant_scope_matches(g.scope_kind, g.scope_ref, 'group', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND NOT EXISTS (
@@ -5240,7 +5444,7 @@ async fn authorized_group_ids(
                                AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
                          )
                          AND grant_scope_matches(g.scope_kind, g.scope_ref, 'group', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    )
                    AND ($11::uuid IS NULL OR EXISTS (
@@ -5252,7 +5456,7 @@ async fn authorized_group_ids(
                                AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
                          )
                          AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'group', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_id,
+                                                 c.id, c.tenant_id, c.parent_group_ids,
                                                  COALESCE(ca.ancestors, '{}'::uuid[]))
                    ))
                )
@@ -5274,6 +5478,7 @@ async fn authorized_group_ids(
         .bind(limit)
         .bind(offset)
         .bind(ceiling_credential_id)
+        .bind(attributes_contains)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -5634,7 +5839,12 @@ pub(crate) struct AuthzObjectRecord {
     pub(crate) name: Option<String>,
     pub(crate) tenant_id: Option<Uuid>,
     pub(crate) attributes: Value,
-    pub(crate) parent_group_id: Option<Uuid>,
+    /// Every object group the object belongs to. Object group membership is
+    /// many-to-many, so this is loaded as an aggregate on the object's own row —
+    /// a join projecting the group would multiply rows and `fetch_optional`
+    /// would then keep one arbitrary group, silently dropping the grants held
+    /// through the rest.
+    pub(crate) parent_group_ids: Vec<Uuid>,
 }
 
 pub(crate) async fn load_authz_subject(
@@ -5673,9 +5883,10 @@ pub(crate) async fn load_authz_resource(
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     sqlx::query_as::<_, AuthzObjectRecord>(
         r#"SELECT r.id, r.kind, r.name, r.tenant_id, r.attributes,
-                  grp.group_id AS parent_group_id
+                  COALESCE((SELECT array_agg(grp.group_id)
+                            FROM group_resource_parents grp
+                            WHERE grp.resource_id = r.id), '{}'::uuid[]) AS parent_group_ids
            FROM resources r
-           LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE r.id = $1 AND r.deleted_at IS NULL"#,
     )
     .bind(resource_id)
@@ -5690,9 +5901,10 @@ pub(crate) async fn load_authz_entity_object(
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     sqlx::query_as::<_, AuthzObjectRecord>(
         r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.attributes,
-                  gep.group_id AS parent_group_id
+                  COALESCE((SELECT array_agg(gep.group_id)
+                            FROM group_entity_parents gep
+                            WHERE gep.entity_id = e.id), '{}'::uuid[]) AS parent_group_ids
            FROM entities e
-           LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
            WHERE e.id = $1 AND e.status <> 'inactive' AND e.deleted_at IS NULL"#,
     )
     .bind(entity_id)
@@ -5705,9 +5917,13 @@ pub(crate) async fn load_authz_group_object(
     pool: &PgPool,
     group_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
+    // The group hierarchy stays a tree (`PRIMARY KEY (child_id)`), so this is 0
+    // or 1 parent — carried as an array only so every protected object presents
+    // the same shape to the scope predicate.
     sqlx::query_as::<_, AuthzObjectRecord>(
         r#"SELECT g.id, 'group'::text AS kind, g.name, g.tenant_id, g.attributes,
-                  gh.parent_id AS parent_group_id
+                  CASE WHEN gh.parent_id IS NULL THEN '{}'::uuid[] ELSE ARRAY[gh.parent_id] END
+                      AS parent_group_ids
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
            WHERE g.id = $1 AND g.status <> 'inactive' AND g.deleted_at IS NULL"#,
@@ -5724,7 +5940,7 @@ pub(crate) async fn load_authz_credential_object(
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     sqlx::query_as::<_, AuthzObjectRecord>(
         r#"SELECT c.id, c.kind, c.identifier AS name, e.tenant_id,
-                  c.metadata AS attributes, NULL::uuid AS parent_group_id
+                  c.metadata AS attributes, '{}'::uuid[] AS parent_group_ids
            FROM credentials c
            JOIN entities e ON e.id = c.entity_id
            WHERE c.id = $1"#,
@@ -5735,21 +5951,27 @@ pub(crate) async fn load_authz_credential_object(
     .map_err(db_err)
 }
 
+/// Recursive ancestors of every supplied group, de-duplicated. An object can be
+/// in several groups in different subtrees, so the tree scopes must be evaluated
+/// against the union of their ancestors, not one branch's.
 pub(crate) async fn group_ancestor_ids(
     pool: &PgPool,
-    group_id: Uuid,
+    group_ids: &[Uuid],
 ) -> Result<Vec<Uuid>, AppError> {
+    if group_ids.is_empty() {
+        return Ok(Vec::new());
+    }
     sqlx::query_scalar(
         r#"WITH RECURSIVE ancestors(id) AS (
-               SELECT parent_id FROM group_hierarchy WHERE child_id = $1
-               UNION ALL
+               SELECT parent_id FROM group_hierarchy WHERE child_id = ANY($1::uuid[])
+               UNION
                SELECT gh.parent_id
                FROM group_hierarchy gh
                JOIN ancestors a ON gh.child_id = a.id
            )
-           SELECT id FROM ancestors"#,
+           SELECT DISTINCT id FROM ancestors"#,
     )
-    .bind(group_id)
+    .bind(group_ids)
     .fetch_all(pool)
     .await
     .map_err(db_err)
@@ -5826,4 +6048,70 @@ fn search_pattern(q: Option<String>) -> Option<String> {
     q.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device_id() -> Uuid {
+        Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid")
+    }
+
+    #[test]
+    fn object_filter_accepts_a_bare_object_id() {
+        assert!(validate_direct_policy_object_filter(Some(device_id()), None, None).is_ok());
+    }
+
+    #[test]
+    fn object_filter_accepts_a_subject_only_listing() {
+        assert!(validate_direct_policy_object_filter(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn object_filter_rejects_co_filters_without_an_object_id() {
+        assert!(
+            validate_direct_policy_object_filter(None, Some(ObjectKind::Entity), None).is_err(),
+            "objectKind alone would silently return the unfiltered listing"
+        );
+        assert!(
+            validate_direct_policy_object_filter(None, None, Some("entity:device")).is_err(),
+            "objectType alone would silently return the unfiltered listing"
+        );
+    }
+
+    #[test]
+    fn object_filter_requires_a_namespaced_object_type() {
+        assert!(
+            validate_direct_policy_object_filter(Some(device_id()), None, Some("device")).is_err()
+        );
+        assert!(
+            validate_direct_policy_object_filter(Some(device_id()), None, Some("entity:")).is_err()
+        );
+        assert!(
+            validate_direct_policy_object_filter(Some(device_id()), None, Some(":device")).is_err()
+        );
+        assert!(validate_direct_policy_object_filter(
+            Some(device_id()),
+            None,
+            Some("entity:device")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn object_filter_requires_the_type_namespace_to_match_the_kind() {
+        assert!(validate_direct_policy_object_filter(
+            Some(device_id()),
+            Some(ObjectKind::Resource),
+            Some("entity:device"),
+        )
+        .is_err());
+        assert!(validate_direct_policy_object_filter(
+            Some(device_id()),
+            Some(ObjectKind::Entity),
+            Some("entity:device"),
+        )
+        .is_ok());
+    }
 }
