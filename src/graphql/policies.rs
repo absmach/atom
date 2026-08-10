@@ -290,9 +290,10 @@ impl PolicyQuery {
     /// `group_child_groups`/`group_descendant_groups` (object is a group
     /// covered by the block's hierarchy scope).
     ///
-    /// **Not effective access.** Blocks that reach the object without naming
-    /// it (`platform`, `tenant`, `object_kind`, `object_type`) are excluded —
-    /// this answers "who is this object shared with", not "who can see it".
+    /// This is a policy lookup, not effective access. Blocks that reach the
+    /// object without naming it (`platform`, `tenant`, `object_kind`,
+    /// `object_type`) are excluded — this answers "who is this object shared
+    /// with", not "who can see it".
     ///
     /// `objectKind`/`objectType` are co-filters that disambiguate an id across
     /// kinds; they require `objectId`. Omitting `objectId` is unchanged from

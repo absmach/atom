@@ -236,11 +236,13 @@ impl Entity {
         self.0.tenant_id.map(id)
     }
 
-    async fn parent_group_id(&self, ctx: &Context<'_>) -> Result<Option<ID>> {
+    /// Every object group the entity belongs to. Membership is many-to-many, so
+    /// this is a set — there is no single "parent" group.
+    async fn object_group_ids(&self, ctx: &Context<'_>) -> Result<Vec<ID>> {
         let state = ctx.data::<AppState>()?;
-        identity_repo::get_entity_parent_group(&state.pool, self.0.id)
+        identity_repo::get_entity_object_groups(&state.pool, self.0.id)
             .await
-            .map(|parent_id| parent_id.map(id))
+            .map(|group_ids| group_ids.into_iter().map(id).collect())
             .map_err(|err| async_graphql::Error::new(err.to_string()))
     }
 
@@ -478,11 +480,13 @@ impl Resource {
         self.0.owner_id.map(id)
     }
 
-    async fn parent_group_id(&self, ctx: &Context<'_>) -> Result<Option<ID>> {
+    /// Every object group the resource belongs to. Membership is many-to-many,
+    /// so this is a set — there is no single "parent" group.
+    async fn object_group_ids(&self, ctx: &Context<'_>) -> Result<Vec<ID>> {
         let state = ctx.data::<AppState>()?;
-        authz_repo::get_resource_parent_group(&state.pool, self.0.id)
+        authz_repo::get_resource_object_groups(&state.pool, self.0.id)
             .await
-            .map(|parent_id| parent_id.map(id))
+            .map(|group_ids| group_ids.into_iter().map(id).collect())
             .map_err(|err| async_graphql::Error::new(err.to_string()))
     }
 
