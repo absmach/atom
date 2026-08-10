@@ -1416,7 +1416,7 @@ fn public_url(public_base_url: &str, path: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use super::{public_url, Config, LogFormat};
+    use super::{public_url, Config, LogFormat, PkiCaProvisioningBackend};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
