@@ -30,6 +30,10 @@ src/
   │                       RequireManage extractor + has_global_manage() helper
   keys.rs              — ES256 signing keys (primary/standby/retired), encryption at rest
   grpc.rs              — Tonic services: AuthService, AuthzService.Check, CertificateService
+  broker_auth/         — the broker auth callout: Atom serving FluxMQ's
+  │                       `broker.auth.v1.AuthService` directly (off by default)
+  │  topic.rs          — the configurable topic→object grammar
+  │  service.rs        — Authenticate/Authorize over the existing credential + PDP paths
   graphql/             — schema + per-domain resolvers (the live admin/API surface)
   db.rs                — pool creation (configurable pool)
   models/
@@ -200,6 +204,14 @@ cargo test -- --include-ignored
 # Lint
 cargo clippy -- -D warnings
 cargo fmt --check
+
+# Protobuf. The Rust bindings are NOT checked in — build.rs runs tonic-build on
+# every compile into cargo's OUT_DIR, so editing a .proto and rebuilding is
+# enough for code. `make proto` also regenerates apidocs/grpc-reference.md,
+# which IS checked in and goes stale silently without it.
+make proto
+make proto-lint    # protos Atom owns
+make proto-check   # vendored broker contract vs upstream
 ```
 
 Environment variables: copy `.env.example` to `.env`. Required: `DATABASE_URL`. Signing uses ES256 keys bootstrapped/loaded at startup — there is no `JWT_SECRET`. `ATOM_KEY_ENCRYPTION_KEY` is the single root AES-256-GCM key encrypting all recoverable secrets at rest (signing private keys and retrievable credential secrets such as shared keys); it is required to create shared keys.
@@ -220,6 +232,83 @@ startup; a configured-but-unreadable file fails before the server reports
 must then be confined to a private network or a service mesh that provides
 transport security, and a startup warning is logged. (The HTTP rate limiter does
 not cover gRPC; see backlog #10.)
+
+### Broker auth callout
+
+A message broker delegates connect-time credential checks and per-topic access
+control to an external gRPC service. Atom implements that contract itself
+(`src/broker_auth/`), so a broker can be pointed straight at Atom with **no
+adapter service in between**. The proto is vendored verbatim from FluxMQ at
+`proto/broker/v1/auth.proto` as a **byte-identical** copy, so drift is a plain
+`diff` — `scripts/check-vendored-proto.sh`, which CI runs against the ref pinned
+in `proto/broker/v1/REF`. Atom's notes live beside it in `VENDOR.md`, never in
+the proto itself: a check that has to forgive expected differences stops
+catching the one that matters.
+
+Because Atom does not own that file, it is excluded from `buf.yaml`'s lint and
+breaking rules (its style is upstream's, and editing it would break the
+byte-for-byte match) and from `buf.gen.yaml`'s inputs — `protoc-gen-doc` writes
+one file per invocation, so including a second package does not extend
+`apidocs/grpc-reference.md`, it **replaces** it and Atom's own gRPC surface
+vanishes from the docs.
+
+The `package broker.auth.v1` line **is** the contract — the path a broker dials
+is derived from it. It is vendor-neutral on purpose: the messages carry no
+FluxMQ concept, so naming the package after one implementation would put that
+name in every peer's public wire surface. Changing it is a breaking wire change:
+a broker dialling the new path against a service still serving the old one gets
+`UNIMPLEMENTED`, so Atom, the broker, and any adapter service must be deployed
+together.
+
+Config (`ATOM_BROKER_*`), all optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ATOM_BROKER_AUTH_ENABLED` | `false` | mount the callout |
+| `ATOM_BROKER_TOPIC_TEMPLATE` | `{resource}/#` | comma-separated templates, tried in order |
+| `ATOM_BROKER_TOPIC_REF` | `alias` | `alias` or `uuid` — how a bound segment names an object |
+| `ATOM_BROKER_CREDENTIAL_KIND` | `password` | `password` or `shared_key` |
+| `ATOM_BROKER_TOPIC_ALLOW` | *(empty)* | comma-separated MQTT filters authorized **without consulting the PDP** |
+
+`ATOM_BROKER_TOPIC_ALLOW` is the only authorization bypass in the callout. It
+exists because brokers carry operational topics that address no object — a
+health probe such as `hc/<tenant>` names nothing Atom can resolve, so no policy
+could describe it and every request for it would be denied. Patterns are
+ordinary MQTT filters (`+` one segment, `#` the remainder); use the narrowest
+one that covers the topic, since `#` alone grants the broker everything. The
+broker's topic is matched literally and a broker `#` is only admitted by a
+pattern that is itself `#` at that position — otherwise `hc/+` would quietly
+admit a subscription to the whole `hc` subtree.
+
+**Off by default for a security reason, not a rollout one.** It is the only gRPC
+service here with no bearer token to check — a broker's callout client cannot
+send one — so it authenticates its caller at the transport, via
+`ATOM_GRPC_TLS_CLIENT_CA_PATH`. Mounted on a plaintext listener, anything that
+can reach the port can authenticate and authorize as any principal. Enable it
+with a client CA that signs brokers and nothing else. A startup warning fires if
+it is enabled without one.
+
+Two invariants worth not relearning:
+
+- **Denials are answers, not errors.** Every rejection — bad password, unknown
+  entity, unparseable topic, policy deny, *rate limit* — returns a successful RPC
+  carrying a false verdict. Only infrastructure failure returns a gRPC error. A
+  broker wraps this callout in a circuit breaker, and a tripped breaker rejects
+  **every** client connection; one device retrying a stale password must not be
+  able to take the broker's whole auth path down. Rate limiting is on that list
+  because it is the failure a bad client can trigger at will.
+- **Tenant comes from the subject, not from config or the topic.** Authenticate
+  resolves the identifier across tenants and the entity's own tenant comes back
+  with it, so the zero-configuration case needs no tenant in the topic and no
+  username grammar. A `{tenant}` template segment, when present, only scopes
+  alias resolution — it is deliberately **not** checked against the subject's
+  tenant, because cross-tenant grants are legitimate and that call belongs to
+  the PDP, not to a hardcoded equality test.
+
+An adapter service is still right where the mapping needs more than a grammar —
+route resolution, multi-service composition. Both speak the same wire contract,
+so a deployment picks one by pointing the broker's `auth.external.url` at Atom
+or at the adapter.
 
 ## Metrics
 
