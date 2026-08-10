@@ -114,6 +114,14 @@ export function EntityInspectDetails({ row }: { row: Row | null }) {
         </Field>
       ) : null}
 
+      {row.externalId ? (
+        <Field label="External ID">
+          <span className="break-all font-mono text-xs">
+            {String(row.externalId)}
+          </span>
+        </Field>
+      ) : null}
+
       <Field label="Kind">
         <span className="font-mono text-xs">{String(row.kind ?? "—")}</span>
       </Field>

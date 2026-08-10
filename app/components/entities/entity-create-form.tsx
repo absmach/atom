@@ -76,6 +76,7 @@ const CREATE_ENTITY_MUTATION = `
       profileVersionId
       name
       alias
+      externalId
       tenantId
       status
       createdAt
@@ -93,6 +94,7 @@ const UPDATE_ENTITY_MUTATION = `
       profileVersionId
       name
       alias
+      externalId
       tenantId
       status
       updatedAt
@@ -136,6 +138,7 @@ type ProfileVersionsData = {
 const entityFormSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
   alias: z.string().trim(),
+  externalId: z.string().trim(),
   kind: z.enum(ENTITY_KINDS),
   tenantId: z.string().trim(),
   profileId: z.string().trim(),
@@ -206,6 +209,7 @@ export type EntityFormInitialValues = {
   id: string;
   name: string;
   alias: string;
+  externalId: string;
   kind: (typeof ENTITY_KINDS)[number];
   tenantId: string;
   profileId: string;
@@ -216,6 +220,7 @@ export type EntityFormInitialValues = {
 const defaultValues: EntityFormValues = {
   name: "",
   alias: "",
+  externalId: "",
   kind: "human",
   tenantId: "",
   profileId: "",
@@ -249,6 +254,7 @@ export function EntityCreateForm({
       ? {
           name: entity.name,
           alias: entity.alias,
+          externalId: entity.externalId,
           kind: entity.kind,
           tenantId: entity.tenantId,
           profileId: entity.profileId,
@@ -356,6 +362,7 @@ export function EntityCreateForm({
                 attributes,
               }),
               alias: values.alias || null,
+              externalId: values.externalId || null,
             },
           },
         });
@@ -366,6 +373,7 @@ export function EntityCreateForm({
             input: removeEmptyValues({
               name: values.name,
               alias: values.alias,
+              externalId: values.externalId,
               kind: values.kind,
               tenantId: values.tenantId,
               profileId: values.profileId,
@@ -393,6 +401,7 @@ export function EntityCreateForm({
       <form className="grid gap-4" onSubmit={form.handleSubmit(submit)}>
         <TextField form={form} label="Name" name="name" required />
         <TextField form={form} label="Alias" name="alias" />
+        <TextField form={form} label="External ID" name="externalId" />
         <KindSelectField form={form} disabled={Boolean(profileId)} />
         <TenantSelectField form={form} />
         <ProfileSelectField form={form} profiles={profiles} />
@@ -435,7 +444,7 @@ function TextField({
 }: {
   form: UseFormReturn<EntityFormValues>;
   label: string;
-  name: "name" | "alias";
+  name: "name" | "alias" | "externalId";
   required?: boolean;
 }) {
   return (
