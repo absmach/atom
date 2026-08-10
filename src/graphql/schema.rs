@@ -440,8 +440,8 @@ mod tests {
     }
 
     /// `entities`, `groups` and `resources` all carry a JSONB `attributes`
-    /// column, so all three expose the same containment filter under the same
-    /// name and type. Divergence here is the symmetry bug ATOM-01 fixed.
+    /// column, so all three should expose the same containment filter under
+    /// the same name and type.
     #[tokio::test]
     async fn entity_group_and_resource_queries_expose_attributes_contains_filter() {
         let schema = build_schema(test_state());

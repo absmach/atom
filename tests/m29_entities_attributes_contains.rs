@@ -140,8 +140,8 @@ fn listing(data: &Value, query: &str) -> (Vec<String>, i64) {
     (ids, total)
 }
 
-/// Criteria 1, 2, 4 and 6: containment filters the listing, composes with the
-/// other filters, is reflected in `total`, and omitting it filters nothing.
+/// Containment filters the listing, composes with the other filters, is
+/// reflected in `total`, and omitting it filters nothing.
 #[tokio::test]
 #[ignore]
 async fn entities_query_filters_by_attributes_contains() {
@@ -244,7 +244,7 @@ async fn entities_query_filters_by_attributes_contains() {
     assert_eq!(total, 1);
     assert_eq!(ids, vec![pending_device.to_string()]);
 
-    // Criterion 6: omitting the argument filters nothing.
+    // Omitting the argument filters nothing.
     let unfiltered = schema
         .execute(authed(format!(
             r#"
@@ -268,8 +268,8 @@ async fn entities_query_filters_by_attributes_contains() {
     }
 }
 
-/// Criterion 1a: array containment — the gateway view's "which devices are
-/// declared on this gateway" query.
+/// Array containment — e.g. "which devices declare this gateway in their
+/// `gateways` list" — matches per-element, not by exact array equality.
 #[tokio::test]
 #[ignore]
 async fn entities_query_attributes_contains_matches_array_membership() {
@@ -333,7 +333,7 @@ async fn entities_query_attributes_contains_matches_array_membership() {
     assert!(!ids.contains(&unattached.to_string()));
 }
 
-/// Criterion 3: the filter composes with authorization on the **live** branch —
+/// The filter composes with authorization on the **live** (non-admin) branch —
 /// the subject sees only entities it may read *and* that match, and `total` is
 /// the intersection, not either side alone.
 #[tokio::test]
@@ -471,8 +471,9 @@ async fn entities_query_attributes_contains_applies_on_deleted_branch() {
     assert_eq!(ids, vec![pending.to_string()]);
 }
 
-/// Criterion 5: `groups(attributesContains: …)` behaves equivalently, including
-/// composition with the other filters, `total`, and the omitted-argument case.
+/// `groups(attributesContains: …)` behaves like the entity version: it
+/// composes with the other filters, is reflected in `total`, and the
+/// omitted-argument case is unfiltered.
 #[tokio::test]
 #[ignore]
 async fn groups_query_filters_by_attributes_contains() {
@@ -556,7 +557,7 @@ async fn groups_query_filters_by_attributes_contains() {
     assert_eq!(total, 1);
     assert_eq!(ids, vec![site_north.to_string()]);
 
-    // Criterion 6 for groups: omitting the argument filters nothing.
+    // Omitting the argument filters nothing.
     let unfiltered = schema
         .execute(authed(format!(
             r#"
@@ -580,8 +581,8 @@ async fn groups_query_filters_by_attributes_contains() {
     }
 }
 
-/// Criterion 5 on the live branch: the group filter composes with authorization
-/// the same way the entity one does.
+/// The group filter composes with authorization on the live branch the same
+/// way the entity one does.
 #[tokio::test]
 #[ignore]
 async fn groups_query_attributes_contains_composes_with_authorization() {
@@ -640,7 +641,7 @@ async fn groups_query_attributes_contains_composes_with_authorization() {
 }
 
 /// The repository call the resolver makes on the deleted branch: a `None`
-/// filter must leave the listing untouched (regression guard for criterion 6).
+/// filter must leave the listing untouched.
 #[tokio::test]
 #[ignore]
 async fn list_entities_without_attributes_contains_is_unfiltered() {
