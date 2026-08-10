@@ -1240,7 +1240,7 @@ async fn set_group_parent_rejects_deleted_parent_or_child() {
 
 #[tokio::test]
 #[ignore]
-async fn set_resource_parent_group_rejects_deleted_resource_or_group() {
+async fn add_resource_to_object_group_rejects_deleted_resource_or_group() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-res-parent-ten-{}", Uuid::new_v4())).await;
     let live_resource = Uuid::new_v4();
@@ -1279,13 +1279,13 @@ async fn set_resource_parent_group_rejects_deleted_resource_or_group() {
         .expect("delete group");
 
     assert!(
-        atom::authz::repo::set_resource_parent_group(&pool, live_resource, deleted_group)
+        atom::authz::repo::add_resource_to_object_group(&pool, live_resource, deleted_group)
             .await
             .is_err(),
         "live resource must not be attached to a deleted object group"
     );
     assert!(
-        atom::authz::repo::set_resource_parent_group(&pool, deleted_resource, live_group)
+        atom::authz::repo::add_resource_to_object_group(&pool, deleted_resource, live_group)
             .await
             .is_err(),
         "deleted resource must not be attached to a live object group"

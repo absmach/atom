@@ -51,7 +51,13 @@ pub(crate) struct ProtectedObject {
     pub name: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub attributes: Value,
-    pub parent_group_id: Option<Uuid>,
+    /// Every object group the object belongs to directly. Membership is
+    /// many-to-many (ATOM-04), so a group scope must be matched against the
+    /// whole set — taking one arbitrary group would silently drop grants held
+    /// through the others. Groups themselves still have at most one parent
+    /// (the hierarchy stays a tree), so for a group object this holds 0 or 1 id.
+    pub parent_group_ids: Vec<Uuid>,
+    /// Recursive ancestors of every id in `parent_group_ids`, de-duplicated.
     pub ancestor_group_ids: Vec<Uuid>,
 }
 
@@ -77,7 +83,7 @@ pub(crate) async fn resolve_object(
             name: Some("platform".to_string()),
             tenant_id: None,
             attributes: Value::Object(Default::default()),
-            parent_group_id: None,
+            parent_group_ids: Vec::new(),
             ancestor_group_ids: Vec::new(),
         }));
     }
@@ -167,10 +173,10 @@ async fn load_protected_object(
     let Some(record) = record else {
         return Ok(None);
     };
-    let ancestor_group_ids = match record.parent_group_id {
-        Some(parent_group_id) => repo::group_ancestor_ids(pool, parent_group_id).await?,
-        None => Vec::new(),
-    };
+    // Ancestors of *all* the object's groups, not of one arbitrary group: a
+    // `group_descendant_objects` grant on any subtree the object sits under must
+    // still be seen.
+    let ancestor_group_ids = repo::group_ancestor_ids(pool, &record.parent_group_ids).await?;
     Ok(Some(protected_object_from_record(
         coarse_kind,
         record,
@@ -190,7 +196,7 @@ fn protected_object_from_record(
         name: record.name,
         tenant_id: record.tenant_id,
         attributes: record.attributes,
-        parent_group_id: record.parent_group_id,
+        parent_group_ids: record.parent_group_ids,
         ancestor_group_ids,
     }
 }
@@ -203,7 +209,7 @@ fn tenant_object_from_record(tenant: repo::AuthzTenantRecord) -> ProtectedObject
         name: Some(tenant.name),
         tenant_id: Some(tenant.id),
         attributes: tenant.attributes,
-        parent_group_id: None,
+        parent_group_ids: Vec::new(),
         ancestor_group_ids: Vec::new(),
     }
 }
@@ -373,7 +379,7 @@ fn scope_target<'a>(
         coarse_kind: &object.coarse_kind,
         sub_kind: &object.kind,
         tenant_id: object_tenant_id_str,
-        parent_group_id: object.parent_group_id,
+        parent_group_ids: &object.parent_group_ids,
         ancestor_group_ids: &object.ancestor_group_ids,
     }
 }
@@ -766,7 +772,7 @@ fn scope_matches(
         coarse_kind,
         sub_kind,
         object_tenant_id,
-        None,
+        &[],
         &[],
     )
 }
@@ -781,7 +787,7 @@ fn scope_matches_with_groups(
     coarse_kind: &str,
     sub_kind: &str,
     object_tenant_id: Option<&str>,
-    parent_group_id: Option<Uuid>,
+    parent_group_ids: &[Uuid],
     ancestor_group_ids: &[Uuid],
 ) -> bool {
     if let Some(policy_tenant_id) = binding.tenant_id {
@@ -795,7 +801,7 @@ fn scope_matches_with_groups(
         coarse_kind,
         sub_kind,
         tenant_id: object_tenant_id,
-        parent_group_id,
+        parent_group_ids,
         ancestor_group_ids,
     };
     scope_values_match(&binding.scope_kind, binding.scope_ref.as_deref(), &target)
@@ -806,7 +812,7 @@ struct ScopeMatchObject<'a> {
     coarse_kind: &'a str,
     sub_kind: &'a str,
     tenant_id: Option<&'a str>,
-    parent_group_id: Option<Uuid>,
+    parent_group_ids: &'a [Uuid],
     ancestor_group_ids: &'a [Uuid],
 }
 
@@ -831,23 +837,23 @@ fn scope_values_match(
             scope_ref,
             target.coarse_kind,
             target.sub_kind,
-            target.parent_group_id,
+            target.parent_group_ids,
             &[],
         ),
         ScopeKind::GroupTreeObjectType => group_object_scope_matches(
             scope_ref,
             target.coarse_kind,
             target.sub_kind,
-            None,
+            &[],
             target.ancestor_group_ids,
         ),
         ScopeKind::GroupChildKind => {
-            group_kind_scope_matches(scope_ref, target.coarse_kind, target.parent_group_id, &[])
+            group_kind_scope_matches(scope_ref, target.coarse_kind, target.parent_group_ids, &[])
         }
         ScopeKind::GroupDescendantKind => group_kind_scope_matches(
             scope_ref,
             target.coarse_kind,
-            target.parent_group_id,
+            target.parent_group_ids,
             target.ancestor_group_ids,
         ),
     }
@@ -857,7 +863,7 @@ fn group_object_scope_matches(
     scope_ref: Option<&str>,
     coarse_kind: &str,
     sub_kind: &str,
-    parent_group_id: Option<Uuid>,
+    parent_group_ids: &[Uuid],
     ancestor_group_ids: &[Uuid],
 ) -> bool {
     let Some((group_id, object_type)) = parse_group_scope_ref(scope_ref) else {
@@ -868,13 +874,13 @@ fn group_object_scope_matches(
     };
     prefix == coarse_kind
         && sub == sub_kind
-        && group_scope_contains(parent_group_id, ancestor_group_ids, group_id)
+        && group_scope_contains(parent_group_ids, ancestor_group_ids, group_id)
 }
 
 fn group_kind_scope_matches(
     scope_ref: Option<&str>,
     coarse_kind: &str,
-    parent_group_id: Option<Uuid>,
+    parent_group_ids: &[Uuid],
     ancestor_group_ids: &[Uuid],
 ) -> bool {
     let Some((group_id, kind)) = parse_group_scope_ref(scope_ref) else {
@@ -882,15 +888,18 @@ fn group_kind_scope_matches(
     };
     kind == "group"
         && coarse_kind == "group"
-        && group_scope_contains(parent_group_id, ancestor_group_ids, group_id)
+        && group_scope_contains(parent_group_ids, ancestor_group_ids, group_id)
 }
 
+/// A group scope covers the object when it names *any* group the object belongs
+/// to (or any ancestor of one, for the tree scopes). Membership is a set, so
+/// this is an existence test, never a comparison against a single group.
 fn group_scope_contains(
-    parent_group_id: Option<Uuid>,
+    parent_group_ids: &[Uuid],
     ancestor_group_ids: &[Uuid],
     group_id: Uuid,
 ) -> bool {
-    parent_group_id == Some(group_id) || ancestor_group_ids.contains(&group_id)
+    parent_group_ids.contains(&group_id) || ancestor_group_ids.contains(&group_id)
 }
 
 fn parse_group_scope_ref(scope_ref: Option<&str>) -> Option<(Uuid, &str)> {
@@ -928,7 +937,7 @@ fn build_context(
             "kind": object.kind,
             "tenant_id": object.tenant_id,
             "attributes": object.attributes,
-            "parent_group_id": object.parent_group_id,
+            "parent_group_ids": object.parent_group_ids,
             "ancestor_group_ids": object.ancestor_group_ids,
         },
         "object": {
@@ -937,7 +946,7 @@ fn build_context(
             "type": object_type,
             "tenant_id": object.tenant_id,
             "attributes": object.attributes,
-            "parent_group_id": object.parent_group_id,
+            "parent_group_ids": object.parent_group_ids,
             "ancestor_group_ids": object.ancestor_group_ids,
         },
         "tenant": tenant_value,
@@ -1084,7 +1093,7 @@ mod tests {
             name: Some("telemetry".into()),
             tenant_id: Some(tenant_id),
             attributes: json!({"tags": ["production"]}),
-            parent_group_id: None,
+            parent_group_ids: Vec::new(),
             ancestor_group_ids: Vec::new(),
         };
         let tenant = TenantEvalContext {
@@ -1124,7 +1133,7 @@ mod tests {
                 name: Some("telemetry".into()),
                 tenant_id: Some(tenant_id),
                 attributes: json!({"region": "eu"}),
-                parent_group_id: Some(parent_group_id),
+                parent_group_ids: vec![parent_group_id],
             },
             vec![ancestor_group_id],
         );
@@ -1135,7 +1144,7 @@ mod tests {
         assert_eq!(object.name.as_deref(), Some("telemetry"));
         assert_eq!(object.tenant_id, Some(tenant_id));
         assert_eq!(object.attributes, json!({"region": "eu"}));
-        assert_eq!(object.parent_group_id, Some(parent_group_id));
+        assert_eq!(object.parent_group_ids, vec![parent_group_id]);
         assert_eq!(object.ancestor_group_ids, vec![ancestor_group_id]);
     }
 
@@ -1341,7 +1350,7 @@ mod tests {
             "entity",
             "device",
             None,
-            Some(group_id),
+            &[group_id],
             &[],
         ));
         assert!(!scope_matches_with_groups(
@@ -1350,9 +1359,38 @@ mod tests {
             "entity",
             "device",
             None,
-            None,
+            &[],
             &[group_id],
         ));
+    }
+
+    /// Criterion 4 in miniature: with membership in two groups, a grant naming
+    /// *either* of them must match. Before ATOM-04 the target carried one group,
+    /// so a grant through the other was silently invisible.
+    #[test]
+    fn group_object_type_matches_any_of_several_groups() {
+        let group_a = Uuid::new_v4();
+        let group_b = Uuid::new_v4();
+        for granted in [group_a, group_b] {
+            let b = make_binding(
+                ScopeKind::GroupObjectType,
+                Some(&format!("{granted}:entity:device")),
+                GrantKind::Capability,
+                Effect::Allow,
+            );
+            assert!(
+                scope_matches_with_groups(
+                    &b,
+                    "client-id",
+                    "entity",
+                    "device",
+                    None,
+                    &[group_a, group_b],
+                    &[],
+                ),
+                "a grant via {granted} must authorize an entity in both groups"
+            );
+        }
     }
 
     #[test]
@@ -1372,7 +1410,7 @@ mod tests {
             "resource",
             "channel",
             None,
-            Some(group_id),
+            &[group_id],
             &[],
         ));
         assert!(scope_matches_with_groups(
@@ -1381,7 +1419,7 @@ mod tests {
             "resource",
             "channel",
             None,
-            Some(child_group_id),
+            &[child_group_id],
             &[group_id],
         ));
         assert!(scope_matches_with_groups(
@@ -1390,7 +1428,7 @@ mod tests {
             "resource",
             "channel",
             None,
-            Some(grandchild_group_id),
+            &[grandchild_group_id],
             &[child_group_id, group_id],
         ));
     }
@@ -1411,7 +1449,7 @@ mod tests {
             "group",
             "group",
             None,
-            Some(child_group_id),
+            &[child_group_id],
             &[group_id],
         ));
     }
@@ -1613,7 +1651,7 @@ mod db_tests {
             coarse: &'static str,
             sub: &'static str,
             object_tenant: Option<Uuid>,
-            parent_group: Option<Uuid>,
+            parent_groups: Vec<Uuid>,
             ancestors: Vec<Uuid>,
             expected: bool,
         }
@@ -1626,7 +1664,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1637,7 +1675,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1648,7 +1686,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1659,7 +1697,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: None,
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1670,7 +1708,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1681,7 +1719,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1692,7 +1730,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1703,7 +1741,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "device",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1714,7 +1752,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1725,7 +1763,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1736,7 +1774,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1747,7 +1785,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: None,
+                parent_groups: vec![],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1758,7 +1796,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![ancestor],
                 expected: true,
             },
@@ -1769,7 +1807,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1780,7 +1818,7 @@ mod db_tests {
                 coarse: "group",
                 sub: "group",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1791,7 +1829,7 @@ mod db_tests {
                 coarse: "entity",
                 sub: "human",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![],
                 expected: false,
             },
@@ -1802,7 +1840,7 @@ mod db_tests {
                 coarse: "group",
                 sub: "group",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![],
                 expected: true,
             },
@@ -1813,7 +1851,7 @@ mod db_tests {
                 coarse: "group",
                 sub: "group",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![ancestor],
                 expected: true,
             },
@@ -1824,8 +1862,43 @@ mod db_tests {
                 coarse: "group",
                 sub: "group",
                 object_tenant: Some(tenant),
-                parent_group: Some(parent),
+                parent_groups: vec![parent],
                 ancestors: vec![ancestor],
+                expected: false,
+            },
+            // Many-to-many membership (ATOM-04): a direct-group scope naming
+            // *either* of the object's groups matches, in Rust and in SQL alike.
+            Case {
+                kind: ScopeKind::GroupObjectType,
+                text: "group_object_type",
+                scope_ref: Some(format!("{parent}:entity:human")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_groups: vec![other, parent],
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::GroupObjectType,
+                text: "group_object_type",
+                scope_ref: Some(format!("{other}:entity:human")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_groups: vec![other, parent],
+                ancestors: vec![],
+                expected: true,
+            },
+            Case {
+                kind: ScopeKind::GroupObjectType,
+                text: "group_object_type",
+                scope_ref: Some(format!("{ancestor}:entity:human")),
+                coarse: "entity",
+                sub: "human",
+                object_tenant: Some(tenant),
+                parent_groups: vec![other, parent],
+                ancestors: vec![],
                 expected: false,
             },
         ];
@@ -1838,7 +1911,7 @@ mod db_tests {
                 coarse_kind: case.coarse,
                 sub_kind: case.sub,
                 tenant_id: tenant_str.as_deref(),
-                parent_group_id: case.parent_group,
+                parent_group_ids: &case.parent_groups,
                 ancestor_group_ids: &case.ancestors,
             };
             let rust = scope_values_match(&case.kind, case.scope_ref.as_deref(), &target);
@@ -1851,7 +1924,7 @@ mod db_tests {
                     .bind(case.sub)
                     .bind(object)
                     .bind(case.object_tenant)
-                    .bind(case.parent_group)
+                    .bind(&case.parent_groups)
                     .bind(&case.ancestors)
                     .fetch_one(&pool)
                     .await
@@ -2090,7 +2163,7 @@ mod db_tests {
         .expect("resolve group")
         .expect("group exists");
         assert_eq!(group.kind, "group");
-        assert_eq!(group.parent_group_id, Some(parent_group_id));
+        assert_eq!(group.parent_group_ids, vec![parent_group_id]);
         assert_eq!(group.ancestor_group_ids, vec![grandparent_group_id]);
 
         let credential_id = Uuid::new_v4();
@@ -2122,7 +2195,7 @@ mod db_tests {
         .expect("credential exists");
         assert_eq!(credential.kind, "access_token");
         assert_eq!(credential.attributes, json!({"environment": "test"}));
-        assert_eq!(credential.parent_group_id, None);
+        assert!(credential.parent_group_ids.is_empty());
         assert!(credential.ancestor_group_ids.is_empty());
     }
 
