@@ -81,15 +81,6 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bootstrap PR-013 lockfile
-        run: cargo generate-lockfile
-
-      - name: Upload PR-013 lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr013-cargo-lock
-          path: Cargo.lock
-
       - name: cargo fmt
         run: cargo fmt --check
 
