@@ -94,6 +94,24 @@ ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID=local-ca:v1
 Generate this value independently from every JWT or credential-encryption key.
 Atom never accepts or stores the production root private key.
 
+For production HSM-backed authorities, set the provisioning backend and token
+configuration instead:
+
+```text
+ATOM_PKI_CA_KEY_BACKEND=pkcs11
+ATOM_PKI_PKCS11_MODULE_PATH=/opt/vendor/lib/libpkcs11.so
+ATOM_PKI_PKCS11_TOKEN_LABEL=atom-production-ca
+ATOM_PKI_PKCS11_USER_PIN=<injected secret>
+```
+
+New authority keys are generated inside the token as sensitive,
+non-extractable P-256 objects. Postgres receives only an opaque,
+authority-bound reference. Existing encrypted-database authorities remain
+usable when the provisioning backend changes, provided their CA KEK remains
+configured. Atom validates token availability and certificate/public-key
+matching before it starts serving. See the
+[PKCS#11 operations and recovery runbook](https://github.com/absmach/atom/blob/certificates/product-docs/development/pki/PKCS11-RUNBOOK.md).
+
 The authenticated GraphQL API exposes the following lifecycle operations to
 callers holding `pki.provision` in the authority's stored scope:
 

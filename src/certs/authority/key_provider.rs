@@ -1,8 +1,8 @@
 //! Atom-owned CA signing boundary.
 //!
-//! The encrypted-database provider implemented here is deliberately independent
-//! of certificate issuance. Later providers (PKCS#11, KMS, or the legacy file
-//! bridge) can implement [`AuthorityKeyProvider`] without changing public APIs.
+//! The encrypted-database and PKCS#11 providers implemented here are deliberately
+//! independent of certificate issuance. Later providers (KMS or an isolated
+//! signer) can implement [`AuthorityKeyProvider`] without changing public APIs.
 
 use std::fmt;
 
@@ -16,9 +16,17 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{config::PkiCaKeyConfig, crypto, error::AppError, metrics};
+use crate::{
+    config::{PkiCaKeyConfig, PkiCaProvisioningBackend},
+    crypto,
+    error::AppError,
+    metrics,
+};
 
 use super::{repo, AuthorityKeyBackend, AuthorityRecord};
+
+mod pkcs11;
+pub use pkcs11::{Pkcs11AuthorityKey, Pkcs11KeyProvider};
 
 const PROVIDER_NAME: &str = "encrypted_database";
 const ENCRYPTION_ALGORITHM: &str = crypto::AEAD_ALG;
@@ -70,6 +78,8 @@ impl AuthorityKeyContext {
 pub enum AuthorityKeyProviderStatus {
     Ready,
     Unconfigured,
+    Unavailable,
+    CircuitOpen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -228,10 +238,40 @@ pub enum AuthorityKeyProviderError {
     UnsupportedEncryptionAlgorithm,
     #[error("authority key uses an unsupported signing algorithm")]
     UnsupportedKeyAlgorithm,
+    #[error("authority key reference is invalid")]
+    InvalidKeyReference,
+    #[error("authority key reference does not match its authority context")]
+    KeyContextMismatch,
+    #[error("authority key was not found in its provider")]
+    KeyNotFound,
+    #[error("authority key provider state is inconsistent")]
+    ProviderStateCorrupt,
+    #[error("authority key violates the required non-exportable policy")]
+    NonExportablePolicyViolation,
+    #[error("authority key provider is unavailable")]
+    ProviderUnavailable,
+    #[error("authority key provider is throttling operations")]
+    ProviderThrottled,
+    #[error("authority key provider operation timed out")]
+    OperationTimedOut,
+    #[error("authority key provider circuit is open")]
+    CircuitOpen,
     #[error("authority key cryptographic operation failed")]
     CryptographicFailure,
     #[error("authority key has been destroyed")]
     Destroyed,
+}
+
+impl AuthorityKeyProviderError {
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::ProviderUnavailable
+                | Self::ProviderThrottled
+                | Self::OperationTimedOut
+                | Self::CircuitOpen
+        )
+    }
 }
 
 /// Provider-neutral CA key operations. Certificate services depend on this
@@ -259,8 +299,16 @@ pub trait AuthorityKeyProvider: Send + Sync {
         key: &Self::Key,
         message: &[u8],
     ) -> Result<AuthoritySignature, AuthorityKeyProviderError>;
-    fn retire(&self, key: &Self::Key) -> Result<(), AuthorityKeyProviderError>;
-    fn destroy(&self, key: &mut Self::Key) -> Result<(), AuthorityKeyProviderError>;
+    fn retire(
+        &self,
+        context: AuthorityKeyContext,
+        key: &Self::Key,
+    ) -> Result<(), AuthorityKeyProviderError>;
+    fn destroy(
+        &self,
+        context: AuthorityKeyContext,
+        key: &mut Self::Key,
+    ) -> Result<(), AuthorityKeyProviderError>;
 }
 
 #[derive(Clone)]
@@ -461,7 +509,11 @@ impl AuthorityKeyProvider for EncryptedDatabaseKeyProvider {
         Self::observe("sign", result)
     }
 
-    fn retire(&self, key: &EncryptedAuthorityKey) -> Result<(), AuthorityKeyProviderError> {
+    fn retire(
+        &self,
+        _context: AuthorityKeyContext,
+        key: &EncryptedAuthorityKey,
+    ) -> Result<(), AuthorityKeyProviderError> {
         // Retired issuer keys must remain usable for CRL/OCSP until retention
         // ends. Lifecycle state lives on the authority; the encrypted provider
         // therefore validates but intentionally retains the key material.
@@ -469,7 +521,11 @@ impl AuthorityKeyProvider for EncryptedDatabaseKeyProvider {
         Self::observe("retire", result)
     }
 
-    fn destroy(&self, key: &mut EncryptedAuthorityKey) -> Result<(), AuthorityKeyProviderError> {
+    fn destroy(
+        &self,
+        _context: AuthorityKeyContext,
+        key: &mut EncryptedAuthorityKey,
+    ) -> Result<(), AuthorityKeyProviderError> {
         let result = (|| {
             key.ensure_usable()?;
             key.destroy();
@@ -479,26 +535,298 @@ impl AuthorityKeyProvider for EncryptedDatabaseKeyProvider {
     }
 }
 
-/// Validate provider metadata without loading or decrypting any CA private key.
-/// A CA KEK is optional while every authority is `public_only`, but startup
-/// fails closed as soon as an encrypted authority requires it.
-pub async fn validate_startup(pool: &PgPool, config: &PkiCaKeyConfig) -> Result<(), AppError> {
-    let requirements = repo::encrypted_key_requirements(pool).await?;
-    if requirements.is_empty() {
-        return Ok(());
+#[derive(Debug)]
+pub enum ManagedAuthorityKey {
+    EncryptedDatabase(EncryptedAuthorityKey),
+    Pkcs11(Pkcs11AuthorityKey),
+}
+
+pub(crate) struct AuthorityKeyColumns<'a> {
+    pub backend: AuthorityKeyBackend,
+    pub key_reference: Option<&'a str>,
+    pub encrypted_private_key: Option<&'a [u8]>,
+    pub private_key_nonce: Option<&'a [u8]>,
+    pub wrapped_dek: Option<&'a [u8]>,
+    pub wrapped_dek_nonce: Option<&'a [u8]>,
+    pub key_encryption_key_id: Option<&'a str>,
+    pub encryption_algorithm: Option<&'a str>,
+}
+
+impl ManagedAuthorityKey {
+    pub fn from_authority(authority: &AuthorityRecord) -> Result<Self, AuthorityKeyProviderError> {
+        match authority.key_backend {
+            AuthorityKeyBackend::EncryptedDatabase => {
+                EncryptedAuthorityKey::from_authority(authority).map(Self::EncryptedDatabase)
+            }
+            AuthorityKeyBackend::Pkcs11 => {
+                Pkcs11AuthorityKey::from_authority(authority).map(Self::Pkcs11)
+            }
+            AuthorityKeyBackend::PublicOnly | AuthorityKeyBackend::Kms => {
+                Err(AuthorityKeyProviderError::WrongBackend)
+            }
+        }
     }
 
-    let provider = EncryptedDatabaseKeyProvider::new(config.clone());
-    requirements
-        .iter()
-        .try_for_each(|requirement| provider.validate_requirement(requirement))
-        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    pub(crate) fn columns(&self) -> AuthorityKeyColumns<'_> {
+        match self {
+            Self::EncryptedDatabase(key) => AuthorityKeyColumns {
+                backend: AuthorityKeyBackend::EncryptedDatabase,
+                key_reference: None,
+                encrypted_private_key: Some(&key.encrypted_private_key),
+                private_key_nonce: Some(&key.private_key_nonce),
+                wrapped_dek: Some(&key.wrapped_dek),
+                wrapped_dek_nonce: Some(&key.wrapped_dek_nonce),
+                key_encryption_key_id: Some(&key.key_encryption_key_id),
+                encryption_algorithm: Some(&key.encryption_algorithm),
+            },
+            Self::Pkcs11(key) => AuthorityKeyColumns {
+                backend: AuthorityKeyBackend::Pkcs11,
+                key_reference: Some(key.reference()),
+                encrypted_private_key: None,
+                private_key_nonce: None,
+                wrapped_dek: None,
+                wrapped_dek_nonce: None,
+                key_encryption_key_id: None,
+                encryption_algorithm: None,
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum ManagedAuthorityKeyProvider {
+    EncryptedDatabase(EncryptedDatabaseKeyProvider),
+    Pkcs11(Pkcs11KeyProvider),
+}
+
+impl fmt::Debug for ManagedAuthorityKeyProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EncryptedDatabase(provider) => provider.fmt(f),
+            Self::Pkcs11(provider) => provider.fmt(f),
+        }
+    }
+}
+
+impl ManagedAuthorityKeyProvider {
+    pub fn for_provisioning(config: &PkiCaKeyConfig) -> Result<Self, AuthorityKeyProviderError> {
+        match config.provisioning_backend {
+            PkiCaProvisioningBackend::EncryptedDatabase => Ok(Self::EncryptedDatabase(
+                EncryptedDatabaseKeyProvider::new(config.clone()),
+            )),
+            PkiCaProvisioningBackend::Pkcs11 => config
+                .pkcs11
+                .clone()
+                .map(Pkcs11KeyProvider::new)
+                .map(Self::Pkcs11)
+                .ok_or(AuthorityKeyProviderError::Unconfigured),
+        }
+    }
+
+    pub fn for_authority(
+        config: &PkiCaKeyConfig,
+        authority: &AuthorityRecord,
+    ) -> Result<Self, AuthorityKeyProviderError> {
+        match authority.key_backend {
+            AuthorityKeyBackend::EncryptedDatabase => Ok(Self::EncryptedDatabase(
+                EncryptedDatabaseKeyProvider::new(config.clone()),
+            )),
+            AuthorityKeyBackend::Pkcs11 => config
+                .pkcs11
+                .clone()
+                .map(Pkcs11KeyProvider::new)
+                .map(Self::Pkcs11)
+                .ok_or(AuthorityKeyProviderError::Unconfigured),
+            AuthorityKeyBackend::PublicOnly | AuthorityKeyBackend::Kms => {
+                Err(AuthorityKeyProviderError::WrongBackend)
+            }
+        }
+    }
+}
+
+impl AuthorityKeyProvider for ManagedAuthorityKeyProvider {
+    type Key = ManagedAuthorityKey;
+
+    fn backend(&self) -> AuthorityKeyBackend {
+        match self {
+            Self::EncryptedDatabase(provider) => provider.backend(),
+            Self::Pkcs11(provider) => provider.backend(),
+        }
+    }
+
+    fn health(&self) -> AuthorityKeyProviderHealth {
+        match self {
+            Self::EncryptedDatabase(provider) => provider.health(),
+            Self::Pkcs11(provider) => provider.health(),
+        }
+    }
+
+    fn generate(
+        &self,
+        context: AuthorityKeyContext,
+        algorithm: AuthorityKeyAlgorithm,
+    ) -> Result<GeneratedAuthorityKey<Self::Key>, AuthorityKeyProviderError> {
+        match self {
+            Self::EncryptedDatabase(provider) => {
+                provider
+                    .generate(context, algorithm)
+                    .map(|generated| GeneratedAuthorityKey {
+                        public_key: generated.public_key,
+                        key: ManagedAuthorityKey::EncryptedDatabase(generated.key),
+                    })
+            }
+            Self::Pkcs11(provider) => {
+                provider
+                    .generate(context, algorithm)
+                    .map(|generated| GeneratedAuthorityKey {
+                        public_key: generated.public_key,
+                        key: ManagedAuthorityKey::Pkcs11(generated.key),
+                    })
+            }
+        }
+    }
+
+    fn public_key(
+        &self,
+        context: AuthorityKeyContext,
+        key: &Self::Key,
+    ) -> Result<AuthorityPublicKey, AuthorityKeyProviderError> {
+        match (self, key) {
+            (Self::EncryptedDatabase(provider), ManagedAuthorityKey::EncryptedDatabase(key)) => {
+                provider.public_key(context, key)
+            }
+            (Self::Pkcs11(provider), ManagedAuthorityKey::Pkcs11(key)) => {
+                provider.public_key(context, key)
+            }
+            _ => Err(AuthorityKeyProviderError::WrongBackend),
+        }
+    }
+
+    fn sign(
+        &self,
+        context: AuthorityKeyContext,
+        key: &Self::Key,
+        message: &[u8],
+    ) -> Result<AuthoritySignature, AuthorityKeyProviderError> {
+        match (self, key) {
+            (Self::EncryptedDatabase(provider), ManagedAuthorityKey::EncryptedDatabase(key)) => {
+                provider.sign(context, key, message)
+            }
+            (Self::Pkcs11(provider), ManagedAuthorityKey::Pkcs11(key)) => {
+                provider.sign(context, key, message)
+            }
+            _ => Err(AuthorityKeyProviderError::WrongBackend),
+        }
+    }
+
+    fn retire(
+        &self,
+        context: AuthorityKeyContext,
+        key: &Self::Key,
+    ) -> Result<(), AuthorityKeyProviderError> {
+        match (self, key) {
+            (Self::EncryptedDatabase(provider), ManagedAuthorityKey::EncryptedDatabase(key)) => {
+                provider.retire(context, key)
+            }
+            (Self::Pkcs11(provider), ManagedAuthorityKey::Pkcs11(key)) => {
+                provider.retire(context, key)
+            }
+            _ => Err(AuthorityKeyProviderError::WrongBackend),
+        }
+    }
+
+    fn destroy(
+        &self,
+        context: AuthorityKeyContext,
+        key: &mut Self::Key,
+    ) -> Result<(), AuthorityKeyProviderError> {
+        match (self, key) {
+            (Self::EncryptedDatabase(provider), ManagedAuthorityKey::EncryptedDatabase(key)) => {
+                provider.destroy(context, key)
+            }
+            (Self::Pkcs11(provider), ManagedAuthorityKey::Pkcs11(key)) => {
+                provider.destroy(context, key)
+            }
+            _ => Err(AuthorityKeyProviderError::WrongBackend),
+        }
+    }
+}
+
+/// Validate every configured provider and every persisted managed key before
+/// serving. Encrypted keys are checked by metadata only; PKCS#11 keys are
+/// opened through their opaque references and matched to stored certificates.
+pub async fn validate_startup(pool: &PgPool, config: &PkiCaKeyConfig) -> Result<(), AppError> {
+    if repo::kms_authority_count(pool).await? != 0 {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "stored KMS authority requires an unavailable provider"
+        )));
+    }
+    let requirements = repo::encrypted_key_requirements(pool).await?;
+    if !requirements.is_empty() {
+        let provider = EncryptedDatabaseKeyProvider::new(config.clone());
+        requirements
+            .iter()
+            .try_for_each(|requirement| provider.validate_requirement(requirement))
+            .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+    }
+
+    let pkcs11_authorities = repo::pkcs11_authorities(pool).await?;
+    if config.provisioning_backend == PkiCaProvisioningBackend::Pkcs11
+        || !pkcs11_authorities.is_empty()
+    {
+        let provider_config = config.pkcs11.clone().ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(AuthorityKeyProviderError::Unconfigured))
+        })?;
+        let provider = Pkcs11KeyProvider::new(provider_config);
+        if provider.health().status != AuthorityKeyProviderStatus::Ready {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                AuthorityKeyProviderError::ProviderUnavailable
+            )));
+        }
+        for authority in &pkcs11_authorities {
+            let context = AuthorityKeyContext {
+                authority_id: authority.id,
+                tenant_id: authority.tenant_id,
+                version: authority.version,
+            };
+            let key = Pkcs11AuthorityKey::from_authority(authority)
+                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+            let public = provider
+                .public_key(context, &key)
+                .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
+            validate_pkcs11_certificate_match(authority, &public)?;
+        }
+    }
 
     tracing::info!(
-        provider = PROVIDER_NAME,
-        configurations = requirements.len(),
-        "PKI CA key provider metadata validated"
+        encrypted_database_configurations = requirements.len(),
+        pkcs11_authorities = pkcs11_authorities.len(),
+        "PKI CA key providers validated"
     );
+    Ok(())
+}
+
+fn validate_pkcs11_certificate_match(
+    authority: &AuthorityRecord,
+    public: &AuthorityPublicKey,
+) -> Result<(), AppError> {
+    let Some(certificate_pem) = authority.certificate_pem.as_deref() else {
+        return Ok(());
+    };
+    let (remaining, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("stored invalid authority certificate")))?;
+    if !remaining.iter().all(u8::is_ascii_whitespace) || pem.label != "CERTIFICATE" {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "stored invalid authority certificate"
+        )));
+    }
+    let (_, certificate) = x509_parser::parse_x509_certificate(&pem.contents)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("stored invalid authority certificate")))?;
+    if certificate.public_key().raw != public.subject_public_key_info_der.as_slice() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "PKCS#11 authority key does not match its certificate"
+        )));
+    }
     Ok(())
 }
 
@@ -517,6 +845,7 @@ mod tests {
         PkiCaKeyConfig {
             key_encryption_key: Some(SecretBytes::new(vec![byte; DEK_LEN]).expect("test CA KEK")),
             key_encryption_key_id: id.to_string(),
+            ..PkiCaKeyConfig::default()
         }
     }
 
@@ -742,12 +1071,16 @@ mod tests {
         let provider = EncryptedDatabaseKeyProvider::new(config(7, "ca:v1"));
         let context = context();
         let mut generated = generated(&provider, context);
-        provider.retire(&generated.key).expect("retire retains key");
+        provider
+            .retire(context, &generated.key)
+            .expect("retire retains key");
         provider
             .sign(context, &generated.key, b"crl")
             .expect("retired key remains usable for artifacts");
 
-        provider.destroy(&mut generated.key).expect("destroy");
+        provider
+            .destroy(context, &mut generated.key)
+            .expect("destroy");
         assert_eq!(
             provider
                 .sign(context, &generated.key, b"message")
@@ -771,6 +1104,34 @@ mod tests {
                 })
                 .expect_err("encrypted row requires CA KEK"),
             AuthorityKeyProviderError::Unconfigured
+        );
+    }
+
+    #[test]
+    fn pkcs11_certificate_public_key_mismatch_fails_closed() {
+        let mut authority = public_only_root();
+        authority.key_backend = AuthorityKeyBackend::Pkcs11;
+        authority.key_reference = Some(format!("pkcs11:v1:id={}", "00".repeat(32)));
+        authority.certificate_pem = Some(
+            rcgen::generate_simple_self_signed(vec!["authority.invalid".to_string()])
+                .expect("certificate")
+                .cert
+                .pem(),
+        );
+        let error = validate_pkcs11_certificate_match(
+            &authority,
+            &AuthorityPublicKey {
+                algorithm: AuthorityKeyAlgorithm::EcdsaP256Sha256,
+                subject_public_key_info_der: vec![0],
+            },
+        )
+        .expect_err("wrong certificate key");
+        let AppError::Internal(error) = error else {
+            panic!("certificate mismatch must fail as an internal startup error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "PKCS#11 authority key does not match its certificate"
         );
     }
 }

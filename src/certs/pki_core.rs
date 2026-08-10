@@ -31,8 +31,8 @@ use crate::{config::PkiCaKeyConfig, error::AppError};
 
 use super::authority::{
     key_provider::{
-        AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError,
-        EncryptedAuthorityKey, EncryptedDatabaseKeyProvider,
+        AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError, ManagedAuthorityKey,
+        ManagedAuthorityKeyProvider,
     },
     AuthorityKeyBackend, AuthorityRecord,
 };
@@ -48,10 +48,10 @@ const CA_ISSUERS_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 2];
 
 enum PkiSigningKey {
     Local(KeyPair),
-    EncryptedDatabase {
-        provider: EncryptedDatabaseKeyProvider,
+    Managed {
+        provider: Box<ManagedAuthorityKeyProvider>,
         context: AuthorityKeyContext,
-        key: EncryptedAuthorityKey,
+        key: ManagedAuthorityKey,
         raw_public_key: Vec<u8>,
     },
 }
@@ -60,14 +60,14 @@ impl PublicKeyData for PkiSigningKey {
     fn der_bytes(&self) -> &[u8] {
         match self {
             Self::Local(key) => key.der_bytes(),
-            Self::EncryptedDatabase { raw_public_key, .. } => raw_public_key,
+            Self::Managed { raw_public_key, .. } => raw_public_key,
         }
     }
 
     fn algorithm(&self) -> &'static SignatureAlgorithm {
         match self {
             Self::Local(key) => key.algorithm(),
-            Self::EncryptedDatabase { .. } => &PKCS_ECDSA_P256_SHA256,
+            Self::Managed { .. } => &PKCS_ECDSA_P256_SHA256,
         }
     }
 }
@@ -76,7 +76,7 @@ impl SigningKey for PkiSigningKey {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
         match self {
             Self::Local(key) => key.sign(message),
-            Self::EncryptedDatabase {
+            Self::Managed {
                 provider,
                 context,
                 key,
@@ -338,7 +338,10 @@ fn managed_authority_material(
     authority: &AuthorityRecord,
     ca_keys: &PkiCaKeyConfig,
 ) -> Result<ManagedAuthorityMaterial, AppError> {
-    if authority.key_backend != AuthorityKeyBackend::EncryptedDatabase {
+    if !matches!(
+        authority.key_backend,
+        AuthorityKeyBackend::EncryptedDatabase | AuthorityKeyBackend::Pkcs11
+    ) {
         return Err(AppError::Internal(anyhow::anyhow!(
             "managed authority key backend is not available"
         )));
@@ -369,9 +372,9 @@ fn managed_authority_material(
         tenant_id: authority.tenant_id,
         version: authority.version,
     };
-    let provider = EncryptedDatabaseKeyProvider::new(ca_keys.clone());
-    let key =
-        EncryptedAuthorityKey::from_authority(authority).map_err(managed_key_provider_error)?;
+    let provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, authority)
+        .map_err(managed_key_provider_error)?;
+    let key = ManagedAuthorityKey::from_authority(authority).map_err(managed_key_provider_error)?;
     let public = provider
         .public_key(context, &key)
         .map_err(managed_key_provider_error)?;
@@ -389,8 +392,8 @@ fn managed_authority_material(
     Ok(ManagedAuthorityMaterial {
         certificate_pem: pem_encode_certificate(&certificate_der),
         chain_pem: chain_pem.to_string(),
-        signing_key: PkiSigningKey::EncryptedDatabase {
-            provider,
+        signing_key: PkiSigningKey::Managed {
+            provider: Box::new(provider),
             context,
             key,
             raw_public_key,

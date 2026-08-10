@@ -139,6 +139,36 @@ impl Drop for SecretBytes {
     }
 }
 
+/// Redacted, zeroizing configuration text for provider credentials whose
+/// length is provider-defined (for example, a PKCS#11 user PIN).
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretText(String);
+
+impl SecretText {
+    pub fn new(value: String) -> Result<Self> {
+        if value.trim().is_empty() {
+            anyhow::bail!("secret text must not be blank");
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl Drop for SecretText {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningKeyConfig {
     pub key_encryption_key: Option<SecretBytes>,
@@ -160,10 +190,64 @@ impl Default for SigningKeyConfig {
 ///
 /// This is intentionally separate from [`SigningKeyConfig`]: compromise or
 /// rotation of JWT/credential encryption must not grant access to CA keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PkiCaProvisioningBackend {
+    EncryptedDatabase,
+    Pkcs11,
+}
+
+impl PkiCaProvisioningBackend {
+    pub fn from_env_value(value: &str) -> Result<Self> {
+        match value {
+            "encrypted_database" => Ok(Self::EncryptedDatabase),
+            "pkcs11" => Ok(Self::Pkcs11),
+            other => anyhow::bail!(
+                "ATOM_PKI_CA_KEY_BACKEND must be encrypted_database or pkcs11, got {other}"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EncryptedDatabase => "encrypted_database",
+            Self::Pkcs11 => "pkcs11",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct PkiPkcs11Config {
+    pub module_path: String,
+    pub token_label: String,
+    pub user_pin: SecretText,
+    pub operation_timeout_ms: u64,
+    pub max_retries: u32,
+    pub max_in_flight: u32,
+    pub circuit_failure_threshold: u32,
+    pub circuit_reset_secs: u64,
+}
+
+impl fmt::Debug for PkiPkcs11Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PkiPkcs11Config")
+            .field("module_path", &self.module_path)
+            .field("token_label", &self.token_label)
+            .field("user_pin", &"<redacted>")
+            .field("operation_timeout_ms", &self.operation_timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("circuit_failure_threshold", &self.circuit_failure_threshold)
+            .field("circuit_reset_secs", &self.circuit_reset_secs)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkiCaKeyConfig {
     pub key_encryption_key: Option<SecretBytes>,
     pub key_encryption_key_id: String,
+    pub provisioning_backend: PkiCaProvisioningBackend,
+    pub pkcs11: Option<PkiPkcs11Config>,
 }
 
 impl Default for PkiCaKeyConfig {
@@ -171,6 +255,8 @@ impl Default for PkiCaKeyConfig {
         Self {
             key_encryption_key: None,
             key_encryption_key_id: "local-ca:v1".to_string(),
+            provisioning_backend: PkiCaProvisioningBackend::EncryptedDatabase,
+            pkcs11: None,
         }
     }
 }
@@ -873,9 +959,66 @@ fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
     if key_encryption_key.is_some() && key_encryption_key_id.trim().is_empty() {
         anyhow::bail!("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID must not be blank when the CA KEK is set");
     }
+    let provisioning_backend = PkiCaProvisioningBackend::from_env_value(
+        &std::env::var("ATOM_PKI_CA_KEY_BACKEND")
+            .unwrap_or_else(|_| default.provisioning_backend.as_str().to_string()),
+    )?;
+    let pkcs11_names = [
+        "ATOM_PKI_PKCS11_MODULE_PATH",
+        "ATOM_PKI_PKCS11_TOKEN_LABEL",
+        "ATOM_PKI_PKCS11_USER_PIN",
+    ];
+    let pkcs11_requested = provisioning_backend == PkiCaProvisioningBackend::Pkcs11
+        || pkcs11_names
+            .iter()
+            .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+    let pkcs11 = if pkcs11_requested {
+        let required = |name: &'static str| -> Result<String> {
+            let value = std::env::var(name).with_context(|| format!("{name} must be set"))?;
+            if value.trim().is_empty() {
+                anyhow::bail!("{name} must not be blank");
+            }
+            Ok(value)
+        };
+        let operation_timeout_ms = env_parse("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS", 2_000_u64)?;
+        let max_retries = env_parse("ATOM_PKI_PKCS11_MAX_RETRIES", 1_u32)?;
+        let max_in_flight = env_parse("ATOM_PKI_PKCS11_MAX_IN_FLIGHT", 8_u32)?;
+        let circuit_failure_threshold =
+            env_parse("ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD", 3_u32)?;
+        let circuit_reset_secs = env_parse("ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS", 30_u64)?;
+        if operation_timeout_ms == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS must be greater than zero");
+        }
+        if max_retries > 3 {
+            anyhow::bail!("ATOM_PKI_PKCS11_MAX_RETRIES must be at most 3");
+        }
+        if max_in_flight == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_MAX_IN_FLIGHT must be greater than zero");
+        }
+        if circuit_failure_threshold == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD must be greater than zero");
+        }
+        if circuit_reset_secs == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS must be greater than zero");
+        }
+        Some(PkiPkcs11Config {
+            module_path: required("ATOM_PKI_PKCS11_MODULE_PATH")?,
+            token_label: required("ATOM_PKI_PKCS11_TOKEN_LABEL")?,
+            user_pin: SecretText::new(required("ATOM_PKI_PKCS11_USER_PIN")?)?,
+            operation_timeout_ms,
+            max_retries,
+            max_in_flight,
+            circuit_failure_threshold,
+            circuit_reset_secs,
+        })
+    } else {
+        None
+    };
     Ok(PkiCaKeyConfig {
         key_encryption_key,
         key_encryption_key_id,
+        provisioning_backend,
+        pkcs11,
     })
 }
 
@@ -1273,7 +1416,7 @@ fn public_url(public_base_url: &str, path: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use super::{public_url, Config, LogFormat};
+    use super::{public_url, Config, LogFormat, PkiCaProvisioningBackend};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1305,6 +1448,11 @@ mod tests {
         assert!(!cfg.signing_keys.allow_plaintext_signing_keys);
         assert!(cfg.signing_keys.key_encryption_key.is_none());
         assert!(cfg.pki_ca_keys.key_encryption_key.is_none());
+        assert_eq!(
+            cfg.pki_ca_keys.provisioning_backend,
+            PkiCaProvisioningBackend::EncryptedDatabase
+        );
+        assert!(cfg.pki_ca_keys.pkcs11.is_none());
         assert!(!cfg.audit_policy.hot_path_allow_db_enabled);
         assert_eq!(cfg.audit_retention.days, 365);
         assert_eq!(cfg.login_failure_limit, 5);
@@ -1528,6 +1676,37 @@ mod tests {
     }
 
     #[test]
+    fn pkcs11_configuration_is_operator_only_and_fail_closed() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_PKI_CA_KEY_BACKEND", "pkcs11");
+
+        let err = Config::from_env().expect_err("missing PKCS#11 configuration");
+        assert!(err.to_string().contains("ATOM_PKI_PKCS11_MODULE_PATH"));
+
+        std::env::set_var("ATOM_PKI_PKCS11_MODULE_PATH", "/opt/hsm/libpkcs11.so");
+        std::env::set_var("ATOM_PKI_PKCS11_TOKEN_LABEL", "atom-production-ca");
+        std::env::set_var("ATOM_PKI_PKCS11_USER_PIN", "provider-pin");
+        let cfg = Config::from_env().expect("PKCS#11 config");
+        assert_eq!(
+            cfg.pki_ca_keys.provisioning_backend,
+            PkiCaProvisioningBackend::Pkcs11
+        );
+        let pkcs11 = cfg.pki_ca_keys.pkcs11.expect("PKCS#11 provider");
+        assert_eq!(pkcs11.token_label, "atom-production-ca");
+        assert!(!format!("{pkcs11:?}").contains("provider-pin"));
+
+        std::env::set_var("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS", "0");
+        let err = Config::from_env().expect_err("zero timeout");
+        assert!(err
+            .to_string()
+            .contains("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn trusted_proxy_cidrs_must_be_valid() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -1667,6 +1846,15 @@ mod tests {
             "ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS",
             "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
             "ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID",
+            "ATOM_PKI_CA_KEY_BACKEND",
+            "ATOM_PKI_PKCS11_MODULE_PATH",
+            "ATOM_PKI_PKCS11_TOKEN_LABEL",
+            "ATOM_PKI_PKCS11_USER_PIN",
+            "ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS",
+            "ATOM_PKI_PKCS11_MAX_RETRIES",
+            "ATOM_PKI_PKCS11_MAX_IN_FLIGHT",
+            "ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD",
+            "ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS",
             "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
             "ATOM_AUDIT_RETENTION_DAYS",
             "ATOM_AUDIT_RETENTION_ENABLED",
