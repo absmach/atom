@@ -602,7 +602,9 @@ async fn assert_audit_and_outbox_linkage(pool: &PgPool, old_id: Uuid, new_id: Uu
     assert_eq!(details["revoke_old"], false);
     let payload: Value = sqlx::query_scalar(
         r#"SELECT payload FROM event_outbox
-           WHERE event = 'certificate.renew' AND (payload->>'target_id')::uuid = $1"#,
+           WHERE event = 'certificate.renew'
+             AND payload->>'outcome' = 'allow'
+             AND (payload->>'target_id')::uuid = $1"#,
     )
     .bind(old_id)
     .fetch_one(pool)
@@ -610,7 +612,10 @@ async fn assert_audit_and_outbox_linkage(pool: &PgPool, old_id: Uuid, new_id: Uu
     .unwrap();
     assert_eq!(payload["details"]["new_credential_id"], new_id.to_string());
     let event_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM event_outbox WHERE event = 'certificate.renew' AND (payload->>'target_id')::uuid = $1",
+        "SELECT COUNT(*) FROM event_outbox
+         WHERE event = 'certificate.renew'
+           AND payload->>'outcome' = 'allow'
+           AND (payload->>'target_id')::uuid = $1",
     )
     .bind(old_id)
     .fetch_one(pool)
