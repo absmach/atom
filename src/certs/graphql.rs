@@ -6,7 +6,7 @@ use crate::{
     audit,
     auth::{has_capability_in_scope, AuthContext, Scope},
     certs::{lifecycle, service},
-    error::db_err,
+    error::{db_err, AppError},
     models::enums::AuditOutcome,
     state::AppState,
 };
