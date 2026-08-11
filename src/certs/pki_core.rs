@@ -302,9 +302,10 @@ impl PkiArtifactSigner {
     ) -> Result<PkiArtifactSignature, AppError> {
         let certificate_der =
             one_certificate_der(&self.certificate_pem, "OCSP signer certificate")?;
-        let (_, certificate) = x509_parser::parse_x509_certificate(&certificate_der).map_err(
-            |_| AppError::Internal(anyhow::anyhow!("stored invalid OCSP signer certificate")),
-        )?;
+        let (_, certificate) =
+            x509_parser::parse_x509_certificate(&certificate_der).map_err(|_| {
+                AppError::Internal(anyhow::anyhow!("stored invalid OCSP signer certificate"))
+            })?;
         let usage = certificate
             .tbs_certificate
             .key_usage()
