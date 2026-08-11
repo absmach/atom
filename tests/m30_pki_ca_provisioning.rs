@@ -507,9 +507,10 @@ async fn provision_automatically(
     tenant_id: Uuid,
 ) -> provisioning::AuthorityImportOutcome {
     let mut tx = pool.begin().await.unwrap();
-    let mut outcome = provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
-        .await
-        .unwrap();
+    let mut outcome =
+        provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
+            .await
+            .unwrap();
     tx.commit().await.unwrap();
     outcome.commit_generated_key();
     outcome.value
