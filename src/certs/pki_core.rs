@@ -300,6 +300,23 @@ impl PkiArtifactSigner {
         &self,
         response_data_der: &[u8],
     ) -> Result<PkiArtifactSignature, AppError> {
+        let certificate_der =
+            one_certificate_der(&self.certificate_pem, "OCSP signer certificate")?;
+        let (_, certificate) = x509_parser::parse_x509_certificate(&certificate_der).map_err(
+            |_| AppError::Internal(anyhow::anyhow!("stored invalid OCSP signer certificate")),
+        )?;
+        let usage = certificate
+            .tbs_certificate
+            .key_usage()
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid OCSP signer key usage")))?
+            .ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!("OCSP signer is missing key usage"))
+            })?;
+        if !usage.value.digital_signature() {
+            return Err(AppError::bad_request(
+                "authority certificate is not authorized for OCSP response signing",
+            ));
+        }
         let algorithm = pki_signature_algorithm(self.signing_key.algorithm())?;
         let bytes = self
             .signing_key
