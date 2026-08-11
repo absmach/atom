@@ -118,9 +118,7 @@ pub async fn import_root_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     certificate_pem: &str,
 ) -> Result<AuthorityRecord, AppError> {
-    Ok(import_root_mutation_in_tx(tx, certificate_pem)
-        .await?
-        .value)
+    Ok(import_root_mutation_in_tx(tx, certificate_pem).await?.value)
 }
 
 pub async fn import_root_mutation_in_tx(
@@ -145,8 +143,7 @@ pub async fn import_root_mutation_in_tx(
 
     let version = repo::next_authority_version(tx, AuthorityKind::Root, None).await?;
     let completed = completed_authority(&parsed, &parsed.pem);
-    let authority =
-        repo::insert_root_authority(tx, Uuid::new_v4(), version, &completed).await?;
+    let authority = repo::insert_root_authority(tx, Uuid::new_v4(), version, &completed).await?;
     Ok(AuthorityMutationOutcome {
         value: authority,
         changed: true,
@@ -158,9 +155,11 @@ pub async fn begin_tenant_authority_in_tx(
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
-    Ok(begin_tenant_authority_mutation_in_tx(tx, ca_keys, tenant_id)
-        .await?
-        .value)
+    Ok(
+        begin_tenant_authority_mutation_in_tx(tx, ca_keys, tenant_id)
+            .await?
+            .value,
+    )
 }
 
 pub async fn begin_tenant_authority_mutation_in_tx(
@@ -181,48 +180,34 @@ pub async fn begin_platform_leaf_issuer_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
 ) -> Result<AuthorityRecord, AppError> {
-    Ok(
-        begin_platform_leaf_issuer_mutation_in_tx(tx, ca_keys)
-            .await?
-            .value,
-    )
+    Ok(begin_platform_leaf_issuer_mutation_in_tx(tx, ca_keys)
+        .await?
+        .value)
 }
 
 pub async fn begin_platform_leaf_issuer_mutation_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    begin_offline_authority_mutation_in_tx(
-        tx,
-        ca_keys,
-        AuthorityKind::PlatformLeafIssuer,
-        None,
-    )
-    .await
+    begin_offline_authority_mutation_in_tx(tx, ca_keys, AuthorityKind::PlatformLeafIssuer, None)
+        .await
 }
 
 pub async fn begin_platform_intermediate_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
 ) -> Result<AuthorityRecord, AppError> {
-    Ok(
-        begin_platform_intermediate_mutation_in_tx(tx, ca_keys)
-            .await?
-            .value,
-    )
+    Ok(begin_platform_intermediate_mutation_in_tx(tx, ca_keys)
+        .await?
+        .value)
 }
 
 pub async fn begin_platform_intermediate_mutation_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    begin_offline_authority_mutation_in_tx(
-        tx,
-        ca_keys,
-        AuthorityKind::PlatformIntermediate,
-        None,
-    )
-    .await
+    begin_offline_authority_mutation_in_tx(tx, ca_keys, AuthorityKind::PlatformIntermediate, None)
+        .await
 }
 
 async fn begin_offline_authority_mutation_in_tx(
@@ -454,11 +439,9 @@ pub async fn begin_retirement_in_tx(
     ca_keys: &PkiCaKeyConfig,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
-    Ok(
-        begin_retirement_mutation_in_tx(tx, ca_keys, authority_id)
-            .await?
-            .value,
-    )
+    Ok(begin_retirement_mutation_in_tx(tx, ca_keys, authority_id)
+        .await?
+        .value)
 }
 
 pub async fn begin_retirement_mutation_in_tx(
