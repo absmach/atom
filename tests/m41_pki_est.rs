@@ -77,7 +77,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     let issuer = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant).await;
     let other_issuer = {
         let mut tx = pool.begin().await.unwrap();
-        let provisioned = provisioning::provision_tenant_automatically_in_tx(
+        let mut provisioned = provisioning::provision_tenant_automatically_in_tx(
             &mut tx,
             &config.pki_ca_keys,
             other_tenant,
@@ -90,6 +90,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
             provisioned.validation_error
         );
         tx.commit().await.unwrap();
+        provisioned.commit_generated_key();
         sqlx::query(
             r#"UPDATE pki_authorities
                SET ocsp_url = $2, ca_issuers_url = $3,
@@ -103,7 +104,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         .execute(&pool)
         .await
         .unwrap();
-        provisioned.authority
+        provisioned.value.authority
     };
 
     keys::bootstrap_if_needed(&pool, &config.signing_keys)

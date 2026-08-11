@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Deref};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
@@ -44,6 +44,101 @@ impl AuthorityImportOutcome {
 pub struct AuthorityMutationOutcome<T> {
     pub value: T,
     pub changed: bool,
+    generated_key: Option<GeneratedAuthorityKeyGuard>,
+}
+
+impl<T> AuthorityMutationOutcome<T> {
+    fn unchanged(value: T) -> Self {
+        Self {
+            value,
+            changed: false,
+            generated_key: None,
+        }
+    }
+
+    fn changed(value: T) -> Self {
+        Self {
+            value,
+            changed: true,
+            generated_key: None,
+        }
+    }
+
+    fn with_generated_key(value: T, generated_key: GeneratedAuthorityKeyGuard) -> Self {
+        Self {
+            value,
+            changed: true,
+            generated_key: Some(generated_key),
+        }
+    }
+
+    /// Transfer ownership of a newly generated provider key to the committed
+    /// authority row. Until this is called, dropping the outcome destroys the
+    /// key so a failed or rolled-back transaction cannot orphan token objects.
+    pub fn commit_generated_key(&mut self) {
+        if let Some(mut generated_key) = self.generated_key.take() {
+            generated_key.disarm();
+        }
+    }
+}
+
+impl<T> Deref for AuthorityMutationOutcome<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+#[derive(Debug)]
+struct GeneratedAuthorityKeyGuard {
+    provider: ManagedAuthorityKeyProvider,
+    context: AuthorityKeyContext,
+    key: Option<ManagedAuthorityKey>,
+}
+
+impl GeneratedAuthorityKeyGuard {
+    fn new(
+        provider: ManagedAuthorityKeyProvider,
+        context: AuthorityKeyContext,
+        key: ManagedAuthorityKey,
+    ) -> Self {
+        Self {
+            provider,
+            context,
+            key: Some(key),
+        }
+    }
+
+    fn provider(&self) -> &ManagedAuthorityKeyProvider {
+        &self.provider
+    }
+
+    fn key(&self) -> &ManagedAuthorityKey {
+        self.key
+            .as_ref()
+            .expect("generated authority key guard is armed")
+    }
+
+    fn disarm(&mut self) {
+        self.key = None;
+    }
+}
+
+impl Drop for GeneratedAuthorityKeyGuard {
+    fn drop(&mut self) {
+        let Some(mut key) = self.key.take() else {
+            return;
+        };
+        if let Err(error) = self.provider.destroy(self.context, &mut key) {
+            tracing::error!(
+                provider = ?self.provider.backend(),
+                authority_id = %self.context.authority_id,
+                error = %error,
+                "failed to remove uncommitted authority key"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +161,7 @@ struct ParsedAuthorityCertificate {
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
     path_len_constraint: Option<u32>,
+    digital_signature: bool,
 }
 
 struct ProviderSigningKey<'a> {
@@ -131,10 +227,7 @@ pub async fn import_root_mutation_in_tx(
 
     if let Some(existing) = repo::authority_by_fingerprint(tx, &parsed.fingerprint_sha256).await? {
         if existing.kind == AuthorityKind::Root {
-            return Ok(AuthorityMutationOutcome {
-                value: existing,
-                changed: false,
-            });
+            return Ok(AuthorityMutationOutcome::unchanged(existing));
         }
         return Err(AppError::conflict(
             "certificate fingerprint already belongs to another authority",
@@ -144,22 +237,15 @@ pub async fn import_root_mutation_in_tx(
     let version = repo::next_authority_version(tx, AuthorityKind::Root, None).await?;
     let completed = completed_authority(&parsed, &parsed.pem);
     let authority = repo::insert_root_authority(tx, Uuid::new_v4(), version, &completed).await?;
-    Ok(AuthorityMutationOutcome {
-        value: authority,
-        changed: true,
-    })
+    Ok(AuthorityMutationOutcome::changed(authority))
 }
 
 pub async fn begin_tenant_authority_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
-) -> Result<AuthorityRecord, AppError> {
-    Ok(
-        begin_tenant_authority_mutation_in_tx(tx, ca_keys, tenant_id)
-            .await?
-            .value,
-    )
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
+    begin_tenant_authority_mutation_in_tx(tx, ca_keys, tenant_id).await
 }
 
 pub async fn begin_tenant_authority_mutation_in_tx(
@@ -179,10 +265,8 @@ pub async fn begin_tenant_authority_mutation_in_tx(
 pub async fn begin_platform_leaf_issuer_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
-) -> Result<AuthorityRecord, AppError> {
-    Ok(begin_platform_leaf_issuer_mutation_in_tx(tx, ca_keys)
-        .await?
-        .value)
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
+    begin_platform_leaf_issuer_mutation_in_tx(tx, ca_keys).await
 }
 
 pub async fn begin_platform_leaf_issuer_mutation_in_tx(
@@ -196,10 +280,8 @@ pub async fn begin_platform_leaf_issuer_mutation_in_tx(
 pub async fn begin_platform_intermediate_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
-) -> Result<AuthorityRecord, AppError> {
-    Ok(begin_platform_intermediate_mutation_in_tx(tx, ca_keys)
-        .await?
-        .value)
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
+    begin_platform_intermediate_mutation_in_tx(tx, ca_keys).await
 }
 
 pub async fn begin_platform_intermediate_mutation_in_tx(
@@ -222,10 +304,7 @@ async fn begin_offline_authority_mutation_in_tx(
     }
     if let Some(existing) = repo::pending_authority_for_scope(tx, kind, tenant_id).await? {
         if existing.provisioning_mode == "offline" {
-            return Ok(AuthorityMutationOutcome {
-                value: existing,
-                changed: false,
-            });
+            return Ok(AuthorityMutationOutcome::unchanged(existing));
         }
         return Err(AppError::conflict(
             "authority provisioning already exists for this scope",
@@ -234,24 +313,20 @@ async fn begin_offline_authority_mutation_in_tx(
 
     let parent = repo::active_root(tx).await?;
     ensure_parent_available(&parent)?;
-    let authority =
+    let (authority, generated_key) =
         create_pending_authority(tx, ca_keys, kind, tenant_id, &parent, "offline").await?;
-    Ok(AuthorityMutationOutcome {
-        value: authority,
-        changed: true,
-    })
+    Ok(AuthorityMutationOutcome::with_generated_key(
+        authority,
+        generated_key,
+    ))
 }
 
 pub async fn provision_tenant_automatically_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
-) -> Result<AuthorityImportOutcome, AppError> {
-    Ok(
-        provision_tenant_automatically_mutation_in_tx(tx, ca_keys, tenant_id)
-            .await?
-            .value,
-    )
+) -> Result<AuthorityMutationOutcome<AuthorityImportOutcome>, AppError> {
+    provision_tenant_automatically_mutation_in_tx(tx, ca_keys, tenant_id).await
 }
 
 pub async fn provision_tenant_automatically_mutation_in_tx(
@@ -266,14 +341,13 @@ pub async fn provision_tenant_automatically_mutation_in_tx(
         repo::active_authority_for_scope(tx, AuthorityKind::TenantIntermediate, Some(tenant_id))
             .await?
     {
-        return Ok(AuthorityMutationOutcome {
-            value: AuthorityImportOutcome {
+        return Ok(AuthorityMutationOutcome::unchanged(
+            AuthorityImportOutcome {
                 authority: active,
                 validation_error: None,
                 replaced_authorities: Vec::new(),
             },
-            changed: false,
-        });
+        ));
     }
     if let Some(existing) =
         repo::pending_authority_for_scope(tx, AuthorityKind::TenantIntermediate, Some(tenant_id))
@@ -287,7 +361,7 @@ pub async fn provision_tenant_automatically_mutation_in_tx(
 
     let parent = repo::active_platform_intermediate(tx).await?;
     ensure_parent_available(&parent)?;
-    let pending = create_pending_authority(
+    let (pending, generated_key) = create_pending_authority(
         tx,
         ca_keys,
         AuthorityKind::TenantIntermediate,
@@ -298,10 +372,10 @@ pub async fn provision_tenant_automatically_mutation_in_tx(
     .await?;
     let certificate_pem = sign_pending_authority(ca_keys, &pending, &parent)?;
     let outcome = import_signed_authority_locked(tx, ca_keys, pending, &certificate_pem).await?;
-    Ok(AuthorityMutationOutcome {
-        value: outcome,
-        changed: true,
-    })
+    Ok(AuthorityMutationOutcome::with_generated_key(
+        outcome,
+        generated_key,
+    ))
 }
 
 pub async fn import_signed_authority_in_tx(
@@ -327,9 +401,10 @@ pub async fn import_signed_authority_mutation_in_tx(
     let authority = repo::authority_by_id_for_update(tx, authority_id).await?;
     let was_active = authority.status == AuthorityStatus::Active;
     let outcome = import_signed_authority_locked(tx, ca_keys, authority, certificate_pem).await?;
-    Ok(AuthorityMutationOutcome {
-        value: outcome,
-        changed: !was_active,
+    Ok(if was_active {
+        AuthorityMutationOutcome::unchanged(outcome)
+    } else {
+        AuthorityMutationOutcome::changed(outcome)
     })
 }
 
@@ -457,10 +532,7 @@ pub async fn begin_retirement_mutation_in_tx(
         ));
     }
     if authority.status == AuthorityStatus::Retiring {
-        return Ok(AuthorityMutationOutcome {
-            value: authority,
-            changed: false,
-        });
+        return Ok(AuthorityMutationOutcome::unchanged(authority));
     }
     if authority.status != AuthorityStatus::Active {
         return Err(AppError::conflict("only an active authority can retire"));
@@ -480,10 +552,7 @@ pub async fn begin_retirement_mutation_in_tx(
         AuthorityStatus::Retiring,
     )
     .await?;
-    Ok(AuthorityMutationOutcome {
-        value: authority,
-        changed: true,
-    })
+    Ok(AuthorityMutationOutcome::changed(authority))
 }
 
 pub async fn complete_retirement_in_tx(
@@ -502,10 +571,7 @@ pub async fn complete_retirement_mutation_in_tx(
     repo::lock_provisioning(tx).await?;
     let authority = repo::authority_by_id_for_update(tx, authority_id).await?;
     if authority.status == AuthorityStatus::Retired {
-        return Ok(AuthorityMutationOutcome {
-            value: authority,
-            changed: false,
-        });
+        return Ok(AuthorityMutationOutcome::unchanged(authority));
     }
     let authority = repo::transition_authority(
         tx,
@@ -514,10 +580,7 @@ pub async fn complete_retirement_mutation_in_tx(
         AuthorityStatus::Retired,
     )
     .await?;
-    Ok(AuthorityMutationOutcome {
-        value: authority,
-        changed: true,
-    })
+    Ok(AuthorityMutationOutcome::changed(authority))
 }
 
 pub async fn trust_bundle(pool: &PgPool) -> Result<TrustBundle, AppError> {
@@ -557,7 +620,7 @@ async fn create_pending_authority(
     tenant_id: Option<Uuid>,
     parent: &AuthorityRecord,
     provisioning_mode: &str,
-) -> Result<AuthorityRecord, AppError> {
+) -> Result<(AuthorityRecord, GeneratedAuthorityKeyGuard), AppError> {
     let version = repo::next_authority_version(tx, kind, tenant_id).await?;
     let authority_id = Uuid::new_v4();
     let context = AuthorityKeyContext {
@@ -570,14 +633,15 @@ async fn create_pending_authority(
     let generated = provider
         .generate(context, AuthorityKeyAlgorithm::EcdsaP256Sha256)
         .map_err(key_provider_error)?;
-    let signing_key = ProviderSigningKey::new(&provider, context, &generated.key)?;
+    let generated_key = GeneratedAuthorityKeyGuard::new(provider, context, generated.key);
+    let signing_key =
+        ProviderSigningKey::new(generated_key.provider(), context, generated_key.key())?;
     let subject = authority_common_name(kind, tenant_id, version)?;
     let params = ca_certificate_params(kind, &subject)?;
     let csr = params
         .serialize_request(&signing_key)
         .map_err(rcgen_error)?;
     let csr_pem = csr.pem().map_err(rcgen_error)?;
-    let mut key = generated.key;
     let inserted = repo::insert_pending_authority(
         tx,
         &repo::PendingAuthorityInsert {
@@ -589,21 +653,11 @@ async fn create_pending_authority(
             subject: &subject,
             csr_pem: &csr_pem,
             provisioning_mode,
-            key: &key,
+            key: generated_key.key(),
         },
     )
-    .await;
-    if inserted.is_err() {
-        if let Err(error) = provider.destroy(context, &mut key) {
-            tracing::error!(
-                provider = ?provider.backend(),
-                authority_id = %authority_id,
-                error = %error,
-                "failed to remove authority key after database insertion failure"
-            );
-        }
-    }
-    inserted
+    .await?;
+    Ok((inserted, generated_key))
 }
 
 fn sign_pending_authority(
@@ -760,6 +814,11 @@ fn validate_ca_shape(
     if certificate.not_after <= now {
         return Err(AppError::bad_request("authority certificate is expired"));
     }
+    if kind.can_issue_leaf_credentials() && !certificate.digital_signature {
+        return Err(AppError::bad_request(
+            "leaf-issuing authority key usage must include digitalSignature",
+        ));
+    }
     match kind {
         AuthorityKind::TenantIntermediate | AuthorityKind::PlatformLeafIssuer
             if certificate.path_len_constraint != Some(0) =>
@@ -886,6 +945,7 @@ fn parse_authority_certificate(
         not_before,
         not_after,
         path_len_constraint: basic.value.path_len_constraint,
+        digital_signature: usage.value.digital_signature(),
     })
 }
 
@@ -924,6 +984,9 @@ fn ca_certificate_params(
     };
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(path_len));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    if kind.can_issue_leaf_credentials() {
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    }
     params.key_identifier_method = KeyIdMethod::Sha256;
     Ok(params)
 }
@@ -1043,7 +1106,11 @@ mod tests {
             .distinguished_name
             .push(DnType::CommonName, common_name);
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(path_len));
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
         params.key_identifier_method = KeyIdMethod::Sha256;
         params.not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
         params.not_after = OffsetDateTime::now_utc() + Duration::days(30);

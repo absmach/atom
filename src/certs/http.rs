@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::{certs::service, error::AppError, state::AppState};
 
+use super::authority::http::etag_matches;
+
 pub async fn ca_chain(State(state): State<AppState>) -> Result<Response, AppError> {
     let pem = service::ca_chain(&state.config, state.certificate_issuer.as_deref())?;
     let mut headers = HeaderMap::new();
@@ -64,9 +66,7 @@ pub async fn issuer_crl(
     let not_modified = request_headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value == "*" || value.split(',').any(|candidate| candidate.trim() == etag)
-        });
+        .is_some_and(|value| etag_matches(value, &etag));
     if not_modified {
         return Ok((StatusCode::NOT_MODIFIED, headers).into_response());
     }

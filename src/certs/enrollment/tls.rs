@@ -1,6 +1,6 @@
 //! In-process TLS termination for the public enrollment listener.
 
-use std::{io::Cursor, net::SocketAddr, sync::Arc};
+use std::{io::Cursor, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use hyper_util::{
@@ -9,7 +9,7 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig};
-use tokio::{net::TcpListener, sync::Semaphore};
+use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
 use crate::{certs::authority::provisioning, config::EnrollmentTlsConfig, state::AppState};
@@ -29,6 +29,9 @@ pub struct PreparedEnrollmentServer {
     listener: TcpListener,
     acceptor: TlsAcceptor,
     max_connections: usize,
+    tls_handshake_timeout: Duration,
+    connection_timeout: Duration,
+    shutdown_drain_timeout: Duration,
 }
 
 impl PreparedEnrollmentServer {
@@ -65,17 +68,28 @@ pub async fn prepare(state: &AppState) -> Result<Option<PreparedEnrollmentServer
         listener,
         acceptor: TlsAcceptor::from(Arc::new(server_config)),
         max_connections: state.config.enrollment.max_connections,
+        tls_handshake_timeout: Duration::from_secs(
+            state.config.enrollment.tls_handshake_timeout_secs,
+        ),
+        connection_timeout: Duration::from_secs(state.config.enrollment.connection_timeout_secs),
+        shutdown_drain_timeout: Duration::from_secs(
+            state.config.enrollment.shutdown_drain_timeout_secs,
+        ),
     }))
 }
 
 pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Result<()> {
     let address = prepared.local_addr()?;
     let permits = Arc::new(Semaphore::new(prepared.max_connections));
+    let handshake_timeout = prepared.tls_handshake_timeout;
+    let connection_timeout = prepared.connection_timeout;
+    let shutdown_drain_timeout = prepared.shutdown_drain_timeout;
     let refresh_secs = state.config.enrollment.trust_bundle_refresh_secs;
     let refresh_state = state.clone();
     let router = http::create_router(state);
     let mut acceptor = prepared.acceptor;
     let mut trust_refresh = tokio::time::interval(std::time::Duration::from_secs(refresh_secs));
+    let mut connections = JoinSet::new();
     trust_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     trust_refresh.tick().await;
     tracing::info!(%address, "PKI enrollment listener ready (in-process optional mTLS)");
@@ -99,6 +113,12 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
                 continue;
             },
             _ = crate::shutdown::shutdown_signal() => break,
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    tracing::warn!(%error, "enrollment connection task failed");
+                }
+                continue;
+            },
         };
         let (stream, remote_addr) = match accepted {
             Ok(value) => value,
@@ -116,12 +136,16 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
         };
         let acceptor = acceptor.clone();
         let router = router.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let _permit = permit;
-            let stream = match acceptor.accept(stream).await {
-                Ok(stream) => stream,
-                Err(error) => {
+            let stream = match timeout(handshake_timeout, acceptor.accept(stream)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
                     tracing::warn!(%remote_addr, %error, "enrollment TLS handshake rejected");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!(%remote_addr, "enrollment TLS handshake timed out");
                     return;
                 }
             };
@@ -139,13 +163,40 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
             };
             let service = TowerToHyperService::new(connection_router);
             let builder = Builder::new(TokioExecutor::new());
-            if let Err(error) = builder
-                .serve_connection(TokioIo::new(stream), service)
-                .await
+            match timeout(
+                connection_timeout,
+                builder.serve_connection(TokioIo::new(stream), service),
+            )
+            .await
             {
-                tracing::debug!(%remote_addr, %error, "enrollment connection closed with error");
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%remote_addr, %error, "enrollment connection closed with error");
+                }
+                Err(_) => {
+                    tracing::warn!(%remote_addr, "enrollment connection deadline reached");
+                }
             }
         });
+    }
+
+    if timeout(shutdown_drain_timeout, async {
+        while let Some(joined) = connections.join_next().await {
+            if let Err(error) = joined {
+                tracing::warn!(%error, "enrollment connection task failed during shutdown");
+            }
+        }
+    })
+    .await
+    .is_err()
+    {
+        let remaining = connections.len();
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+        tracing::warn!(
+            remaining,
+            "aborted enrollment connections after shutdown drain deadline"
+        );
     }
     tracing::info!(%address, "PKI enrollment listener stopped");
     Ok(())

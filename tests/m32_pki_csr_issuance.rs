@@ -180,6 +180,11 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
         .await;
     assert!(errors_contain(&mismatched_retry.errors, "idempotency key"));
     assert_eq!(certificate_count(&pool, entity_a).await, 1);
+    assert_eq!(
+        error_event_count(&pool, "certificate.issue", entity_a).await,
+        1,
+        "failed managed CSR issuance must publish one error observation"
+    );
 
     let ledger: (String, String, Option<Uuid>) = sqlx::query_as(
         r#"SELECT request_key_hash, request_fingerprint_sha256, credential_id
@@ -540,10 +545,11 @@ async fn provision_tenant_issuer(
     tx.commit().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let pending = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
+    let mut pending = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    pending.commit_generated_key();
     let signed = sign_authority_csr(&pending, root);
     let mut tx = pool.begin().await.unwrap();
     let imported =
@@ -554,7 +560,7 @@ async fn provision_tenant_issuer(
     tx.commit().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let provisioned =
+    let mut provisioned =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
             .await
             .unwrap();
@@ -564,6 +570,7 @@ async fn provision_tenant_issuer(
         provisioned.validation_error
     );
     tx.commit().await.unwrap();
+    provisioned.commit_generated_key();
     sqlx::query(
         r#"UPDATE pki_authorities
            SET ocsp_url = $2, ca_issuers_url = $3,
@@ -640,7 +647,7 @@ async fn event_count(pool: &PgPool, table: &str, event: &str, target_id: Uuid) -
     let query = match table {
         "audit_logs" => "SELECT COUNT(*) FROM audit_logs WHERE event = $1 AND target_id = $2",
         "event_outbox" => {
-            "SELECT COUNT(*) FROM event_outbox WHERE event = $1 AND (payload->>'target_id')::uuid = $2"
+            "SELECT COUNT(*) FROM event_outbox WHERE event = $1 AND (payload->>'target_id')::uuid = $2 AND payload->>'outcome' = 'allow'"
         }
         _ => panic!("unsupported event table"),
     };
@@ -650,6 +657,21 @@ async fn event_count(pool: &PgPool, table: &str, event: &str, target_id: Uuid) -
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+async fn error_event_count(pool: &PgPool, event: &str, target_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM event_outbox
+           WHERE event = $1
+             AND (payload->>'target_id')::uuid = $2
+             AND payload->>'outcome' = 'error'
+             AND payload->'details'->>'transport' = 'graphql'"#,
+    )
+    .bind(event)
+    .bind(target_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn install_serial_collision_trigger(pool: &PgPool, entity_id: Uuid) {

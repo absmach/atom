@@ -1832,6 +1832,22 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
 async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-purge-ten-{}", Uuid::new_v4())).await;
+    let entity_id = make_entity(
+        &pool,
+        &format!("sd-purge-rate-{}", Uuid::new_v4()),
+        Some(tenant_id),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO pki_enrollment_rate_windows
+         (scope_kind, scope_id, window_start, request_count)
+         VALUES ('tenant', $1, now(), 1), ('entity', $2, now(), 1)",
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .execute(&pool)
+    .await
+    .expect("enrollment rate windows");
     let role_id = Uuid::new_v4();
     sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(role_id)
@@ -1882,4 +1898,18 @@ async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
             "{table} row must be purged with the tenant, not orphaned"
         );
     }
+    let abandoned_rate_windows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pki_enrollment_rate_windows
+         WHERE (scope_kind = 'tenant' AND scope_id = $1)
+            OR (scope_kind = 'entity' AND scope_id = $2)",
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("rate window count");
+    assert_eq!(
+        abandoned_rate_windows, 0,
+        "tenant purge must drop tenant and child enrollment counters"
+    );
 }

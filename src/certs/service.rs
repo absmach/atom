@@ -506,10 +506,9 @@ pub async fn issue_certificate(
     issuer: Option<&CertificateIssuer>,
     input: IssueCertificate,
 ) -> Result<IssuedCertificate, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "issuance").await?;
     let issued = issue_certificate_in_tx(&mut tx, config, issuer, input).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(issued)
+    commit_lifecycle_transaction(tx, issued, "issuance").await
 }
 
 /// The caller owns the commit, so an audited caller can bind issuance and its
@@ -522,7 +521,7 @@ pub async fn issue_certificate_in_tx(
     input: IssueCertificate,
 ) -> Result<IssuedCertificate, AppError> {
     let result = issue_certificate_in_tx_inner(tx, config, issuer, input).await;
-    record_lifecycle_operation("issuance", &result);
+    record_lifecycle_precommit_failure("issuance", &result);
     result
 }
 
@@ -629,10 +628,9 @@ pub async fn issue_certificate_from_csr(
     issuer: Option<&CertificateIssuer>,
     input: IssueCertificateFromCsr,
 ) -> Result<IssuedCertificate, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "issuance").await?;
     let issued = issue_certificate_from_csr_in_tx(&mut tx, config, issuer, input).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(issued)
+    commit_lifecycle_transaction(tx, issued, "issuance").await
 }
 
 /// See [`issue_certificate_in_tx`] — the caller owns the commit.
@@ -643,7 +641,7 @@ pub async fn issue_certificate_from_csr_in_tx(
     input: IssueCertificateFromCsr,
 ) -> Result<IssuedCertificate, AppError> {
     let result = issue_certificate_from_csr_in_tx_inner(tx, config, issuer, input).await;
-    record_lifecycle_operation("issuance", &result);
+    record_lifecycle_precommit_failure("issuance", &result);
     result
 }
 
@@ -728,11 +726,10 @@ pub async fn issue_certificate_from_csr_v2(
     authorized_tenant_id: Option<Uuid>,
     input: IssueCertificateFromCsrV2,
 ) -> Result<IssuedCertificate, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "issuance").await?;
     let issued =
         issue_certificate_from_csr_v2_in_tx(&mut tx, config, authorized_tenant_id, input).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(issued)
+    commit_lifecycle_transaction(tx, issued, "issuance").await
 }
 
 /// Managed CSR issuance using only the caller's existing transaction and
@@ -745,7 +742,7 @@ pub async fn issue_certificate_from_csr_v2_in_tx(
 ) -> Result<IssuedCertificate, AppError> {
     let result =
         issue_certificate_from_csr_v2_in_tx_inner(tx, config, authorized_tenant_id, input).await;
-    record_lifecycle_operation("issuance", &result);
+    record_lifecycle_precommit_failure("issuance", &result);
     result
 }
 
@@ -865,7 +862,7 @@ pub async fn issue_generated_certificate_v2_in_tx(
 ) -> Result<IssuedCertificate, AppError> {
     let result =
         issue_generated_certificate_v2_in_tx_inner(tx, config, authorized_tenant_id, input).await;
-    record_lifecycle_operation("issuance", &result);
+    record_lifecycle_precommit_failure("issuance", &result);
     result
 }
 
@@ -972,10 +969,9 @@ pub async fn renew_certificate(
     issuer: Option<&CertificateIssuer>,
     input: RenewCertificate,
 ) -> Result<IssuedCertificate, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "renewal").await?;
     let issued = renew_certificate_in_tx(&mut tx, config, issuer, input).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(issued)
+    commit_lifecycle_transaction(tx, issued, "renewal").await
 }
 
 /// See [`issue_certificate_in_tx`] — the caller owns the commit. Renewal issues
@@ -988,7 +984,7 @@ pub async fn renew_certificate_in_tx(
     input: RenewCertificate,
 ) -> Result<IssuedCertificate, AppError> {
     let result = renew_certificate_in_tx_inner(tx, config, issuer, input).await;
-    record_lifecycle_operation("renewal", &result);
+    record_lifecycle_precommit_failure("renewal", &result);
     result
 }
 
@@ -1032,10 +1028,9 @@ pub async fn renew_certificate_v2(
     authorization: CertificateRenewalAuthorization,
     input: RenewCertificateV2,
 ) -> Result<IssuedCertificate, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "renewal").await?;
     let issued = renew_certificate_v2_in_tx(&mut tx, config, authorization, input).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(issued)
+    commit_lifecycle_transaction(tx, issued, "renewal").await
 }
 
 /// Exact-credential, issuer-aware renewal. Operator authorization is bound to
@@ -1049,7 +1044,7 @@ pub async fn renew_certificate_v2_in_tx(
     input: RenewCertificateV2,
 ) -> Result<IssuedCertificate, AppError> {
     let result = renew_certificate_v2_in_tx_inner(tx, config, authorization, input).await;
-    record_lifecycle_operation("renewal", &result);
+    record_lifecycle_precommit_failure("renewal", &result);
     result
 }
 
@@ -1265,10 +1260,9 @@ pub async fn revoke_certificate(
     serial_number: &str,
     reason: Option<String>,
 ) -> Result<CertificateRecord, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "revocation").await?;
     let record = revoke_certificate_in_tx(&mut tx, serial_number, reason).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(record)
+    commit_lifecycle_transaction(tx, record, "revocation").await
 }
 
 /// See [`issue_certificate_in_tx`] — the caller owns the commit. The revocation
@@ -1281,7 +1275,7 @@ pub async fn revoke_certificate_in_tx(
     reason: Option<String>,
 ) -> Result<CertificateRecord, AppError> {
     let result = revoke_certificate_in_tx_inner(tx, serial_number, reason).await;
-    record_lifecycle_operation("revocation", &result);
+    record_lifecycle_precommit_failure("revocation", &result);
     result
 }
 
@@ -1338,10 +1332,9 @@ pub async fn revoke_certificate_v2(
     pool: &sqlx::PgPool,
     input: RevokeCertificateV2,
 ) -> Result<CertificateRevocationResult, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "revocation").await?;
     let result = revoke_certificate_v2_in_tx(&mut tx, input).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(result)
+    commit_lifecycle_transaction(tx, result, "revocation").await
 }
 
 /// Revoke one exact certificate. The row lock makes first-write semantics and
@@ -1353,7 +1346,7 @@ pub async fn revoke_certificate_v2_in_tx(
     input: RevokeCertificateV2,
 ) -> Result<CertificateRevocationResult, AppError> {
     let result = revoke_certificate_v2_in_tx_inner(tx, input).await;
-    record_lifecycle_operation("revocation", &result);
+    record_lifecycle_precommit_failure("revocation", &result);
     result
 }
 
@@ -1428,10 +1421,9 @@ pub async fn revoke_entity_certificates(
     entity_id: Uuid,
     reason: Option<String>,
 ) -> Result<usize, AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = begin_lifecycle_transaction(pool, "revocation").await?;
     let count = revoke_entity_certificates_in_tx(&mut tx, entity_id, reason).await?;
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(count)
+    commit_lifecycle_transaction(tx, count, "revocation").await
 }
 
 /// See [`revoke_certificate_in_tx`] — the caller owns the commit. Revoking an
@@ -1458,7 +1450,7 @@ pub async fn revoke_entity_certificates_v2_in_tx(
 ) -> Result<BulkCertificateRevocationResult, AppError> {
     let result =
         revoke_entity_certificates_v2_in_tx_inner(tx, entity_id, reason, actor_entity_id).await;
-    record_lifecycle_operation("revocation", &result);
+    record_lifecycle_precommit_failure("revocation", &result);
     result
 }
 
@@ -1596,19 +1588,19 @@ pub async fn generate_crl(
     }
 
     let generation_started = Instant::now();
-    let revoked = repo::revoked_certificates(pool, &loaded.issuer_fingerprint_sha256).await?;
-    let revoked_certs = revoked
-        .into_iter()
-        .map(|cert| {
-            let metadata = metadata_from_value(&cert.metadata)?;
-            Ok(RevokedCertParams {
-                serial_number: SerialNumber::from(serial_bytes(&cert.identifier)?),
-                revocation_time: to_offset(metadata.revoked_at.unwrap_or_else(Utc::now))?,
-                reason_code: Some(RevocationReason::Unspecified),
-                invalidity_date: None,
+    let revoked_certs =
+        repo::revocations_by_fingerprint_tx(&mut tx, &loaded.issuer_fingerprint_sha256)
+            .await?
+            .into_iter()
+            .map(|entry| {
+                Ok(RevokedCertParams {
+                    serial_number: SerialNumber::from(serial_bytes(&entry.serial_number)?),
+                    revocation_time: to_offset(entry.revoked_at)?,
+                    reason_code: Some(crl_revocation_reason(&entry.reason)),
+                    invalidity_date: None,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
+            .collect::<Result<Vec<_>, AppError>>()?;
     let now = OffsetDateTime::now_utc();
     let next_update = now + Duration::hours(CRL_TTL_HOURS);
     let crl_number = state.crl_number + 1;
@@ -2836,6 +2828,14 @@ async fn managed_ocsp_status(
     issuer_id: Uuid,
     serial_number: &str,
 ) -> Result<CertStatus, AppError> {
+    if let Some(revocation) =
+        repo::certificate_revocation_by_issuer_serial(pool, issuer_id, serial_number).await?
+    {
+        return Ok(CertStatus::revoked(RevokedInfo {
+            revocation_time: ocsp_time(revocation.revoked_at)?,
+            revocation_reason: Some(ocsp_revocation_reason(&revocation.reason)),
+        }));
+    }
     let certificate = match repo::certificate_by_issuer_serial(pool, issuer_id, serial_number).await
     {
         Ok(certificate) => certificate,
@@ -2844,25 +2844,9 @@ async fn managed_ocsp_status(
     };
     match certificate.status.as_str() {
         "active" => Ok(CertStatus::good()),
-        "revoked" => {
-            let revocation = repo::certificate_revocation_by_id(pool, certificate.id)
-                .await
-                .map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!(
-                        "revoked certificate has no immutable revocation record: {error}"
-                    ))
-                })?;
-            if revocation.issuer_id != Some(issuer_id) || revocation.serial_number != serial_number
-            {
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "certificate revocation record does not match its issuer identity"
-                )));
-            }
-            Ok(CertStatus::revoked(RevokedInfo {
-                revocation_time: ocsp_time(revocation.revoked_at)?,
-                revocation_reason: Some(ocsp_revocation_reason(&revocation.reason)),
-            }))
-        }
+        "revoked" => Err(AppError::Internal(anyhow::anyhow!(
+            "revoked certificate has no immutable revocation record"
+        ))),
         _ => Ok(CertStatus::unknown()),
     }
 }
@@ -2995,7 +2979,39 @@ fn is_unique_violation(err: &AppError) -> bool {
     )
 }
 
-fn record_lifecycle_operation<T>(operation: &'static str, result: &Result<T, AppError>) {
+async fn begin_lifecycle_transaction<'a>(
+    pool: &'a sqlx::PgPool,
+    operation: &'static str,
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, AppError> {
+    match pool.begin().await {
+        Ok(tx) => Ok(tx),
+        Err(error) => {
+            crate::metrics::record_pki_lifecycle_operation(operation, "failure");
+            Err(AppError::Database(error))
+        }
+    }
+}
+
+async fn commit_lifecycle_transaction<T>(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    value: T,
+    operation: &'static str,
+) -> Result<T, AppError> {
+    let result = tx.commit().await;
+    record_lifecycle_commit(operation, &result);
+    result.map(|_| value).map_err(AppError::Database)
+}
+
+fn record_lifecycle_precommit_failure<T>(operation: &'static str, result: &Result<T, AppError>) {
+    if result.is_err() {
+        crate::metrics::record_pki_lifecycle_operation(operation, "failure");
+    }
+}
+
+/// Record an operation only after the owner of a transaction has observed its
+/// final commit result. Transactional transports use this after their audit +
+/// mutation commit; `_in_tx` helpers record only pre-commit failures.
+pub(crate) fn record_lifecycle_commit<T, E>(operation: &'static str, result: &Result<T, E>) {
     crate::metrics::record_pki_lifecycle_operation(
         operation,
         if result.is_ok() { "success" } else { "failure" },

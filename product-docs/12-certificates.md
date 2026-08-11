@@ -216,7 +216,11 @@ The listener is opt-in with `ATOM_PKI_ENROLLMENT_ENABLED=true` and requires
 `ATOM_PKI_ENROLLMENT_TLS_KEY_PATH`. It binds
 `ATOM_PKI_ENROLLMENT_LISTEN_ADDR` (default `0.0.0.0:8443`). Expired, revoked,
 unknown, or otherwise inactive certificate subjects must recover through first
-enrollment with a still-active non-certificate credential.
+enrollment with a still-active non-certificate credential. TLS handshakes,
+connection lifetimes, and shutdown draining are bounded by
+`ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS`,
+`ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS`, and
+`ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS` respectively.
 
 PR-014b attaches RFC 7030 EST to that same listener and service boundary.
 `/.well-known/est/simpleenroll`, `simplereenroll`, `serverkeygen`, `csrattrs`,
@@ -321,15 +325,21 @@ configured rotation lead time.
 `bulkRevokeCertificates` accepts exactly one tenant, issuer, or principal-group
 selector and processes a bounded page. The result reports each attempted
 credential and a cursor after the last contiguous success, so a caller can fix a
-failure and resume without repeating completed revocations. Every successful
-item retains the normal per-certificate authorization, audit, outbox, immutable
-revocation evidence, and issuer-specific CRL-dirty behavior.
+failure and resume without repeating completed revocations. The first page also
+returns `snapshotAt`; a resumed request must pass it unchanged with
+`afterCredentialId`. This freezes the fleet membership so certificates issued
+between pages are handled by a subsequent operation rather than skipped by UUID
+ordering. Every successful item retains the normal per-certificate
+authorization, audit, outbox, immutable revocation evidence, and issuer-specific
+CRL-dirty behavior.
 
 Lifecycle metrics cover issuance, renewal, revocation, enrollment, expiry
 buckets, authority time to expiry, and CRL size and generation duration. They
 use bounded operational labels and omit identifiers, certificate subjects, key
 material, and other secrets. Disabling the sweeper preserves the existing
-interactive certificate behavior.
+interactive certificate behavior. Success counters are recorded only after the
+owning transaction commits, and an absent authority kind is represented as
+`NaN` rather than a false zero-second expiry.
 
 ---
 

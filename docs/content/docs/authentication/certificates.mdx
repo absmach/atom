@@ -537,6 +537,9 @@ ATOM_PKI_ENROLLMENT_ENABLED=true
 ATOM_PKI_ENROLLMENT_LISTEN_ADDR=0.0.0.0:8443
 ATOM_PKI_ENROLLMENT_TLS_CERT_PATH=/certs/enrollment-server.crt
 ATOM_PKI_ENROLLMENT_TLS_KEY_PATH=/certs/enrollment-server.key
+ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS=10
+ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS=300
+ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS=30
 ```
 
 The cert/key identify the enrollment server. Client certificates are verified
@@ -550,6 +553,9 @@ The verifier refreshes the database trust bundle every 60 seconds by default,
 so newly provisioned or rotated authorities become eligible without restarting
 Atom. A refresh failure retains the last known-good verifier and emits a
 warning; tune the interval with `ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS`.
+Slow handshakes cannot hold a connection permit indefinitely, established
+connections have a configured lifetime, and shutdown waits for active
+connections only up to the configured drain deadline before aborting them.
 
 Per-entity (10/minute by default) and per-tenant (1000/minute) limits are stored
 atomically in PostgreSQL, so replicas share enforcement. `429` responses include
@@ -626,12 +632,17 @@ before pagination rather than by filtering returned rows.
 `bulkRevokeCertificates` revokes one bounded page selected by exactly one of
 `tenantId`, `issuerId`, or `principalGroupId`. It reports every attempted item
 and returns the last contiguous successful credential as
-`nextCursorCredentialId`. A caller can repair a failed item and resume from that
-cursor; already revoked credentials are not selected again. Bulk issuance and
+`nextCursor`. The first page also returns `snapshotAt`; every request carrying
+`afterCredentialId` must send that same snapshot timestamp. A caller can repair
+a failed item and resume from the cursor without absorbing certificates issued
+between pages; already revoked credentials are not selected again. A new bulk
+operation handles certificates created after the snapshot. Bulk issuance and
 notification delivery remain outside Atom.
 
 Prometheus metrics expose lifecycle operation counts, certificate expiry
 buckets, authority time to expiry, and CRL size and generation duration. Metric
 labels are deliberately bounded to operation, result, status, and time bucket;
 they never carry tenant, entity, credential, issuer, subject, serial, or key
-material.
+material. Operation successes are counted only after commit. If an authority
+kind is absent from the current fleet snapshot, its gauge is `NaN`, not a
+zero-second value that could produce a false expiry alert.

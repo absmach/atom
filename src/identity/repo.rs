@@ -1070,6 +1070,18 @@ pub async fn purge_entity_with_audit(
             .await
             .map_err(db_err)?;
 
+    // Enrollment counters intentionally have no FK because a scope may be
+    // admitted before all subject reads finish. Purge them explicitly so a
+    // one-time subject cannot leave durable abuse-control state behind.
+    sqlx::query(
+        "DELETE FROM pki_enrollment_rate_windows
+         WHERE scope_kind = 'entity' AND scope_id = $1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
     let purged_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
         "DELETE FROM entities WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
     )
