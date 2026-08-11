@@ -1324,17 +1324,13 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS must be greater than zero");
     }
     if cfg.tls_handshake_timeout_secs == 0 {
-        anyhow::bail!(
-            "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS must be greater than zero"
-        );
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS must be greater than zero");
     }
     if cfg.connection_timeout_secs == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS must be greater than zero");
     }
     if cfg.shutdown_drain_timeout_secs == 0 {
-        anyhow::bail!(
-            "ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS must be greater than zero"
-        );
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS must be greater than zero");
     }
     Ok(cfg)
 }

@@ -3010,10 +3010,7 @@ async fn commit_lifecycle_transaction<T>(
     result.map(|_| value).map_err(AppError::Database)
 }
 
-fn record_lifecycle_precommit_failure<T>(
-    operation: &'static str,
-    result: &Result<T, AppError>,
-) {
+fn record_lifecycle_precommit_failure<T>(operation: &'static str, result: &Result<T, AppError>) {
     if result.is_err() {
         crate::metrics::record_pki_lifecycle_operation(operation, "failure");
     }
@@ -3022,10 +3019,7 @@ fn record_lifecycle_precommit_failure<T>(
 /// Record an operation only after the owner of a transaction has observed its
 /// final commit result. Transactional transports use this after their audit +
 /// mutation commit; `_in_tx` helpers record only pre-commit failures.
-pub(crate) fn record_lifecycle_commit<T, E>(
-    operation: &'static str,
-    result: &Result<T, E>,
-) {
+pub(crate) fn record_lifecycle_commit<T, E>(operation: &'static str, result: &Result<T, E>) {
     crate::metrics::record_pki_lifecycle_operation(
         operation,
         if result.is_ok() { "success" } else { "failure" },

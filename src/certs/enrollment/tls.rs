@@ -71,9 +71,7 @@ pub async fn prepare(state: &AppState) -> Result<Option<PreparedEnrollmentServer
         tls_handshake_timeout: Duration::from_secs(
             state.config.enrollment.tls_handshake_timeout_secs,
         ),
-        connection_timeout: Duration::from_secs(
-            state.config.enrollment.connection_timeout_secs,
-        ),
+        connection_timeout: Duration::from_secs(state.config.enrollment.connection_timeout_secs),
         shutdown_drain_timeout: Duration::from_secs(
             state.config.enrollment.shutdown_drain_timeout_secs,
         ),
@@ -195,7 +193,10 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
         let remaining = connections.len();
         connections.abort_all();
         while connections.join_next().await.is_some() {}
-        tracing::warn!(remaining, "aborted enrollment connections after shutdown drain deadline");
+        tracing::warn!(
+            remaining,
+            "aborted enrollment connections after shutdown drain deadline"
+        );
     }
     tracing::info!(%address, "PKI enrollment listener stopped");
     Ok(())

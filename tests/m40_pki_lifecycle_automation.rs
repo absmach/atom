@@ -169,13 +169,8 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     .await;
     let overdue_authority_tenant =
         common::pki::create_tenant(&pool, "pki-life-overdue-authority").await;
-    let overdue_authority = common::pki::provision_tenant_issuer(
-        &pool,
-        &config,
-        &root,
-        overdue_authority_tenant,
-    )
-    .await;
+    let overdue_authority =
+        common::pki::provision_tenant_issuer(&pool, &config, &root, overdue_authority_tenant).await;
     sqlx::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
         .bind(overdue_authority.id)
         .bind(now - Duration::minutes(1))
@@ -552,11 +547,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
 
     // `_in_tx` success is provisional. Rolling the caller-owned transaction
     // back must not publish a successful issuance sample.
-    let before_rollback = lifecycle_metric_value(
-        &metrics::render(&pool),
-        "issuance",
-        "success",
-    );
+    let before_rollback = lifecycle_metric_value(&metrics::render(&pool), "issuance", "success");
     let mut rollback_tx = pool.begin().await.unwrap();
     service::issue_certificate_from_csr_v2_in_tx(
         &mut rollback_tx,
@@ -572,11 +563,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     .await
     .unwrap();
     rollback_tx.rollback().await.unwrap();
-    let after_rollback = lifecycle_metric_value(
-        &metrics::render(&pool),
-        "issuance",
-        "success",
-    );
+    let after_rollback = lifecycle_metric_value(&metrics::render(&pool), "issuance", "success");
     assert_eq!(before_rollback, after_rollback);
 
     let rendered = metrics::render(&pool);
