@@ -110,6 +110,13 @@ pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSumma
     // Entities: capture cascaded credential ids before the delete removes them.
     let entity_ids = select_doomed(&mut tx, "entities", cutoff, cfg.batch_size).await?;
     if !entity_ids.is_empty() {
+        sqlx::query(
+            "DELETE FROM pki_enrollment_rate_windows
+             WHERE scope_kind = 'entity' AND scope_id = ANY($1)",
+        )
+        .bind(&entity_ids)
+        .execute(&mut *tx)
+        .await?;
         let credential_ids: Vec<Uuid> =
             sqlx::query_scalar("SELECT id FROM credentials WHERE entity_id = ANY($1)")
                 .bind(&entity_ids)

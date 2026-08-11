@@ -785,6 +785,29 @@ where
     .map_err(db_err)
 }
 
+pub async fn certificate_revocation_by_issuer_serial<'e, E>(
+    executor: E,
+    issuer_id: Uuid,
+    serial_number: &str,
+) -> Result<Option<CertificateRevocationRecord>, AppError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, CertificateRevocationRecord>(
+        r#"
+        SELECT credential_id, issuer_id, issuer_fingerprint_sha256,
+               serial_number, reason, actor_entity_id, revoked_at
+        FROM certificate_revocations
+        WHERE issuer_id = $1 AND serial_number = $2
+        "#,
+    )
+    .bind(issuer_id)
+    .bind(serial_number)
+    .fetch_optional(executor)
+    .await
+    .map_err(AppError::Database)
+}
+
 pub async fn active_entity_certificates<'e, E>(
     executor: E,
     entity_id: Uuid,
@@ -808,28 +831,24 @@ where
     .map_err(AppError::Database)
 }
 
-/// Revoked certificates issued by one issuer, for that issuer's CRL. A CRL is
-/// signed by its issuer and covers only certificates the issuer signed, so the
-/// filter is a correctness requirement, not an optimisation — and it also keeps
-/// certificate rows created outside the issuance path (no full metadata, e.g.
-/// externally provisioned or test fixtures) from breaking CRL generation.
-pub async fn revoked_certificates(
-    pool: &PgPool,
+/// Unexpired durable revocations for a legacy file issuer. The caller's
+/// transaction already owns the legacy CRL state lock; querying through it
+/// avoids a nested pool acquire and keeps the published snapshot consistent.
+pub async fn revocations_by_fingerprint_tx(
+    tx: &mut Transaction<'_, Postgres>,
     issuer_fingerprint_sha256: &str,
-) -> Result<Vec<CertificateCredential>, AppError> {
-    sqlx::query_as::<_, CertificateCredential>(
+) -> Result<Vec<IssuerRevocationEntry>, AppError> {
+    sqlx::query_as::<_, IssuerRevocationEntry>(
         r#"
-        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
-               c.expires_at, c.created_at
-        FROM credentials c
-        JOIN entities e ON e.id = c.entity_id
-        WHERE c.kind = 'certificate' AND c.status = 'revoked'
-          AND c.metadata->>'issuer_fingerprint_sha256' = $1
-        ORDER BY c.created_at ASC
+        SELECT credential_id, serial_number, reason, revoked_at
+        FROM certificate_revocations
+        WHERE issuer_fingerprint_sha256 = $1
+          AND expires_at > now()
+        ORDER BY revoked_at, credential_id
         "#,
     )
     .bind(issuer_fingerprint_sha256)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_err(AppError::Database)
 }
@@ -970,6 +989,7 @@ pub async fn issuer_revocations_tx(
         SELECT credential_id, serial_number, reason, revoked_at
         FROM certificate_revocations
         WHERE issuer_id = $1
+          AND expires_at > now()
         ORDER BY revoked_at, credential_id
         "#,
     )

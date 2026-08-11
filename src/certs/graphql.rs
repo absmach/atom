@@ -6,7 +6,7 @@ use crate::{
     audit,
     auth::{has_capability_in_scope, AuthContext, Scope},
     certs::{lifecycle, service},
-    error::db_err,
+    error::{db_err, AppError},
     models::enums::AuditOutcome,
     state::AppState,
 };
@@ -116,6 +116,34 @@ fn parse_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>> {
         .map_err(|_| async_graphql::Error::new(format!("{field} must be an RFC3339 timestamp")))
 }
 
+async fn commit_with_lifecycle_audit(
+    pool: &sqlx::PgPool,
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    events_enabled: bool,
+    event: &audit::AuditEvent<'_>,
+) -> std::result::Result<(), AppError> {
+    let result = audit::commit_with_audit(pool, tx, events_enabled, event).await;
+    let operation = match event.event {
+        "certificate.issue" => Some("issuance"),
+        "certificate.renew" => Some("renewal"),
+        "certificate.revoke" | "certificate.revoke_entity" => Some("revocation"),
+        _ => None,
+    };
+    if let Some(operation) = operation {
+        service::record_lifecycle_commit(operation, &result);
+    }
+    result
+}
+
+async fn commit_lifecycle_replay(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    operation: &'static str,
+) -> std::result::Result<(), AppError> {
+    let result = tx.commit().await.map_err(AppError::Database);
+    service::record_lifecycle_commit(operation, &result);
+    result
+}
+
 #[derive(Default)]
 pub struct CertificateMutation;
 
@@ -145,7 +173,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -179,8 +207,35 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let issued = service::issue_generated_certificate_v2_in_tx(
+        let error_meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "entity",
+            target_id: Some(entity_id),
+            event: "certificate.issue",
+        };
+        let error_details = serde_json::json!({
+            "csr": false,
+            "generated_key": true,
+            "managed": true,
+            "transport": "graphql",
+        });
+        let mut tx = match state.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                let error = db_err(error);
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
+        let issued = match service::issue_generated_certificate_v2_in_tx(
             &mut tx,
             &state.config,
             tenant_id,
@@ -190,8 +245,26 @@ impl CertificateMutation {
             },
         )
         .await
-        .map_err(gql_error)?;
-        audit::commit_with_audit(
+        {
+            Ok(issued) => issued,
+            Err(error) => {
+                if let Err(rollback_error) = tx.rollback().await {
+                    tracing::warn!(
+                        "failed to roll back generated certificate issuance: {rollback_error}"
+                    );
+                }
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
+        if let Err(error) = commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -214,7 +287,17 @@ impl CertificateMutation {
             },
         )
         .await
-        .map_err(gql_error)?;
+        {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
         Ok(issued.into())
     }
 
@@ -240,7 +323,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -274,12 +357,34 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let issued = service::issue_certificate_from_csr_v2_in_tx(
+        let error_meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "entity",
+            target_id: Some(entity_id),
+            event: "certificate.issue",
+        };
+        let error_details = serde_json::json!({
+            "csr": true,
+            "managed": true,
+            "transport": "graphql",
+        });
+        let mut tx = match state.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                let error = db_err(error);
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
+        let issued = match service::issue_certificate_from_csr_v2_in_tx(
             &mut tx,
             &state.config,
             tenant_id,
@@ -291,7 +396,25 @@ impl CertificateMutation {
             },
         )
         .await
-        .map_err(gql_error)?;
+        {
+            Ok(issued) => issued,
+            Err(error) => {
+                if let Err(rollback_error) = tx.rollback().await {
+                    tracing::warn!(
+                        "failed to roll back CSR certificate issuance: {rollback_error}"
+                    );
+                }
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
         let details = serde_json::json!({
             "credential_id": issued.certificate.credential_id,
             "serial_number": issued.certificate.serial_number,
@@ -302,9 +425,17 @@ impl CertificateMutation {
             "replay": issued.idempotent_replay,
         });
         if issued.idempotent_replay {
-            tx.commit()
-                .await
-                .map_err(|error| gql_error(db_err(error)))?;
+            if let Err(error) = commit_lifecycle_replay(tx, "issuance").await {
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
             audit::write(
                 &state.pool,
                 false,
@@ -320,7 +451,7 @@ impl CertificateMutation {
             )
             .await;
         } else {
-            audit::commit_with_audit(
+            if let Err(error) = commit_with_lifecycle_audit(
                 &state.pool,
                 tx,
                 state.config.events.enabled(),
@@ -335,7 +466,17 @@ impl CertificateMutation {
                 },
             )
             .await
-            .map_err(gql_error)?;
+            {
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
         }
         Ok(issued.into())
     }
@@ -364,7 +505,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -500,7 +641,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -558,12 +699,18 @@ impl CertificateMutation {
             .after_credential_id
             .map(|id| parse_id(id, "afterCredentialId"))
             .transpose()?;
+        let snapshot_at = input
+            .snapshot_at
+            .as_deref()
+            .map(|value| parse_timestamp(value, "snapshotAt"))
+            .transpose()?;
         lifecycle::bulk_revoke(
             state,
             selector,
             auth.entity_id,
             input.reason,
             after,
+            snapshot_at,
             input.limit.unwrap_or(100),
         )
         .await
@@ -609,9 +756,9 @@ async fn revoke_certificate_exact(
         "idempotent_replay": revoked.idempotent_replay,
     });
     if revoked.idempotent_replay {
-        tx.commit()
+        commit_lifecycle_replay(tx, "revocation")
             .await
-            .map_err(|error| gql_error(db_err(error)))?;
+            .map_err(gql_error)?;
         audit::write(
             &state.pool,
             false,
@@ -627,7 +774,7 @@ async fn revoke_certificate_exact(
         )
         .await;
     } else {
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -662,12 +809,35 @@ async fn renew_certificate_v2(
         .map_err(gql_error)?;
     require_certificate_rotate(state, &auth, &old).await?;
     let key_mode = key_source.mode();
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|error| gql_error(db_err(error)))?;
-    let issued = service::renew_certificate_v2_in_tx(
+    let error_meta = audit::AuditMeta {
+        actor_entity_id: Some(auth.entity_id),
+        tenant_id: old.tenant_id,
+        target_kind: "credential",
+        target_id: Some(old.credential_id),
+        event: "certificate.renew",
+    };
+    let error_details = serde_json::json!({
+        "key_mode": key_mode,
+        "revoke_old": revoke_old,
+        "managed": true,
+        "transport": "graphql",
+    });
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            let error = db_err(error);
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
+    };
+    let issued = match service::renew_certificate_v2_in_tx(
         &mut tx,
         &state.config,
         service::CertificateRenewalAuthorization::Operator {
@@ -684,7 +854,23 @@ async fn renew_certificate_v2(
         },
     )
     .await
-    .map_err(gql_error)?;
+    {
+        Ok(issued) => issued,
+        Err(error) => {
+            if let Err(rollback_error) = tx.rollback().await {
+                tracing::warn!("failed to roll back certificate renewal: {rollback_error}");
+            }
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
+    };
     let details = serde_json::json!({
         "old_credential_id": old.credential_id,
         "new_credential_id": issued.certificate.credential_id,
@@ -699,9 +885,17 @@ async fn renew_certificate_v2(
         "managed": true,
     });
     if issued.idempotent_replay {
-        tx.commit()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
+        if let Err(error) = commit_lifecycle_replay(tx, "renewal").await {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
         audit::write(
             &state.pool,
             false,
@@ -717,7 +911,7 @@ async fn renew_certificate_v2(
         )
         .await;
     } else {
-        audit::commit_with_audit(
+        if let Err(error) = commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -732,7 +926,17 @@ async fn renew_certificate_v2(
             },
         )
         .await
-        .map_err(gql_error)?;
+        {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
     }
     Ok(issued.into())
 }
@@ -813,6 +1017,7 @@ pub struct BulkRevokeCertificatesInput {
     pub principal_group_id: Option<ID>,
     pub reason: Option<String>,
     pub after_credential_id: Option<ID>,
+    pub snapshot_at: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -829,6 +1034,7 @@ pub struct BulkRevokeCertificateItem {
 #[derive(async_graphql::SimpleObject)]
 pub struct BulkRevokeCertificatesPayload {
     pub items: Vec<BulkRevokeCertificateItem>,
+    pub snapshot_at: String,
     pub next_cursor: Option<ID>,
     pub complete: bool,
 }
@@ -836,6 +1042,7 @@ pub struct BulkRevokeCertificatesPayload {
 impl From<lifecycle::BulkRevocationBatch> for BulkRevokeCertificatesPayload {
     fn from(value: lifecycle::BulkRevocationBatch) -> Self {
         Self {
+            snapshot_at: value.snapshot_at.to_rfc3339(),
             items: value
                 .items
                 .into_iter()

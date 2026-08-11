@@ -48,6 +48,10 @@ presentation belong to whoever consumes them.
   It must not double-emit; coordinate the same way existing periodic work does.
 - Batch operations must not hold a transaction across an unbounded row set, and
   must not open a second pool connection while a transaction is held.
+- A bulk operation freezes candidate membership at its first page. Its snapshot
+  must be returned with the UUID cursor and reused unchanged on resumption.
+- A delayed sweep still claims due windows after a certificate or authority has
+  crossed expiry; transient failures cannot erase an unclaimed notification.
 - Every emitted event carries issuer, credential, entity, and tenant identifiers
   and no secret material.
 - Renewal thresholds come from the certificate's profile, not from a global
@@ -59,10 +63,13 @@ presentation belong to whoever consumes them.
   across restarts and replicas.
 - Expiry listings are authorization-filtered and paginate over large fleets.
 - Bulk revocation reports per-item outcomes and is safely resumable after failure.
+- Certificates issued between bulk pages are excluded from that frozen operation
+  and remain eligible for a later operation.
 - An authority approaching expiry is surfaced with enough lead time to complete
   rotation.
 - Metrics expose the lifecycle state of the fleet without exposing key material or
-  subject secrets.
+  subject secrets. Success is recorded only after commit, and absent authority
+  kinds do not masquerade as zero-second expiries.
 - Disabling automation degrades to current behaviour rather than failing issuance.
 
 ## Mandatory tests
@@ -70,7 +77,9 @@ presentation belong to whoever consumes them.
 Sweeper idempotency across restart and concurrent replicas, event content and
 outbox transactionality, expiry-window boundary conditions, authorization
 filtering on listings, bulk revoke partial failure and resumption, authority
-expiry surfacing, and metric emission without secrets.
+expiry surfacing including overdue retry, frozen bulk-snapshot membership,
+post-commit metric emission, absent-authority semantics, and metric emission
+without secrets.
 
 ## AI execution prompt
 

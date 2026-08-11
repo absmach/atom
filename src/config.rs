@@ -334,6 +334,9 @@ pub struct EnrollmentConfig {
     pub max_csr_bytes: usize,
     pub max_connections: usize,
     pub trust_bundle_refresh_secs: u64,
+    pub tls_handshake_timeout_secs: u64,
+    pub connection_timeout_secs: u64,
+    pub shutdown_drain_timeout_secs: u64,
 }
 
 impl Default for EnrollmentConfig {
@@ -353,6 +356,9 @@ impl Default for EnrollmentConfig {
             max_csr_bytes: 64 * 1024,
             max_connections: 256,
             trust_bundle_refresh_secs: 60,
+            tls_handshake_timeout_secs: 10,
+            connection_timeout_secs: 300,
+            shutdown_drain_timeout_secs: 30,
         }
     }
 }
@@ -1295,6 +1301,18 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             default.trust_bundle_refresh_secs,
         )?,
+        tls_handshake_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
+            default.tls_handshake_timeout_secs,
+        )?,
+        connection_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS",
+            default.connection_timeout_secs,
+        )?,
+        shutdown_drain_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS",
+            default.shutdown_drain_timeout_secs,
+        )?,
     };
     if cfg.max_csr_bytes == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES must be greater than zero");
@@ -1304,6 +1322,15 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
     }
     if cfg.trust_bundle_refresh_secs == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS must be greater than zero");
+    }
+    if cfg.tls_handshake_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.connection_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.shutdown_drain_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS must be greater than zero");
     }
     Ok(cfg)
 }
@@ -1729,6 +1756,9 @@ mod tests {
         assert!(!cfg.enrollment.enabled);
         assert!(cfg.enrollment.tls.is_none());
         assert_eq!(cfg.enrollment.max_csr_bytes, 64 * 1024);
+        assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 10);
+        assert_eq!(cfg.enrollment.connection_timeout_secs, 300);
+        assert_eq!(cfg.enrollment.shutdown_drain_timeout_secs, 30);
 
         std::env::set_var("ATOM_PKI_ENROLLMENT_ENABLED", "true");
         let err = Config::from_env().expect_err("enabled listener without TLS");
@@ -1741,10 +1771,16 @@ mod tests {
         std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_KEY_PATH", "/tls/server-key.pem");
         std::env::set_var("ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT", "7");
         std::env::set_var("ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT", "70");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS", "11");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS", "301");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS", "31");
         let cfg = Config::from_env().expect("enrollment config");
         assert!(cfg.enrollment.enabled);
         assert_eq!(cfg.enrollment.entity_rate_limit.max_requests, 7);
         assert_eq!(cfg.enrollment.tenant_rate_limit.max_requests, 70);
+        assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 11);
+        assert_eq!(cfg.enrollment.connection_timeout_secs, 301);
+        assert_eq!(cfg.enrollment.shutdown_drain_timeout_secs, 31);
         assert_eq!(
             cfg.enrollment
                 .tls
@@ -1880,6 +1916,9 @@ mod tests {
             "ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES",
             "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
+            "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS",
             "ATOM_PKI_LIFECYCLE_ENABLED",
             "ATOM_PKI_LIFECYCLE_INTERVAL_SECS",
             "ATOM_PKI_LIFECYCLE_BATCH_SIZE",

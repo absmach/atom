@@ -313,6 +313,9 @@ impl TryFrom<ProfileRow> for CertificateProfile {
             .iter()
             .map(|usage| KeyUsage::parse(usage))
             .collect::<Result<Vec<_>, _>>()?;
+        if key_usages.is_empty() {
+            return Err(invalid_profile("key usages cannot be empty"));
+        }
         require_unique(&key_usages, "duplicate key usage")?;
 
         let extended_key_usages = row
@@ -320,6 +323,9 @@ impl TryFrom<ProfileRow> for CertificateProfile {
             .iter()
             .map(|usage| ExtendedKeyUsage::parse(usage))
             .collect::<Result<Vec<_>, _>>()?;
+        if extended_key_usages.is_empty() {
+            return Err(invalid_profile("extended key usages cannot be empty"));
+        }
         require_unique(&extended_key_usages, "duplicate extended key usage")?;
 
         let san_policy: SanPolicy = serde_json::from_value(row.san_policy)
@@ -513,6 +519,31 @@ fn invalid_profile(message: impl Into<String>) -> AppError {
 mod tests {
     use super::*;
 
+    fn valid_profile_row() -> ProfileRow {
+        ProfileRow {
+            id: Uuid::new_v4(),
+            tenant_id: None,
+            base_profile_id: None,
+            name: "test".to_string(),
+            permitted_key_algorithms: serde_json::json!([
+                {"algorithm": "ecdsa", "sizes": [256]}
+            ]),
+            default_ttl_seconds: 3_600,
+            maximum_ttl_seconds: 7_200,
+            renewal_threshold_seconds: 600,
+            key_usages: vec!["digital_signature".to_string()],
+            extended_key_usages: vec!["client_auth".to_string()],
+            san_policy: serde_json::json!({
+                "dns": {"mode": "deny", "values": []},
+                "ip": {"mode": "deny", "values": []},
+                "email": {"mode": "deny", "values": []},
+                "uri": {"mode": "identity", "values": []}
+            }),
+            identity_uri_template: "urn:atom:{scope}entity:{entity_id}".to_string(),
+            basic_constraints: serde_json::json!({"ca": false, "path_len": null}),
+        }
+    }
+
     fn rule(mode: SanRuleMode, values: &[&str]) -> SanRule {
         SanRule {
             mode,
@@ -550,5 +581,28 @@ mod tests {
             &[SanRuleMode::EntityTemplate]
         )
         .is_err());
+    }
+
+    #[test]
+    fn empty_usage_sets_fail_closed_in_typed_profile_loading() {
+        let mut row = valid_profile_row();
+        row.key_usages.clear();
+        let AppError::Internal(error) =
+            CertificateProfile::try_from(row).expect_err("empty key usages")
+        else {
+            panic!("empty stored key usages must be an internal integrity error");
+        };
+        assert!(error.to_string().contains("key usages cannot be empty"));
+
+        let mut row = valid_profile_row();
+        row.extended_key_usages.clear();
+        let AppError::Internal(error) =
+            CertificateProfile::try_from(row).expect_err("empty extended key usages")
+        else {
+            panic!("empty stored extended key usages must be an internal integrity error");
+        };
+        assert!(error
+            .to_string()
+            .contains("extended key usages cannot be empty"));
     }
 }

@@ -81,10 +81,11 @@ pub async fn provision_tenant_issuer(
     tx.commit().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let pending = provisioning::begin_platform_intermediate_in_tx(&mut tx, &config.pki_ca_keys)
+    let mut pending = provisioning::begin_platform_intermediate_in_tx(&mut tx, &config.pki_ca_keys)
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    pending.commit_generated_key();
     let signed = sign_authority_csr(&pending, root);
     let mut tx = pool.begin().await.unwrap();
     let imported = provisioning::import_signed_authority_in_tx(
@@ -99,7 +100,7 @@ pub async fn provision_tenant_issuer(
     tx.commit().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let provisioned =
+    let mut provisioned =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
             .await
             .unwrap();
@@ -109,6 +110,7 @@ pub async fn provision_tenant_issuer(
         provisioned.validation_error
     );
     tx.commit().await.unwrap();
+    provisioned.commit_generated_key();
     sqlx::query(
         r#"UPDATE pki_authorities
            SET ocsp_url = $2, ca_issuers_url = $3,
@@ -139,10 +141,11 @@ pub async fn provision_platform_leaf_issuer(
     tx.commit().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let pending = provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &config.pki_ca_keys)
+    let mut pending = provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &config.pki_ca_keys)
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    pending.commit_generated_key();
     let signed = sign_authority_csr(&pending, root);
     let mut tx = pool.begin().await.unwrap();
     let imported = provisioning::import_signed_authority_in_tx(
@@ -180,11 +183,12 @@ pub async fn rotate_tenant_issuer(
     tenant_id: Uuid,
 ) -> AuthorityRecord {
     let mut tx = pool.begin().await.unwrap();
-    let pending =
+    let mut pending =
         provisioning::begin_tenant_authority_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
             .await
             .unwrap();
     tx.commit().await.unwrap();
+    pending.commit_generated_key();
     let signed = sign_authority_csr(&pending, root);
     let mut tx = pool.begin().await.unwrap();
     let imported = provisioning::import_signed_authority_in_tx(

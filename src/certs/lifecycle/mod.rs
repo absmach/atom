@@ -55,6 +55,10 @@ pub struct BulkRevocationItem {
 #[derive(Debug, Clone, Serialize)]
 pub struct BulkRevocationBatch {
     pub items: Vec<BulkRevocationItem>,
+    /// Freeze point for the operation. Pass it unchanged on every resumed
+    /// page so certificates issued while a batch is running are handled by a
+    /// later operation instead of being silently skipped by UUID pagination.
+    pub snapshot_at: DateTime<Utc>,
     /// Pass this value as `after_credential_id` to resume. On a failure it is
     /// the last contiguous success, so the failed item is selected again.
     pub next_cursor: Option<Uuid>,
@@ -243,6 +247,7 @@ pub async fn bulk_revoke(
     actor_entity_id: Uuid,
     reason: Option<String>,
     after_credential_id: Option<Uuid>,
+    snapshot_at: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<BulkRevocationBatch, AppError> {
     if !(1..=MAX_BULK_BATCH_SIZE).contains(&limit) {
@@ -250,11 +255,29 @@ pub async fn bulk_revoke(
             "bulk revocation limit must be between 1 and {MAX_BULK_BATCH_SIZE}"
         )));
     }
+    if after_credential_id.is_some() && snapshot_at.is_none() {
+        return Err(AppError::bad_request(
+            "snapshotAt is required when afterCredentialId is provided",
+        ));
+    }
+    let database_now = repo::bulk_snapshot_at(&state.pool).await?;
+    if snapshot_at
+        .as_ref()
+        .is_some_and(|snapshot| snapshot > &database_now)
+    {
+        return Err(AppError::bad_request(
+            "snapshotAt cannot be later than the database clock",
+        ));
+    }
+    let snapshot_at = snapshot_at.unwrap_or(database_now);
+
     // One look-ahead row determines whether a successful page has more work.
+    // The creation-time cutoff freezes membership across all UUID pages.
     let candidates = repo::bulk_candidates(
         &state.pool,
         selector,
         after_credential_id,
+        &snapshot_at,
         limit.saturating_add(1),
     )
     .await?;
@@ -270,26 +293,26 @@ pub async fn bulk_revoke(
             }
             Err(error) => {
                 let error_code = public_error_code(&error);
-                audit::write(
+                audit::observe_error(
                     &state.pool,
                     state.config.events.enabled(),
-                    audit::AuditEvent {
+                    &audit::AuditMeta {
                         actor_entity_id: Some(actor_entity_id),
                         tenant_id: candidate.tenant_id,
-                        target_kind: Some("credential"),
+                        target_kind: "credential",
                         target_id: Some(candidate.credential_id),
                         event: "certificate.bulk_revoke",
-                        outcome: error.audit_outcome(),
-                        details: serde_json::json!({
-                            "selector_kind": selector.kind(),
-                            "selector_id": selector.id(),
-                            "issuer_id": candidate.issuer_id,
-                            "credential_id": candidate.credential_id,
-                            "entity_id": candidate.entity_id,
-                            "tenant_id": candidate.tenant_id,
-                            "error_code": error_code,
-                        }),
                     },
+                    &serde_json::json!({
+                        "selector_kind": selector.kind(),
+                        "selector_id": selector.id(),
+                        "issuer_id": candidate.issuer_id,
+                        "credential_id": candidate.credential_id,
+                        "entity_id": candidate.entity_id,
+                        "tenant_id": candidate.tenant_id,
+                        "error_code": error_code,
+                    }),
+                    &error,
                 )
                 .await;
                 items.push(BulkRevocationItem {
@@ -302,6 +325,7 @@ pub async fn bulk_revoke(
                 });
                 return Ok(BulkRevocationBatch {
                     items,
+                    snapshot_at,
                     next_cursor: last_success,
                     complete: false,
                 });
@@ -311,6 +335,7 @@ pub async fn bulk_revoke(
 
     Ok(BulkRevocationBatch {
         items,
+        snapshot_at,
         next_cursor: if has_more { last_success } else { None },
         complete: !has_more,
     })
@@ -351,7 +376,9 @@ async fn revoke_candidate(
         "idempotent_replay": revoked.idempotent_replay,
     });
     if revoked.idempotent_replay {
-        tx.commit().await.map_err(AppError::Database)?;
+        let commit = tx.commit().await.map_err(AppError::Database);
+        certificates::record_lifecycle_commit("revocation", &commit);
+        commit?;
         audit::write(
             &state.pool,
             false,
@@ -367,7 +394,7 @@ async fn revoke_candidate(
         )
         .await;
     } else {
-        audit::commit_with_audit(
+        let commit = audit::commit_with_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -381,7 +408,9 @@ async fn revoke_candidate(
                 details,
             },
         )
-        .await?;
+        .await;
+        certificates::record_lifecycle_commit("revocation", &commit);
+        commit?;
     }
 
     Ok(BulkRevocationItem {

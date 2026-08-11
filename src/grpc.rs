@@ -426,7 +426,7 @@ impl CertificateService for AtomCertificates {
         )
         .await
         .map_err(Status::from)?;
-        audit::commit_with_audit(
+        let commit = audit::commit_with_audit(
             &self.state.pool,
             tx,
             self.state.config.events.enabled(),
@@ -446,8 +446,9 @@ impl CertificateService for AtomCertificates {
                 }),
             },
         )
-        .await
-        .map_err(Status::from)?;
+        .await;
+        certs::service::record_lifecycle_commit("revocation", &commit);
+        commit.map_err(Status::from)?;
 
         Ok(Response::new(RevokeEntityCertificatesResponse {
             revoked: revoked.count as u64,

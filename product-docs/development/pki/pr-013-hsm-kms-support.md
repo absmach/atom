@@ -17,6 +17,18 @@ PR-002 through PR-012 stable interfaces.
 - Key rotation, disable, destroy, backup/recovery policy where provider supports it.
 - Deployment and incident runbooks.
 
+Started persistent provider mutations have a soft deadline: Atom reports that
+the deadline was exceeded but waits for the provider's actual result before it
+returns or retries. Read-only operations retain the hard timeout. Blocking
+provider waits must use the runtime's blocking boundary so they do not pin an
+asynchronous worker.
+
+A generated provider key remains owned by the provisioning operation until the
+authority mutation and its audit event commit. CSR construction, signing,
+database, audit, or outer-transaction failure destroys that key before the
+operation returns; only a successful commit transfers ownership to the stored
+authority row.
+
 ## Non-goals
 
 Multi-cloud abstraction beyond approved providers, generic secrets management, or exposing HSM/KMS controls to tenants.
@@ -33,7 +45,11 @@ Multi-cloud abstraction beyond approved providers, generic secrets management, o
 
 ## Mandatory tests
 
-Provider emulator/SoftHSM signing, wrong key/certificate match, unavailable/throttled provider, timeout/retry idempotency, signer authentication, arbitrary-sign prevention, provider rotation, and recovery runbook exercise.
+Provider emulator/SoftHSM signing, wrong key/certificate match,
+unavailable/throttled provider, timeout/retry idempotency including late
+persistent mutations, async-runtime progress during provider waits,
+outer-transaction rollback cleanup, signer authentication, arbitrary-sign
+prevention, provider rotation, and recovery runbook exercise.
 
 ## AI execution prompt
 
