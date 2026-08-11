@@ -104,7 +104,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         .execute(&pool)
         .await
         .unwrap();
-        provisioned.authority
+        provisioned.value.authority
     };
 
     keys::bootstrap_if_needed(&pool, &config.signing_keys)
