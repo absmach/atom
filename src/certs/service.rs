@@ -1596,21 +1596,19 @@ pub async fn generate_crl(
     }
 
     let generation_started = Instant::now();
-    let revoked_certs = repo::revocations_by_fingerprint_tx(
-        &mut tx,
-        &loaded.issuer_fingerprint_sha256,
-    )
-    .await?
-        .into_iter()
-        .map(|entry| {
-            Ok(RevokedCertParams {
-                serial_number: SerialNumber::from(serial_bytes(&entry.serial_number)?),
-                revocation_time: to_offset(entry.revoked_at)?,
-                reason_code: Some(crl_revocation_reason(&entry.reason)),
-                invalidity_date: None,
+    let revoked_certs =
+        repo::revocations_by_fingerprint_tx(&mut tx, &loaded.issuer_fingerprint_sha256)
+            .await?
+            .into_iter()
+            .map(|entry| {
+                Ok(RevokedCertParams {
+                    serial_number: SerialNumber::from(serial_bytes(&entry.serial_number)?),
+                    revocation_time: to_offset(entry.revoked_at)?,
+                    reason_code: Some(crl_revocation_reason(&entry.reason)),
+                    invalidity_date: None,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
+            .collect::<Result<Vec<_>, AppError>>()?;
     let now = OffsetDateTime::now_utc();
     let next_update = now + Duration::hours(CRL_TTL_HOURS);
     let crl_number = state.crl_number + 1;
