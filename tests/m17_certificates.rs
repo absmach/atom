@@ -17,8 +17,8 @@ use der::{
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use ring::digest;
 use spki::AlgorithmIdentifierOwned;
-use sqlx::PgPool;
-use std::{fs, path::PathBuf};
+use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::{fs, path::PathBuf, time::Duration as StdDuration};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_ocsp::{CertId, OcspRequest, Request as OcspSingleRequest, TbsRequest};
@@ -260,9 +260,18 @@ async fn certificate_lifecycle_with_database() {
             .unwrap();
     assert!(revoked_count >= 2);
 
-    let crl = service::generate_crl(&pool, &cfg, Some(&issuer))
+    let single_connection_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
+    let crl = tokio::time::timeout(
+        StdDuration::from_secs(5),
+        service::generate_crl(&single_connection_pool, &cfg, Some(&issuer)),
+    )
+    .await
+    .expect("legacy CRL generation must not perform a nested pool acquire")
+    .unwrap();
     let (_, parsed_crl) = x509_parser::parse_x509_crl(&crl).unwrap();
     let serial = hex::decode(&issued.certificate.serial_number).unwrap();
     assert!(parsed_crl
