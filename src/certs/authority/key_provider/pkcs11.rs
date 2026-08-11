@@ -355,9 +355,8 @@ impl Pkcs11KeyProvider {
                             operation,
                             "PKCS#11 mutation exceeded its soft deadline; waiting for completion"
                         );
-                        wait_for_worker_completion(&receiver).unwrap_or(Err(
-                            AuthorityKeyProviderError::ProviderUnavailable,
-                        ))
+                        wait_for_worker_completion(&receiver)
+                            .unwrap_or(Err(AuthorityKeyProviderError::ProviderUnavailable))
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         Err(AuthorityKeyProviderError::OperationTimedOut)
