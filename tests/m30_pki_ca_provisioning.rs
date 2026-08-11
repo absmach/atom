@@ -113,8 +113,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
         .await;
     assert!(replay.errors.is_empty(), "{:?}", replay.errors);
     assert_eq!(
-        replay.data.into_json().expect("replay JSON")
-            ["beginTenantAuthorityProvisioning"]["id"],
+        replay.data.into_json().expect("replay JSON")["beginTenantAuthorityProvisioning"]["id"],
         authority_id.to_string()
     );
     assert_eq!(
