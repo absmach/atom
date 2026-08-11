@@ -447,6 +447,12 @@ fn assert_generated_ca_csr(authority: &AuthorityRecord, expected: BasicConstrain
         .key_usages
         .contains(&KeyUsagePurpose::KeyCertSign));
     assert!(parsed.params.key_usages.contains(&KeyUsagePurpose::CrlSign));
+    if expected == BasicConstraints::Constrained(0) {
+        assert!(parsed
+            .params
+            .key_usages
+            .contains(&KeyUsagePurpose::DigitalSignature));
+    }
 }
 
 fn assert_failed(outcome: provisioning::AuthorityImportOutcome) {
