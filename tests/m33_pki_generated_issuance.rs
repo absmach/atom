@@ -242,9 +242,9 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
         credential_id.to_string()
     );
 
-    // A failure after signing but before persistence commits nothing and emits
-    // no operational record. The generated secret is dropped/zeroized by the
-    // service response wrapper and never appears in the returned error/logs.
+    // A failure after signing but before persistence commits no credential or
+    // success audit, but it does emit one error observation. The generated
+    // secret is dropped/zeroized and never appears in the returned error/logs.
     install_persistence_failure_trigger(&pool, entity_a).await;
     let before_credentials = certificate_count(&pool, entity_a).await;
     let before_audits = event_count(&pool, "audit_logs", entity_a).await;
@@ -267,8 +267,22 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
     );
     assert_eq!(
         event_count(&pool, "event_outbox", entity_a).await,
-        before_events
+        before_events + 1
     );
+    let failure: (String, String) = sqlx::query_as(
+        r#"SELECT payload->>'outcome', payload->'details'->>'transport'
+           FROM event_outbox
+           WHERE event = 'certificate.issue'
+             AND actor_entity_id = $1
+             AND payload->>'outcome' = 'error'
+           ORDER BY created_at DESC
+           LIMIT 1"#,
+    )
+    .bind(entity_a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(failure, ("error".into(), "graphql".into()));
 
     private_key_pem.zeroize();
 }
