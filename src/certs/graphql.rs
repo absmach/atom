@@ -221,7 +221,9 @@ impl CertificateMutation {
             Ok(issued) => issued,
             Err(error) => {
                 if let Err(rollback_error) = tx.rollback().await {
-                    tracing::warn!("failed to roll back generated certificate issuance: {rollback_error}");
+                    tracing::warn!(
+                        "failed to roll back generated certificate issuance: {rollback_error}"
+                    );
                 }
                 audit::observe_error(
                     &state.pool,
@@ -370,7 +372,9 @@ impl CertificateMutation {
             Ok(issued) => issued,
             Err(error) => {
                 if let Err(rollback_error) = tx.rollback().await {
-                    tracing::warn!("failed to roll back CSR certificate issuance: {rollback_error}");
+                    tracing::warn!(
+                        "failed to roll back CSR certificate issuance: {rollback_error}"
+                    );
                 }
                 audit::observe_error(
                     &state.pool,
