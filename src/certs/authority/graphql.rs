@@ -4,9 +4,9 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::{require_capability, Scope},
-    error::db_err,
+    error::{db_err, AppError},
     graphql::{
-        auth::{deny_scoped_token, gql_error, require_auth},
+        auth::{gql_error, require_auth},
         types::parse_id,
     },
     models::enums::AuditOutcome,
@@ -58,26 +58,36 @@ impl AuthorityMutation {
     ) -> Result<Authority> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_mutation_access(state, &auth, Scope::Platform).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let authority = provisioning::import_root_in_tx(&mut tx, &certificate_pem)
-            .await
-            .map_err(gql_error)?;
-        commit_authority_event(
+        let result = async {
+            require_mutation_access(state, &auth, Scope::Platform).await?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let outcome =
+                provisioning::import_root_mutation_in_tx(&mut tx, &certificate_pem).await?;
+            commit_authority_mutation(
+                state,
+                tx,
+                &auth,
+                &outcome.value,
+                outcome.changed,
+                "pki.authority.root_imported",
+                "pki.authority.root_import_replayed",
+                AuditOutcome::Allow,
+                serde_json::json!({"version": outcome.value.version}),
+            )
+            .await?;
+            Ok(outcome.value.into())
+        }
+        .await;
+        observe_authority_result(
             state,
-            tx,
             &auth,
-            &authority,
+            None,
+            None,
             "pki.authority.root_imported",
-            AuditOutcome::Allow,
-            serde_json::json!({"version": authority.version}),
+            serde_json::json!({"transport": "graphql"}),
+            result,
         )
-        .await?;
-        Ok(authority.into())
+        .await
     }
 
     async fn begin_tenant_authority_provisioning(
@@ -88,30 +98,40 @@ impl AuthorityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        require_mutation_access(state, &auth, Scope::Tenant(tenant_id)).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let authority = provisioning::begin_tenant_authority_in_tx(
-            &mut tx,
-            &state.config.pki_ca_keys,
-            tenant_id,
+        let result = async {
+            require_mutation_access(state, &auth, Scope::Tenant(tenant_id)).await?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let outcome = provisioning::begin_tenant_authority_mutation_in_tx(
+                &mut tx,
+                &state.config.pki_ca_keys,
+                tenant_id,
+            )
+            .await?;
+            commit_authority_mutation(
+                state,
+                tx,
+                &auth,
+                &outcome.value,
+                outcome.changed,
+                "pki.authority.provisioning_started",
+                "pki.authority.provisioning_replayed",
+                AuditOutcome::Allow,
+                lifecycle_details(&outcome.value),
+            )
+            .await?;
+            Ok(outcome.value.into())
+        }
+        .await;
+        observe_authority_result(
+            state,
+            &auth,
+            Some(tenant_id),
+            None,
+            "pki.authority.provisioning_started",
+            serde_json::json!({"transport": "graphql", "kind": "tenant_intermediate"}),
+            result,
         )
         .await
-        .map_err(gql_error)?;
-        commit_authority_event(
-            state,
-            tx,
-            &auth,
-            &authority,
-            "pki.authority.provisioning_started",
-            AuditOutcome::Allow,
-            lifecycle_details(&authority),
-        )
-        .await?;
-        Ok(authority.into())
     }
 
     async fn begin_platform_leaf_issuer_provisioning(
@@ -120,27 +140,39 @@ impl AuthorityMutation {
     ) -> Result<Authority> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_mutation_access(state, &auth, Scope::Platform).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let authority =
-            provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &state.config.pki_ca_keys)
-                .await
-                .map_err(gql_error)?;
-        commit_authority_event(
+        let result = async {
+            require_mutation_access(state, &auth, Scope::Platform).await?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let outcome = provisioning::begin_platform_leaf_issuer_mutation_in_tx(
+                &mut tx,
+                &state.config.pki_ca_keys,
+            )
+            .await?;
+            commit_authority_mutation(
+                state,
+                tx,
+                &auth,
+                &outcome.value,
+                outcome.changed,
+                "pki.authority.provisioning_started",
+                "pki.authority.provisioning_replayed",
+                AuditOutcome::Allow,
+                lifecycle_details(&outcome.value),
+            )
+            .await?;
+            Ok(outcome.value.into())
+        }
+        .await;
+        observe_authority_result(
             state,
-            tx,
             &auth,
-            &authority,
+            None,
+            None,
             "pki.authority.provisioning_started",
-            AuditOutcome::Allow,
-            lifecycle_details(&authority),
+            serde_json::json!({"transport": "graphql", "kind": "platform_leaf_issuer"}),
+            result,
         )
-        .await?;
-        Ok(authority.into())
+        .await
     }
 
     async fn begin_platform_intermediate_provisioning(
@@ -149,27 +181,39 @@ impl AuthorityMutation {
     ) -> Result<Authority> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_mutation_access(state, &auth, Scope::Platform).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let authority =
-            provisioning::begin_platform_intermediate_in_tx(&mut tx, &state.config.pki_ca_keys)
-                .await
-                .map_err(gql_error)?;
-        commit_authority_event(
+        let result = async {
+            require_mutation_access(state, &auth, Scope::Platform).await?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let outcome = provisioning::begin_platform_intermediate_mutation_in_tx(
+                &mut tx,
+                &state.config.pki_ca_keys,
+            )
+            .await?;
+            commit_authority_mutation(
+                state,
+                tx,
+                &auth,
+                &outcome.value,
+                outcome.changed,
+                "pki.authority.provisioning_started",
+                "pki.authority.provisioning_replayed",
+                AuditOutcome::Allow,
+                lifecycle_details(&outcome.value),
+            )
+            .await?;
+            Ok(outcome.value.into())
+        }
+        .await;
+        observe_authority_result(
             state,
-            tx,
             &auth,
-            &authority,
+            None,
+            None,
             "pki.authority.provisioning_started",
-            AuditOutcome::Allow,
-            lifecycle_details(&authority),
+            serde_json::json!({"transport": "graphql", "kind": "platform_intermediate"}),
+            result,
         )
-        .await?;
-        Ok(authority.into())
+        .await
     }
 
     async fn import_signed_authority(
@@ -181,46 +225,57 @@ impl AuthorityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let authority_id = parse_id(authority_id, "authorityId")?;
-        let existing = repo::authority_by_id(&state.pool, authority_id)
-            .await
-            .map_err(gql_error)?;
-        require_mutation_access(state, &auth, authority_scope(&existing)).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let outcome = provisioning::import_signed_authority_in_tx(
-            &mut tx,
-            &state.config.pki_ca_keys,
-            authority_id,
-            &certificate_pem,
+        let mut observed_tenant_id = auth.tenant_id;
+        let result = async {
+            let existing = repo::authority_by_id(&state.pool, authority_id).await?;
+            observed_tenant_id = existing.tenant_id;
+            require_mutation_access(state, &auth, authority_scope(&existing)).await?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let mutation = provisioning::import_signed_authority_mutation_in_tx(
+                &mut tx,
+                &state.config.pki_ca_keys,
+                authority_id,
+                &certificate_pem,
+            )
+            .await?;
+            let outcome = mutation.value;
+            let audit_outcome = if outcome.succeeded() {
+                AuditOutcome::Allow
+            } else {
+                AuditOutcome::Error
+            };
+            let details = serde_json::json!({
+                "kind": authority_kind(&outcome.authority),
+                "version": outcome.authority.version,
+                "status": authority_status(&outcome.authority),
+                "replaced_authorities": outcome.replaced_authorities,
+                "validation_succeeded": outcome.succeeded()
+            });
+            commit_authority_mutation(
+                state,
+                tx,
+                &auth,
+                &outcome.authority,
+                mutation.changed,
+                "pki.authority.signed_certificate_imported",
+                "pki.authority.signed_certificate_import_replayed",
+                audit_outcome,
+                details,
+            )
+            .await?;
+            Ok(outcome.into())
+        }
+        .await;
+        observe_authority_result(
+            state,
+            &auth,
+            observed_tenant_id,
+            Some(authority_id),
+            "pki.authority.signed_certificate_imported",
+            serde_json::json!({"transport": "graphql"}),
+            result,
         )
         .await
-        .map_err(gql_error)?;
-        let audit_outcome = if outcome.succeeded() {
-            AuditOutcome::Allow
-        } else {
-            AuditOutcome::Error
-        };
-        let details = serde_json::json!({
-            "kind": authority_kind(&outcome.authority),
-            "version": outcome.authority.version,
-            "status": authority_status(&outcome.authority),
-            "replaced_authorities": outcome.replaced_authorities,
-            "validation_succeeded": outcome.succeeded()
-        });
-        commit_authority_event(
-            state,
-            tx,
-            &auth,
-            &outcome.authority,
-            "pki.authority.signed_certificate_imported",
-            audit_outcome,
-            details,
-        )
-        .await?;
-        Ok(outcome.into())
     }
 
     async fn provision_tenant_authority_automatically(
@@ -231,43 +286,59 @@ impl AuthorityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
-        deny_scoped_token(&auth)?;
-        require_pki_capability(state, &auth, Scope::Tenant(tenant_id)).await?;
-        require_capability(
-            &state.pool,
-            &auth,
-            "pki.provision_automated",
-            Scope::Platform,
-        )
-        .await
-        .map_err(gql_error)?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let outcome = provisioning::provision_tenant_automatically_in_tx(
-            &mut tx,
-            &state.config.pki_ca_keys,
-            tenant_id,
-        )
-        .await
-        .map_err(gql_error)?;
-        commit_authority_event(
+        let result = async {
+            auth.reject_scoped_credential_management()?;
+            require_capability(
+                &state.pool,
+                &auth,
+                "pki.provision",
+                Scope::Tenant(tenant_id),
+            )
+            .await?;
+            require_capability(
+                &state.pool,
+                &auth,
+                "pki.provision_automated",
+                Scope::Platform,
+            )
+            .await?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let mutation = provisioning::provision_tenant_automatically_mutation_in_tx(
+                &mut tx,
+                &state.config.pki_ca_keys,
+                tenant_id,
+            )
+            .await?;
+            let outcome = mutation.value;
+            commit_authority_mutation(
+                state,
+                tx,
+                &auth,
+                &outcome.authority,
+                mutation.changed,
+                "pki.authority.provisioned_automatically",
+                "pki.authority.automated_provisioning_replayed",
+                AuditOutcome::Allow,
+                serde_json::json!({
+                    "kind": authority_kind(&outcome.authority),
+                    "version": outcome.authority.version,
+                    "replaced_authorities": outcome.replaced_authorities
+                }),
+            )
+            .await?;
+            Ok(outcome.into())
+        }
+        .await;
+        observe_authority_result(
             state,
-            tx,
             &auth,
-            &outcome.authority,
+            Some(tenant_id),
+            None,
             "pki.authority.provisioned_automatically",
-            AuditOutcome::Allow,
-            serde_json::json!({
-                "kind": authority_kind(&outcome.authority),
-                "version": outcome.authority.version,
-                "replaced_authorities": outcome.replaced_authorities
-            }),
+            serde_json::json!({"transport": "graphql"}),
+            result,
         )
-        .await?;
-        Ok(outcome.into())
+        .await
     }
 
     async fn begin_authority_retirement(
@@ -297,38 +368,57 @@ impl AuthorityMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let authority_id = parse_id(authority_id, "authorityId")?;
-        let existing = repo::authority_by_id(&state.pool, authority_id)
-            .await
-            .map_err(gql_error)?;
-        require_mutation_access(state, &auth, authority_scope(&existing)).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let authority = if complete {
-            provisioning::complete_retirement_in_tx(&mut tx, authority_id).await
-        } else {
-            provisioning::begin_retirement_in_tx(&mut tx, &state.config.pki_ca_keys, authority_id)
-                .await
-        }
-        .map_err(gql_error)?;
         let event = if complete {
             "pki.authority.retired"
         } else {
             "pki.authority.retiring"
         };
-        commit_authority_event(
+        let replay_event = if complete {
+            "pki.authority.retirement_completion_replayed"
+        } else {
+            "pki.authority.retirement_start_replayed"
+        };
+        let mut observed_tenant_id = auth.tenant_id;
+        let result = async {
+            let existing = repo::authority_by_id(&state.pool, authority_id).await?;
+            observed_tenant_id = existing.tenant_id;
+            require_mutation_access(state, &auth, authority_scope(&existing)).await?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let outcome = if complete {
+                provisioning::complete_retirement_mutation_in_tx(&mut tx, authority_id).await?
+            } else {
+                provisioning::begin_retirement_mutation_in_tx(
+                    &mut tx,
+                    &state.config.pki_ca_keys,
+                    authority_id,
+                )
+                .await?
+            };
+            commit_authority_mutation(
+                state,
+                tx,
+                &auth,
+                &outcome.value,
+                outcome.changed,
+                event,
+                replay_event,
+                AuditOutcome::Allow,
+                lifecycle_details(&outcome.value),
+            )
+            .await?;
+            Ok(outcome.value.into())
+        }
+        .await;
+        observe_authority_result(
             state,
-            tx,
             &auth,
-            &authority,
+            observed_tenant_id,
+            Some(authority_id),
             event,
-            AuditOutcome::Allow,
-            lifecycle_details(&authority),
+            serde_json::json!({"transport": "graphql"}),
+            result,
         )
-        .await?;
-        Ok(authority.into())
+        .await
     }
 }
 
@@ -490,9 +580,9 @@ async fn require_mutation_access(
     state: &AppState,
     auth: &crate::auth::AuthContext,
     scope: Scope,
-) -> Result<()> {
-    deny_scoped_token(auth)?;
-    require_pki_capability(state, auth, scope).await
+) -> std::result::Result<(), AppError> {
+    auth.reject_scoped_credential_management()?;
+    require_capability(&state.pool, auth, "pki.provision", scope).await
 }
 
 async fn require_pki_capability(
@@ -521,7 +611,7 @@ async fn commit_authority_event(
     event: &'static str,
     outcome: AuditOutcome,
     details: serde_json::Value,
-) -> Result<()> {
+) -> std::result::Result<(), AppError> {
     audit::commit_with_audit(
         &state.pool,
         tx,
@@ -537,7 +627,72 @@ async fn commit_authority_event(
         },
     )
     .await
-    .map_err(gql_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_authority_mutation(
+    state: &AppState,
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    auth: &crate::auth::AuthContext,
+    authority: &AuthorityRecord,
+    changed: bool,
+    event: &'static str,
+    replay_event: &'static str,
+    outcome: AuditOutcome,
+    details: serde_json::Value,
+) -> std::result::Result<(), AppError> {
+    if changed {
+        return commit_authority_event(state, tx, auth, authority, event, outcome, details).await;
+    }
+
+    tx.commit().await.map_err(db_err)?;
+    let mut replay_details = details;
+    if let serde_json::Value::Object(ref mut object) = replay_details {
+        object.insert("replay".to_string(), serde_json::Value::Bool(true));
+    }
+    audit::write(
+        &state.pool,
+        false,
+        audit::AuditEvent {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: authority.tenant_id,
+            target_kind: Some("pki_authority"),
+            target_id: Some(authority.id),
+            event: replay_event,
+            outcome,
+            details: replay_details,
+        },
+    )
+    .await;
+    Ok(())
+}
+
+async fn observe_authority_result<T>(
+    state: &AppState,
+    auth: &crate::auth::AuthContext,
+    tenant_id: Option<Uuid>,
+    target_id: Option<Uuid>,
+    event: &'static str,
+    details: serde_json::Value,
+    result: std::result::Result<T, AppError>,
+) -> Result<T> {
+    if let Err(ref error) = result {
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id,
+                target_kind: "pki_authority",
+                target_id,
+                event,
+            },
+            &details,
+            error,
+        )
+        .await;
+    }
+    result.map_err(gql_error)
 }
 
 fn lifecycle_details(authority: &AuthorityRecord) -> serde_json::Value {

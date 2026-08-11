@@ -40,6 +40,12 @@ impl AuthorityImportOutcome {
     }
 }
 
+#[derive(Debug)]
+pub struct AuthorityMutationOutcome<T> {
+    pub value: T,
+    pub changed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustBundle {
     pub pem: String,
@@ -112,13 +118,23 @@ pub async fn import_root_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     certificate_pem: &str,
 ) -> Result<AuthorityRecord, AppError> {
+    Ok(import_root_mutation_in_tx(tx, certificate_pem).await?.value)
+}
+
+pub async fn import_root_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    certificate_pem: &str,
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
     let parsed = parse_authority_certificate(certificate_pem)?;
     validate_root_certificate(&parsed)?;
 
     if let Some(existing) = repo::authority_by_fingerprint(tx, &parsed.fingerprint_sha256).await? {
         if existing.kind == AuthorityKind::Root {
-            return Ok(existing);
+            return Ok(AuthorityMutationOutcome {
+                value: existing,
+                changed: false,
+            });
         }
         return Err(AppError::conflict(
             "certificate fingerprint already belongs to another authority",
@@ -127,7 +143,11 @@ pub async fn import_root_in_tx(
 
     let version = repo::next_authority_version(tx, AuthorityKind::Root, None).await?;
     let completed = completed_authority(&parsed, &parsed.pem);
-    repo::insert_root_authority(tx, Uuid::new_v4(), version, &completed).await
+    let authority = repo::insert_root_authority(tx, Uuid::new_v4(), version, &completed).await?;
+    Ok(AuthorityMutationOutcome {
+        value: authority,
+        changed: true,
+    })
 }
 
 pub async fn begin_tenant_authority_in_tx(
@@ -135,7 +155,19 @@ pub async fn begin_tenant_authority_in_tx(
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
-    begin_offline_authority_in_tx(
+    Ok(
+        begin_tenant_authority_mutation_in_tx(tx, ca_keys, tenant_id)
+            .await?
+            .value,
+    )
+}
+
+pub async fn begin_tenant_authority_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ca_keys: &PkiCaKeyConfig,
+    tenant_id: Uuid,
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
+    begin_offline_authority_mutation_in_tx(
         tx,
         ca_keys,
         AuthorityKind::TenantIntermediate,
@@ -148,29 +180,52 @@ pub async fn begin_platform_leaf_issuer_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
 ) -> Result<AuthorityRecord, AppError> {
-    begin_offline_authority_in_tx(tx, ca_keys, AuthorityKind::PlatformLeafIssuer, None).await
+    Ok(begin_platform_leaf_issuer_mutation_in_tx(tx, ca_keys)
+        .await?
+        .value)
+}
+
+pub async fn begin_platform_leaf_issuer_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ca_keys: &PkiCaKeyConfig,
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
+    begin_offline_authority_mutation_in_tx(tx, ca_keys, AuthorityKind::PlatformLeafIssuer, None)
+        .await
 }
 
 pub async fn begin_platform_intermediate_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
 ) -> Result<AuthorityRecord, AppError> {
-    begin_offline_authority_in_tx(tx, ca_keys, AuthorityKind::PlatformIntermediate, None).await
+    Ok(begin_platform_intermediate_mutation_in_tx(tx, ca_keys)
+        .await?
+        .value)
 }
 
-async fn begin_offline_authority_in_tx(
+pub async fn begin_platform_intermediate_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ca_keys: &PkiCaKeyConfig,
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
+    begin_offline_authority_mutation_in_tx(tx, ca_keys, AuthorityKind::PlatformIntermediate, None)
+        .await
+}
+
+async fn begin_offline_authority_mutation_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
-) -> Result<AuthorityRecord, AppError> {
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
     if let Some(tenant_id) = tenant_id {
         repo::lock_active_tenant(tx, tenant_id).await?;
     }
     if let Some(existing) = repo::pending_authority_for_scope(tx, kind, tenant_id).await? {
         if existing.provisioning_mode == "offline" {
-            return Ok(existing);
+            return Ok(AuthorityMutationOutcome {
+                value: existing,
+                changed: false,
+            });
         }
         return Err(AppError::conflict(
             "authority provisioning already exists for this scope",
@@ -179,7 +234,12 @@ async fn begin_offline_authority_in_tx(
 
     let parent = repo::active_root(tx).await?;
     ensure_parent_available(&parent)?;
-    create_pending_authority(tx, ca_keys, kind, tenant_id, &parent, "offline").await
+    let authority =
+        create_pending_authority(tx, ca_keys, kind, tenant_id, &parent, "offline").await?;
+    Ok(AuthorityMutationOutcome {
+        value: authority,
+        changed: true,
+    })
 }
 
 pub async fn provision_tenant_automatically_in_tx(
@@ -187,6 +247,18 @@ pub async fn provision_tenant_automatically_in_tx(
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityImportOutcome, AppError> {
+    Ok(
+        provision_tenant_automatically_mutation_in_tx(tx, ca_keys, tenant_id)
+            .await?
+            .value,
+    )
+}
+
+pub async fn provision_tenant_automatically_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ca_keys: &PkiCaKeyConfig,
+    tenant_id: Uuid,
+) -> Result<AuthorityMutationOutcome<AuthorityImportOutcome>, AppError> {
     repo::lock_provisioning(tx).await?;
     repo::lock_active_tenant(tx, tenant_id).await?;
 
@@ -194,10 +266,13 @@ pub async fn provision_tenant_automatically_in_tx(
         repo::active_authority_for_scope(tx, AuthorityKind::TenantIntermediate, Some(tenant_id))
             .await?
     {
-        return Ok(AuthorityImportOutcome {
-            authority: active,
-            validation_error: None,
-            replaced_authorities: Vec::new(),
+        return Ok(AuthorityMutationOutcome {
+            value: AuthorityImportOutcome {
+                authority: active,
+                validation_error: None,
+                replaced_authorities: Vec::new(),
+            },
+            changed: false,
         });
     }
     if let Some(existing) =
@@ -222,7 +297,11 @@ pub async fn provision_tenant_automatically_in_tx(
     )
     .await?;
     let certificate_pem = sign_pending_authority(ca_keys, &pending, &parent)?;
-    import_signed_authority_locked(tx, ca_keys, pending, &certificate_pem).await
+    let outcome = import_signed_authority_locked(tx, ca_keys, pending, &certificate_pem).await?;
+    Ok(AuthorityMutationOutcome {
+        value: outcome,
+        changed: true,
+    })
 }
 
 pub async fn import_signed_authority_in_tx(
@@ -231,9 +310,27 @@ pub async fn import_signed_authority_in_tx(
     authority_id: Uuid,
     certificate_pem: &str,
 ) -> Result<AuthorityImportOutcome, AppError> {
+    Ok(
+        import_signed_authority_mutation_in_tx(tx, ca_keys, authority_id, certificate_pem)
+            .await?
+            .value,
+    )
+}
+
+pub async fn import_signed_authority_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ca_keys: &PkiCaKeyConfig,
+    authority_id: Uuid,
+    certificate_pem: &str,
+) -> Result<AuthorityMutationOutcome<AuthorityImportOutcome>, AppError> {
     repo::lock_provisioning(tx).await?;
     let authority = repo::authority_by_id_for_update(tx, authority_id).await?;
-    import_signed_authority_locked(tx, ca_keys, authority, certificate_pem).await
+    let was_active = authority.status == AuthorityStatus::Active;
+    let outcome = import_signed_authority_locked(tx, ca_keys, authority, certificate_pem).await?;
+    Ok(AuthorityMutationOutcome {
+        value: outcome,
+        changed: !was_active,
+    })
 }
 
 async fn import_signed_authority_locked(
@@ -342,6 +439,16 @@ pub async fn begin_retirement_in_tx(
     ca_keys: &PkiCaKeyConfig,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
+    Ok(begin_retirement_mutation_in_tx(tx, ca_keys, authority_id)
+        .await?
+        .value)
+}
+
+pub async fn begin_retirement_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ca_keys: &PkiCaKeyConfig,
+    authority_id: Uuid,
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
     let authority = repo::authority_by_id_for_update(tx, authority_id).await?;
     if authority.kind == AuthorityKind::Root {
@@ -350,7 +457,10 @@ pub async fn begin_retirement_in_tx(
         ));
     }
     if authority.status == AuthorityStatus::Retiring {
-        return Ok(authority);
+        return Ok(AuthorityMutationOutcome {
+            value: authority,
+            changed: false,
+        });
     }
     if authority.status != AuthorityStatus::Active {
         return Err(AppError::conflict("only an active authority can retire"));
@@ -363,31 +473,51 @@ pub async fn begin_retirement_in_tx(
             .retire(authority_key_context(&authority), &key)
             .map_err(key_provider_error)?;
     }
-    repo::transition_authority(
+    let authority = repo::transition_authority(
         tx,
         authority_id,
         AuthorityStatus::Active,
         AuthorityStatus::Retiring,
     )
-    .await
+    .await?;
+    Ok(AuthorityMutationOutcome {
+        value: authority,
+        changed: true,
+    })
 }
 
 pub async fn complete_retirement_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
+    Ok(complete_retirement_mutation_in_tx(tx, authority_id)
+        .await?
+        .value)
+}
+
+pub async fn complete_retirement_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_id: Uuid,
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
     let authority = repo::authority_by_id_for_update(tx, authority_id).await?;
     if authority.status == AuthorityStatus::Retired {
-        return Ok(authority);
+        return Ok(AuthorityMutationOutcome {
+            value: authority,
+            changed: false,
+        });
     }
-    repo::transition_authority(
+    let authority = repo::transition_authority(
         tx,
         authority_id,
         AuthorityStatus::Retiring,
         AuthorityStatus::Retired,
     )
-    .await
+    .await?;
+    Ok(AuthorityMutationOutcome {
+        value: authority,
+        changed: true,
+    })
 }
 
 pub async fn trust_bundle(pool: &PgPool) -> Result<TrustBundle, AppError> {
@@ -645,6 +775,15 @@ fn validate_ca_shape(
         {
             Err(AppError::bad_request(
                 "platform intermediate must permit one subordinate CA level",
+            ))
+        }
+        AuthorityKind::Root
+            if certificate
+                .path_len_constraint
+                .is_some_and(|path_len| path_len < 2) =>
+        {
+            Err(AppError::bad_request(
+                "root authority must permit the platform and tenant intermediate levels",
             ))
         }
         AuthorityKind::Root
@@ -932,6 +1071,19 @@ mod tests {
         let error =
             validate_ca_shape(AuthorityKind::PlatformLeafIssuer, &parsed).expect_err("path length");
         assert!(error.to_string().contains("pathLenConstraint=0"));
+    }
+
+    #[test]
+    fn root_requires_the_full_configured_ca_depth() {
+        let key = KeyPair::generate().expect("key");
+        let certificate = test_ca_params("Shallow Root", 1)
+            .self_signed(&key)
+            .expect("certificate");
+        let parsed = parse_authority_certificate(&certificate.pem()).expect("parse");
+        let error = validate_root_certificate(&parsed).expect_err("insufficient path length");
+        assert!(error
+            .to_string()
+            .contains("platform and tenant intermediate levels"));
     }
 
     #[test]
