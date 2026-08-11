@@ -540,10 +540,11 @@ async fn provision_tenant_issuer(
     tx.commit().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let pending = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
+    let mut pending = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    pending.commit_generated_key();
     let signed = sign_authority_csr(&pending, root);
     let mut tx = pool.begin().await.unwrap();
     let imported =
@@ -554,7 +555,7 @@ async fn provision_tenant_issuer(
     tx.commit().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let provisioned =
+    let mut provisioned =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
             .await
             .unwrap();
@@ -564,6 +565,7 @@ async fn provision_tenant_issuer(
         provisioned.validation_error
     );
     tx.commit().await.unwrap();
+    provisioned.commit_generated_key();
     sqlx::query(
         r#"UPDATE pki_authorities
            SET ocsp_url = $2, ca_issuers_url = $3,

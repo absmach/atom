@@ -465,11 +465,12 @@ async fn import_root(pool: &PgPool, pem: &str) -> AuthorityRecord {
 
 async fn begin_tenant(pool: &PgPool, ca_keys: &PkiCaKeyConfig, tenant_id: Uuid) -> AuthorityRecord {
     let mut tx = pool.begin().await.unwrap();
-    let authority = provisioning::begin_tenant_authority_in_tx(&mut tx, ca_keys, tenant_id)
+    let mut authority = provisioning::begin_tenant_authority_in_tx(&mut tx, ca_keys, tenant_id)
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    authority
+    authority.commit_generated_key();
+    authority.value
 }
 
 async fn begin_tenant_owned(
@@ -482,20 +483,22 @@ async fn begin_tenant_owned(
 
 async fn begin_platform_leaf(pool: &PgPool, ca_keys: &PkiCaKeyConfig) -> AuthorityRecord {
     let mut tx = pool.begin().await.unwrap();
-    let authority = provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, ca_keys)
+    let mut authority = provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, ca_keys)
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    authority
+    authority.commit_generated_key();
+    authority.value
 }
 
 async fn begin_platform_intermediate(pool: &PgPool, ca_keys: &PkiCaKeyConfig) -> AuthorityRecord {
     let mut tx = pool.begin().await.unwrap();
-    let authority = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
+    let mut authority = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    authority
+    authority.commit_generated_key();
+    authority.value
 }
 
 async fn provision_automatically(
@@ -504,11 +507,12 @@ async fn provision_automatically(
     tenant_id: Uuid,
 ) -> provisioning::AuthorityImportOutcome {
     let mut tx = pool.begin().await.unwrap();
-    let outcome = provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
+    let mut outcome = provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    outcome
+    outcome.commit_generated_key();
+    outcome.value
 }
 
 async fn import_signed(

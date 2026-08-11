@@ -235,6 +235,35 @@ impl Drop for InFlightGuard {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperationClass {
+    ReadOnly,
+    Mutating,
+}
+
+fn wait_for_worker<T>(
+    receiver: &mpsc::Receiver<T>,
+    timeout: Duration,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(|| receiver.recv_timeout(timeout))
+    } else {
+        receiver.recv_timeout(timeout)
+    }
+}
+
+fn wait_for_worker_completion<T>(receiver: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(|| receiver.recv())
+    } else {
+        receiver.recv()
+    }
+}
+
 #[derive(Clone)]
 pub struct Pkcs11KeyProvider {
     config: PkiPkcs11Config,
@@ -271,6 +300,7 @@ impl Pkcs11KeyProvider {
     fn execute<T, F>(
         &self,
         operation: &'static str,
+        class: OperationClass,
         function: F,
     ) -> Result<T, AuthorityKeyProviderError>
     where
@@ -312,8 +342,23 @@ impl Pkcs11KeyProvider {
                     .record_failure(&error, self.config.circuit_failure_threshold);
                 final_result = Err(error);
             } else {
-                final_result = match receiver.recv_timeout(timeout) {
+                final_result = match wait_for_worker(&receiver, timeout) {
                     Ok(result) => result,
+                    Err(mpsc::RecvTimeoutError::Timeout) if class == OperationClass::Mutating => {
+                        // A PKCS#11 worker cannot be cancelled safely once the token has
+                        // accepted a persistent mutation. Keep the mutation's lifecycle
+                        // serialized and observe its real result before returning or
+                        // retrying; otherwise a late generate/destroy could become an
+                        // invisible side effect or race the next attempt.
+                        tracing::warn!(
+                            provider = PROVIDER_NAME,
+                            operation,
+                            "PKCS#11 mutation exceeded its soft deadline; waiting for completion"
+                        );
+                        wait_for_worker_completion(&receiver).unwrap_or(Err(
+                            AuthorityKeyProviderError::ProviderUnavailable,
+                        ))
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         Err(AuthorityKeyProviderError::OperationTimedOut)
                     }
@@ -563,7 +608,9 @@ impl AuthorityKeyProvider for Pkcs11KeyProvider {
         let status = if self.runtime.circuit_open(reset_after) {
             AuthorityKeyProviderStatus::CircuitOpen
         } else {
-            match self.execute("health", |provider| provider.probe_once()) {
+            match self.execute("health", OperationClass::ReadOnly, |provider| {
+                provider.probe_once()
+            }) {
                 Ok(()) => AuthorityKeyProviderStatus::Ready,
                 Err(AuthorityKeyProviderError::CircuitOpen) => {
                     AuthorityKeyProviderStatus::CircuitOpen
@@ -585,7 +632,9 @@ impl AuthorityKeyProvider for Pkcs11KeyProvider {
         if algorithm != AuthorityKeyAlgorithm::EcdsaP256Sha256 {
             return Err(AuthorityKeyProviderError::UnsupportedKeyAlgorithm);
         }
-        let result = self.execute("generate", move |provider| provider.generate_once(context));
+        let result = self.execute("generate", OperationClass::Mutating, move |provider| {
+            provider.generate_once(context)
+        });
         Self::audit_result("generate", context, result)
     }
 
@@ -595,7 +644,7 @@ impl AuthorityKeyProvider for Pkcs11KeyProvider {
         key: &Self::Key,
     ) -> Result<AuthorityPublicKey, AuthorityKeyProviderError> {
         let key = key.clone();
-        let result = self.execute("public_key", move |provider| {
+        let result = self.execute("public_key", OperationClass::ReadOnly, move |provider| {
             provider.public_key_once(context, &key)
         });
         Self::audit_result("public_key", context, result)
@@ -609,7 +658,7 @@ impl AuthorityKeyProvider for Pkcs11KeyProvider {
     ) -> Result<AuthoritySignature, AuthorityKeyProviderError> {
         let key = key.clone();
         let message = message.to_vec();
-        let result = self.execute("sign", move |provider| {
+        let result = self.execute("sign", OperationClass::ReadOnly, move |provider| {
             provider.sign_once(context, &key, &message)
         });
         Self::audit_result("sign", context, result)
@@ -621,7 +670,7 @@ impl AuthorityKeyProvider for Pkcs11KeyProvider {
         key: &Self::Key,
     ) -> Result<(), AuthorityKeyProviderError> {
         let key = key.clone();
-        let result = self.execute("retire", move |provider| {
+        let result = self.execute("retire", OperationClass::ReadOnly, move |provider| {
             provider.retire_once(context, &key)
         });
         Self::audit_result("retire", context, result)
@@ -633,7 +682,7 @@ impl AuthorityKeyProvider for Pkcs11KeyProvider {
         key: &mut Self::Key,
     ) -> Result<(), AuthorityKeyProviderError> {
         let owned = key.clone();
-        let result = self.execute("destroy", move |provider| {
+        let result = self.execute("destroy", OperationClass::Mutating, move |provider| {
             provider.destroy_once(context, &owned)
         });
         if result.is_ok() {
@@ -814,7 +863,7 @@ mod tests {
         let provider = Pkcs11KeyProvider::new(executor_config("timeout-throttle"));
         assert_eq!(
             provider
-                .execute("test_timeout", |_| {
+                .execute("test_timeout", OperationClass::ReadOnly, |_| {
                     thread::sleep(Duration::from_millis(100));
                     Ok(())
                 })
@@ -823,7 +872,7 @@ mod tests {
         );
         assert_eq!(
             provider
-                .execute("test_throttle", |_| Ok(()))
+                .execute("test_throttle", OperationClass::ReadOnly, |_| Ok(()))
                 .expect_err("late worker occupies the only slot"),
             AuthorityKeyProviderError::ProviderThrottled
         );
@@ -839,7 +888,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
         retry_provider
-            .execute("test_retry", move |_| {
+            .execute("test_retry", OperationClass::ReadOnly, move |_| {
                 if observed.fetch_add(1, Ordering::SeqCst) == 0 {
                     Err(AuthorityKeyProviderError::ProviderUnavailable)
                 } else {
@@ -855,7 +904,7 @@ mod tests {
         let circuit_provider = Pkcs11KeyProvider::new(circuit_config);
         assert_eq!(
             circuit_provider
-                .execute("test_circuit_timeout", |_| {
+                .execute("test_circuit_timeout", OperationClass::ReadOnly, |_| {
                     thread::sleep(Duration::from_millis(100));
                     Ok(())
                 })
@@ -864,10 +913,53 @@ mod tests {
         );
         assert_eq!(
             circuit_provider
-                .execute("test_circuit_open", |_| Ok(()))
+                .execute("test_circuit_open", OperationClass::ReadOnly, |_| Ok(()))
                 .expect_err("circuit is open"),
             AuthorityKeyProviderError::CircuitOpen
         );
         thread::sleep(Duration::from_millis(110));
+    }
+
+    #[test]
+    fn mutating_executor_waits_for_started_operation_before_returning() {
+        let mut config = executor_config("mutating-soft-timeout");
+        config.max_retries = 2;
+        let provider = Pkcs11KeyProvider::new(config);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let started = Instant::now();
+
+        provider
+            .execute("test_mutation", OperationClass::Mutating, move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(50));
+                Ok(())
+            })
+            .expect("started mutation returns its actual result");
+
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn executor_wait_does_not_starve_the_async_runtime() {
+        let mut config = executor_config("runtime-progress");
+        config.operation_timeout_ms = 200;
+        let provider = Pkcs11KeyProvider::new(config);
+        let progressed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&progressed);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            observed.store(true, Ordering::SeqCst);
+        });
+
+        provider
+            .execute("test_runtime", OperationClass::ReadOnly, |_| {
+                thread::sleep(Duration::from_millis(50));
+                Ok(())
+            })
+            .expect("worker completes");
+
+        assert!(progressed.load(Ordering::SeqCst));
     }
 }
