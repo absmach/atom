@@ -152,7 +152,7 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         .oneshot(
             Request::builder()
                 .uri(format!("/certs/issuers/{}/crl", issuer_a.id))
-                .header(header::IF_NONE_MATCH, etag)
+                .header(header::IF_NONE_MATCH, &etag)
                 .body(Body::empty())
                 .unwrap(),
         )
