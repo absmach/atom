@@ -908,7 +908,10 @@ async fn audit_count(pool: &sqlx::PgPool, event: &str) -> i64 {
 }
 
 async fn outbox_count(pool: &sqlx::PgPool, event: &str) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM event_outbox WHERE event = $1")
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_outbox
+         WHERE event = $1 AND payload->>'outcome' = 'allow'",
+    )
         .bind(event)
         .fetch_one(pool)
         .await
