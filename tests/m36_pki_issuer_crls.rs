@@ -148,6 +148,7 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         empty_a.der
     );
     let not_modified = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/certs/issuers/{}/crl", issuer_a.id))
@@ -162,6 +163,18 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         .await
         .unwrap()
         .is_empty());
+    let weak_not_modified = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/certs/issuers/{}/crl", issuer_a.id))
+                .header(header::IF_NONE_MATCH, format!("W/{etag}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(weak_not_modified.status(), StatusCode::NOT_MODIFIED);
 
     let key_compromise = issue_managed(&pool, &config, tenant_a, entity_a, "key-compromise").await;
     revoke(
@@ -270,6 +283,9 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         .unwrap();
     assert!(after_restart.cache_hit);
     assert_eq!(after_restart.der, repaired.der);
+
+    let purge_entity = common::pki::create_entity(&pool, tenant_a, "pki-crl-purge").await;
+    let purge_leaf = issue_managed(&pool, &config, tenant_a, purge_entity, "purge").await;
 
     // Rotation retains old-authority publication. One old leaf is revoked
     // while the issuer is retiring and another after it is retired; neither
@@ -415,6 +431,38 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
             .der,
         retired_crl.der
     );
+
+    // Revocation publication evidence is independent of credential/entity
+    // retention. Purging the owning entity before regeneration cannot remove
+    // a still-valid serial from the issuer's next CRL.
+    revoke(
+        &pool,
+        purge_leaf.credential_id,
+        purge_entity,
+        tenant_a,
+        "key_compromise",
+    )
+    .await;
+    sqlx::query("DELETE FROM entities WHERE id = $1")
+        .bind(purge_entity)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM certificate_revocations WHERE credential_id = $1",
+        )
+        .bind(purge_leaf.credential_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let after_purge = service::issuer_crl(&pool, &config, issuer_a.id)
+        .await
+        .unwrap();
+    assert_eq!(after_purge.crl_number, 8);
+    assert!(crl_contains(&after_purge.der, &purge_leaf.serial_number));
 }
 
 async fn issue_managed(
