@@ -179,8 +179,35 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let issued = service::issue_generated_certificate_v2_in_tx(
+        let error_meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "entity",
+            target_id: Some(entity_id),
+            event: "certificate.issue",
+        };
+        let error_details = serde_json::json!({
+            "csr": false,
+            "generated_key": true,
+            "managed": true,
+            "transport": "graphql",
+        });
+        let mut tx = match state.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                let error = db_err(error);
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
+        let issued = match service::issue_generated_certificate_v2_in_tx(
             &mut tx,
             &state.config,
             tenant_id,
@@ -190,8 +217,24 @@ impl CertificateMutation {
             },
         )
         .await
-        .map_err(gql_error)?;
-        audit::commit_with_audit(
+        {
+            Ok(issued) => issued,
+            Err(error) => {
+                if let Err(rollback_error) = tx.rollback().await {
+                    tracing::warn!("failed to roll back generated certificate issuance: {rollback_error}");
+                }
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
+        if let Err(error) = audit::commit_with_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -214,7 +257,17 @@ impl CertificateMutation {
             },
         )
         .await
-        .map_err(gql_error)?;
+        {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
         Ok(issued.into())
     }
 
@@ -274,12 +327,34 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(input.entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
-        let issued = service::issue_certificate_from_csr_v2_in_tx(
+        let error_meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id,
+            target_kind: "entity",
+            target_id: Some(entity_id),
+            event: "certificate.issue",
+        };
+        let error_details = serde_json::json!({
+            "csr": true,
+            "managed": true,
+            "transport": "graphql",
+        });
+        let mut tx = match state.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                let error = db_err(error);
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
+        let issued = match service::issue_certificate_from_csr_v2_in_tx(
             &mut tx,
             &state.config,
             tenant_id,
@@ -291,7 +366,23 @@ impl CertificateMutation {
             },
         )
         .await
-        .map_err(gql_error)?;
+        {
+            Ok(issued) => issued,
+            Err(error) => {
+                if let Err(rollback_error) = tx.rollback().await {
+                    tracing::warn!("failed to roll back CSR certificate issuance: {rollback_error}");
+                }
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
+        };
         let details = serde_json::json!({
             "credential_id": issued.certificate.credential_id,
             "serial_number": issued.certificate.serial_number,
@@ -302,9 +393,18 @@ impl CertificateMutation {
             "replay": issued.idempotent_replay,
         });
         if issued.idempotent_replay {
-            tx.commit()
-                .await
-                .map_err(|error| gql_error(db_err(error)))?;
+            if let Err(error) = tx.commit().await {
+                let error = db_err(error);
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
             audit::write(
                 &state.pool,
                 false,
@@ -320,7 +420,7 @@ impl CertificateMutation {
             )
             .await;
         } else {
-            audit::commit_with_audit(
+            if let Err(error) = audit::commit_with_audit(
                 &state.pool,
                 tx,
                 state.config.events.enabled(),
@@ -335,7 +435,17 @@ impl CertificateMutation {
                 },
             )
             .await
-            .map_err(gql_error)?;
+            {
+                audit::observe_error(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    &error_meta,
+                    &error_details,
+                    &error,
+                )
+                .await;
+                return Err(gql_error(error));
+            }
         }
         Ok(issued.into())
     }
@@ -662,12 +772,35 @@ async fn renew_certificate_v2(
         .map_err(gql_error)?;
     require_certificate_rotate(state, &auth, &old).await?;
     let key_mode = key_source.mode();
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|error| gql_error(db_err(error)))?;
-    let issued = service::renew_certificate_v2_in_tx(
+    let error_meta = audit::AuditMeta {
+        actor_entity_id: Some(auth.entity_id),
+        tenant_id: old.tenant_id,
+        target_kind: "credential",
+        target_id: Some(old.credential_id),
+        event: "certificate.renew",
+    };
+    let error_details = serde_json::json!({
+        "key_mode": key_mode,
+        "revoke_old": revoke_old,
+        "managed": true,
+        "transport": "graphql",
+    });
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            let error = db_err(error);
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
+    };
+    let issued = match service::renew_certificate_v2_in_tx(
         &mut tx,
         &state.config,
         service::CertificateRenewalAuthorization::Operator {
@@ -684,7 +817,23 @@ async fn renew_certificate_v2(
         },
     )
     .await
-    .map_err(gql_error)?;
+    {
+        Ok(issued) => issued,
+        Err(error) => {
+            if let Err(rollback_error) = tx.rollback().await {
+                tracing::warn!("failed to roll back certificate renewal: {rollback_error}");
+            }
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
+    };
     let details = serde_json::json!({
         "old_credential_id": old.credential_id,
         "new_credential_id": issued.certificate.credential_id,
@@ -699,9 +848,18 @@ async fn renew_certificate_v2(
         "managed": true,
     });
     if issued.idempotent_replay {
-        tx.commit()
-            .await
-            .map_err(|error| gql_error(db_err(error)))?;
+        if let Err(error) = tx.commit().await {
+            let error = db_err(error);
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
         audit::write(
             &state.pool,
             false,
@@ -717,7 +875,7 @@ async fn renew_certificate_v2(
         )
         .await;
     } else {
-        audit::commit_with_audit(
+        if let Err(error) = audit::commit_with_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -732,7 +890,17 @@ async fn renew_certificate_v2(
             },
         )
         .await
-        .map_err(gql_error)?;
+        {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &error_meta,
+                &error_details,
+                &error,
+            )
+            .await;
+            return Err(gql_error(error));
+        }
     }
     Ok(issued.into())
 }
