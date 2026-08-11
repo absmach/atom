@@ -42,7 +42,7 @@ pub async fn trust_bundle(
     Ok((StatusCode::OK, response_headers, bundle.pem).into_response())
 }
 
-fn etag_matches(if_none_match: &str, current: &str) -> bool {
+pub(crate) fn etag_matches(if_none_match: &str, current: &str) -> bool {
     if_none_match.split(',').any(|candidate| {
         let candidate = candidate.trim();
         candidate == "*" || candidate == current || candidate.strip_prefix("W/") == Some(current)
