@@ -90,6 +90,91 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
     assert_eq!(outbox_payload["target_kind"], "pki_authority");
     assert_eq!(outbox_payload["tenant_id"], tenant_id.to_string());
     assert_eq!(outbox_payload["details"]["status"], "pending_signature");
+
+    let replay = schema
+        .execute(
+            GraphqlRequest::new(format!(
+                r#"
+                mutation {{
+                  beginTenantAuthorityProvisioning(tenantId: "{tenant_id}") {{
+                    id
+                    status
+                  }}
+                }}
+                "#
+            ))
+            .data(AuthContext {
+                entity_id: common::admin_id(),
+                tenant_id: None,
+                session_id: None,
+                ..Default::default()
+            }),
+        )
+        .await;
+    assert!(replay.errors.is_empty(), "{:?}", replay.errors);
+    assert_eq!(
+        replay.data.into_json().expect("replay JSON")
+            ["beginTenantAuthorityProvisioning"]["id"],
+        authority_id.to_string()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1",
+        )
+        .bind(authority_id)
+        .fetch_one(&pool)
+        .await
+        .expect("one transition event"),
+        1,
+        "an idempotent replay must not publish another lifecycle transition"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE event = 'pki.authority.provisioning_replayed' AND target_id = $1",
+        )
+        .bind(authority_id)
+        .fetch_one(&pool)
+        .await
+        .expect("replay audit"),
+        1
+    );
+
+    let invalid_root = schema
+        .execute(
+            GraphqlRequest::new(
+                r#"
+                mutation {
+                  importRootAuthority(certificatePem: "not a certificate") {
+                    id
+                  }
+                }
+                "#,
+            )
+            .data(AuthContext {
+                entity_id: common::admin_id(),
+                tenant_id: None,
+                session_id: None,
+                ..Default::default()
+            }),
+        )
+        .await;
+    assert!(!invalid_root.errors.is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM event_outbox
+            WHERE event = 'pki.authority.root_imported'
+              AND payload->'details'->>'transport' = 'graphql'
+              AND payload->>'outcome' = 'error'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("failure observation"),
+        1,
+        "failed authority mutations must publish one error observation"
+    );
 }
 
 #[tokio::test]
