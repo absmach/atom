@@ -22,7 +22,7 @@ use atom::{
 use chrono::{DateTime, Duration, Utc};
 use rcgen::{CertificateParams, KeyPair};
 use serde_json::{json, Value};
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -154,6 +154,46 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(
         marker_count(&pool, future.credential_id, "renewal").await,
         0
+    );
+
+    // A delayed or failed sweep still claims windows after the subject has
+    // crossed its expiry timestamp; those events must not disappear merely
+    // because the next successful retry is late.
+    let overdue = issue(&pool, &config, tenant_b, entity_b, "overdue").await;
+    set_expiry_and_renewal(
+        &pool,
+        overdue.credential_id,
+        now - Duration::minutes(1),
+        now - Duration::hours(2),
+    )
+    .await;
+    let overdue_authority_tenant =
+        common::pki::create_tenant(&pool, "pki-life-overdue-authority").await;
+    let overdue_authority = common::pki::provision_tenant_issuer(
+        &pool,
+        &config,
+        &root,
+        overdue_authority_tenant,
+    )
+    .await;
+    sqlx::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
+        .bind(overdue_authority.id)
+        .bind(now - Duration::minutes(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let overdue_sweep = lifecycle::sweep_once(&pool, config.pki_lifecycle, true, now)
+        .await
+        .unwrap();
+    assert_eq!(overdue_sweep.certificate_events, 2);
+    assert_eq!(overdue_sweep.authority_events, 1);
+    assert_eq!(
+        marker_count(&pool, overdue.credential_id, "expiry").await,
+        1
+    );
+    assert_eq!(
+        marker_count(&pool, overdue_authority.id, "authority_expiry").await,
+        1
     );
 
     // The marker and outbox insert are one transaction: a forced outbox error
@@ -358,21 +398,22 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(partial["items"][1]["outcome"], "failed");
     assert_eq!(partial["items"][1]["errorCode"], "internal");
     assert_eq!(partial["nextCursor"], ordered[0].to_string());
-    let failed_audit: (String, String) = sqlx::query_as(
+    let partial_snapshot = partial["snapshotAt"].as_str().unwrap().to_string();
+    let failed_observation: (String, String) = sqlx::query_as(
         r#"
-        SELECT outcome, details->>'error_code'
-        FROM audit_logs
-        WHERE event = 'certificate.bulk_revoke' AND target_id = $1
+        SELECT payload->>'outcome', payload->'details'->>'error_code'
+        FROM event_outbox
+        WHERE event = 'certificate.bulk_revoke' AND payload->>'target_id' = $1
         ORDER BY created_at DESC
         LIMIT 1
         "#,
     )
-    .bind(ordered[1])
+    .bind(ordered[1].to_string())
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(failed_audit.0, "error");
-    assert_eq!(failed_audit.1, "internal");
+    assert_eq!(failed_observation.0, "error");
+    assert_eq!(failed_observation.1, "internal");
     sqlx::query("UPDATE credentials SET metadata = $2 WHERE id = $1")
         .bind(ordered[1])
         .bind(original_metadata)
@@ -387,6 +428,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
             "tenantId": tenant_c,
             "reason": "key_compromise",
             "afterCredentialId": ordered[0],
+            "snapshotAt": partial_snapshot,
             "limit": 10
         }),
     )
@@ -395,6 +437,72 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(resumed["items"].as_array().unwrap().len(), 1);
     assert_eq!(resumed["items"][0]["credentialId"], ordered[1].to_string());
     assert_eq!(resumed["items"][0]["outcome"], "revoked");
+
+    // A bulk operation freezes its membership at page one. Certificates
+    // issued between pages are deliberately excluded even when their random
+    // UUID sorts after the cursor; a later operation then picks them up.
+    let tenant_d = common::pki::create_tenant(&pool, "pki-life-d").await;
+    common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_d).await;
+    let entity_d = common::pki::create_entity(&pool, tenant_d, "pki-life-d").await;
+    issue(&pool, &config, tenant_d, entity_d, "snapshot-one").await;
+    issue(&pool, &config, tenant_d, entity_d, "snapshot-two").await;
+    let snapshot_first = execute_bulk(
+        &schema,
+        common::admin_id(),
+        None,
+        json!({"tenantId": tenant_d, "reason": "superseded", "limit": 1}),
+    )
+    .await;
+    assert!(!snapshot_first["complete"].as_bool().unwrap());
+    let snapshot_cursor = Uuid::parse_str(snapshot_first["nextCursor"].as_str().unwrap()).unwrap();
+    let snapshot_at = snapshot_first["snapshotAt"].as_str().unwrap().to_string();
+    let mut issued_during_scan = None;
+    for index in 0..32 {
+        let issued = issue(
+            &pool,
+            &config,
+            tenant_d,
+            entity_d,
+            &format!("snapshot-late-{index}"),
+        )
+        .await;
+        if issued.credential_id > snapshot_cursor {
+            issued_during_scan = Some(issued);
+            break;
+        }
+    }
+    let issued_during_scan = issued_during_scan.expect("random UUID after first-page cursor");
+    let snapshot_resumed = execute_bulk(
+        &schema,
+        common::admin_id(),
+        None,
+        json!({
+            "tenantId": tenant_d,
+            "reason": "superseded",
+            "afterCredentialId": snapshot_cursor,
+            "snapshotAt": snapshot_at,
+            "limit": 100
+        }),
+    )
+    .await;
+    assert!(snapshot_resumed["complete"].as_bool().unwrap());
+    assert_eq!(
+        certificate_status(&pool, issued_during_scan.credential_id).await,
+        "active",
+        "the frozen operation must not absorb certificates issued between pages"
+    );
+    let catch_up = execute_bulk(
+        &schema,
+        common::admin_id(),
+        None,
+        json!({"tenantId": tenant_d, "reason": "superseded", "limit": 100}),
+    )
+    .await;
+    assert!(catch_up["complete"].as_bool().unwrap());
+    assert_eq!(
+        certificate_status(&pool, issued_during_scan.credential_id).await,
+        "revoked"
+    );
 
     // First enrollment is included in the unified lifecycle operation metric;
     // a deliberately invalid issuance and unknown revocation prove failures.
@@ -441,6 +549,36 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
         .await
         .unwrap();
     assert!(!crl.der.is_empty());
+
+    // `_in_tx` success is provisional. Rolling the caller-owned transaction
+    // back must not publish a successful issuance sample.
+    let before_rollback = lifecycle_metric_value(
+        &metrics::render(&pool),
+        "issuance",
+        "success",
+    );
+    let mut rollback_tx = pool.begin().await.unwrap();
+    service::issue_certificate_from_csr_v2_in_tx(
+        &mut rollback_tx,
+        &config,
+        Some(tenant_b),
+        service::IssueCertificateFromCsrV2 {
+            entity_id: entity_b,
+            ttl_secs: None,
+            csr_pem: csr(),
+            idempotency_key: "m40-rolled-back-issuance".into(),
+        },
+    )
+    .await
+    .unwrap();
+    rollback_tx.rollback().await.unwrap();
+    let after_rollback = lifecycle_metric_value(
+        &metrics::render(&pool),
+        "issuance",
+        "success",
+    );
+    assert_eq!(before_rollback, after_rollback);
+
     let rendered = metrics::render(&pool);
     for metric in [
         metrics::PKI_LIFECYCLE_OPERATIONS,
@@ -467,6 +605,29 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     ] {
         assert!(!rendered.contains(&secret_or_identifier));
     }
+    metrics::record_pki_fleet_snapshot(&[], &[]);
+    let absent_snapshot = metrics::render(&pool);
+    assert!(
+        absent_snapshot.lines().any(|line| {
+            line.starts_with(metrics::PKI_AUTHORITY_TIME_TO_EXPIRY)
+                && line.contains("kind=\"root\"")
+                && line.ends_with(" NaN")
+        }),
+        "an absent authority kind must be explicit rather than a false zero: {absent_snapshot}"
+    );
+}
+
+fn lifecycle_metric_value(rendered: &str, operation: &str, outcome: &str) -> f64 {
+    rendered
+        .lines()
+        .find(|line| {
+            line.starts_with(metrics::PKI_LIFECYCLE_OPERATIONS)
+                && line.contains(&format!("operation=\"{operation}\""))
+                && line.contains(&format!("outcome=\"{outcome}\""))
+        })
+        .and_then(|line| line.rsplit_once(' '))
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0.0)
 }
 
 async fn issue(
@@ -738,6 +899,7 @@ async fn execute_bulk(
                 r#"mutation Bulk($input: BulkRevokeCertificatesInput!) {
                     bulkRevokeCertificates(input: $input) {
                         complete
+                        snapshotAt
                         nextCursor
                         items { credentialId issuerId entityId tenantId outcome errorCode }
                     }

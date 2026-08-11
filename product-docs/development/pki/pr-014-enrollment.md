@@ -150,7 +150,11 @@ smuggled in here.
   credential, and that path must exist and be documented.
 - Renewal thresholds come from the profile, not a global constant.
 - The enrollment endpoint is a public network surface taking cryptographic input.
-  Malformed input must fail cheaply and must not allocate unboundedly.
+  Malformed input must fail cheaply and must not allocate unboundedly. TLS
+  handshakes and established connections have deadlines; shutdown tracks and
+  drains connection tasks for a bounded interval.
+- Durable rate-limit windows are removed with entity and tenant purge, so deleted
+  one-time subjects cannot leave unbounded counter rows.
 - The adapter boundary is verified by review, not by intent: a reviewer must be
   able to describe how a second adapter would attach without touching enrollment
   logic.
@@ -170,6 +174,8 @@ smuggled in here.
   the management API for the same entity.
 - Responses carry the renewal threshold from the certificate's profile.
 - Enrollment and re-enrollment are distinguishable in audit and events.
+- Native adapter denials and service failures use the same error-observation path
+  as other certificate transports, including a missing verified peer.
 - Rate limits are enforced and observable.
 - Enrollment logic sits behind an adapter boundary, with no protocol-specific
   behaviour below it and no enrollment behaviour above it.
@@ -182,7 +188,9 @@ header-injection rejection, self-scope violation, expired-certificate
 re-enrollment rejection plus documented recovery, cross-tenant attempts, global
 entity enrollment against the platform leaf issuer, malformed and oversized CSR
 input, rate-limit behaviour, profile application parity with the management API,
-renewal-threshold correctness, and independent verification of the issued chain.
+renewal-threshold correctness, bounded handshake/connection shutdown behaviour,
+purge cleanup for durable counters, error observation, and independent
+verification of the issued chain.
 
 ## AI execution prompt
 

@@ -116,6 +116,34 @@ fn parse_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>> {
         .map_err(|_| async_graphql::Error::new(format!("{field} must be an RFC3339 timestamp")))
 }
 
+async fn commit_with_lifecycle_audit(
+    pool: &sqlx::PgPool,
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    events_enabled: bool,
+    event: &audit::AuditEvent<'_>,
+) -> std::result::Result<(), AppError> {
+    let result = audit::commit_with_audit(pool, tx, events_enabled, event).await;
+    let operation = match event.event {
+        "certificate.issue" => Some("issuance"),
+        "certificate.renew" => Some("renewal"),
+        "certificate.revoke" | "certificate.revoke_entity" => Some("revocation"),
+        _ => None,
+    };
+    if let Some(operation) = operation {
+        service::record_lifecycle_commit(operation, &result);
+    }
+    result
+}
+
+async fn commit_lifecycle_replay(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    operation: &'static str,
+) -> std::result::Result<(), AppError> {
+    let result = tx.commit().await.map_err(AppError::Database);
+    service::record_lifecycle_commit(operation, &result);
+    result
+}
+
 #[derive(Default)]
 pub struct CertificateMutation;
 
@@ -145,7 +173,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -191,7 +219,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -240,7 +268,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -302,9 +330,9 @@ impl CertificateMutation {
             "replay": issued.idempotent_replay,
         });
         if issued.idempotent_replay {
-            tx.commit()
+            commit_lifecycle_replay(tx, "issuance")
                 .await
-                .map_err(|error| gql_error(db_err(error)))?;
+                .map_err(gql_error)?;
             audit::write(
                 &state.pool,
                 false,
@@ -320,7 +348,7 @@ impl CertificateMutation {
             )
             .await;
         } else {
-            audit::commit_with_audit(
+            commit_with_lifecycle_audit(
                 &state.pool,
                 tx,
                 state.config.events.enabled(),
@@ -364,7 +392,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -500,7 +528,7 @@ impl CertificateMutation {
         )
         .await
         .map_err(gql_error)?;
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -558,12 +586,18 @@ impl CertificateMutation {
             .after_credential_id
             .map(|id| parse_id(id, "afterCredentialId"))
             .transpose()?;
+        let snapshot_at = input
+            .snapshot_at
+            .as_deref()
+            .map(|value| parse_timestamp(value, "snapshotAt"))
+            .transpose()?;
         lifecycle::bulk_revoke(
             state,
             selector,
             auth.entity_id,
             input.reason,
             after,
+            snapshot_at,
             input.limit.unwrap_or(100),
         )
         .await
@@ -609,9 +643,9 @@ async fn revoke_certificate_exact(
         "idempotent_replay": revoked.idempotent_replay,
     });
     if revoked.idempotent_replay {
-        tx.commit()
+        commit_lifecycle_replay(tx, "revocation")
             .await
-            .map_err(|error| gql_error(db_err(error)))?;
+            .map_err(gql_error)?;
         audit::write(
             &state.pool,
             false,
@@ -627,7 +661,7 @@ async fn revoke_certificate_exact(
         )
         .await;
     } else {
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -699,9 +733,9 @@ async fn renew_certificate_v2(
         "managed": true,
     });
     if issued.idempotent_replay {
-        tx.commit()
+        commit_lifecycle_replay(tx, "renewal")
             .await
-            .map_err(|error| gql_error(db_err(error)))?;
+            .map_err(gql_error)?;
         audit::write(
             &state.pool,
             false,
@@ -717,7 +751,7 @@ async fn renew_certificate_v2(
         )
         .await;
     } else {
-        audit::commit_with_audit(
+        commit_with_lifecycle_audit(
             &state.pool,
             tx,
             state.config.events.enabled(),
@@ -813,6 +847,7 @@ pub struct BulkRevokeCertificatesInput {
     pub principal_group_id: Option<ID>,
     pub reason: Option<String>,
     pub after_credential_id: Option<ID>,
+    pub snapshot_at: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -829,6 +864,7 @@ pub struct BulkRevokeCertificateItem {
 #[derive(async_graphql::SimpleObject)]
 pub struct BulkRevokeCertificatesPayload {
     pub items: Vec<BulkRevokeCertificateItem>,
+    pub snapshot_at: String,
     pub next_cursor: Option<ID>,
     pub complete: bool,
 }
@@ -836,6 +872,7 @@ pub struct BulkRevokeCertificatesPayload {
 impl From<lifecycle::BulkRevocationBatch> for BulkRevokeCertificatesPayload {
     fn from(value: lifecycle::BulkRevocationBatch) -> Self {
         Self {
+            snapshot_at: value.snapshot_at.to_rfc3339(),
             items: value
                 .items
                 .into_iter()
