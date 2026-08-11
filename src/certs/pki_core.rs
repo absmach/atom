@@ -1033,13 +1033,40 @@ fn validate_chain(issuer_der: &[u8], chain_pem: &str) -> Result<(), AppError> {
             "issuer chain must begin with the issuing certificate",
         ));
     }
-    for pair in chain.windows(2) {
-        let (_, child) = x509_parser::parse_x509_certificate(&pair[0])
-            .map_err(|_| AppError::bad_request("invalid issuer chain certificate"))?;
-        let (_, parent) = x509_parser::parse_x509_certificate(&pair[1])
-            .map_err(|_| AppError::bad_request("invalid issuer chain certificate"))?;
-        validate_issuer_certificate(&child)?;
-        validate_issuer_certificate(&parent)?;
+    let parsed_chain = chain
+        .iter()
+        .map(|certificate| {
+            x509_parser::parse_x509_certificate(certificate)
+                .map(|(_, certificate)| certificate)
+                .map_err(|_| AppError::bad_request("invalid issuer chain certificate"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (index, certificate) in parsed_chain.iter().enumerate() {
+        validate_issuer_certificate(certificate)?;
+        let constraints = certificate
+            .tbs_certificate
+            .basic_constraints()
+            .map_err(|_| AppError::bad_request("invalid issuer basic constraints"))?
+            .ok_or_else(|| AppError::bad_request("issuer is missing basic constraints"))?;
+        let subordinate_ca_count = parsed_chain[..index]
+            .iter()
+            .filter(|subordinate| subordinate.issuer() != subordinate.subject())
+            .count();
+        if constraints
+            .value
+            .path_len_constraint
+            .is_some_and(|limit| subordinate_ca_count > limit as usize)
+        {
+            return Err(AppError::bad_request(
+                "issuer chain exceeds a parent path-length constraint",
+            ));
+        }
+    }
+
+    for pair in parsed_chain.windows(2) {
+        let child = &pair[0];
+        let parent = &pair[1];
         if child.issuer() != parent.subject() {
             return Err(AppError::bad_request("issuer chain names do not link"));
         }
@@ -1054,18 +1081,15 @@ fn validate_chain(issuer_der: &[u8], chain_pem: &str) -> Result<(), AppError> {
             ));
         }
     }
-    let (_, root) = x509_parser::parse_x509_certificate(
-        chain
-            .last()
-            .ok_or_else(|| AppError::bad_request("issuer chain is empty"))?,
-    )
-    .map_err(|_| AppError::bad_request("invalid issuer root certificate"))?;
+    let root = parsed_chain
+        .last()
+        .ok_or_else(|| AppError::bad_request("issuer chain is empty"))?;
     if root.issuer() != root.subject() {
         return Err(AppError::bad_request(
             "issuer chain is not anchored by a root",
         ));
     }
-    validate_issuer_certificate(&root)?;
+    validate_issuer_certificate(root)?;
     root.verify_signature(None)
         .map_err(|_| AppError::bad_request("issuer chain root is not self-signed"))?;
     Ok(())
@@ -1235,6 +1259,42 @@ mod tests {
         let mut requested = CertificateParams::default();
         requested.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         assert!(validate_requested_extensions(&profile, &requested).is_err());
+    }
+
+    #[test]
+    fn issuer_chain_rejects_parent_path_len_violation() {
+        let root_key = KeyPair::generate().unwrap();
+        let mut root_params = CertificateParams::default();
+        root_params
+            .distinguished_name
+            .push(DnType::CommonName, "Constrained Test Root");
+        root_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let root = root_params.self_signed(&root_key).unwrap();
+
+        let issuer_key = KeyPair::generate().unwrap();
+        let mut issuer_params = CertificateParams::default();
+        issuer_params
+            .distinguished_name
+            .push(DnType::CommonName, "Subordinate Test Issuer");
+        issuer_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        issuer_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let issuer = issuer_params
+            .signed_by(&issuer_key, &Issuer::from_params(&root_params, &root_key))
+            .unwrap();
+        let issuer_pem = issuer.pem();
+        let chain_pem = format!("{issuer_pem}{}", root.pem());
+
+        let error = PkiIssuer::from_pem(
+            &issuer_pem,
+            &issuer_key.serialize_pem(),
+            &chain_pem,
+            "https://pki.example.test/ocsp",
+            "https://pki.example.test/ca.der",
+            "https://pki.example.test/crl.der",
+        )
+        .expect_err("a pathLen=0 root cannot have a subordinate CA");
+        assert!(error.to_string().contains("path-length constraint"));
     }
 
     #[test]
