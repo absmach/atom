@@ -66,6 +66,7 @@ struct ParsedAuthorityCertificate {
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
     path_len_constraint: Option<u32>,
+    digital_signature: bool,
 }
 
 struct ProviderSigningKey<'a> {
@@ -760,6 +761,11 @@ fn validate_ca_shape(
     if certificate.not_after <= now {
         return Err(AppError::bad_request("authority certificate is expired"));
     }
+    if kind.can_issue_leaf_credentials() && !certificate.digital_signature {
+        return Err(AppError::bad_request(
+            "leaf-issuing authority key usage must include digitalSignature",
+        ));
+    }
     match kind {
         AuthorityKind::TenantIntermediate | AuthorityKind::PlatformLeafIssuer
             if certificate.path_len_constraint != Some(0) =>
@@ -886,6 +892,7 @@ fn parse_authority_certificate(
         not_before,
         not_after,
         path_len_constraint: basic.value.path_len_constraint,
+        digital_signature: usage.value.digital_signature(),
     })
 }
 
@@ -924,6 +931,9 @@ fn ca_certificate_params(
     };
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(path_len));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    if kind.can_issue_leaf_credentials() {
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    }
     params.key_identifier_method = KeyIdMethod::Sha256;
     Ok(params)
 }
@@ -1043,7 +1053,11 @@ mod tests {
             .distinguished_name
             .push(DnType::CommonName, common_name);
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(path_len));
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
         params.key_identifier_method = KeyIdMethod::Sha256;
         params.not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
         params.not_after = OffsetDateTime::now_utc() + Duration::days(30);
