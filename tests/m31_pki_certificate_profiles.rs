@@ -53,6 +53,22 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     assert_eq!(client.extended_key_usages().len(), 1);
     assert_eq!(server.extended_key_usages().len(), 1);
 
+    let empty_key_usages =
+        sqlx::query("UPDATE certificate_profiles SET key_usages = '{}'::text[] WHERE id = $1")
+            .bind(client.id())
+            .execute(&pool)
+            .await
+            .map(|_| ());
+    assert_check_violation(empty_key_usages);
+    let empty_extended_key_usages = sqlx::query(
+        "UPDATE certificate_profiles SET extended_key_usages = '{}'::text[] WHERE id = $1",
+    )
+    .bind(client.id())
+    .execute(&pool)
+    .await
+    .map(|_| ());
+    assert_check_violation(empty_extended_key_usages);
+
     let combined_id = insert_platform_profile(
         &pool,
         "combined",

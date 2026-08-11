@@ -74,6 +74,14 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
     let leaf_b = issue_managed(&pool, &config, tenant_b, entity_b, "leaf-b").await;
     let issuer_a_pem = issuer_a.certificate_pem.as_deref().unwrap();
     let issuer_b_pem = issuer_b.certificate_pem.as_deref().unwrap();
+    let issuer_a_der = parse_x509_pem(issuer_a_pem.as_bytes()).unwrap().1.contents;
+    let (_, parsed_issuer_a) = x509_parser::parse_x509_certificate(&issuer_a_der).unwrap();
+    assert!(parsed_issuer_a
+        .key_usage()
+        .unwrap()
+        .unwrap()
+        .value
+        .digital_signature());
 
     // Both RFC-required SHA-1 CertIDs and reviewed SHA-256 CertIDs resolve to
     // good. The managed issuer currently supports ECDSA P-256, and the
@@ -323,6 +331,19 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
             .await
             .unwrap();
     assert_status(&duplicate_b_after_revoke, CertStatus::good());
+
+    // A physical credential purge must not turn a revoked issuer/serial into
+    // unknown while the certificate is still valid.
+    sqlx::query("DELETE FROM credentials WHERE id = $1")
+        .bind(leaf_a.credential_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let revoked_after_purge =
+        service::issuer_ocsp_response(&pool, &config, issuer_a.id, &request_a_sha1)
+            .await
+            .unwrap();
+    assert_status(&revoked_after_purge, CertStatus::revoked(revoked));
 
     // Rotation retains responder availability while the old authority is
     // retiring and after it is retired. No delegated responder is used: the

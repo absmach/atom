@@ -197,8 +197,12 @@ mod backend {
             "platform_leaf_issuer",
             "tenant_intermediate",
         ];
+        // Prometheus recorders cannot unregister one labeled gauge through
+        // the facade. NaN explicitly represents an absent authority kind and
+        // prevents a missing fleet from looking like a real zero-second CA,
+        // which would otherwise trigger false expiry alerts.
         for kind in AUTHORITY_KINDS {
-            metrics::gauge!(PKI_AUTHORITY_TIME_TO_EXPIRY, "kind" => kind).set(0.0);
+            metrics::gauge!(PKI_AUTHORITY_TIME_TO_EXPIRY, "kind" => kind).set(f64::NAN);
         }
         for row in authority_rows {
             let Some(kind) = AUTHORITY_KINDS

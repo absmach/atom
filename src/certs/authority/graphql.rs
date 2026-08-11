@@ -61,7 +61,7 @@ impl AuthorityMutation {
         let result = async {
             require_mutation_access(state, &auth, Scope::Platform).await?;
             let mut tx = state.pool.begin().await.map_err(db_err)?;
-            let outcome =
+            let mut outcome =
                 provisioning::import_root_mutation_in_tx(&mut tx, &certificate_pem).await?;
             commit_authority_mutation(
                 state,
@@ -75,6 +75,7 @@ impl AuthorityMutation {
                 serde_json::json!({"version": outcome.value.version}),
             )
             .await?;
+            outcome.commit_generated_key();
             Ok(outcome.value.into())
         }
         .await;
@@ -101,7 +102,7 @@ impl AuthorityMutation {
         let result = async {
             require_mutation_access(state, &auth, Scope::Tenant(tenant_id)).await?;
             let mut tx = state.pool.begin().await.map_err(db_err)?;
-            let outcome = provisioning::begin_tenant_authority_mutation_in_tx(
+            let mut outcome = provisioning::begin_tenant_authority_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
                 tenant_id,
@@ -119,6 +120,7 @@ impl AuthorityMutation {
                 lifecycle_details(&outcome.value),
             )
             .await?;
+            outcome.commit_generated_key();
             Ok(outcome.value.into())
         }
         .await;
@@ -143,7 +145,7 @@ impl AuthorityMutation {
         let result = async {
             require_mutation_access(state, &auth, Scope::Platform).await?;
             let mut tx = state.pool.begin().await.map_err(db_err)?;
-            let outcome = provisioning::begin_platform_leaf_issuer_mutation_in_tx(
+            let mut outcome = provisioning::begin_platform_leaf_issuer_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
             )
@@ -160,6 +162,7 @@ impl AuthorityMutation {
                 lifecycle_details(&outcome.value),
             )
             .await?;
+            outcome.commit_generated_key();
             Ok(outcome.value.into())
         }
         .await;
@@ -184,7 +187,7 @@ impl AuthorityMutation {
         let result = async {
             require_mutation_access(state, &auth, Scope::Platform).await?;
             let mut tx = state.pool.begin().await.map_err(db_err)?;
-            let outcome = provisioning::begin_platform_intermediate_mutation_in_tx(
+            let mut outcome = provisioning::begin_platform_intermediate_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
             )
@@ -201,6 +204,7 @@ impl AuthorityMutation {
                 lifecycle_details(&outcome.value),
             )
             .await?;
+            outcome.commit_generated_key();
             Ok(outcome.value.into())
         }
         .await;
@@ -231,14 +235,14 @@ impl AuthorityMutation {
             observed_tenant_id = existing.tenant_id;
             require_mutation_access(state, &auth, authority_scope(&existing)).await?;
             let mut tx = state.pool.begin().await.map_err(db_err)?;
-            let mutation = provisioning::import_signed_authority_mutation_in_tx(
+            let mut mutation = provisioning::import_signed_authority_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
                 authority_id,
                 &certificate_pem,
             )
             .await?;
-            let outcome = mutation.value;
+            let outcome = &mutation.value;
             let audit_outcome = if outcome.succeeded() {
                 AuditOutcome::Allow
             } else {
@@ -248,7 +252,7 @@ impl AuthorityMutation {
                 "kind": authority_kind(&outcome.authority),
                 "version": outcome.authority.version,
                 "status": authority_status(&outcome.authority),
-                "replaced_authorities": outcome.replaced_authorities,
+                "replaced_authorities": outcome.replaced_authorities.clone(),
                 "validation_succeeded": outcome.succeeded()
             });
             commit_authority_mutation(
@@ -263,7 +267,8 @@ impl AuthorityMutation {
                 details,
             )
             .await?;
-            Ok(outcome.into())
+            mutation.commit_generated_key();
+            Ok(mutation.value.into())
         }
         .await;
         observe_authority_result(
@@ -303,13 +308,13 @@ impl AuthorityMutation {
             )
             .await?;
             let mut tx = state.pool.begin().await.map_err(db_err)?;
-            let mutation = provisioning::provision_tenant_automatically_mutation_in_tx(
+            let mut mutation = provisioning::provision_tenant_automatically_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
                 tenant_id,
             )
             .await?;
-            let outcome = mutation.value;
+            let outcome = &mutation.value;
             commit_authority_mutation(
                 state,
                 tx,
@@ -322,11 +327,12 @@ impl AuthorityMutation {
                 serde_json::json!({
                     "kind": authority_kind(&outcome.authority),
                     "version": outcome.authority.version,
-                    "replaced_authorities": outcome.replaced_authorities
+                    "replaced_authorities": outcome.replaced_authorities.clone()
                 }),
             )
             .await?;
-            Ok(outcome.into())
+            mutation.commit_generated_key();
+            Ok(mutation.value.into())
         }
         .await;
         observe_authority_result(
@@ -384,7 +390,7 @@ impl AuthorityMutation {
             observed_tenant_id = existing.tenant_id;
             require_mutation_access(state, &auth, authority_scope(&existing)).await?;
             let mut tx = state.pool.begin().await.map_err(db_err)?;
-            let outcome = if complete {
+            let mut outcome = if complete {
                 provisioning::complete_retirement_mutation_in_tx(&mut tx, authority_id).await?
             } else {
                 provisioning::begin_retirement_mutation_in_tx(
@@ -406,6 +412,7 @@ impl AuthorityMutation {
                 lifecycle_details(&outcome.value),
             )
             .await?;
+            outcome.commit_generated_key();
             Ok(outcome.value.into())
         }
         .await;

@@ -8,7 +8,7 @@ use axum::{
 use serde::Deserialize;
 use tower_http::trace::TraceLayer;
 
-use crate::{auth::AuthContext, error::AppError, state::AppState};
+use crate::{audit, auth::AuthContext, error::AppError, state::AppState};
 
 use super::{
     est,
@@ -62,9 +62,24 @@ async fn first_enrollment(
     auth: AuthContext,
     Json(request): Json<NativeEnrollmentRequest>,
 ) -> Result<Json<EnrollmentResponse>, AppError> {
-    service::enroll(&state, auth, request.into())
-        .await
-        .map(Json)
+    let result = service::enroll(&state, auth.clone(), request.into()).await;
+    if let Err(ref error) = result {
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &audit::AuditMeta {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: auth.tenant_id,
+                target_kind: "credential",
+                target_id: None,
+                event: "certificate.enroll",
+            },
+            &serde_json::json!({"mode": "first", "transport": "native"}),
+            error,
+        )
+        .await;
+    }
+    result.map(Json)
 }
 
 async fn re_enrollment(
@@ -72,10 +87,43 @@ async fn re_enrollment(
     peer: Option<Extension<VerifiedPeerCertificate>>,
     Json(request): Json<NativeEnrollmentRequest>,
 ) -> Result<Json<EnrollmentResponse>, AppError> {
-    let peer = peer
-        .map(|Extension(peer)| peer)
-        .ok_or_else(|| AppError::unauthorized("a verified client certificate is required"))?;
-    service::re_enroll(&state, peer, request.into())
-        .await
-        .map(Json)
+    let peer = match peer.map(|Extension(peer)| peer) {
+        Some(peer) => peer,
+        None => {
+            let error = AppError::unauthorized("a verified client certificate is required");
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: None,
+                    tenant_id: None,
+                    target_kind: "credential",
+                    target_id: None,
+                    event: "certificate.reenroll",
+                },
+                &serde_json::json!({"mode": "reenroll", "transport": "native"}),
+                &error,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let result = service::re_enroll(&state, peer, request.into()).await;
+    if let Err(ref error) = result {
+        audit::observe_error(
+            &state.pool,
+            state.config.events.enabled(),
+            &audit::AuditMeta {
+                actor_entity_id: None,
+                tenant_id: None,
+                target_kind: "credential",
+                target_id: None,
+                event: "certificate.reenroll",
+            },
+            &serde_json::json!({"mode": "reenroll", "transport": "native"}),
+            error,
+        )
+        .await;
+    }
+    result.map(Json)
 }

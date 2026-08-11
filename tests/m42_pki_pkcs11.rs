@@ -11,7 +11,8 @@ use atom::{
             key_provider::{
                 validate_startup, AuthorityKeyAlgorithm, AuthorityKeyContext, AuthorityKeyProvider,
                 AuthorityKeyProviderError, AuthorityKeyProviderStatus,
-                EncryptedDatabaseKeyProvider, ManagedAuthorityKeyProvider, Pkcs11KeyProvider,
+                EncryptedDatabaseKeyProvider, ManagedAuthorityKeyProvider, Pkcs11AuthorityKey,
+                Pkcs11KeyProvider,
             },
             provisioning, repo as authority_repo, AuthorityKeyBackend,
         },
@@ -258,16 +259,41 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         "provider outage cannot corrupt authority lifecycle state"
     );
 
+    // The key is generated before the caller-owned SQL transaction commits.
+    // Rolling that outer transaction back must also remove the token objects;
+    // otherwise retries would accumulate usable keys with no authority row.
+    let mut tx = pool.begin().await.expect("rollback transaction");
+    let rolled_back =
+        provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &app_config.pki_ca_keys)
+            .await
+            .expect("generate rollback candidate");
+    let rolled_back_context = AuthorityKeyContext {
+        authority_id: rolled_back.id,
+        tenant_id: rolled_back.tenant_id,
+        version: rolled_back.version,
+    };
+    let rolled_back_key =
+        Pkcs11AuthorityKey::from_authority(&rolled_back.value).expect("rollback key reference");
+    tx.rollback().await.expect("rollback generated authority");
+    drop(rolled_back);
+    assert_eq!(
+        provider
+            .public_key(rolled_back_context, &rolled_back_key)
+            .expect_err("rolled-back token key must be destroyed"),
+        AuthorityKeyProviderError::KeyNotFound
+    );
+
     let rotated_tenant = common::pki::create_tenant(&pool, "encrypted-rotation").await;
     let mut rotated_keys = app_config.pki_ca_keys.clone();
     rotated_keys.provisioning_backend = PkiCaProvisioningBackend::EncryptedDatabase;
     let mut tx = pool.begin().await.expect("rotation transaction");
-    let rotated =
+    let mut rotated =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &rotated_keys, rotated_tenant)
             .await
             .expect("cross-provider rotation");
     assert!(rotated.succeeded(), "{:?}", rotated.validation_error);
     tx.commit().await.expect("commit rotated authority");
+    rotated.commit_generated_key();
     assert_eq!(
         rotated.authority.key_backend,
         AuthorityKeyBackend::EncryptedDatabase

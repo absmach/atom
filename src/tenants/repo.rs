@@ -736,6 +736,21 @@ pub(crate) async fn purge_tenant_pki_in_tx(
         return Ok(());
     }
 
+    // Rate-limit rows are deliberately independent of subject FKs. Remove
+    // both tenant and child-entity scopes while those entities are still
+    // available to identify, before the tenant cascade runs.
+    sqlx::query(
+        r#"DELETE FROM pki_enrollment_rate_windows
+           WHERE (scope_kind = 'tenant' AND scope_id = ANY($1))
+              OR (scope_kind = 'entity' AND scope_id IN (
+                    SELECT id FROM entities WHERE tenant_id = ANY($1)
+                 ))"#,
+    )
+    .bind(tenant_ids)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
     // Credentials restrict authority deletion, and authorities belong to the
     // tenant being purged. Remove them in dependency order before the tenant.
     sqlx::query(

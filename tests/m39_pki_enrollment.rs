@@ -282,6 +282,20 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     .await
     .unwrap();
     assert_eq!(injected.status, 401, "{}", injected.body);
+    let native_denial: (String, String) = sqlx::query_as(
+        r#"SELECT payload->>'outcome', payload->'details'->>'transport'
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->>'outcome' = 'deny'
+             AND payload->'details'->>'transport' = 'native'
+           ORDER BY created_at DESC
+           LIMIT 1"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(native_denial.0, "deny");
+    assert_eq!(native_denial.1, "native");
 
     // A certificate asserted in the TLS handshake but signed outside Atom's
     // trust bundle is rejected during the in-process handshake.

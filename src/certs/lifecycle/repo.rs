@@ -97,7 +97,6 @@ pub async fn due_certificate_windows(
             WHERE c.kind = 'certificate'
               AND c.status = 'active'
               AND c.expires_at IS NOT NULL
-              AND c.expires_at > $1
         ), due AS (
             SELECT credential_id, issuer_id, entity_id, tenant_id, expires_at,
                    'renewal'::text AS window_kind, renewal_at AS window_at
@@ -155,7 +154,6 @@ pub async fn due_authority_windows(
                a.not_after - ($2 * interval '1 second') AS window_at
         FROM pki_authorities a
         WHERE a.status IN ('active', 'retiring')
-          AND a.not_after > $1
           AND a.not_after - ($2 * interval '1 second') <= $1
           AND NOT EXISTS (
               SELECT 1 FROM pki_lifecycle_notifications n
@@ -276,10 +274,21 @@ pub async fn selector_tenant_id(
     }
 }
 
+/// Database-clock cutoff used to freeze the membership of a paginated bulk
+/// operation. Credential creation also uses the database clock, avoiding
+/// process/DB clock skew at the page boundary.
+pub async fn bulk_snapshot_at(pool: &PgPool) -> Result<DateTime<Utc>, AppError> {
+    sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Database)
+}
+
 pub async fn bulk_candidates(
     pool: &PgPool,
     selector: BulkRevocationSelector,
     after: Option<Uuid>,
+    snapshot_at: &DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<BulkCandidate>, AppError> {
     match selector {
@@ -308,15 +317,17 @@ pub async fn bulk_candidates(
                 CROSS JOIN root_group root
                 WHERE c.kind = 'certificate'
                   AND c.status = 'active'
+                  AND c.created_at <= $3
                   AND e.tenant_id IS NOT DISTINCT FROM root.tenant_id
                   AND ($2::uuid IS NULL OR c.id > $2)
                 GROUP BY c.id, c.issuer_id, c.entity_id, e.tenant_id
                 ORDER BY c.id ASC
-                LIMIT $3
+                LIMIT $4
                 "#,
         )
         .bind(group_id)
         .bind(after)
+        .bind(snapshot_at)
         .bind(limit)
         .fetch_all(pool)
         .await
@@ -331,6 +342,8 @@ pub async fn bulk_candidates(
                   AND c.status = 'active'
                 "#,
             );
+            query.push(" AND c.created_at <= ");
+            query.push_bind(snapshot_at);
             match selector {
                 BulkRevocationSelector::Tenant(tenant_id) => {
                     query.push(" AND e.tenant_id = ");

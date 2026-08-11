@@ -361,12 +361,23 @@ async fn commit_with_mode_audit(
         outcome: AuditOutcome::Allow,
         details,
     };
+    let operation = if event == "certificate.reenroll" {
+        "renewal"
+    } else {
+        "issuance"
+    };
     if replay {
-        tx.commit().await.map_err(AppError::Database)?;
+        let commit = tx.commit().await.map_err(AppError::Database);
+        certificates::record_lifecycle_commit(operation, &commit);
+        commit?;
         audit::write(&state.pool, false, audit_event).await;
         Ok(())
     } else {
-        audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &audit_event).await
+        let commit =
+            audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &audit_event)
+                .await;
+        certificates::record_lifecycle_commit(operation, &commit);
+        commit
     }
 }
 
