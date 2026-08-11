@@ -132,6 +132,11 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
         "no active issuing authority"
     ));
     assert_eq!(certificate_count(&pool, entity_without_issuer).await, 0);
+    assert_eq!(
+        error_event_count(&pool, "certificate.issue", entity_without_issuer).await,
+        1,
+        "failed generated issuance must publish one error observation"
+    );
 
     let issued = schema
         .execute(issue_request(
@@ -342,6 +347,21 @@ async fn certificate_count(pool: &PgPool, entity_id: Uuid) -> i64 {
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'certificate'",
     )
     .bind(entity_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn error_event_count(pool: &PgPool, event: &str, target_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM event_outbox
+           WHERE event = $1
+             AND (payload->>'target_id')::uuid = $2
+             AND payload->>'outcome' = 'error'
+             AND payload->'details'->>'transport' = 'graphql'"#,
+    )
+    .bind(event)
+    .bind(target_id)
     .fetch_one(pool)
     .await
     .unwrap()
