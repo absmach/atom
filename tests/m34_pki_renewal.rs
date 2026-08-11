@@ -257,6 +257,11 @@ async fn issuer_aware_renewal_enforces_the_pr007_contract() {
         ))
         .await;
     assert!(errors_contain(&revoked_operator.errors, "revoked"));
+    assert_eq!(
+        error_event_count(&pool, "certificate.renew", old_revoked.credential_id).await,
+        1,
+        "failed renewal must publish one error observation"
+    );
 
     // The certificate-authenticated service seam accepts an exact, valid
     // certificate in its profile window and rejects credential substitution.
@@ -628,6 +633,21 @@ async fn audit_details(pool: &PgPool, event: &str, old_id: Uuid) -> Value {
     )
     .bind(event)
     .bind(old_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn error_event_count(pool: &PgPool, event: &str, target_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM event_outbox
+           WHERE event = $1
+             AND (payload->>'target_id')::uuid = $2
+             AND payload->>'outcome' = 'error'
+             AND payload->'details'->>'transport' = 'graphql'"#,
+    )
+    .bind(event)
+    .bind(target_id)
     .fetch_one(pool)
     .await
     .unwrap()
