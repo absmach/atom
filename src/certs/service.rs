@@ -1596,15 +1596,17 @@ pub async fn generate_crl(
     }
 
     let generation_started = Instant::now();
-    let revoked = repo::revoked_certificates(pool, &loaded.issuer_fingerprint_sha256).await?;
-    let revoked_certs = revoked
+    let revoked_certs = repo::revocations_by_fingerprint_tx(
+        &mut tx,
+        &loaded.issuer_fingerprint_sha256,
+    )
+    .await?
         .into_iter()
-        .map(|cert| {
-            let metadata = metadata_from_value(&cert.metadata)?;
+        .map(|entry| {
             Ok(RevokedCertParams {
-                serial_number: SerialNumber::from(serial_bytes(&cert.identifier)?),
-                revocation_time: to_offset(metadata.revoked_at.unwrap_or_else(Utc::now))?,
-                reason_code: Some(RevocationReason::Unspecified),
+                serial_number: SerialNumber::from(serial_bytes(&entry.serial_number)?),
+                revocation_time: to_offset(entry.revoked_at)?,
+                reason_code: Some(crl_revocation_reason(&entry.reason)),
                 invalidity_date: None,
             })
         })
@@ -2836,6 +2838,14 @@ async fn managed_ocsp_status(
     issuer_id: Uuid,
     serial_number: &str,
 ) -> Result<CertStatus, AppError> {
+    if let Some(revocation) =
+        repo::certificate_revocation_by_issuer_serial(pool, issuer_id, serial_number).await?
+    {
+        return Ok(CertStatus::revoked(RevokedInfo {
+            revocation_time: ocsp_time(revocation.revoked_at)?,
+            revocation_reason: Some(ocsp_revocation_reason(&revocation.reason)),
+        }));
+    }
     let certificate = match repo::certificate_by_issuer_serial(pool, issuer_id, serial_number).await
     {
         Ok(certificate) => certificate,
@@ -2844,25 +2854,9 @@ async fn managed_ocsp_status(
     };
     match certificate.status.as_str() {
         "active" => Ok(CertStatus::good()),
-        "revoked" => {
-            let revocation = repo::certificate_revocation_by_id(pool, certificate.id)
-                .await
-                .map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!(
-                        "revoked certificate has no immutable revocation record: {error}"
-                    ))
-                })?;
-            if revocation.issuer_id != Some(issuer_id) || revocation.serial_number != serial_number
-            {
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "certificate revocation record does not match its issuer identity"
-                )));
-            }
-            Ok(CertStatus::revoked(RevokedInfo {
-                revocation_time: ocsp_time(revocation.revoked_at)?,
-                revocation_reason: Some(ocsp_revocation_reason(&revocation.reason)),
-            }))
-        }
+        "revoked" => Err(AppError::Internal(anyhow::anyhow!(
+            "revoked certificate has no immutable revocation record"
+        ))),
         _ => Ok(CertStatus::unknown()),
     }
 }
