@@ -104,6 +104,23 @@ async fn make_device(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) {
 
 /// A resource with an alias, standing in for an MQTT channel.
 async fn make_channel(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) {
+    // `publish` / `subscribe` applicability on `resource:channel` is
+    // product-specific and migration 007 strips the rows seeded by
+    // migration 001 — so the authz engine's capability lookup returns empty
+    // for `publish` / `subscribe` on a channel and every grant test in this
+    // file trips the "unknown action" deny path. Seeded inline (idempotent
+    // via ON CONFLICT) so the file stays product-agnostic without another
+    // shared fixture.
+    sqlx::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           SELECT id, 'resource', 'resource:channel'
+             FROM actions WHERE name IN ('publish', 'subscribe')
+           ON CONFLICT DO NOTHING"#,
+    )
+    .execute(pool)
+    .await
+    .expect("seed publish/subscribe applicability on resource:channel");
+
     let alias = slug("chan");
     let resource = authz_repo::create_resource(
         pool,
