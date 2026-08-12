@@ -1462,6 +1462,8 @@ fn pki_lifecycle_from_env() -> Result<PkiLifecycleConfig> {
         anyhow::bail!("ATOM_PKI_AUTHORITY_WARNING_SECS must be greater than zero");
     }
     Ok(cfg)
+}
+
 fn broker_auth_from_env() -> Result<BrokerAuthConfig> {
     let defaults = BrokerAuthConfig::default();
     let enabled = env_bool_default("ATOM_BROKER_AUTH_ENABLED", defaults.enabled);
