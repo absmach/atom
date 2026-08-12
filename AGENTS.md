@@ -330,7 +330,7 @@ middlewares.
   Env overrides per endpoint id: `ATOM_CALLOUT_<UPPER_ID>_URL`, `_ADDRESS`,
   `_TIMEOUT_MS`. See `callouts.example.yaml`.
 - **Two transports, one wire shape.** HTTP (POST/GET, TLS + mTLS via reqwest)
-  and gRPC (tonic client of `atom.v1.callout.Callout/Check` — see
+  and gRPC (tonic client of `atom.v1.CalloutService/Check` — see
   `proto/atom/v1/callout.proto`). Both send the same canonical envelope
   (operation, surface, request_id, time, actor, args, extra); GET flattens
   it to a query string for magistrala v0.14 parity.

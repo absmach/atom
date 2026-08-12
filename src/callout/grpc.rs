@@ -13,20 +13,23 @@ use super::config::{EndpointConfig, GrpcTransportConfig, TlsConfig, TransportCon
 use super::envelope::{CalloutRequest, CalloutResponse, Decision};
 
 // Generated code from proto/atom/v1/callout.proto — client only.
-// The include! path is picked by tonic-build (package = atom.v1.callout).
+// The include! path is picked by tonic-build (package = atom.v1). callout.proto
+// shares the atom.v1 package with atom.proto, so both generate into the same
+// module; we re-include here so this file has a local `proto` for the callout
+// types without depending on src/grpc.rs's module layout.
 pub mod proto {
-    tonic::include_proto!("atom.v1.callout");
+    tonic::include_proto!("atom.v1");
 }
 
-use proto::callout_client::CalloutClient;
+use proto::callout_service_client::CalloutServiceClient;
 use proto::{
-    callout_response::Decision as ProtoDecision, Actor as ProtoActor,
-    CalloutRequest as ProtoRequest,
+    callout_service_check_response::Decision as ProtoDecision, Actor as ProtoActor,
+    CalloutServiceCheckRequest as ProtoRequest,
 };
 
 /// A built gRPC callout client for one endpoint.
 pub struct GrpcCallout {
-    client: CalloutClient<Channel>,
+    client: CalloutServiceClient<Channel>,
     pub timeout: Duration,
     endpoint_id: String,
 }
@@ -41,7 +44,7 @@ impl GrpcCallout {
         };
         let channel = build_channel(&grpc, cfg.tls.as_ref(), cfg.timeout_ms).await?;
         Ok(Self {
-            client: CalloutClient::new(channel),
+            client: CalloutServiceClient::new(channel),
             timeout: Duration::from_millis(cfg.timeout_ms),
             endpoint_id: cfg.id.as_str().to_string(),
         })
@@ -174,11 +177,13 @@ fn value_to_prost(v: &serde_json::Value) -> prost_types::Value {
     prost_types::Value { kind: Some(kind) }
 }
 
-fn proto_to_response(resp: proto::CalloutResponse) -> CalloutResponse {
+fn proto_to_response(resp: proto::CalloutServiceCheckResponse) -> CalloutResponse {
     let decision = match ProtoDecision::try_from(resp.decision) {
         Ok(ProtoDecision::Allow) => Decision::Allow,
-        Ok(ProtoDecision::Deny) => Decision::Deny,
-        // Zero-value / unknown → deny (fail-closed on decode ambiguity).
+        // Zero-value (Unspecified) / explicit Deny / unknown → deny
+        // (fail-closed on decode ambiguity; the enum's zero value is defined
+        // to mean unset, and unset must not accidentally allow).
+        Ok(ProtoDecision::Unspecified) | Ok(ProtoDecision::Deny) => Decision::Deny,
         Err(_) => Decision::Deny,
     };
     let reason = if matches!(decision, Decision::Deny) && resp.reason.trim().is_empty() {
@@ -226,7 +231,7 @@ mod tests {
 
     #[test]
     fn unknown_decision_is_deny() {
-        let resp = proto::CalloutResponse {
+        let resp = proto::CalloutServiceCheckResponse {
             decision: 99,
             reason: String::new(),
         };

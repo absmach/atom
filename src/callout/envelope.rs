@@ -62,7 +62,7 @@ impl Actor {
 }
 
 /// Canonical callout envelope — the shape sent to HTTP as JSON and translated
-/// to `atom.v1.CalloutRequest` for gRPC.
+/// to `atom.v1.CalloutServiceCheckRequest` for gRPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalloutRequest {
     pub operation: String,

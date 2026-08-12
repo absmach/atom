@@ -90,37 +90,38 @@ async fn spawn_http_mock(behaviour: Behaviour) -> (String, HttpMockState, onesho
 // ─── gRPC mock ────────────────────────────────────────────────────────────
 
 mod callout_proto {
-    tonic::include_proto!("atom.v1.callout");
+    tonic::include_proto!("atom.v1");
 }
 
 use callout_proto::{
-    callout_response::Decision as ProtoDecision, callout_server::CalloutServer, CalloutResponse,
+    callout_service_check_response::Decision as ProtoDecision,
+    callout_service_server::CalloutServiceServer, CalloutServiceCheckResponse,
 };
 
 struct GrpcMock {
-    recorded: Arc<Mutex<Vec<callout_proto::CalloutRequest>>>,
+    recorded: Arc<Mutex<Vec<callout_proto::CalloutServiceCheckRequest>>>,
     behaviour: Behaviour,
 }
 
 #[tonic::async_trait]
-impl callout_proto::callout_server::Callout for GrpcMock {
+impl callout_proto::callout_service_server::CalloutService for GrpcMock {
     async fn check(
         &self,
-        request: tonic::Request<callout_proto::CalloutRequest>,
-    ) -> Result<tonic::Response<CalloutResponse>, tonic::Status> {
+        request: tonic::Request<callout_proto::CalloutServiceCheckRequest>,
+    ) -> Result<tonic::Response<CalloutServiceCheckResponse>, tonic::Status> {
         self.recorded.lock().unwrap().push(request.into_inner());
         match &self.behaviour {
-            Behaviour::Allow => Ok(tonic::Response::new(CalloutResponse {
+            Behaviour::Allow => Ok(tonic::Response::new(CalloutServiceCheckResponse {
                 decision: ProtoDecision::Allow as i32,
                 reason: String::new(),
             })),
-            Behaviour::Deny(reason) => Ok(tonic::Response::new(CalloutResponse {
+            Behaviour::Deny(reason) => Ok(tonic::Response::new(CalloutServiceCheckResponse {
                 decision: ProtoDecision::Deny as i32,
                 reason: reason.clone(),
             })),
             Behaviour::Delay(d) => {
                 tokio::time::sleep(*d).await;
-                Ok(tonic::Response::new(CalloutResponse {
+                Ok(tonic::Response::new(CalloutServiceCheckResponse {
                     decision: ProtoDecision::Allow as i32,
                     reason: String::new(),
                 }))
@@ -134,7 +135,7 @@ async fn spawn_grpc_mock(
     behaviour: Behaviour,
 ) -> (
     String,
-    Arc<Mutex<Vec<callout_proto::CalloutRequest>>>,
+    Arc<Mutex<Vec<callout_proto::CalloutServiceCheckRequest>>>,
     oneshot::Sender<()>,
 ) {
     let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -154,7 +155,7 @@ async fn spawn_grpc_mock(
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(CalloutServer::new(svc))
+            .add_service(CalloutServiceServer::new(svc))
             .serve_with_incoming_shutdown(incoming, async {
                 let _ = rx.await;
             })

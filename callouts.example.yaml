@@ -45,7 +45,7 @@ callouts:
       on_error: deny                      # deny | allow (default deny)
 
     # gRPC transport — the external service must implement
-    # `atom.v1.callout.Callout/Check` (see proto/atom/v1/callout.proto).
+    # `atom.v1.CalloutService/Check` (see proto/atom/v1/callout.proto).
     - id: policy-gate-grpc
       transport: grpc
       address: https://policy.internal:9443

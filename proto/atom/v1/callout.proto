@@ -1,10 +1,11 @@
 syntax = "proto3";
 
-package atom.v1.callout;
+package atom.v1;
 
 import "google/protobuf/struct.proto";
 
-// Callout is the wire contract atom speaks with an external policy service.
+// CalloutService is the wire contract atom speaks with an external policy
+// service.
 //
 // Atom sends one Check() per intercepted operation, before executing it. The
 // external service inspects the operation, actor and per-operation args, and
@@ -13,11 +14,11 @@ import "google/protobuf/struct.proto";
 // fails fast on the first non-ALLOW response.
 //
 // See docs in AGENTS.md and callouts.example.yaml for the config-side view.
-service Callout {
-  rpc Check(CalloutRequest) returns (CalloutResponse);
+service CalloutService {
+  rpc Check(CalloutServiceCheckRequest) returns (CalloutServiceCheckResponse);
 }
 
-message CalloutRequest {
+message CalloutServiceCheckRequest {
   // Operation identifier — a GraphQL resolver name (e.g. "createEntity") or a
   // fully-qualified gRPC method ("atom.v1.AuthzService/Check").
   string operation = 1;
@@ -53,12 +54,14 @@ message Actor {
   string user_agent    = 6;
 }
 
-message CalloutResponse {
-  // DENY is the zero value on purpose: an unset/undecodable response evaluates
-  // to a deny, matching atom's default-deny invariant.
+message CalloutServiceCheckResponse {
+  // DECISION_UNSPECIFIED is the zero value and is treated as DENY at runtime
+  // to preserve atom's default-deny invariant: an unset or undecodable
+  // response never accidentally allows the operation.
   enum Decision {
-    DENY  = 0;
-    ALLOW = 1;
+    DECISION_UNSPECIFIED = 0;
+    DECISION_ALLOW       = 1;
+    DECISION_DENY        = 2;
   }
 
   Decision decision = 1;
