@@ -7,7 +7,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-env=ATOM_VERSION={version}");
     println!("cargo:rustc-env=ATOM_REVISION={revision}");
 
-    tonic_build::compile_protos("proto/atom/v1/atom.proto")?;
+    tonic_build::configure().compile_protos(
+        &["proto/atom/v1/atom.proto", "proto/broker/v1/auth.proto"],
+        &["proto"],
+    )?;
     Ok(())
 }
 

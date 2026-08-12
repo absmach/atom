@@ -86,6 +86,103 @@ pub struct Config {
     pub certs_root_ca_key_path: Option<String>,
     pub certs_leaf_default_ttl_secs: u64,
     pub certs_leaf_max_ttl_secs: u64,
+    pub broker_auth: BrokerAuthConfig,
+}
+
+/// How a topic segment addresses an object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BrokerTopicRef {
+    /// The bound segment is a tenant-scoped alias slug, resolved through the
+    /// same path as `AliasService.ResolveAlias`.
+    #[default]
+    Alias,
+    /// The bound segment is the object's UUID; no resolution step.
+    Uuid,
+}
+
+impl BrokerTopicRef {
+    fn from_env_value(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "alias" => Ok(Self::Alias),
+            "uuid" => Ok(Self::Uuid),
+            other => anyhow::bail!("ATOM_BROKER_TOPIC_REF must be alias or uuid, got {other}"),
+        }
+    }
+}
+
+/// The broker auth callout — Atom implementing FluxMQ's `AuthService` so a
+/// broker can call it with no adapter service in between.
+///
+/// **Off by default, and deliberately so.** The callout has no bearer token to
+/// check: a broker's gRPC client sends no `authorization` metadata, so the
+/// endpoint authenticates its caller at the transport, via the gRPC listener's
+/// mTLS client CA. Enabling it on a plaintext listener lets anything that can
+/// reach the port authenticate and authorize as any principal. Enable it
+/// together with `ATOM_GRPC_TLS_CLIENT_CA_PATH`, scoped to a CA that signs
+/// brokers and nothing else.
+#[derive(Debug, Clone)]
+pub struct BrokerAuthConfig {
+    pub enabled: bool,
+    pub topic_templates: crate::broker_auth::TopicTemplateSet,
+    pub topic_ref: BrokerTopicRef,
+    /// Which credential kind a broker's username/password pair is checked
+    /// against. One kind, one lookup — the callout runs on the connect path and
+    /// trying both would double the cost of every rejected connection.
+    pub credential_kind: crate::models::enums::CredentialKind,
+    /// Topics authorized without consulting the PDP. Empty by default; see
+    /// [`crate::broker_auth::TopicAllowList`] for why it exists and how narrow
+    /// a pattern should be.
+    pub topic_allow: crate::broker_auth::TopicAllowList,
+}
+
+/// First segment names the object, the rest is unconstrained — the near
+/// universal MQTT convention, and the one that survives `+`/`#` in a filter.
+pub const DEFAULT_BROKER_TOPIC_TEMPLATE: &str = "{resource}/#";
+
+impl Default for BrokerAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            topic_templates: crate::broker_auth::TopicTemplateSet::parse_list(&[
+                DEFAULT_BROKER_TOPIC_TEMPLATE.to_string(),
+            ])
+            .expect("the built-in default template must parse"),
+            topic_ref: BrokerTopicRef::default(),
+            credential_kind: crate::models::enums::CredentialKind::Password,
+            topic_allow: crate::broker_auth::TopicAllowList::default(),
+        }
+    }
+}
+
+/// Split a comma-separated env var, dropping blanks. Absent or blank yields an
+/// empty list.
+fn comma_list(name: &str) -> Vec<String> {
+    nonempty_env(name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn broker_credential_kind_from_env() -> Result<crate::models::enums::CredentialKind> {
+    use crate::models::enums::CredentialKind;
+    match std::env::var("ATOM_BROKER_CREDENTIAL_KIND")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "password" => Ok(CredentialKind::Password),
+        "shared_key" => Ok(CredentialKind::SharedKey),
+        other => {
+            anyhow::bail!("ATOM_BROKER_CREDENTIAL_KIND must be password or shared_key, got {other}")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -749,6 +846,7 @@ impl Config {
             certs_root_ca_key_path: std::env::var("ATOM_CERTS_ROOT_CA_KEY_PATH").ok(),
             certs_leaf_default_ttl_secs: env_u64("ATOM_CERTS_LEAF_DEFAULT_TTL_SECS", 2_592_000),
             certs_leaf_max_ttl_secs: env_u64("ATOM_CERTS_LEAF_MAX_TTL_SECS", 2_592_000),
+            broker_auth: broker_auth_from_env()?,
             public_base_url,
         })
     }
@@ -822,6 +920,7 @@ impl Config {
             certs_root_ca_key_path: None,
             certs_leaf_default_ttl_secs: 2_592_000,
             certs_leaf_max_ttl_secs: 2_592_000,
+            broker_auth: BrokerAuthConfig::default(),
         }
     }
 }
@@ -1363,6 +1462,38 @@ fn pki_lifecycle_from_env() -> Result<PkiLifecycleConfig> {
         anyhow::bail!("ATOM_PKI_AUTHORITY_WARNING_SECS must be greater than zero");
     }
     Ok(cfg)
+fn broker_auth_from_env() -> Result<BrokerAuthConfig> {
+    let defaults = BrokerAuthConfig::default();
+    let enabled = env_bool_default("ATOM_BROKER_AUTH_ENABLED", defaults.enabled);
+    if !enabled {
+        return Ok(defaults);
+    }
+
+    let raw = nonempty_env("ATOM_BROKER_TOPIC_TEMPLATE")
+        .unwrap_or_else(|| DEFAULT_BROKER_TOPIC_TEMPLATE.to_string());
+    // Templates are tried in order, so a deployment with more than one topic
+    // shape does not need a second Atom.
+    let templates: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|template| !template.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if templates.is_empty() {
+        anyhow::bail!("ATOM_BROKER_TOPIC_TEMPLATE must list at least one template");
+    }
+
+    Ok(BrokerAuthConfig {
+        enabled,
+        topic_templates: crate::broker_auth::TopicTemplateSet::parse_list(&templates)?,
+        topic_ref: BrokerTopicRef::from_env_value(
+            &std::env::var("ATOM_BROKER_TOPIC_REF").unwrap_or_default(),
+        )?,
+        credential_kind: broker_credential_kind_from_env()?,
+        topic_allow: crate::broker_auth::TopicAllowList::parse_list(&comma_list(
+            "ATOM_BROKER_TOPIC_ALLOW",
+        ))?,
+    })
 }
 
 fn nonempty_env(name: &str) -> Option<String> {

@@ -13,6 +13,7 @@ import { Callout } from 'fumadocs-ui/components/callout';
 import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 import type { Metadata } from 'next';
 import { Mermaid } from '@/components/mermaid';
+import { DocImage } from '@/components/doc-image';
 
 const mdxComponents = {
   ...defaultMdxComponents,
@@ -24,6 +25,10 @@ const mdxComponents = {
   Mermaid,
   Tab,
   Tabs,
+  // Overrides defaultMdxComponents' next/image-backed img -- doc images are
+  // served from R2 via a same-origin proxy, not bundled by next/image. See
+  // components/doc-image.tsx.
+  img: DocImage,
 };
 
 export default async function Page({

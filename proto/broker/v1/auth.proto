@@ -1,0 +1,146 @@
+// Copyright (c) Abstract Machines
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+// The package is vendor-neutral on purpose. These services are a generic
+// broker-callout contract — the messages carry no FluxMQ concept, and other
+// brokers and providers implement them — but the proto package is what a caller
+// dials (`/broker.auth.v1.AuthService/Authorize`), so naming it after one
+// implementation would put that implementation's name in every peer's public
+// wire surface. The Go import path is derived from this file's location, not
+// from the package, so it is unaffected.
+package broker.auth.v1;
+
+// AuthService is a callout service for external authentication and
+// authorization. Broker implementations call this service during connection
+// establishment, publish, and subscribe to delegate credential validation
+// and topic-level access control to an external provider.
+service AuthService {
+  // Authenticate validates client credentials presented during connection.
+  // The server resolves the credentials to an external identity (e.g. a UUID)
+  // which the broker stores on the session and passes in subsequent Authorize
+  // calls.
+  rpc Authenticate(AuthnReq) returns (AuthnRes);
+
+  // Authorize checks whether a previously authenticated identity is allowed
+  // to perform a given action on the effective topic/filter. When the optional
+  // topic normalizer is configured, the broker authorizes the normalized value.
+  rpc Authorize(AuthzReq) returns (AuthzRes);
+}
+
+// HookService is an optional callout service for blocking broker hooks.
+// Hook handlers may allow, deny, or mutate only the fields supported by the
+// hook point before the broker continues processing.
+service HookService {
+  rpc Handle(HookReq) returns (HookRes);
+}
+
+// Protocol identifies which messaging protocol the client connected with.
+enum Protocol {
+  Unspecified = 0;
+  MQTT = 1;
+  AMQP_1_0 = 2;
+  AMQP_0_9_1 = 3;
+  HTTP = 4;
+  CoAP = 5;
+}
+
+message AuthnReq {
+  // Client identifier from the connection handshake.
+  string client_id = 1;
+  // Username credential.
+  string username = 2;
+  // Password credential.
+  string password = 3;
+  // Protocol the client connected with.
+  Protocol protocol = 4;
+}
+
+message AuthnRes {
+  // Whether the credentials are valid.
+  bool authenticated = 1;
+  // External identity resolved by the auth provider (e.g. a client UUID).
+  // The broker stores this on the session and passes it in AuthzReq.
+  string id = 2;
+  // Machine-readable reason code (0 = success).
+  uint32 reason_code = 3;
+  // Human-readable reason for rejection (empty on success).
+  string reason = 4;
+}
+
+message AuthzReq {
+  // External identity returned from AuthnRes.id.
+  string external_id = 1;
+  // Raw topic or topic filter from the publish/subscribe operation.
+  string topic = 2;
+  // The action being requested.
+  Action action = 3;
+}
+
+enum Action {
+  None = 0;
+  Publish = 1;
+  Subscribe = 2;
+}
+
+message AuthzRes {
+  // Whether the action is authorized.
+  bool authorized = 1;
+  // Machine-readable reason code (0 = authorized).
+  uint32 reason_code = 2;
+  // Human-readable reason for rejection (empty on success).
+  string reason = 3;
+}
+
+enum HookType {
+  HookTypeUnspecified = 0;
+  AuthOnRegister = 1;
+  AuthOnPublish = 2;
+  AuthOnSubscribe = 3;
+  AuthOnUnsubscribe = 4;
+}
+
+enum HookResult {
+  HookResultUnspecified = 0;
+  HookResultOk = 1;
+  HookResultDeny = 2;
+}
+
+message HookReq {
+  HookType hook = 1;
+  // Protocol-level client identifier.
+  string client_id = 2;
+  // External identity returned from AuthnRes.id when available.
+  string external_id = 3;
+  // Protocol the client connected with.
+  Protocol protocol = 4;
+  // Topic, topic filter, or address being handled.
+  string topic = 5;
+  // Publish payload. Empty for non-publish hooks.
+  bytes payload = 6;
+  uint32 qos = 7;
+  bool retain = 8;
+  map<string, string> properties = 9;
+  // Username/password are populated only for register/authenticate hooks.
+  string username = 10;
+  string password = 11;
+}
+
+message HookRes {
+  HookResult result = 1;
+  // Empty means keep the requested topic/filter.
+  string topic = 2;
+  bytes payload = 3;
+  bool payload_set = 4;
+  uint32 qos = 5;
+  bool qos_set = 6;
+  bool retain = 7;
+  bool retain_set = 8;
+  // Properties are merged into the current properties map.
+  map<string, string> properties = 9;
+  uint32 reason_code = 10;
+  string reason = 11;
+  // AuthOnRegister may set or override the external identity.
+  string external_id = 12;
+}

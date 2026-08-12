@@ -43,4 +43,18 @@ for (const entry of await fs.readdir(tempDir)) {
 
 await fs.rmdir(tempDir);
 
+// Doc images are served from R2 via worker/index.ts, not from the static
+// export -- public/img is gitignored and normally won't exist at build
+// time, but strip it here too in case a locally-gitignored copy (kept
+// around for `next dev` previews) is still sitting in public/img when
+// someone runs a build. If it survived into out/, Cloudflare would serve
+// it directly as a static asset instead of falling through to the R2
+// proxy Worker, silently defeating the whole point of the migration
+// (stale content, no purge-on-update).
+const imgDir = path.join(nestedDir, "img");
+if (await pathExists(imgDir)) {
+  await fs.rm(imgDir, { recursive: true, force: true });
+  console.log(`Stripped ${path.join(basePath, "img")} from static export`);
+}
+
 console.log(`Nested static export under out/${basePath}`);

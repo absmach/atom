@@ -1,12 +1,24 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "atom-docs",
+  "main": "./worker/index.ts",
   "compatibility_date": "2026-06-08",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": {
     "enabled": true
   },
   "assets": {
-    "directory": "./out"
-  }
+    "directory": "./out",
+    "binding": "ASSETS",
+    // Default (false): serve a matching static file directly and only
+    // invoke worker/index.ts for requests that don't match one -- e.g.
+    // "/docs/atom/img/...", which the static export no longer contains.
+    "run_worker_first": false
+  },
+  "r2_buckets": [
+    {
+      "binding": "IMAGES_BUCKET",
+      "bucket_name": "websites-images"
+    }
+  ]
 }

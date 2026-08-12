@@ -79,6 +79,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Atom implements a proto it does not own, and nothing rebuilds the
+      # vendored copy. Without this, an upstream change surfaces at runtime.
+      - name: Vendored proto matches upstream
+        run: scripts/check-vendored-proto.sh
+
       - name: cargo fmt
         run: cargo fmt --check
 

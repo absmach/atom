@@ -10,6 +10,7 @@
 /out/
 /build
 *.tsbuildinfo
+/.wrangler/
 
 # misc
 .DS_Store
@@ -24,3 +25,12 @@ yarn-error.log*
 .env*.local
 .vercel
 next-env.d.ts
+
+# doc images -- served from R2 (see worker/index.ts), not committed here.
+# Fine to drop a file here temporarily for a `next dev` preview; it just
+# won't be tracked, and scripts/nest-static-export.mjs strips it from any
+# build output before deploy either way.
+/public/img/
+
+# holds a real Cloudflare API token -- see scripts/README.md
+/scripts/.env.publish-image

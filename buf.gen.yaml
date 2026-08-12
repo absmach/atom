@@ -1,5 +1,15 @@
 version: v2
 
+# Only the protos Atom owns. proto/broker/v1/auth.proto is vendored verbatim
+# from FluxMQ (see its VENDOR.md) and is deliberately excluded: protoc-gen-doc
+# writes one file per invocation, so a second package here does not extend
+# grpc-reference.md — it silently replaces it, and Atom's own gRPC surface
+# disappears from the docs. The vendored contract is documented upstream.
+inputs:
+  - directory: proto
+    exclude_paths:
+      - proto/broker
+
 plugins:
   # Generates apidocs/grpc-reference.md from the proto.
   # Requires protoc-gen-doc: go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@latest

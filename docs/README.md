@@ -19,7 +19,8 @@ This site follows the same Cloudflare Workers static-assets pattern used by the 
 
 - **Next.js static export** - `next build` outputs static files to `out/`
 - **Next.js `basePath`** - links and assets are generated under `/docs/atom`
-- **Post-build nesting** - `scripts/nest-static-export.mjs` moves the export under `out/docs/atom/` so Cloudflare static assets can serve it from the route prefix without custom Worker code
+- **Post-build nesting** - `scripts/nest-static-export.mjs` moves the export under `out/docs/atom/` so Cloudflare static assets can serve it from the route prefix
+- **Doc images via R2** - `worker/index.ts` is a small Worker in front of the static assets that serves `/docs/atom/img/...` from a shared Cloudflare R2 bucket instead of the repo, so images can be updated and cache-purged without a rebuild. It only runs as a fallback for requests that don't match a static asset (`run_worker_first: false`, the default) - every actual page is still served directly from `out/` with no Worker involved. See [`scripts/README.md`](./scripts/README.md) for the full picture and the publishing workflow.
 
 ### Cloudflare Build Settings
 
@@ -57,9 +58,14 @@ flowchart LR
   end
 
   subgraph Runtime_Request_Flow
-    U[Browser request] --> H[Cloudflare static asset route]
-    H --> J[Static asset lookup]
+    U[Browser request] --> H{Matches a static asset?}
+    H -->|yes| J[Serve from out/]
     J --> U
+    H -->|no, e.g. /docs/atom/img/...| K[worker/index.ts]
+    K -->|img path| L[R2: websites-images/atom-docs/...]
+    K -->|anything else| M[404 via assets binding]
+    L --> U
+    M --> U
   end
 ```
 
@@ -73,10 +79,13 @@ NEXT_PUBLIC_BASE_URL=https://www.absmach.eu/docs/atom
 
 ## Project Structure
 
-| Path                             | Description                             |
-| -------------------------------- | --------------------------------------- |
-| `app/[[...slug]]/page.tsx`       | Docs page renderer                      |
-| `content/docs`                   | MDX source files                        |
-| `lib/source.ts`                  | Fumadocs source adapter                 |
-| `scripts/nest-static-export.mjs` | Moves static export under `/docs/atom`  |
-| `wrangler.jsonc`                 | Cloudflare Workers static-assets config |
+| Path                              | Description                                                                    |
+| ---------------------------------- | -------------------------------------------------------------------------------- |
+| `app/[[...slug]]/page.tsx`        | Docs page renderer                                                             |
+| `content/docs`                    | MDX source files                                                               |
+| `lib/source.ts`                   | Fumadocs source adapter                                                        |
+| `components/doc-image.tsx`        | Renders doc images as a plain, zoomable `<img>` (no `next/image`, no manifest) |
+| `worker/index.ts`                 | Serves `/docs/atom/img/...` from R2, falls back to static assets otherwise    |
+| `scripts/nest-static-export.mjs`  | Moves static export under `/docs/atom`, strips any local `img/` from it       |
+| `scripts/publish-image.mjs`       | Maintainer-only: uploads a doc image to R2 and purges its cache               |
+| `wrangler.jsonc`                  | Cloudflare Workers static-assets + Worker + R2 binding config                 |

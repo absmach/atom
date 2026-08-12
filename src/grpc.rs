@@ -13,6 +13,7 @@ use crate::{
     audit,
     auth::{authenticate_token, require_any_capability, scope_for_tenant, AuthContext, Scope},
     authz::{access, engine, repo},
+    broker_auth::{service::BrokerAuthServiceServer, BrokerAuth},
     certs,
     identity::service as identity_service,
     models::{
@@ -623,6 +624,11 @@ pub async fn serve(
     health_reporter
         .set_serving::<AliasServiceServer<AtomAlias>>()
         .await;
+    if state.config.broker_auth.enabled {
+        health_reporter
+            .set_serving::<BrokerAuthServiceServer<BrokerAuth>>()
+            .await;
+    }
 
     // The TLS config was already loaded and validated in `load_tls_config`
     // before this task was spawned (fail-fast at startup); here we only apply it.
@@ -650,7 +656,7 @@ pub async fn serve(
         .set_grpc_status(GrpcRuntimeStatus::serving(addr.to_string()))
         .await;
 
-    let result = builder
+    let mut router = builder
         .add_service(health_service)
         .add_service(AuthzServiceServer::new(AtomAuthz {
             state: state.clone(),
@@ -663,7 +669,41 @@ pub async fn serve(
         }))
         .add_service(AliasServiceServer::new(AtomAlias {
             state: state.clone(),
-        }))
+        }));
+
+    // The broker callout is the one service here with no bearer token to check —
+    // a broker's callout client cannot send one — so its caller is authenticated
+    // at the transport instead. Mounting it without an mTLS client CA hands
+    // authentication and authorization for every principal to anything that can
+    // reach the port.
+    if state.config.broker_auth.enabled {
+        let client_ca = state
+            .config
+            .grpc_tls
+            .as_ref()
+            .and_then(|tls| tls.client_ca_path.as_deref());
+        match client_ca {
+            Some(path) => tracing::info!(
+                client_ca = %path,
+                templates = ?state
+                    .config
+                    .broker_auth
+                    .topic_templates
+                    .iter()
+                    .map(crate::broker_auth::TopicTemplate::as_str)
+                    .collect::<Vec<_>>(),
+                "broker auth callout enabled"
+            ),
+            None => tracing::warn!(
+                "broker auth callout enabled without ATOM_GRPC_TLS_CLIENT_CA_PATH; \
+                 any client that can reach this port can authenticate and authorize \
+                 as any principal"
+            ),
+        }
+        router = router.add_service(BrokerAuthServiceServer::new(BrokerAuth::new(state.clone())));
+    }
+
+    let result = router
         .serve_with_incoming_shutdown(incoming, crate::shutdown::shutdown_signal())
         .await;
 
