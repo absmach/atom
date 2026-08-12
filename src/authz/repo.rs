@@ -686,8 +686,12 @@ pub async fn remove_resource_from_object_group_with_audit(
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_resource_object_groups_in_tx(&mut tx, resource_id, Some(group_id)).await?;
+    let deleted = delete_resource_object_groups_in_tx(&mut tx, resource_id, Some(group_id)).await?;
     let resource = fetch_resource(&mut *tx, resource_id).await?;
+    if deleted == 0 {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(resource);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: resource.tenant_id,
@@ -718,8 +722,12 @@ pub async fn clear_resource_object_groups_with_audit(
     resource_id: Uuid,
 ) -> Result<Resource, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_resource_object_groups_in_tx(&mut tx, resource_id, None).await?;
+    let deleted = delete_resource_object_groups_in_tx(&mut tx, resource_id, None).await?;
     let resource = fetch_resource(&mut *tx, resource_id).await?;
+    if deleted == 0 {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(resource);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: resource.tenant_id,
@@ -802,7 +810,7 @@ async fn delete_resource_object_groups_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     resource_id: Uuid,
     group_id: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<u64, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
             .bind(resource_id)
@@ -832,7 +840,7 @@ async fn delete_resource_object_groups_in_tx(
             "resource {resource_id} not found"
         )));
     }
-    sqlx::query(
+    let deleted = sqlx::query(
         r#"DELETE FROM object_group_resources
            WHERE resource_id = $1 AND ($2::uuid IS NULL OR group_id = $2)"#,
     )
@@ -840,8 +848,9 @@ async fn delete_resource_object_groups_in_tx(
     .bind(group_id)
     .execute(&mut **tx)
     .await
-    .map_err(db_err)?;
-    Ok(())
+    .map_err(db_err)?
+    .rows_affected();
+    Ok(deleted)
 }
 
 /// Object group membership is a set, and a scalar attribute cannot express one.

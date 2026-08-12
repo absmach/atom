@@ -541,8 +541,12 @@ pub async fn remove_entity_from_object_group_with_audit(
     group_id: Uuid,
 ) -> Result<Entity, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_entity_object_groups_in_tx(&mut tx, entity_id, Some(group_id)).await?;
+    let deleted = delete_entity_object_groups_in_tx(&mut tx, entity_id, Some(group_id)).await?;
     let entity = fetch_entity(&mut *tx, entity_id).await?;
+    if deleted == 0 {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(entity);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: entity.tenant_id,
@@ -572,8 +576,12 @@ pub async fn clear_entity_object_groups_with_audit(
     entity_id: Uuid,
 ) -> Result<Entity, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    delete_entity_object_groups_in_tx(&mut tx, entity_id, None).await?;
+    let deleted = delete_entity_object_groups_in_tx(&mut tx, entity_id, None).await?;
     let entity = fetch_entity(&mut *tx, entity_id).await?;
+    if deleted == 0 {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(entity);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: entity.tenant_id,
@@ -657,7 +665,7 @@ async fn delete_entity_object_groups_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
     group_id: Option<Uuid>,
-) -> Result<(), AppError> {
+) -> Result<u64, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL")
             .bind(entity_id)
@@ -683,7 +691,7 @@ async fn delete_entity_object_groups_in_tx(
     if locked.is_none() {
         return Err(AppError::not_found(format!("entity {entity_id} not found")));
     }
-    sqlx::query(
+    let deleted = sqlx::query(
         r#"DELETE FROM object_group_entities
            WHERE entity_id = $1 AND ($2::uuid IS NULL OR group_id = $2)"#,
     )
@@ -691,8 +699,9 @@ async fn delete_entity_object_groups_in_tx(
     .bind(group_id)
     .execute(&mut **tx)
     .await
-    .map_err(db_err)?;
-    Ok(())
+    .map_err(db_err)?
+    .rows_affected();
+    Ok(deleted)
 }
 
 /// Object group membership is a set, and a scalar attribute cannot express one.

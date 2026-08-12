@@ -23,19 +23,17 @@ fn trim_external_id(external_id: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Trim an external identifier for storage or lookup. Whitespace-only (and
-/// empty) input is absent, not a value. Case is preserved.
-///
-/// This is the lookup-side normalization: it never fails, so an invalid filter
-/// value simply matches nothing instead of erroring.
+/// Normalize an external identifier for a lookup filter. `None` means
+/// omitted (no filter). Blank/NUL/over-cap `Some(_)` normalizes to a value
+/// over `MAX_EXTERNAL_ID_LEN`, unmatchable per `chk_entities_external_id_length`,
+/// so it never degrades into "no filter" the way collapsing to `None` would.
 pub fn normalize_external_id(external_id: Option<String>) -> Option<String> {
-    trim_external_id(external_id).map(|value| {
-        if value.contains('\0') {
-            "x".repeat(MAX_EXTERNAL_ID_LEN + 1)
-        } else {
-            value
-        }
-    })
+    let value = external_id?.trim().to_string();
+    if value.is_empty() || value.contains('\0') {
+        Some("x".repeat(MAX_EXTERNAL_ID_LEN + 1))
+    } else {
+        Some(value)
+    }
 }
 
 /// Normalize an optional external identifier for a write, enforcing the length
@@ -198,7 +196,21 @@ mod tests {
             Some("x".repeat(MAX_EXTERNAL_ID_LEN + 1)),
             "a NUL-bearing filter must match nothing without binding a NUL to Postgres"
         );
-        assert_eq!(normalize_external_id(Some("  ".into())), None);
+    }
+
+    #[test]
+    fn normalize_keeps_omitted_and_blank_distinct() {
+        // Omitted (`None`): callers bind this as SQL NULL, and the query reads
+        // "IS NULL OR col = $n", so `None` means "no filter applied".
+        assert_eq!(normalize_external_id(None), None);
+
+        // Explicitly blank stays `Some(_)`: the sentinel is over
+        // `MAX_EXTERNAL_ID_LEN`, which no stored row can equal.
+        for blank in ["", "   ", "\t\n"] {
+            let normalized =
+                normalize_external_id(Some(blank.to_string())).expect("blank filter stays Some");
+            assert!(normalized.chars().count() > MAX_EXTERNAL_ID_LEN);
+        }
     }
 
     #[test]

@@ -665,6 +665,19 @@ async fn the_external_id_filter_matches_exactly_and_scopes_to_tenant() {
     assert!(list_by_external_id(&p, &slug("SN-absent")).await.is_empty());
 }
 
+/// A blank filter is a caller mistake, not "no filter": it must match zero
+/// rows, not silently fall back to the unfiltered authorized set.
+#[tokio::test]
+#[ignore]
+async fn a_blank_external_id_filter_matches_nothing_via_authorized_listing() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    create(&p, device(Some(tenant_id), Some(&slug("SN")))).await;
+    create(&p, device(Some(tenant_id), None)).await;
+
+    assert!(list_by_external_id(&p, "   ").await.is_empty());
+}
+
 #[tokio::test]
 #[ignore]
 async fn the_admin_deleted_listing_filters_by_external_id_too() {
@@ -698,6 +711,43 @@ async fn the_admin_deleted_listing_filters_by_external_id_too() {
 
     assert_eq!(list.total, 1);
     assert_eq!(list.items[0].id, entity.id);
+}
+
+/// Same caller-mistake guarantee as `authorized_object_ids`, on the other
+/// `external_id` call site (`identity::repo::list_entities`).
+#[tokio::test]
+#[ignore]
+async fn a_blank_external_id_filter_matches_nothing_via_list_entities() {
+    let p = pool().await;
+    let tenant_id = make_tenant(&p).await;
+    create(&p, device(Some(tenant_id), Some(&slug("SN")))).await;
+    create(&p, device(Some(tenant_id), None)).await;
+
+    let list = identity_repo::list_entities(
+        &p,
+        ListEntities {
+            q: None,
+            kind: None,
+            external_id: Some("   ".to_string()),
+            profile_id: None,
+            tenant_id: Some(tenant_id),
+            attributes_contains: None,
+            status: None,
+            deleted: DeletedFilter::Live,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 20,
+            offset: 0,
+        },
+    )
+    .await
+    .expect("blank external_id listing");
+
+    assert_eq!(
+        list.total, 0,
+        "a blank external_id filter must match nothing"
+    );
+    assert!(list.items.is_empty());
 }
 
 #[tokio::test]

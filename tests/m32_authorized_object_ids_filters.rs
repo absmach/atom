@@ -467,3 +467,35 @@ async fn external_id_and_entity_status_also_narrow() {
     assert_eq!(total, 1);
     assert_eq!(ids, vec![matching.to_string()]);
 }
+
+/// A blank `externalId` is a caller mistake, not "no filter": it must match
+/// zero rows, not the unfiltered authorized set.
+#[tokio::test]
+#[ignore]
+async fn blank_external_id_matches_nothing_not_everything() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m32-blank-external-id").await;
+    let subject_id = make_entity(&pool, tenant_id, json!({})).await;
+    let a = make_entity(&pool, tenant_id, json!({})).await;
+    let b = make_entity(&pool, tenant_id, json!({})).await;
+    grant_read(&pool, tenant_id, subject_id, a).await;
+    grant_read(&pool, tenant_id, subject_id, b).await;
+
+    let schema = build_schema(state(pool).await);
+    let response = schema
+        .execute(authed_as(
+            subject_id,
+            format!(
+                r#"{{ authorizedObjectIds(input: {{
+                      subjectId: "{subject_id}", action: "read",
+                      objectKind: "entity", objectType: "entity:device",
+                      externalId: "   "
+                    }}) {{ ids total }} }}"#
+            ),
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let (ids, total) = listing(&response.data.into_json().expect("json data"));
+    assert_eq!(total, 0, "a blank externalId filter must match nothing");
+    assert!(ids.is_empty());
+}
