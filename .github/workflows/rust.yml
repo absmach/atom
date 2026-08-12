@@ -142,3 +142,12 @@ jobs:
             cargo test --test m42_pki_pkcs11 \
               softhsm_restored_backup_can_sign_with_existing_authority -- \
               --include-ignored --exact --test-threads=1
+
+      - name: Run real PKI smoke test
+        env:
+          PKI_TEST_MAINT_URL: postgres://atom:atom@localhost:5432/atom
+          PKI_TEST_DATABASE_URL: postgres://atom:atom@localhost:5432/atom_pki_test
+          PKI_TEST_DATABASE_NAME: atom_pki_test
+          RUST_BACKTRACE: '1'
+        run: ./scripts/pki-test.sh smoke
+

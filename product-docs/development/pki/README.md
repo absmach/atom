@@ -10,6 +10,7 @@ This directory is the implementation source of truth for Atom-native multi-tenan
 4. the selected `pr-XXX-*.md` specification
 5. `TEST-PLAN.md`
 6. `DEFINITION-OF-DONE.md`
+7. `RELEASE-TESTING.md` — human and AI release, real-integration, and smoke-test runbook
 
 ## Working method
 
