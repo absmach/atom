@@ -26,10 +26,13 @@ use async_graphql::{
 use async_graphql_value::ConstValue;
 use serde_json::Value as JsonValue;
 
+use uuid::Uuid;
+
 use crate::{
     audit,
     auth::AuthContext,
     callout::{envelope::Actor, CalloutOutcome, Surface},
+    identity::repo as identity_repo,
     models::enums::AuditOutcome,
     state::AppState,
 };
@@ -116,7 +119,8 @@ impl Extension for CalloutExtension {
             return next.run(ctx, operation_name).await;
         }
         let auth = ctx.data_opt::<AuthContext>().cloned().unwrap_or_default();
-        for p in pending {
+        for mut p in pending {
+            enrich_args(state, &p.resolver, &mut p.args).await;
             let actor = Actor::from_auth(&auth);
             let outcome = state
                 .callouts
@@ -187,6 +191,33 @@ fn field_args_to_json(field: &Field, variables: &Variables) -> JsonValue {
 
 fn resolve_variable(variables: &Variables, name: &Name) -> Option<ConstValue> {
     variables.get(name).cloned()
+}
+
+/// Enrich `args` with fields the callout policy may want to see but which are
+/// not present in the raw GraphQL arguments. For `deleteEntity`, add the
+/// target entity's `kind` so policy can gate on device/human/service without a
+/// round-trip to the Atom API.
+///
+/// Best-effort: any lookup failure (missing row, DB error) leaves `args` as-is
+/// and lets the callout run without the enriched fields. The subsequent
+/// resolver will surface the real error to the caller.
+async fn enrich_args(state: &AppState, resolver: &str, args: &mut JsonValue) {
+    if resolver != "deleteEntity" {
+        return;
+    }
+    let Some(id_str) = args.get("id").and_then(JsonValue::as_str) else {
+        return;
+    };
+    let Ok(id) = Uuid::parse_str(id_str) else {
+        return;
+    };
+    if let Ok(entity) = identity_repo::get_entity(&state.pool, id).await {
+        if let Some(map) = args.as_object_mut() {
+            if let Ok(kind) = serde_json::to_value(&entity.kind) {
+                map.insert("kind".into(), kind);
+            }
+        }
+    }
 }
 
 fn audit_callout_deny(

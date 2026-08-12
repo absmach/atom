@@ -1,0 +1,145 @@
+# Atom bootstrap configuration — demo for docker compose.
+#
+# Loaded by atom when ATOM_BOOTSTRAP_FILE points at it, once at startup right
+# after migrations. Idempotent: every record is keyed on a stable UUID and
+# inserted with ON CONFLICT DO NOTHING, so re-runs are no-ops.
+#
+# Every row created (or claimed) from this file is stamped
+# `managed_by='config'`. The API rejects update/delete/revoke on those rows
+# with 409 conflict, and the UI shows a "Config" badge with a lock icon and
+# hides the mutation buttons. Verify with:
+#
+#   psql $DATABASE_URL -c \
+#     "SELECT name, managed_by FROM entities WHERE managed_by='config'"
+
+# --- Tenants -------------------------------------------------------------
+tenants:
+  - id: 11111111-1111-1111-1111-111111111111
+    name: demo-factory
+    alias: demo-factory
+    tags: [demo, bootstrap]
+
+# --- Entities + credentials ---------------------------------------------
+entities:
+  # Attach a password to the pre-seeded admin (replaces ADMIN_SECRET's role).
+  # After this loads, log in with identifier=admin secret=12345678.
+  - id: 00000000-0000-0000-0000-000000000001
+    kind: human
+    name: admin
+    credentials:
+      - kind: password
+        secret: "12345678"
+
+  # A device scoped to the demo tenant, with a machine shared_key.
+  - id: 22222222-2222-2222-2222-222222222222
+    kind: device
+    name: bootstrap-gateway
+    tenant_id: 11111111-1111-1111-1111-111111111111
+    credentials:
+      - kind: shared_key
+        key: "bootstrap-device-key-must-be-long-enough"
+
+  # A service with a pre-minted access token.
+  # Regenerate for real use:
+  #   printf 'atom_%s_%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 32)"
+  - id: 33333333-3333-3333-3333-333333333333
+    kind: service
+    name: bootstrap-ingest
+    credentials:
+      - kind: access_token
+        name: ingest
+        description: Sample bootstrap-provisioned service token
+        token: "atom_00112233445566778899aabbccddeeff_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+# --- Resources ----------------------------------------------------------
+resources:
+  - id: 44444444-4444-4444-4444-444444444444
+    kind: channel
+    name: telemetry
+    alias: telemetry
+    tenant_id: 11111111-1111-1111-1111-111111111111
+    owner_id: 22222222-2222-2222-2222-222222222222
+
+# --- Principal groups + members ----------------------------------------
+groups:
+  - id: 55555555-5555-5555-5555-555555555555
+    name: floor-devices
+    tenant_id: 11111111-1111-1111-1111-111111111111
+    description: Production floor devices
+    members:
+      - 22222222-2222-2222-2222-222222222222
+
+# --- Object groups + members -------------------------------------------
+object_groups:
+  - id: 66666666-6666-6666-6666-666666666666
+    name: production-channels
+    tenant_id: 11111111-1111-1111-1111-111111111111
+    resources:
+      - 44444444-4444-4444-4444-444444444444
+
+# --- Capabilities (product-specific vocabulary) ------------------------
+# `publish`/`subscribe` are seeded actions from migration 001; the
+# applicability below claims them for `resource:channel` and stamps
+# managed_by='config'.
+capabilities:
+  - name: publish
+    description: Publish messages to a channel
+    applicability:
+      - object_kind: resource
+        object_type: resource:channel
+  - name: subscribe
+    description: Subscribe to channel messages
+    applicability:
+      - object_kind: resource
+        object_type: resource:channel
+
+# --- Assignment guardrails ---------------------------------------------
+action_assignment_rules:
+  - entity_kind: device
+    action_name: publish
+    object_kind: resource
+    object_type: resource:channel
+    decision: allow
+  - entity_kind: device
+    action_name: subscribe
+    object_kind: resource
+    object_type: resource:channel
+    decision: allow
+
+# --- Permission blocks -------------------------------------------------
+permission_blocks:
+  - id: 77777777-7777-7777-7777-777777777777
+    scope:
+      mode: object_type
+      tenant_id: 11111111-1111-1111-1111-111111111111
+      object_kind: resource
+      object_type: resource:channel
+    actions: [publish, subscribe]
+    effect: allow
+
+# --- Roles + linked blocks ---------------------------------------------
+roles:
+  - id: 88888888-8888-8888-8888-888888888888
+    name: channel-publisher
+    tenant_id: 11111111-1111-1111-1111-111111111111
+    description: Can publish/subscribe on demo-factory channels
+    permission_blocks:
+      - 77777777-7777-7777-7777-777777777777
+
+# --- Role assignments --------------------------------------------------
+role_assignments:
+  - id: 99999999-9999-9999-9999-999999999999
+    tenant_id: 11111111-1111-1111-1111-111111111111
+    subject:
+      kind: entity
+      id: 22222222-2222-2222-2222-222222222222
+    role_id: 88888888-8888-8888-8888-888888888888
+
+# --- Direct policies ---------------------------------------------------
+direct_policies:
+  - id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+    tenant_id: 11111111-1111-1111-1111-111111111111
+    subject:
+      kind: entity
+      id: 33333333-3333-3333-3333-333333333333
+    permission_block_id: 77777777-7777-7777-7777-777777777777

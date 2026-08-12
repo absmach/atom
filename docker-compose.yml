@@ -28,6 +28,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # Wait for the demo callout server so a fresh `docker compose up` has
+      # createEntity / deleteEntity mutations routed through it out of the
+      # box (see ATOM_CALLOUTS_* below). Flip ATOM_CALLOUTS_ENABLED=false to
+      # kill-switch without removing the wiring.
+      callout-server:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-atom}
       LISTEN_ADDR: 0.0.0.0:${ATOM_HTTP_PORT:-8080}
@@ -88,9 +94,20 @@ services:
       ATOM_LOG_LEVEL: ${ATOM_LOG_LEVEL:-${RUST_LOG:-info}}
       ATOM_LOG_FORMAT: ${ATOM_LOG_FORMAT:-text}
       ATOM_EMAIL_TEMPLATES_DIR: ${ATOM_EMAIL_TEMPLATES_DIR:-/email-templates}
+      # Demo bootstrap + callout wiring — see ./bootstrap.yaml and ./callout.yaml
+      # in the repo root. Which host files get mounted is controlled by
+      # ATOM_BOOTSTRAP_FILE / ATOM_CALLOUTS_FILE in .env (host paths). The
+      # in-container path atom reads is always /etc/atom/... and is fixed
+      # here — flipping the .env path swaps the source without changing what
+      # atom looks for. Set ATOM_CALLOUTS_ENABLED=false in .env to kill-switch.
+      ATOM_BOOTSTRAP_FILE: /etc/atom/bootstrap.yaml
+      ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
+      ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
     volumes:
       - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
       - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
+      - ${ATOM_BOOTSTRAP_FILE:-./bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
+      - ${ATOM_CALLOUTS_FILE:-./callout.yaml}:/etc/atom/callout.yaml:ro
     ports:
       - "${ATOM_HTTP_PORT:-8080}:${ATOM_HTTP_PORT:-8080}"
       - "${ATOM_GRPC_PORT:-8081}:${ATOM_GRPC_PORT:-8081}"
@@ -115,6 +132,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      callout-server:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-atom}:${POSTGRES_PASSWORD:-atom-dev-only}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-atom}
       LISTEN_ADDR: 0.0.0.0:${ATOM_DEV_HTTP_PORT:-8081}
@@ -175,9 +194,14 @@ services:
       ATOM_LOG_LEVEL: ${ATOM_LOG_LEVEL:-${RUST_LOG:-info}}
       ATOM_LOG_FORMAT: ${ATOM_LOG_FORMAT:-text}
       ATOM_EMAIL_TEMPLATES_DIR: ${ATOM_EMAIL_TEMPLATES_DIR:-/email-templates}
+      ATOM_BOOTSTRAP_FILE: /etc/atom/bootstrap.yaml
+      ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
+      ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
     volumes:
       - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
       - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
+      - ${ATOM_BOOTSTRAP_FILE:-./bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
+      - ${ATOM_CALLOUTS_FILE:-./callout.yaml}:/etc/atom/callout.yaml:ro
     ports:
       - "${ATOM_DEV_HTTP_PORT:-8081}:${ATOM_DEV_HTTP_PORT:-8081}"
       - "${ATOM_DEV_GRPC_PORT:-18081}:${ATOM_DEV_GRPC_PORT:-18081}"
@@ -209,6 +233,28 @@ services:
       - "${ATOM_UI_HTTP_PORT:-3005}:${ATOM_UI_HTTP_PORT:-3005}"
     profiles:
       - atom-ui
+
+  # Demo callout receiver — always ALLOWs and prints every request. See
+  # scripts/simple-callout-server.py. Both `atom` and `atom-dev` depend on
+  # this service so `docker compose up` + `docker compose --profile dev up`
+  # both boot cleanly. Watch it with:
+  #   docker compose logs -f callout-server
+  callout-server:
+    image: python:3-slim
+    container_name: atom-callout-server
+    working_dir: /app
+    volumes:
+      - ./scripts/simple-callout-server.py:/app/callout-server.py:ro
+    command: ["python3", "-u", "callout-server.py"]
+    environment:
+      PORT: ${ATOM_CALLOUT_SERVER_PORT:-9099}
+    # No published port by default — atom reaches it over the compose network
+    # via the `callout-server` service name. Uncomment to curl from the host:
+    # ports:
+    #   - "${ATOM_CALLOUT_SERVER_PORT:-9099}:${ATOM_CALLOUT_SERVER_PORT:-9099}"
+    profiles:
+      - default
+      - dev
 
 volumes:
   postgres_data:

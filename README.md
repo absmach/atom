@@ -148,11 +148,37 @@ Object Group           = where
 
 ## Quick start
 
-There is one config file. Copy the example and start the stack:
+Create a `.env` in the repo root (gitignored) with these working local
+defaults, then start the stack:
 
 ```bash
-# 1. Create your local config
-cp .env.example .env
+# 1. Create your local config — admin login `admin` / `12345678`, password
+#    login allowed before email verification, certificates disabled, so a
+#    fresh copy boots with no SMTP, OAuth, or CA setup.
+cat > .env <<'EOF'
+COMPOSE_PROJECT_NAME=atom-local
+
+POSTGRES_USER=atom
+POSTGRES_PASSWORD=atom
+POSTGRES_DB=atom
+
+ADMIN_SECRET=12345678
+ATOM_MIN_PASSWORD_CHARS=8
+ATOM_KEY_ENCRYPTION_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+ATOM_KEY_ENCRYPTION_KEY_ID=local:v1
+ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS=false
+
+ATOM_CERTS_ENABLED=false
+ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN=true
+
+# Demo config-file bootstrap + external policy callouts. Values are host
+# paths — docker-compose bind-mounts them into the atom container at fixed
+# in-container paths under /etc/atom/. Point either at a different host file
+# to swap the demo out; kill switch is ATOM_CALLOUTS_ENABLED.
+ATOM_BOOTSTRAP_FILE=./bootstrap.yaml
+ATOM_CALLOUTS_FILE=./callout.yaml
+ATOM_CALLOUTS_ENABLED=true
+EOF
 
 # 2. Start Postgres, Atom, and the Atom Next UI
 #    (builds the images the first time; reuses them after)
@@ -162,17 +188,13 @@ make up
 make logs
 ```
 
-`.env.example` ships working local defaults: admin login `admin` /
-`12345678`, password login allowed before email verification
-(`ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN=true`), and certificates disabled, so a
-fresh copy boots with no SMTP, OAuth, or CA setup.
-
 `make up` runs Docker Compose with `.env`, `--profile default`, and
 `--profile atom-ui`. It starts:
 
 - Atom REST/GraphQL on `http://localhost:8080`
 - Atom Next UI on `http://localhost:3005`
 - Postgres on `127.0.0.1:5432`
+- A demo callout receiver (`atom-callout-server`) that echoes every request
 
 Log in to get a token:
 
@@ -189,12 +211,122 @@ backend or UI code, rebuild explicitly:
 make build      # or: make atom-build / make ui-build
 make up
 
-make down       # stop the stack
-make restart    # stop and start again (no rebuild)
+make down                # stop the stack
+make down args='-v'      # stop and wipe the postgres volume (fresh DB next boot)
+make restart             # stop and start again (no rebuild)
 ```
 
 GraphQL is available at `POST http://localhost:8080/graphql`. Migrations apply
 automatically on startup.
+
+---
+
+## Testing the demo bootstrap and callouts
+
+The compose stack ships two YAML files that exercise the config-file
+bootstrap and the external-policy callout hooks end-to-end. Everything is
+wired by `.env` + `docker-compose.yml` — no extra steps for the golden path.
+
+- **`./bootstrap.yaml`** is bind-mounted into the atom container at
+  `/etc/atom/bootstrap.yaml`. Atom applies it on startup, right after
+  migrations, and stamps every created row `managed_by='config'` — which
+  makes the row read-only through the API. Before adding new records to
+  this file, read [When to use bootstrap — and when not
+  to](#when-to-use-bootstrap--and-when-not-to): bootstrap is for the
+  static RBAC skeleton, not for the dynamic entities a downstream
+  application creates and deletes at runtime.
+- **`./callout.yaml`** is bind-mounted at `/etc/atom/callout.yaml`. It
+  routes `createEntity` and `deleteEntity` GraphQL mutations to the
+  `callout-server` container.
+- **`scripts/simple-callout-server.py`** runs inside the `callout-server`
+  container. It always returns ALLOW and prints every request to stdout —
+  flip the `"allow": True` line to `False` to test the deny path.
+
+### First-time build
+
+`ghcr.io/absmach/atom:latest` on Docker Hub is built from `main`. If you
+are on the `feat/bootstrap-config-file` branch (or any branch whose changes
+have not shipped yet), build the atom image locally first:
+
+```bash
+docker compose --profile default build atom
+make up
+```
+
+Every `make up` afterwards reuses that local image.
+
+### Watch and trigger
+
+Open two terminals:
+
+```bash
+# Terminal 1 — callout receiver output
+docker compose logs -f callout-server
+
+# Terminal 2 — atom startup + callout activity
+docker compose logs -f atom | grep -E "bootstrap file applied|callout"
+```
+
+On a fresh boot the atom terminal should print `bootstrap file applied:
+/etc/atom/bootstrap.yaml`. Then hit atom with a create + delete:
+
+```bash
+TOKEN=$(curl -sS -X POST http://localhost:8080/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"admin","secret":"12345678"}' | jq -r .token)
+
+# API-driven create — callout fires, entity is created (callout printed
+# in Terminal 1, entity id returned here)
+NEW_ID=$(curl -sS -X POST http://localhost:8080/graphql \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"mutation { createEntity(input: {kind: device, name: \"cb-test\"}) { id } }"}' \
+  | jq -r .data.createEntity.id)
+
+# API-driven delete of the same entity — callout fires again, entity removed
+curl -sS -X POST http://localhost:8080/graphql \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"query\":\"mutation { deleteEntity(id: \\\"$NEW_ID\\\") }\"}" | jq
+
+# Attempt to delete a bootstrap-provisioned entity — 409 conflict from the
+# managed_by guard; the row stays and the API surface says why.
+curl -sS -X POST http://localhost:8080/graphql \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"mutation { deleteEntity(id: \"22222222-2222-2222-2222-222222222222\") }"}' | jq
+```
+
+Confirm the config-managed rows in the database:
+
+```bash
+docker exec atom-local-postgres-1 psql -U atom -d atom -c \
+  "SELECT name, managed_by FROM entities WHERE managed_by='config'"
+```
+
+The `bootstrap-gateway`, `bootstrap-ingest`, and `admin` entities should
+all show `config`.
+
+### Toggles without touching the YAML
+
+- **Disable callouts entirely** (keeps mounts, atom skips the extension):
+  set `ATOM_CALLOUTS_ENABLED=false` in `.env` and restart atom:
+  `docker compose up -d atom`.
+- **Swap the demo bootstrap file** for a different scenario without editing
+  compose: point `ATOM_BOOTSTRAP_FILE` in `.env` at a different host file
+  (e.g. `./demos/factory.yaml`). The container-side path stays fixed at
+  `/etc/atom/bootstrap.yaml` — compose translates the mount.
+- **Test the DENY path**: edit `scripts/simple-callout-server.py`, change
+  `"allow": True` → `False, "reason": "external policy said no"`, then
+  `docker compose restart callout-server`. No atom restart needed. The
+  next `createEntity` returns that reason and no row is inserted.
+- **Publish the callout port to your host** for curl-from-terminal
+  testing: uncomment the `ports:` block in the `callout-server` service
+  in `docker-compose.yml`.
+
+### UI
+
+Config-managed rows show a "Config" badge with a lock icon and only offer
+an **Inspect** button — no Edit, no Delete. Visit `/tenants`, `/entities`,
+`/resources`, `/groups`, `/roles`, `/permission-blocks`, `/actions`, and
+`/policies` to see the same treatment across every affected resource.
 
 ### Backend development with Cargo
 
@@ -613,7 +745,7 @@ Generic application mapping:
 
 ## Configuration
 
-`.env.example` is the local template. These are the main runtime and Compose variables:
+See the Quick Start above for a working `.env` starting point. Below are the main runtime and Compose variables:
 
 | Variable                                                                                                                       | Default                                              | Description                                                                             |
 | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- | --------------------------------------------------------------------------------------- |
@@ -859,6 +991,46 @@ machine (non-human) entities and require an explicit `key`. Secrets are written
 in plaintext just like `ADMIN_SECRET`, so treat the file as a secret (restrict
 its mode, keep it out of version control). See
 [`bootstrap.example.yaml`](bootstrap.example.yaml) for a fuller example.
+
+#### When to use bootstrap — and when not to
+
+Bootstrap is meant for the **static, pre-application RBAC skeleton** that has
+to exist before any application built on top of Atom can run. Every row it
+creates is stamped `managed_by='config'`, and the API refuses to update,
+delete, or restore those rows — a `409 Conflict` is returned. The only way
+to change a config-managed row is to edit the YAML and restart Atom.
+
+Treat that as a feature for stable infrastructure, and as a footgun for
+anything the downstream application manages itself.
+
+**Good fits** (declared once, change with a release, not with user activity):
+
+- Tenants and the resources that are part of the physical or logical
+  infrastructure.
+- Platform-level system entities — the admin, service accounts for other
+  services (Magistrala, FluxMQ, etc.), gateway devices that are part of the
+  hardware topology.
+- The action catalog and applicability rules (capabilities) — these define
+  the security schema.
+- Permission blocks, roles, and role assignments that describe the security
+  *shape* of the deployment.
+- Direct policies that encode well-known static grants.
+
+**Poor fits** (created, modified, or deleted during normal application use):
+
+- End-user accounts a downstream app provisions on sign-up or invite.
+- Devices onboarded at runtime by the app or its users.
+- Resources (channels, streams, workloads) that the app creates and tears
+  down as part of normal operation.
+- Role assignments or policies that target those runtime users or devices.
+
+Everything in the second list should be created through the Atom API. Putting
+it in `bootstrap.yaml` means the API can never delete or update it — a
+downstream application that provisions its users via bootstrap can never
+off-board them — and re-provisioning through the app will collide with the
+config file on the next restart. Rule of thumb: **if a downstream service
+ever needs to write to a row after it exists, do not declare that row in
+bootstrap.**
 
 ---
 
