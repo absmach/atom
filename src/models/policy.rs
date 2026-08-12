@@ -34,6 +34,9 @@ pub struct PermissionBlock {
     pub conditions: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// `Some("config")` when provisioned from the bootstrap YAML.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +74,9 @@ pub struct RoleAssignment {
     pub subject_id: Uuid,
     pub role_id: Uuid,
     pub created_at: DateTime<Utc>,
+    /// `Some("config")` when provisioned from the bootstrap YAML.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +111,9 @@ pub struct DirectPolicy {
     pub subject_id: Uuid,
     pub permission_block_id: Uuid,
     pub created_at: DateTime<Utc>,
+    /// `Some("config")` when provisioned from the bootstrap YAML.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

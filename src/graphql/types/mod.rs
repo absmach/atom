@@ -267,6 +267,12 @@ impl Entity {
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
     }
+
+    /// `"config"` when the row was provisioned from the bootstrap YAML.
+    /// The UI uses this to disable mutation buttons on config-managed rows.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct Session(pub session_model::Session);
@@ -391,6 +397,11 @@ impl Tenant {
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct TenantInvitation(pub tenant_model::TenantInvitation);
@@ -504,6 +515,11 @@ impl Resource {
 
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -676,6 +692,11 @@ impl Group {
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct Credential(pub CredentialData);
@@ -688,6 +709,7 @@ pub struct CredentialData {
     pub status: CredentialStatus,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub managed_by: Option<String>,
 }
 
 #[Object]
@@ -718,6 +740,12 @@ impl Credential {
 
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
+    }
+
+    /// `"config"` when the credential was provisioned from the bootstrap YAML.
+    /// The UI uses this to render the row read-only.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -817,6 +845,12 @@ impl AccessToken {
 
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
+    }
+
+    /// `"config"` when the token was provisioned from the bootstrap YAML.
+    /// The UI uses this to render the row read-only.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -935,6 +969,11 @@ impl Role {
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct RolePermissionBlock(pub role_model::RolePermissionBlock);
@@ -1028,6 +1067,11 @@ impl Capability {
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct Action(pub capability_model::Capability);
@@ -1059,6 +1103,11 @@ impl Action {
     async fn updated_at(&self) -> Option<String> {
         self.0.updated_at.map(timestamp)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct ActionApplicability(pub capability_model::CapabilityApplicability);
@@ -1071,6 +1120,11 @@ impl ActionApplicability {
 
     async fn object_type(&self) -> Option<&str> {
         self.0.object_type.as_deref()
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -1109,6 +1163,11 @@ impl ActionApplicabilityEntry {
 
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -1151,6 +1210,11 @@ impl ActionAssignmentRule {
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 pub struct CapabilityApplicability(pub capability_model::CapabilityApplicability);
@@ -1163,6 +1227,11 @@ impl CapabilityApplicability {
 
     async fn object_type(&self) -> Option<&str> {
         self.0.object_type.as_deref()
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -1201,6 +1270,11 @@ impl CapabilityApplicabilityEntry {
 
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -1339,6 +1413,11 @@ impl PermissionBlock {
     async fn updated_at(&self) -> String {
         timestamp(self.0.updated_at)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 impl From<policy_model::PermissionBlock> for PermissionBlock {
@@ -1382,6 +1461,11 @@ impl RoleAssignment {
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
     }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
+    }
 }
 
 impl From<policy_model::RoleAssignment> for RoleAssignment {
@@ -1424,6 +1508,11 @@ impl DirectPolicy {
 
     async fn created_at(&self) -> String {
         timestamp(self.0.created_at)
+    }
+
+    /// `"config"` when provisioned from the bootstrap YAML.
+    async fn managed_by(&self) -> Option<&str> {
+        self.0.managed_by.as_deref()
     }
 }
 
@@ -2437,6 +2526,7 @@ impl From<identity_service::CredentialSummary> for Credential {
             status: credential.status,
             expires_at: credential.expires_at,
             created_at: credential.created_at,
+            managed_by: credential.managed_by,
         })
     }
 }
@@ -2546,6 +2636,10 @@ impl From<access_model::ExpiringCredentialItem> for Credential {
             status: credential.status,
             expires_at: Some(credential.expires_at),
             created_at: credential.created_at,
+            // ExpiringCredentialItem is a compliance report of about-to-expire
+            // rows; bootstrap credentials have no expiry, so they'll never
+            // appear here — leave managed_by as None.
+            managed_by: None,
         })
     }
 }

@@ -33,7 +33,7 @@ DEV_UI_PORT ?= 3000
 .PHONY: help db dev build latest release release-check atom-build docker_atom_dev ui-build up down logs restart docker-build docker-build-release proto proto-lint proto-check
 
 help:
-	@echo "First run: cp .env.example .env"
+	@echo "First run: create .env in the repo root — see README Quick Start"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  make build               Rebuild Atom backend + Atom UI images (run after code changes)"
@@ -161,7 +161,7 @@ logs:
 	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) logs -f atom atom-ui
 
 down:
-	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) down
+	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) down $(args)
 
 docker-build:
 	docker build \

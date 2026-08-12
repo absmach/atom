@@ -14,6 +14,7 @@ use crate::{
     auth::{authenticate_token, require_any_capability, scope_for_tenant, AuthContext, Scope},
     authz::{access, engine, repo},
     broker_auth::{service::BrokerAuthServiceServer, BrokerAuth},
+    callout::{envelope::Actor as CalloutActor, CalloutOutcome, Surface},
     certs,
     identity::service as identity_service,
     models::{
@@ -39,6 +40,74 @@ use proto::{
     ResolveCertificateRequest, ResolveCertificateResponse, RevokeEntityCertificatesRequest,
     RevokeEntityCertificatesResponse,
 };
+
+/// gRPC operation identifiers used by the callout config's `surface: grpc`
+/// entries. Kept as `const` so config typos surface at grep, not runtime.
+mod callout_ops {
+    pub const AUTHZ_CHECK: &str = "atom.v1.AuthzService/Check";
+    pub const AUTH_AUTHENTICATE: &str = "atom.v1.AuthService/Authenticate";
+    pub const AUTH_AUTHENTICATE_CREDENTIAL: &str = "atom.v1.AuthService/AuthenticateCredential";
+    pub const CERT_RESOLVE: &str = "atom.v1.CertificateService/ResolveCertificate";
+    pub const CERT_REVOKE_ENTITY: &str = "atom.v1.CertificateService/RevokeEntityCertificates";
+    pub const ALIAS_RESOLVE: &str = "atom.v1.AliasService/ResolveAlias";
+}
+
+/// Consult the external policy chain for a gRPC method. Returns `Ok(())` on
+/// allow or when no callout is configured. On deny returns
+/// `Status::permission_denied`; on transport failure follows the per-endpoint
+/// `on_error` policy (deny by default). Also writes a `callout.deny` audit row
+/// fire-and-forget for observability.
+async fn callout_check_grpc(
+    state: &AppState,
+    auth: &AuthContext,
+    operation: &'static str,
+    args: serde_json::Value,
+) -> Result<(), Status> {
+    let actor = CalloutActor::from_auth(auth);
+    let outcome = state
+        .callouts
+        .check(Surface::Grpc, operation, actor, args)
+        .await;
+    match outcome {
+        CalloutOutcome::Allow | CalloutOutcome::NotConfigured => Ok(()),
+        CalloutOutcome::Deny {
+            reason,
+            endpoint_id,
+        } => {
+            let pool = state.pool.clone();
+            let actor_id = (!auth.entity_id.is_nil()).then_some(auth.entity_id);
+            let tenant_id = auth.tenant_id;
+            let events_enabled = state.config.events.enabled();
+            let op_name = operation.to_string();
+            let reason_for_audit = reason.clone();
+            let endpoint_for_audit = endpoint_id.clone();
+            tokio::spawn(async move {
+                audit::write(
+                    &pool,
+                    events_enabled,
+                    audit::AuditEvent {
+                        actor_entity_id: actor_id,
+                        tenant_id,
+                        target_kind: Some("callout"),
+                        target_id: None,
+                        event: "callout.deny",
+                        outcome: AuditOutcome::Deny,
+                        details: serde_json::json!({
+                            "operation": op_name,
+                            "surface": "grpc",
+                            "endpoint": endpoint_for_audit,
+                            "reason": reason_for_audit,
+                        }),
+                    },
+                )
+                .await;
+            });
+            Err(Status::permission_denied(format!(
+                "callout denied ({endpoint_id}): {reason}"
+            )))
+        }
+    }
+}
 
 fn authz_request_target(req: &AuthzRequest) -> (Option<&str>, Option<Uuid>) {
     match (req.object_kind.as_deref(), req.object_id) {
@@ -102,6 +171,20 @@ impl AuthzService for AtomAuthz {
             object_id,
             context,
         };
+
+        callout_check_grpc(
+            &self.state,
+            &auth,
+            callout_ops::AUTHZ_CHECK,
+            serde_json::json!({
+                "subject_id": authz_req.subject_id,
+                "action": authz_req.action,
+                "resource_id": authz_req.resource_id,
+                "object_kind": authz_req.object_kind,
+                "object_id": authz_req.object_id,
+            }),
+        )
+        .await?;
 
         let tenant_id = access::authz_request_tenant_id(&self.state.pool, &authz_req)
             .await
@@ -193,6 +276,16 @@ impl AuthService for AtomAuth {
             .await
             .map_err(Status::from)?;
 
+        // Callout runs post-authn, so the actor block is populated. Token
+        // itself is deliberately not forwarded.
+        callout_check_grpc(
+            &self.state,
+            &ctx,
+            callout_ops::AUTH_AUTHENTICATE,
+            serde_json::json!({}),
+        )
+        .await?;
+
         Ok(Response::new(AuthenticateResponse {
             entity_id: ctx.entity_id.to_string(),
             tenant_id: ctx.tenant_id.map(|t| t.to_string()).unwrap_or_default(),
@@ -223,6 +316,18 @@ impl AuthService for AtomAuth {
         .map_err(Status::from)?;
 
         require_credential_auth_access(&self.state.pool, &auth, tenant_id).await?;
+
+        callout_check_grpc(
+            &self.state,
+            &auth,
+            callout_ops::AUTH_AUTHENTICATE_CREDENTIAL,
+            serde_json::json!({
+                "identifier": req.identifier,
+                "kind": req.kind,
+                "tenant_id": tenant_id,
+            }),
+        )
+        .await?;
 
         let result = identity_service::authenticate_credential_in_tenant(
             &self.state.pool,
@@ -312,6 +417,16 @@ impl CertificateService for AtomCertificates {
     ) -> Result<Response<ResolveCertificateResponse>, Status> {
         let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
         let req = request.into_inner();
+        callout_check_grpc(
+            &self.state,
+            &auth,
+            callout_ops::CERT_RESOLVE,
+            serde_json::json!({
+                "serial_number": req.serial_number,
+                "fingerprint_sha256": req.fingerprint_sha256,
+            }),
+        )
+        .await?;
         let identity = certs::service::resolve_certificate_identity(
             &self.state.pool,
             &req.serial_number,
@@ -349,6 +464,16 @@ impl CertificateService for AtomCertificates {
         let req = request.into_inner();
         let entity_id = Uuid::parse_str(&req.entity_id)
             .map_err(|_| Status::invalid_argument("invalid entity_id: expected UUID"))?;
+        callout_check_grpc(
+            &self.state,
+            &auth,
+            callout_ops::CERT_REVOKE_ENTITY,
+            serde_json::json!({
+                "entity_id": entity_id,
+                "reason": req.reason,
+            }),
+        )
+        .await?;
         let tenant_id = certs::repo::entity_tenant_id(&self.state.pool, entity_id)
             .await
             .map_err(Status::from)?;
@@ -413,8 +538,21 @@ impl AliasService for AtomAlias {
     ) -> Result<Response<ResolveAliasResponse>, Status> {
         // Authenticate the caller; resolution itself is capability-neutral — the
         // subsequent AuthzService.Check by UUID is the authorization gate.
-        let _auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
+        let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
         let req = request.into_inner();
+        callout_check_grpc(
+            &self.state,
+            &auth,
+            callout_ops::ALIAS_RESOLVE,
+            serde_json::json!({
+                "tenant_id": req.tenant_id,
+                "tenant_alias": req.tenant_alias,
+                "global": req.global,
+                "object_kind": req.object_kind,
+                "object_alias": req.object_alias,
+            }),
+        )
+        .await?;
 
         let tenant_id = if req.tenant_id.is_empty() {
             None

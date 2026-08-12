@@ -20,6 +20,14 @@ pub struct Entity {
     pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// `Some("config")` when the row was provisioned from the bootstrap YAML
+    /// (see src/bootstrap.rs). The API rejects update/delete/restore of these
+    /// rows with 409 conflict; the UI uses this flag to render them read-only.
+    /// Marked `sqlx(default)` so RETURNING / older SELECTs that omit the
+    /// column still hydrate cleanly — the read paths that surface this to the
+    /// UI explicitly include it.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

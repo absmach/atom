@@ -19,6 +19,11 @@ pub struct Tenant {
     pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// `Some("config")` when provisioned from the bootstrap YAML. The API
+    /// rejects update/restore with 409 conflict; the UI renders the row
+    /// read-only.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

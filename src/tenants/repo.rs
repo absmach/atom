@@ -18,7 +18,7 @@ use crate::{
 };
 
 const TENANT_COLS: &str =
-    "id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at";
+    "id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at, managed_by";
 const INVITATION_COLS: &str =
     "ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
      ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
@@ -497,6 +497,7 @@ pub async fn update_tenant_with_audit(
     req: UpdateTenant,
     updated_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
@@ -554,6 +555,7 @@ pub async fn soft_delete_tenant_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
@@ -633,6 +635,7 @@ pub async fn restore_tenant_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     let tenant = sqlx::query_as::<_, Tenant>(&format!(

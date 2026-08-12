@@ -44,6 +44,10 @@ pub struct AccessTokenSummary {
     /// granularity. `None` = never used.
     pub last_used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// `Some("config")` when provisioned from the bootstrap YAML. The UI
+    /// renders these read-only; the API rejects revoke and permission-replace
+    /// with 409 conflict.
+    pub managed_by: Option<String>,
 }
 
 /// A ceiling entry rendered for display in the token list.

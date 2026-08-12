@@ -9,12 +9,19 @@ pub struct Capability {
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// `Some("config")` when provisioned from the bootstrap YAML. The UI
+    /// uses this to render the row read-only; the API rejects update/delete
+    /// with 409 conflict.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CapabilityApplicability {
     pub object_kind: String,
     pub object_type: Option<String>,
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -25,6 +32,8 @@ pub struct CapabilityApplicabilityEntry {
     pub object_kind: String,
     pub object_type: Option<String>,
     pub created_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    certs::service::CertificateIssuer, config::Config, events::publisher::EventPublisher,
-    keys::ActiveKeys, rate_limit::RateLimiter,
+    callout::CalloutService, certs::service::CertificateIssuer, config::Config,
+    events::publisher::EventPublisher, keys::ActiveKeys, rate_limit::RateLimiter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,10 @@ pub struct AppState {
     /// Set via [`AppState::with_event_publisher`], since connecting to a
     /// broker is an async operation `AppState::new` (sync) can't perform.
     pub event_publisher: Option<Arc<dyn EventPublisher>>,
+    /// Callout service — dispatches per-op callouts to configured external
+    /// policy endpoints. When callouts are disabled or unconfigured, this is
+    /// a cheap no-op ([`CalloutService::disabled`]).
+    pub callouts: CalloutService,
     grpc_status: Arc<RwLock<GrpcRuntimeStatus>>,
 }
 
@@ -80,6 +84,7 @@ impl AppState {
             certificate_issuer: certificate_issuer.map(Arc::new),
             rate_limiter: Arc::new(RateLimiter::default()),
             event_publisher: None,
+            callouts: CalloutService::disabled(),
             grpc_status: Arc::new(RwLock::new(grpc_status)),
         }
     }
@@ -89,6 +94,14 @@ impl AppState {
     /// affect any other field.
     pub fn with_event_publisher(mut self, publisher: Arc<dyn EventPublisher>) -> Self {
         self.event_publisher = Some(publisher);
+        self
+    }
+
+    /// Installs a built callout service (built in `main.rs` because endpoint
+    /// setup — TLS/mTLS load, gRPC connect — is async). Defaults to
+    /// [`CalloutService::disabled`] when unset.
+    pub fn with_callouts(mut self, callouts: CalloutService) -> Self {
+        self.callouts = callouts;
         self
     }
 

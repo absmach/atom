@@ -23,6 +23,15 @@
     - [AuthzService](#atom-v1-AuthzService)
     - [CertificateService](#atom-v1-CertificateService)
   
+- [atom/v1/callout.proto](#atom_v1_callout-proto)
+    - [Actor](#atom-v1-Actor)
+    - [CalloutServiceCheckRequest](#atom-v1-CalloutServiceCheckRequest)
+    - [CalloutServiceCheckResponse](#atom-v1-CalloutServiceCheckResponse)
+  
+    - [CalloutServiceCheckResponse.Decision](#atom-v1-CalloutServiceCheckResponse-Decision)
+  
+    - [CalloutService](#atom-v1-CalloutService)
+  
 - [Scalar Value Types](#scalar-value-types)
 
 
@@ -307,6 +316,115 @@ runtime services that terminate mTLS outside Atom.
 | ----------- | ------------ | ------------- | ------------|
 | ResolveCertificate | [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest) | [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse) |  |
 | RevokeEntityCertificates | [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest) | [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse) |  |
+
+ 
+
+
+
+<a name="atom_v1_callout-proto"></a>
+<p align="right"><a href="#top">Top</a></p>
+
+## atom/v1/callout.proto
+
+
+
+<a name="atom-v1-Actor"></a>
+
+### Actor
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entity_id | [string](#string) |  |  |
+| tenant_id | [string](#string) |  |  |
+| scope | [string](#string) |  | &#34;session&#34; | &#34;access_token&#34; | &#34;&#34; |
+| credential_id | [string](#string) |  |  |
+| source_ip | [string](#string) |  |  |
+| user_agent | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="atom-v1-CalloutServiceCheckRequest"></a>
+
+### CalloutServiceCheckRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| operation | [string](#string) |  | Operation identifier — a GraphQL resolver name (e.g. &#34;createEntity&#34;) or a fully-qualified gRPC method (&#34;atom.v1.AuthzService/Check&#34;). |
+| surface | [string](#string) |  | Which atom surface the call is originating from.
+
+&#34;graphql&#34; | &#34;grpc&#34; |
+| request_id | [string](#string) |  | Correlation id atom assigns to each callout request. |
+| time | [string](#string) |  | RFC-3339 UTC timestamp when the callout was issued. |
+| actor | [Actor](#atom-v1-Actor) |  | The authenticated caller. Populated from atom&#39;s AuthContext post-authn, so it is safe to trust here for policy evaluation. |
+| args | [google.protobuf.Struct](#google-protobuf-Struct) |  | The operation&#39;s arguments, filtered by the per-operation `include:` list in atom&#39;s config. A whitelist is applied and a hard denylist strips any obviously-sensitive keys (secret, password, key) as a safety net. |
+| extra | [google.protobuf.Struct](#google-protobuf-Struct) |  | Static key/value pairs merged in from config (`extra:` per operation). |
+
+
+
+
+
+
+<a name="atom-v1-CalloutServiceCheckResponse"></a>
+
+### CalloutServiceCheckResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| decision | [CalloutServiceCheckResponse.Decision](#atom-v1-CalloutServiceCheckResponse-Decision) |  |  |
+| reason | [string](#string) |  | Human-readable reason surfaced back to the caller on deny. |
+
+
+
+
+
+ 
+
+
+<a name="atom-v1-CalloutServiceCheckResponse-Decision"></a>
+
+### CalloutServiceCheckResponse.Decision
+DECISION_UNSPECIFIED is the zero value and is treated as DENY at runtime
+to preserve atom&#39;s default-deny invariant: an unset or undecodable
+response never accidentally allows the operation.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| DECISION_UNSPECIFIED | 0 |  |
+| DECISION_ALLOW | 1 |  |
+| DECISION_DENY | 2 |  |
+
+
+ 
+
+ 
+
+
+<a name="atom-v1-CalloutService"></a>
+
+### CalloutService
+CalloutService is the wire contract atom speaks with an external policy
+service.
+
+Atom sends one Check() per intercepted operation, before executing it. The
+external service inspects the operation, actor and per-operation args, and
+replies with ALLOW (proceed) or DENY (short-circuit with the given reason).
+Multiple endpoints may be chained in config; atom calls them in order and
+fails fast on the first non-ALLOW response.
+
+See docs in AGENTS.md and callouts.example.yaml for the config-side view.
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| Check | [CalloutServiceCheckRequest](#atom-v1-CalloutServiceCheckRequest) | [CalloutServiceCheckResponse](#atom-v1-CalloutServiceCheckResponse) |  |
 
  
 

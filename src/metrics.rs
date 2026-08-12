@@ -36,6 +36,11 @@ pub const EVENT_OUTBOX_PUBLISH_FAILURES: &str = "atom_event_outbox_publish_failu
 pub const EVENT_OUTBOX_EXHAUSTED: &str = "atom_event_outbox_exhausted_total";
 /// Gauge of DB pool connections, labelled by `state` (total|idle).
 pub const DB_POOL_CONNECTIONS: &str = "atom_db_pool_connections";
+/// Counter of callout attempts, labelled by `operation`, `endpoint`,
+/// `transport`, and `result` (allow|deny|transport_error|timeout).
+pub const CALLOUT_CALLS: &str = "atom_callout_calls_total";
+/// Histogram (seconds) of end-to-end callout latency per endpoint.
+pub const CALLOUT_DURATION: &str = "atom_callout_call_duration_seconds";
 
 #[cfg(feature = "metrics")]
 mod backend {
@@ -102,6 +107,32 @@ mod backend {
     pub fn record_outbox_exhausted() {
         metrics::counter!(EVENT_OUTBOX_EXHAUSTED).increment(1);
     }
+
+    pub fn record_callout(
+        operation: &str,
+        endpoint: &str,
+        transport: &'static str,
+        result: &'static str,
+        elapsed: Duration,
+    ) {
+        // Operation and endpoint labels are bounded by the callout config
+        // (finite, operator-controlled) — safe as high-cardinality labels.
+        metrics::counter!(
+            CALLOUT_CALLS,
+            "operation" => operation.to_string(),
+            "endpoint" => endpoint.to_string(),
+            "transport" => transport,
+            "result" => result,
+        )
+        .increment(1);
+        metrics::histogram!(
+            CALLOUT_DURATION,
+            "operation" => operation.to_string(),
+            "endpoint" => endpoint.to_string(),
+            "transport" => transport,
+        )
+        .record(elapsed.as_secs_f64());
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -130,9 +161,19 @@ mod backend {
     pub fn record_outbox_publish_failure(_rows: u64) {}
     #[inline]
     pub fn record_outbox_exhausted() {}
+    #[inline]
+    pub fn record_callout(
+        _operation: &str,
+        _endpoint: &str,
+        _transport: &'static str,
+        _result: &'static str,
+        _elapsed: Duration,
+    ) {
+    }
 }
 
 pub use backend::{
-    enabled, init, record_audit_db_suppressed, record_audit_failure, record_decision,
-    record_outbox_exhausted, record_outbox_publish_failure, record_rate_limit_rejection, render,
+    enabled, init, record_audit_db_suppressed, record_audit_failure, record_callout,
+    record_decision, record_outbox_exhausted, record_outbox_publish_failure,
+    record_rate_limit_rejection, render,
 };

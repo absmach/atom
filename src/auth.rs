@@ -136,7 +136,7 @@ pub fn make_api_key(cred_id: Uuid, secret_bytes: &[u8; 32]) -> String {
     format!("atom_{id_hex}_{secret_hex}")
 }
 
-fn parse_api_key(key: &str) -> Option<(Uuid, [u8; 32])> {
+pub fn parse_api_key(key: &str) -> Option<(Uuid, [u8; 32])> {
     let rest = key.strip_prefix("atom_")?;
     if rest.len() != 32 + 1 + 64 {
         return None;

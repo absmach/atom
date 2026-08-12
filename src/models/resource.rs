@@ -18,6 +18,9 @@ pub struct Resource {
     pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// `Some("config")` when provisioned from the bootstrap YAML.
+    #[sqlx(default)]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

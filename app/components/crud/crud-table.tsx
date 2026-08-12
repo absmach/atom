@@ -28,6 +28,7 @@ import { CrudInspectSheet } from "@/components/crud/table/inspect-sheet";
 import type { CrudTableProps, Row } from "@/components/crud/table/types";
 import {
   defer,
+  isConfigManagedRow,
   isDeletedRow,
   singularize,
   tenantActionPastTense,
@@ -438,6 +439,21 @@ function TableRowActions({
   row: Row;
   tenantStatusPending: boolean;
 }) {
+  // Rows carrying `managed_by='config'` in the database were provisioned
+  // from the Atom bootstrap YAML. The API rejects update/delete/restore on
+  // them with 409 conflict, so hide the mutation buttons and offer only
+  // Inspect — mirrors the isDeletedRow pattern below. See
+  // components/crud/managed-by-badge.tsx.
+  if (isConfigManagedRow(row)) {
+    return (
+      <div className="flex justify-end gap-2">
+        <Button onClick={onInspect} size="sm" variant="outline">
+          Inspect
+        </Button>
+      </div>
+    );
+  }
+
   if (isDeletedRow(row)) {
     return (
       <div className="flex justify-end gap-2">

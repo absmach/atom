@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
+import { ManagedByBadge } from "@/components/crud/managed-by-badge";
 import { StatusBadge } from "@/components/crud/status-badge";
 import { DisplayTimeCell } from "@/components/display-time";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +35,7 @@ const CREDENTIALS_QUERY = `
         identifier
         expiresAt
         createdAt
+        managedBy
       }
       total
     }
@@ -63,6 +65,7 @@ const ENTITY_ACCESS_TOKENS_QUERY = `
         credentialId
         name
         scoped
+        managedBy
         permissions {
           actions
           scopeMode
@@ -177,6 +180,7 @@ type Credential = {
   identifier: string | null;
   expiresAt: string | null;
   createdAt: string;
+  managedBy: string | null;
 };
 
 type CredentialKind = "password" | "api_key" | "shared_key" | "certificate";
@@ -194,6 +198,7 @@ type EntityAccessToken = {
   credentialId: string;
   name: string;
   scoped: boolean;
+  managedBy: string | null;
   permissions: TokenPermission[];
   lastUsedAt: string | null;
 };
@@ -958,6 +963,11 @@ function CredentialRow({
   downloading: boolean;
   revealing: boolean;
 }) {
+  // Config-managed credentials are provisioned from the bootstrap YAML; the
+  // API refuses revoke/reveal/replace with 409 (or, for reveal, not_found),
+  // so hide the action buttons entirely and surface the badge instead.
+  const configManaged =
+    cred.managedBy === "config" || token?.managedBy === "config";
   return (
     <div className="flex items-start justify-between gap-3 rounded-lg border bg-background p-3">
       <div className="flex min-w-0 items-start gap-2">
@@ -969,6 +979,7 @@ function CredentialRow({
             </span>
             <StatusBadge value={cred.status} />
             {token?.scoped ? <Badge variant="outline">scoped</Badge> : null}
+            <ManagedByBadge managedBy={cred.managedBy ?? token?.managedBy} />
           </div>
           {cred.identifier ? (
             <div className="font-mono text-xs text-muted-foreground truncate">
@@ -1015,7 +1026,7 @@ function CredentialRow({
           </div>
         </div>
       </div>
-      {cred.status === "active" ? (
+      {cred.status === "active" && !configManaged ? (
         <div className="flex shrink-0 gap-1">
           {onDownload ? (
             <Button

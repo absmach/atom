@@ -189,6 +189,22 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
     // A resource with tenant_id = NULL (platform-scoped) must NOT be denied
     // by the lifecycle check.
     let p = pool().await;
+    // `publish` applicability on `resource:channel` is product-specific and
+    // migration 007 removes the seeded row; declare it inline so the
+    // capability lookup succeeds and the request reaches the lifecycle path.
+    // Sibling lifecycle-deny tests pass without this because tenant-frozen
+    // deny short-circuits before applicability is checked; this platform test
+    // has no tenant to short-circuit on.
+    sqlx::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           SELECT id, 'resource', 'resource:channel'
+             FROM actions WHERE name = 'publish'
+           ON CONFLICT DO NOTHING"#,
+    )
+    .execute(&p)
+    .await
+    .expect("seed publish applicability");
+
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
         .bind(id)

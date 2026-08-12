@@ -111,7 +111,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query_as::<_, Resource>(
-        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at FROM resources WHERE id = $1 AND deleted_at IS NULL",
+        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_one(executor)
@@ -164,7 +164,7 @@ pub async fn list_resources(
                WHERE $5::boolean
            )
            SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes,
-                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at
+                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at, r.managed_by
            FROM resources r
            LEFT JOIN group_resource_parents grp ON grp.resource_id = r.id
            WHERE ($1::text IS NULL OR r.kind = $1)
@@ -234,6 +234,7 @@ pub async fn update_resource_with_audit(
     req: UpdateResource,
     updated_fields: Vec<&'static str>,
 ) -> Result<Resource, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let parent_group_id = req
         .attributes
         .as_ref()
@@ -326,6 +327,7 @@ pub async fn delete_resource_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
@@ -376,6 +378,7 @@ pub async fn restore_resource_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
@@ -1923,7 +1926,7 @@ pub async fn list_permission_blocks(
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, PermissionBlock>(
         r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
-                  effect, conditions, created_at, updated_at
+                  effect, conditions, created_at, updated_at, managed_by
            FROM permission_blocks
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR scope_mode = $2)
@@ -2040,6 +2043,7 @@ pub async fn delete_permission_block_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "permission_blocks", id).await?;
     // Blocks are shared: refuse to delete one still linked to a role or attached
     // to a direct policy, so an explicit delete cannot cascade live links away.
     //
@@ -2253,7 +2257,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     }
 
     let items = sqlx::query_as::<_, Role>(
-        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
+        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
@@ -2796,6 +2800,7 @@ pub async fn delete_role_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
@@ -2845,6 +2850,7 @@ pub async fn restore_role_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
@@ -3110,7 +3116,7 @@ pub async fn create_capability_with_audit(
 
 pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppError> {
     sqlx::query_as::<_, Capability>(
-        "SELECT id, name, description, created_at, updated_at FROM actions WHERE id = $1",
+        "SELECT id, name, description, created_at, updated_at, managed_by FROM actions WHERE id = $1",
     )
     .bind(id)
     .fetch_one(pool)
@@ -3129,7 +3135,7 @@ pub async fn list_capabilities(
     let offset = params.offset.max(0);
 
     let items = sqlx::query_as::<_, Capability>(
-        r#"SELECT id, name, description, created_at, updated_at FROM actions c
+        r#"SELECT id, name, description, created_at, updated_at, managed_by FROM actions c
            WHERE (
                $1::text IS NULL
                OR EXISTS (
@@ -3177,7 +3183,7 @@ pub async fn capability_applicability(
     capability_id: Uuid,
 ) -> Result<Vec<CapabilityApplicability>, AppError> {
     sqlx::query_as::<_, CapabilityApplicability>(
-        r#"SELECT object_kind, object_type
+        r#"SELECT object_kind, object_type, managed_by
            FROM action_applicability
            WHERE action_id = $1
            ORDER BY object_kind, object_type NULLS FIRST"#,
@@ -3215,7 +3221,8 @@ pub async fn list_capability_applicability(
                   c.description,
                   ca.object_kind,
                   ca.object_type,
-                  ca.created_at
+                  ca.created_at,
+                  ca.managed_by
            FROM action_applicability ca
            JOIN actions c ON c.id = ca.action_id
            WHERE ($3::text IS NULL OR c.name ILIKE $3)
@@ -3257,7 +3264,7 @@ pub async fn get_action_assignment_rule(
 ) -> Result<ActionAssignmentRule, AppError> {
     sqlx::query_as::<_, ActionAssignmentRule>(
         r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                  decision, is_absolute, created_at
+                  decision, is_absolute, created_at, managed_by
            FROM action_assignment_rules
            WHERE id = $1"#,
     )
@@ -3284,7 +3291,7 @@ pub async fn list_action_assignment_rules(
 
     let items = sqlx::query_as::<_, ActionAssignmentRule>(
         r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                  decision, is_absolute, created_at
+                  decision, is_absolute, created_at, managed_by
            FROM action_assignment_rules
            WHERE tenant_id IS NOT DISTINCT FROM $3
              AND ($4::text IS NULL OR entity_kind = $4)
@@ -3458,6 +3465,7 @@ pub async fn delete_action_assignment_rule_with_audit(
     id: Uuid,
     transport: &str,
 ) -> Result<ActionAssignmentRule, AppError> {
+    ensure_not_config_managed_rule(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let rule = sqlx::query_as::<_, ActionAssignmentRule>(
         r#"DELETE FROM action_assignment_rules
@@ -3493,6 +3501,72 @@ pub async fn delete_action_assignment_rule_with_audit(
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(rule)
+}
+
+async fn ensure_not_config_managed_capability(
+    pool: &PgPool,
+    capability_id: Uuid,
+) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM actions WHERE id = $1")
+            .bind(capability_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found(format!(
+            "capability {capability_id} not found"
+        ))),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "capability is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
+}
+
+async fn ensure_not_config_managed_applicability(
+    pool: &PgPool,
+    capability_id: Uuid,
+    object_kind: &str,
+    object_type: Option<&str>,
+) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> = sqlx::query_scalar(
+        r#"SELECT managed_by FROM action_applicability
+           WHERE action_id = $1
+             AND object_kind = $2
+             AND object_type IS NOT DISTINCT FROM $3"#,
+    )
+    .bind(capability_id)
+    .bind(object_kind)
+    .bind(object_type)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    match managed_by {
+        None => Ok(()),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "capability applicability is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
+}
+
+async fn ensure_not_config_managed_rule(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM action_assignment_rules WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found(format!(
+            "action assignment rule {id} not found"
+        ))),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "action assignment rule is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub async fn add_capability_applicability(
@@ -3552,7 +3626,8 @@ pub async fn add_capability_applicability_with_audit(
                   c.description,
                   ca.object_kind,
                   ca.object_type,
-                  ca.created_at
+                  ca.created_at,
+                  ca.managed_by
            FROM action_applicability ca
            JOIN actions c ON c.id = ca.action_id
            WHERE ca.action_id = $1
@@ -3607,6 +3682,13 @@ pub async fn remove_capability_applicability_with_audit(
     object_kind: String,
     object_type: Option<String>,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_applicability(
+        pool,
+        capability_id,
+        &object_kind,
+        object_type.as_deref(),
+    )
+    .await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let result = sqlx::query(
         r#"DELETE FROM action_applicability
@@ -3679,6 +3761,7 @@ pub async fn update_capability_with_audit(
     id: Uuid,
     req: crate::models::capability::UpdateCapability,
 ) -> Result<Capability, AppError> {
+    ensure_not_config_managed_capability(pool, id).await?;
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let updated = sqlx::query_as::<_, Capability>(
         r#"UPDATE actions
@@ -3723,6 +3806,23 @@ async fn replace_capability_applicability_in_tx(
     capability_id: Uuid,
     applicability: &[CapabilityApplicabilityInput],
 ) -> Result<(), AppError> {
+    // Refuse to blow away applicability rows that were declared in the
+    // bootstrap config, even when the parent capability itself is API-managed.
+    let has_managed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM action_applicability
+                        WHERE action_id = $1 AND managed_by = 'config')",
+    )
+    .bind(capability_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if has_managed {
+        return Err(AppError::conflict(
+            "capability has applicability rows managed by the bootstrap config file; \
+             use addCapabilityApplicability / removeCapabilityApplicability instead",
+        ));
+    }
+
     sqlx::query("DELETE FROM action_applicability WHERE action_id = $1")
         .bind(capability_id)
         .execute(&mut **tx)
@@ -3760,6 +3860,7 @@ pub async fn delete_capability_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_capability(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let result = sqlx::query("DELETE FROM actions WHERE id = $1")
         .bind(id)
@@ -4035,6 +4136,7 @@ pub async fn delete_role_assignment_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "role_assignments", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let assignment_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
@@ -4122,7 +4224,7 @@ pub async fn list_role_assignments(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, RoleAssignment>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
+        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at, managed_by
            FROM role_assignments
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4246,7 +4348,7 @@ pub async fn list_direct_policies(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let items = sqlx::query_as::<_, DirectPolicy>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
+        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at, managed_by
            FROM direct_policies
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR subject_kind = $2)
@@ -4313,6 +4415,7 @@ pub async fn delete_direct_policy_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "direct_policies", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let policy_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
@@ -4645,6 +4748,10 @@ pub async fn subject_role_assignments(
                     deleted_by: None,
                     created_at: row.try_get("role_created_at").map_err(db_err)?,
                     updated_at: row.try_get("role_updated_at").map_err(db_err)?,
+                    // Explain view; only surfaces role identity, not lifecycle
+                    // metadata. Leave managed_by unset — the UI reads it via
+                    // list_roles / get_role, not this SELECT.
+                    managed_by: None,
                 },
             })
         })

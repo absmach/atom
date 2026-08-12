@@ -18,6 +18,53 @@ use crate::{
 
 pub const AUTHENTICATED_USERS_GROUP_ID: Uuid = Uuid::from_u128(5);
 
+/// Refuse mutations against an entity provisioned from the bootstrap config
+/// file. Config-managed entities can only be reshaped by editing the YAML and
+/// restarting Atom, so all API-facing update/delete/restore paths funnel
+/// through this guard.
+pub async fn ensure_not_config_managed_entity(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found(format!("entity {id} not found"))),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "entity is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Companion for credential mutations. Config-managed credentials are visible
+/// in list/read responses (so the UI can flag them read-only), but mutation
+/// endpoints (revoke, replace ceiling) reject them with 409 conflict so the
+/// operator's declared row can only be reshaped by editing the YAML.
+///
+/// `reveal_shared_key` uses a different guard — it must not return the
+/// plaintext key of a config-managed row and returns not_found instead, per
+/// its own module.
+pub async fn ensure_not_config_managed_credential(
+    pool: &PgPool,
+    cred_id: Uuid,
+) -> Result<(), AppError> {
+    let managed_by: Option<Option<String>> =
+        sqlx::query_scalar("SELECT managed_by FROM credentials WHERE id = $1")
+            .bind(cred_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_err)?;
+    match managed_by {
+        None => Err(AppError::not_found("credential not found")),
+        Some(Some(value)) if value == "config" => Err(AppError::conflict(
+            "credential is managed by the bootstrap config file and cannot be modified via the API",
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub async fn lock_active_entity(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
@@ -79,7 +126,7 @@ pub async fn create_entity_with_audit(
            (id, kind, name, alias, tenant_id, profile_id, profile_version_id, attributes)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at"#,
+                     status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by"#,
     )
     .bind(id)
     .bind(kind)
@@ -150,7 +197,7 @@ where
 {
     sqlx::query_as::<_, Entity>(
         r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                  status, attributes, deleted_at, deleted_by, created_at, updated_at
+                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM entities
            WHERE id = $1 AND deleted_at IS NULL"#,
     )
@@ -170,7 +217,7 @@ pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Ent
 
     sqlx::query_as::<_, Entity>(
         r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                  status, attributes, deleted_at, deleted_by, created_at, updated_at
+                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM entities
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY array_position($1::uuid[], id)"#,
@@ -278,6 +325,7 @@ pub async fn update_entity_with_audit(
     event_name: &str,
     audit_details: Value,
 ) -> Result<Entity, AppError> {
+    ensure_not_config_managed_entity(pool, id).await?;
     let attributes = req.attributes.clone().map(normalize_attributes);
     let parent_group_id = attributes
         .as_ref()
@@ -339,7 +387,7 @@ pub async fn update_entity_with_audit(
                updated_at         = now()
            WHERE id = $1 AND deleted_at IS NULL
            RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at"#,
+                     status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by"#,
     )
     .bind(id)
     .bind(req.name)
@@ -707,6 +755,7 @@ pub async fn delete_entity_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_entity(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     let tenant_id: Option<Option<Uuid>> =
@@ -802,6 +851,7 @@ pub async fn restore_entity_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_entity(pool, id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
@@ -1110,7 +1160,7 @@ where
 {
     sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
-                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at
+                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at, g.managed_by
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
            WHERE g.id = $1 AND g.deleted_at IS NULL"#,
@@ -1131,7 +1181,7 @@ pub async fn list_groups_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Group
 
     sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
-                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at
+                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at, g.managed_by
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
            WHERE g.id = ANY($1::uuid[]) AND g.deleted_at IS NULL
@@ -1153,7 +1203,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
 
     let items = sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
-                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at
+                  g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at, g.managed_by
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
            WHERE ($1::uuid IS NULL OR g.tenant_id = $1)
@@ -1471,6 +1521,7 @@ pub async fn update_group_with_audit(
     event_name: &str,
     audit_details: Value,
 ) -> Result<Group, AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let attributes = req.attributes.clone().map(normalize_attributes);
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
@@ -1556,6 +1607,7 @@ pub async fn delete_group_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
@@ -1616,6 +1668,7 @@ pub async fn restore_group_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 

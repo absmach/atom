@@ -3,6 +3,7 @@ use async_graphql::{EmptySubscription, Schema};
 use crate::state::AppState;
 
 use super::{
+    callout_ext::CalloutExtensionFactory,
     mutation::{mutation_root, MutationRoot},
     query::QueryRoot,
 };
@@ -14,6 +15,7 @@ pub fn build_schema(state: AppState) -> AtomSchema {
     let builder = Schema::build(QueryRoot::default(), mutation_root(), EmptySubscription)
         .limit_depth(limits.max_depth)
         .limit_complexity(limits.max_complexity)
+        .extension(CalloutExtensionFactory)
         .data(state)
         .disable_suggestions();
     if limits.introspection_enabled {
