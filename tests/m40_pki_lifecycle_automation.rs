@@ -173,7 +173,11 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
         common::pki::provision_tenant_issuer(&pool, &config, &root, overdue_authority_tenant).await;
     sqlx::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
         .bind(overdue_authority.id)
-        .bind(now - Duration::minutes(1))
+        // Keep the synthetic expiry after the authority's not-before value.
+        // The test root is only backdated by one minute, so using the same
+        // minute boundary here can invert the interval by a fraction of a
+        // second when provisioning happens after `now` was captured.
+        .bind(now - Duration::seconds(1))
         .execute(&pool)
         .await
         .unwrap();
