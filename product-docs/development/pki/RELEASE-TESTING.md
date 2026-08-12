@@ -92,9 +92,9 @@ production connection strings into a shell history, CI log, issue, or PR.
 
 6. Inspect the output. All seven named binaries must pass; a compile-only
    result is not a smoke-test pass.
-7. In GitHub, confirm `Rust`, `PKI Release`, and `API Docs` are green on the
-   current release-PR commit. Open each job and confirm the tests executed; do
-   not rely only on the green summary icon.
+7. In GitHub, confirm `Rust` and `API Docs` are green on the current release-PR
+   commit. Open the Rust job and confirm its `Run real PKI smoke test` step
+   executed; do not rely only on the green summary icon.
 8. For a production-like pre-release drill, use a disposable SoftHSM token and
    run the full mode, then follow `PKCS11-RUNBOOK.md` for the backup/restore
    proof. Never substitute the production root or a production HSM partition.
@@ -168,4 +168,3 @@ UTC time: <timestamp>
   gate. Do not mark the missing local execution as passed.
 - After any code change, re-run both the focused failing test and the complete
   required workflow on the new commit.
-
