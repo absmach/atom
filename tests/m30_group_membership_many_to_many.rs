@@ -655,6 +655,117 @@ async fn removing_one_group_leaves_the_other_membership_and_its_grants() {
     assert!(!pdp_allows(&pool, via_b, "entity", device).await);
 }
 
+// ─── No-op removals do not publish membership-change events ───────────────────
+
+async fn outbox_row_exists(pool: &sqlx::PgPool, event: &str, target_id: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM event_outbox
+                         WHERE event = $1 AND (payload->>'target_id')::uuid = $2)",
+    )
+    .bind(event)
+    .bind(target_id)
+    .fetch_one(pool)
+    .await
+    .expect("query event_outbox")
+}
+
+#[tokio::test]
+#[ignore]
+async fn removing_a_membership_that_never_existed_publishes_no_event() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "noop-entity-remove").await;
+    let device = make_entity(&pool, tenant_id, EntityKind::Device, "device").await;
+    let group = make_object_group(&pool, tenant_id, "g").await;
+
+    atom::identity::repo::remove_entity_from_object_group_with_audit(
+        &pool, true, None, device, group,
+    )
+    .await
+    .expect("no-op remove must still succeed");
+
+    assert!(
+        !outbox_row_exists(&pool, "entity.object_group.remove", device).await,
+        "removing a membership that never existed must not publish an event"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn removing_an_existing_membership_still_publishes_its_event() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "real-entity-remove").await;
+    let device = make_entity(&pool, tenant_id, EntityKind::Device, "device").await;
+    let group = make_object_group(&pool, tenant_id, "g").await;
+    atom::identity::repo::add_entity_to_object_group(&pool, device, group)
+        .await
+        .expect("add membership");
+
+    atom::identity::repo::remove_entity_from_object_group_with_audit(
+        &pool, true, None, device, group,
+    )
+    .await
+    .expect("remove");
+
+    assert!(
+        outbox_row_exists(&pool, "entity.object_group.remove", device).await,
+        "an actual removal must still publish its event"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn clearing_an_already_empty_entity_membership_set_publishes_no_event() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "noop-entity-clear").await;
+    let device = make_entity(&pool, tenant_id, EntityKind::Device, "device").await;
+
+    atom::identity::repo::clear_entity_object_groups_with_audit(&pool, true, None, device)
+        .await
+        .expect("no-op clear must still succeed");
+
+    assert!(
+        !outbox_row_exists(&pool, "entity.object_groups.clear", device).await,
+        "clearing an already-empty membership set must not publish an event"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn removing_a_resource_membership_that_never_existed_publishes_no_event() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "noop-resource-remove").await;
+    let resource = make_resource(&pool, tenant_id, "channel").await;
+    let group = make_object_group(&pool, tenant_id, "g").await;
+
+    atom::authz::repo::remove_resource_from_object_group_with_audit(
+        &pool, true, None, resource, group,
+    )
+    .await
+    .expect("no-op remove must still succeed");
+
+    assert!(
+        !outbox_row_exists(&pool, "resource.object_group.remove", resource).await,
+        "removing a membership that never existed must not publish an event"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn clearing_an_already_empty_resource_membership_set_publishes_no_event() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "noop-resource-clear").await;
+    let resource = make_resource(&pool, tenant_id, "channel").await;
+
+    atom::authz::repo::clear_resource_object_groups_with_audit(&pool, true, None, resource)
+        .await
+        .expect("no-op clear must still succeed");
+
+    assert!(
+        !outbox_row_exists(&pool, "resource.object_groups.clear", resource).await,
+        "clearing an already-empty membership set must not publish an event"
+    );
+}
+
 // ─── Descendant traversal across two subtrees ──────────────────────────────
 
 #[tokio::test]
