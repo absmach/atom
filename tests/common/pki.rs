@@ -111,19 +111,6 @@ pub async fn provision_tenant_issuer(
     );
     tx.commit().await.unwrap();
     provisioned.commit_generated_key();
-    sqlx::query(
-        r#"UPDATE pki_authorities
-           SET ocsp_url = $2, ca_issuers_url = $3,
-               crl_distribution_point_url = $4
-           WHERE id = $1"#,
-    )
-    .bind(provisioned.authority.id)
-    .bind(OCSP_URL)
-    .bind(CA_ISSUERS_URL)
-    .bind(CRL_URL)
-    .execute(pool)
-    .await
-    .unwrap();
     authority_repo::authority_by_id(pool, provisioned.authority.id)
         .await
         .unwrap()
@@ -158,19 +145,6 @@ pub async fn provision_platform_leaf_issuer(
     .unwrap();
     assert!(imported.succeeded(), "{:?}", imported.validation_error);
     tx.commit().await.unwrap();
-    sqlx::query(
-        r#"UPDATE pki_authorities
-           SET ocsp_url = $2, ca_issuers_url = $3,
-               crl_distribution_point_url = $4
-           WHERE id = $1"#,
-    )
-    .bind(imported.authority.id)
-    .bind(OCSP_URL)
-    .bind(CA_ISSUERS_URL)
-    .bind(CRL_URL)
-    .execute(pool)
-    .await
-    .unwrap();
     authority_repo::authority_by_id(pool, imported.authority.id)
         .await
         .unwrap()
@@ -201,19 +175,6 @@ pub async fn rotate_tenant_issuer(
     .unwrap();
     assert!(imported.succeeded(), "{:?}", imported.validation_error);
     tx.commit().await.unwrap();
-    sqlx::query(
-        r#"UPDATE pki_authorities
-           SET ocsp_url = $2, ca_issuers_url = $3,
-               crl_distribution_point_url = $4
-           WHERE id = $1"#,
-    )
-    .bind(imported.authority.id)
-    .bind(OCSP_URL)
-    .bind(CA_ISSUERS_URL)
-    .bind(CRL_URL)
-    .execute(pool)
-    .await
-    .unwrap();
     authority_repo::authority_by_id(pool, imported.authority.id)
         .await
         .unwrap()
