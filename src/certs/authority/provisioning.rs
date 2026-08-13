@@ -495,17 +495,40 @@ async fn import_signed_authority_locked(
         authority.tenant_id,
     )
     .await?;
+    let discovery = discovery_urls_for(authority.kind, authority.id, ca_keys);
     let active = repo::activate_authority(
         tx,
         authority.id,
         &completed,
         authority.kind.can_issue_leaf_credentials(),
+        discovery.as_ref(),
     )
     .await?;
     Ok(AuthorityImportOutcome {
         authority: active,
         validation_error: None,
         replaced_authorities: replaced,
+    })
+}
+
+/// Derive per-authority publication routes from the deployment's public base
+/// URL. Only leaf-issuing kinds need them at activation — `PkiIssuer::from_
+/// managed_authority` requires all three and it is only ever loaded for
+/// leaf-issuing authorities. Returns `None` when the deployment did not
+/// configure a base URL (legacy manual-SQL workflow).
+fn discovery_urls_for(
+    kind: AuthorityKind,
+    authority_id: Uuid,
+    ca_keys: &PkiCaKeyConfig,
+) -> Option<repo::DiscoveryUrls> {
+    if !kind.can_issue_leaf_credentials() {
+        return None;
+    }
+    let base = ca_keys.artifact_base_url.as_deref()?.trim_end_matches('/');
+    Some(repo::DiscoveryUrls {
+        ocsp_url: Some(format!("{base}/certs/issuers/{authority_id}/ocsp")),
+        ca_issuers_url: Some(format!("{base}/certs/trust-bundle.pem")),
+        crl_distribution_point_url: Some(format!("{base}/certs/issuers/{authority_id}/crl")),
     })
 }
 

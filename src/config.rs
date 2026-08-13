@@ -348,6 +348,13 @@ pub struct PkiCaKeyConfig {
     pub key_encryption_key_id: String,
     pub provisioning_backend: PkiCaProvisioningBackend,
     pub pkcs11: Option<PkiPkcs11Config>,
+    /// Public HTTPS base URL under which the `/certs/issuers/{id}/{ocsp,crl}`
+    /// artifact routes and `/certs/trust-bundle.pem` are served. Populated at
+    /// `Config::from_env` from `ATOM_PUBLIC_BASE_URL`; carried on
+    /// `PkiCaKeyConfig` so provisioning helpers can embed per-authority
+    /// discovery URLs at activation without a separate signature parameter.
+    /// `None` preserves the legacy manual-SQL workflow.
+    pub artifact_base_url: Option<String>,
 }
 
 impl Default for PkiCaKeyConfig {
@@ -357,6 +364,7 @@ impl Default for PkiCaKeyConfig {
             key_encryption_key_id: "local-ca:v1".to_string(),
             provisioning_backend: PkiCaProvisioningBackend::EncryptedDatabase,
             pkcs11: None,
+            artifact_base_url: None,
         }
     }
 }
@@ -747,7 +755,8 @@ impl Config {
             .unwrap_or_else(|_| "http://localhost:8080".into());
         let ui_auth_callback = public_url(&public_base_url, "/auth/callback");
         let signing_keys = signing_keys_from_env()?;
-        let pki_ca_keys = pki_ca_keys_from_env()?;
+        let mut pki_ca_keys = pki_ca_keys_from_env()?;
+        pki_ca_keys.artifact_base_url = Some(public_base_url.trim_end_matches('/').to_string());
         if let (Some(signing_kek), Some(ca_kek)) = (
             signing_keys.key_encryption_key.as_ref(),
             pki_ca_keys.key_encryption_key.as_ref(),
@@ -875,6 +884,7 @@ impl Config {
             },
             pki_ca_keys: PkiCaKeyConfig {
                 key_encryption_key: SecretBytes::new(vec![8u8; 32]).ok(),
+                artifact_base_url: Some("https://pki.example.test".into()),
                 ..PkiCaKeyConfig::default()
             },
             audit_policy: AuditPolicyConfig::default(),
@@ -1129,6 +1139,7 @@ fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
         key_encryption_key_id,
         provisioning_backend,
         pkcs11,
+        artifact_base_url: None,
     })
 }
 

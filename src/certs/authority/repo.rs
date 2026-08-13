@@ -8,6 +8,18 @@ use super::{key_provider::ManagedAuthorityKey, AuthorityKind, AuthorityRecord, A
 
 const PROVISIONING_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_504b_4933;
 
+/// Per-authority publication routes recorded at activation so
+/// `PkiIssuer::from_managed_authority` finds populated values for every
+/// active leaf issuer. Provisioning derives these from the deployment's
+/// public base URL; `None` fields preserve any existing column value
+/// (COALESCE), so an operator's manual SQL update survives a re-activation.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveryUrls {
+    pub ocsp_url: Option<String>,
+    pub ca_issuers_url: Option<String>,
+    pub crl_distribution_point_url: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct EncryptedKeyRequirement {
     pub key_encryption_key_id: String,
@@ -480,7 +492,17 @@ pub async fn activate_authority(
     authority_id: Uuid,
     completed: &CompletedAuthority,
     issuance_enabled: bool,
+    discovery: Option<&DiscoveryUrls>,
 ) -> Result<AuthorityRecord, AppError> {
+    let (ocsp_url, ca_issuers_url, crl_distribution_point_url) = discovery
+        .map(|urls| {
+            (
+                urls.ocsp_url.clone(),
+                urls.ca_issuers_url.clone(),
+                urls.crl_distribution_point_url.clone(),
+            )
+        })
+        .unwrap_or((None, None, None));
     sqlx::query(
         r#"UPDATE pki_authorities
            SET status = 'active', issuance_enabled = $2, subject = $3,
@@ -488,6 +510,9 @@ pub async fn activate_authority(
                subject_key_id = $6, authority_key_id = $7,
                certificate_pem = $8, chain_pem = $9, not_before = $10,
                not_after = $11, failure_reason = NULL, activated_at = now(),
+               ocsp_url = COALESCE($12, ocsp_url),
+               ca_issuers_url = COALESCE($13, ca_issuers_url),
+               crl_distribution_point_url = COALESCE($14, crl_distribution_point_url),
                updated_at = now()
            WHERE id = $1 AND status = 'pending_signature'"#,
     )
@@ -502,6 +527,9 @@ pub async fn activate_authority(
     .bind(&completed.chain_pem)
     .bind(completed.not_before)
     .bind(completed.not_after)
+    .bind(ocsp_url)
+    .bind(ca_issuers_url)
+    .bind(crl_distribution_point_url)
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
