@@ -4,9 +4,11 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, Copy } from "lucide-react";
 import * as React from "react";
 import { DisplayTimeCell } from "@/components/display-time";
+import { ObjectGroupMembershipField } from "@/components/groups/object-group-membership-field";
 import { Button } from "@/components/ui/button";
 import { JsonEditor } from "@/components/ui/json-editor";
 import { graphqlClient } from "@/lib/graphql/client";
+import { objectGroupIdsFromRow } from "@/lib/object-groups/membership";
 import { Action } from "@/lib/utils";
 
 const TENANT_QUERY = `
@@ -118,6 +120,15 @@ export function ResourceInspectDetails({ row }: { row: Row | null }) {
         <Field label="Owner">
           <span className="text-sm">{ownerName}</span>
         </Field>
+      ) : null}
+
+      {id ? (
+        <ObjectGroupMembershipField
+          initialObjectGroupIds={objectGroupIdsFromRow(row)}
+          kind="resource"
+          memberId={id}
+          tenantId={tenantId}
+        />
       ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2">

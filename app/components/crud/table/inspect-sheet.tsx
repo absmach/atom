@@ -11,6 +11,8 @@ import { EntityCredentials } from "@/components/entities/entity-credentials";
 import { EntityInspectDetails } from "@/components/entities/entity-inspect-details";
 import { GroupInspectDetails } from "@/components/groups/group-inspect-details";
 import { GroupMembersPanel } from "@/components/groups/group-members-panel";
+import { ObjectGroupMembersPanel } from "@/components/groups/object-group-members-panel";
+import { ObjectAccessPanel } from "@/components/policy/object-access-panel";
 import { PolicyInspectDetails } from "@/components/policy/policy-inspect-details";
 import { ProfileInspectDetails } from "@/components/profiles/profile-inspect-details";
 import { ResourceInspectDetails } from "@/components/resources/resource-inspect-details";
@@ -110,6 +112,7 @@ function InspectBody({
       <Tabs defaultValue="details">
         <TabsList className="mb-4">
           <TabsTrigger value="details">Details</TabsTrigger>
+          <TabsTrigger value="access">Access</TabsTrigger>
           <TabsTrigger value="audit">Audit Logs</TabsTrigger>
         </TabsList>
         <TabsContent value="details" className="grid gap-3">
@@ -121,6 +124,14 @@ function InspectBody({
               entityKind={
                 typeof inspected.kind === "string" ? inspected.kind : undefined
               }
+            />
+          ) : null}
+        </TabsContent>
+        <TabsContent value="access">
+          {inspected?.id ? (
+            <ObjectAccessPanel
+              objectId={String(inspected.id)}
+              objectKind="entity"
             />
           ) : null}
         </TabsContent>
@@ -140,6 +151,12 @@ function InspectBody({
         {inspected?.id && groupType === "principal" ? (
           <GroupMembersPanel groupId={String(inspected.id)} />
         ) : null}
+        {inspected?.id && groupType === "object" ? (
+          <ObjectGroupMembersPanel
+            groupId={String(inspected.id)}
+            tenantId={inspected.tenantId ? String(inspected.tenantId) : null}
+          />
+        ) : null}
       </>
     );
   }
@@ -148,11 +165,20 @@ function InspectBody({
       <Tabs defaultValue="details">
         <TabsList className="mb-4">
           <TabsTrigger value="details">Details</TabsTrigger>
+          <TabsTrigger value="access">Access</TabsTrigger>
           <TabsTrigger value="audit">Audit Logs</TabsTrigger>
         </TabsList>
         <TabsContent value="details" className="grid gap-3">
           <ResourceInspectDetails row={inspected} />
           <InspectAuthzAction resourceKey={resourceKey} row={inspected} />
+        </TabsContent>
+        <TabsContent value="access">
+          {inspected?.id ? (
+            <ObjectAccessPanel
+              objectId={String(inspected.id)}
+              objectKind="resource"
+            />
+          ) : null}
         </TabsContent>
         <TabsContent value="audit">
           {inspected?.id ? (
