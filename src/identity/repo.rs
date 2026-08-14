@@ -7,7 +7,7 @@ use crate::{
     error::{db_err, entity_write_conflict, restore_conflict, AppError},
     models::{
         entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
-        enums::EntityKind,
+        enums::{EntityKind, EntityOrderField, GroupOrderField, SortDir},
         group::{CreateGroup, Group, GroupList, ListGroups, UpdateGroup},
         session::Session,
     },
@@ -17,6 +17,34 @@ use crate::{
 // ─── Entities ────────────────────────────────────────────────────────────────
 
 pub const AUTHENTICATED_USERS_GROUP_ID: Uuid = Uuid::from_u128(5);
+
+fn entity_order_by(order: EntityOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (EntityOrderField::CreatedAt, SortDir::Asc) => "e.created_at ASC, e.id ASC",
+        (EntityOrderField::CreatedAt, SortDir::Desc) => "e.created_at DESC, e.id ASC",
+        (EntityOrderField::UpdatedAt, SortDir::Asc) => "e.updated_at ASC, e.id ASC",
+        (EntityOrderField::UpdatedAt, SortDir::Desc) => "e.updated_at DESC, e.id ASC",
+        (EntityOrderField::Name, SortDir::Asc) => "e.name ASC, e.id ASC",
+        (EntityOrderField::Name, SortDir::Desc) => "e.name DESC, e.id ASC",
+        (EntityOrderField::Kind, SortDir::Asc) => "e.kind ASC, e.id ASC",
+        (EntityOrderField::Kind, SortDir::Desc) => "e.kind DESC, e.id ASC",
+        (EntityOrderField::Status, SortDir::Asc) => "e.status ASC, e.id ASC",
+        (EntityOrderField::Status, SortDir::Desc) => "e.status DESC, e.id ASC",
+    }
+}
+
+fn group_order_by(order: GroupOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (GroupOrderField::CreatedAt, SortDir::Asc) => "g.created_at ASC, g.id ASC",
+        (GroupOrderField::CreatedAt, SortDir::Desc) => "g.created_at DESC, g.id ASC",
+        (GroupOrderField::UpdatedAt, SortDir::Asc) => "g.updated_at ASC, g.id ASC",
+        (GroupOrderField::UpdatedAt, SortDir::Desc) => "g.updated_at DESC, g.id ASC",
+        (GroupOrderField::Name, SortDir::Asc) => "g.name ASC, g.id ASC",
+        (GroupOrderField::Name, SortDir::Desc) => "g.name DESC, g.id ASC",
+        (GroupOrderField::Status, SortDir::Asc) => "g.status ASC, g.id ASC",
+        (GroupOrderField::Status, SortDir::Desc) => "g.status DESC, g.id ASC",
+    }
+}
 
 /// Refuse mutations against an entity provisioned from the bootstrap config
 /// file. Config-managed entities can only be reshaped by editing the YAML and
@@ -243,8 +271,9 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     let q = search_pattern(params.q);
     let external_id = crate::models::external_id::normalize_external_id(params.external_id);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
+    let order_by = entity_order_by(params.order, params.dir);
 
-    let items = sqlx::query_as::<_, Entity>(
+    let items_sql = format!(
         r#"WITH RECURSIVE target_groups(id) AS (
                SELECT $6::uuid WHERE $6::uuid IS NOT NULL
                UNION ALL
@@ -271,24 +300,25 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                   OR ($10::text = 'live' AND e.deleted_at IS NULL)
                   OR ($10::text = 'deleted' AND e.deleted_at IS NOT NULL))
              AND ($12::text IS NULL OR e.external_id = $12)
-           ORDER BY e.created_at DESC
+           ORDER BY {order_by}
            LIMIT $8 OFFSET $9"#,
-    )
-    .bind(kind.clone())
-    .bind(profile_id)
-    .bind(tenant_id)
-    .bind(status.clone())
-    .bind(q.clone())
-    .bind(parent_group_id)
-    .bind(include_descendants)
-    .bind(limit)
-    .bind(offset)
-    .bind(deleted)
-    .bind(attributes_contains.clone())
-    .bind(external_id.clone())
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    );
+    let items = sqlx::query_as::<_, Entity>(&items_sql)
+        .bind(kind.clone())
+        .bind(profile_id)
+        .bind(tenant_id)
+        .bind(status.clone())
+        .bind(q.clone())
+        .bind(parent_group_id)
+        .bind(include_descendants)
+        .bind(limit)
+        .bind(offset)
+        .bind(deleted)
+        .bind(attributes_contains.clone())
+        .bind(external_id.clone())
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(
         r#"WITH RECURSIVE target_groups(id) AS (
@@ -1294,8 +1324,9 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     let parent_id = params.parent_id;
     let deleted = params.deleted.as_str();
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
+    let order_by = group_order_by(params.order, params.dir);
 
-    let items = sqlx::query_as::<_, Group>(
+    let items_sql = format!(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
                   g.status, g.attributes, g.deleted_at, g.deleted_by, g.created_at, g.updated_at, g.managed_by
            FROM groups g
@@ -1310,22 +1341,23 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
              AND ($9::text = 'all'
                   OR ($9::text = 'live' AND g.deleted_at IS NULL)
                   OR ($9::text = 'deleted' AND g.deleted_at IS NOT NULL))
-           ORDER BY g.created_at DESC
+           ORDER BY {order_by}
            LIMIT $6 OFFSET $7"#,
-    )
-    .bind(params.tenant_id)
-    .bind(status.clone())
-    .bind(q.clone())
-    .bind(parent_id)
-    .bind(parent_id.is_some())
-    .bind(limit)
-    .bind(offset)
-    .bind(params.group_type.clone())
-    .bind(deleted)
-    .bind(attributes_contains.clone())
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    );
+    let items = sqlx::query_as::<_, Group>(&items_sql)
+        .bind(params.tenant_id)
+        .bind(status.clone())
+        .bind(q.clone())
+        .bind(parent_id)
+        .bind(parent_id.is_some())
+        .bind(limit)
+        .bind(offset)
+        .bind(params.group_type.clone())
+        .bind(deleted)
+        .bind(attributes_contains.clone())
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
@@ -1606,6 +1638,8 @@ pub async fn list_child_groups(
             deleted: crate::models::enums::DeletedFilter::Live,
             limit,
             offset,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await

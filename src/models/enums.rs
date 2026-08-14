@@ -190,6 +190,56 @@ pub enum DeletedFilter {
     All,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDir {
+    Asc,
+    #[default]
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityOrderField {
+    #[default]
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Kind,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceOrderField {
+    #[default]
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Kind,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupOrderField {
+    #[default]
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantOrderField {
+    #[default]
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Alias,
+    Status,
+}
+
 impl DeletedFilter {
     pub fn as_str(self) -> &'static str {
         match self {

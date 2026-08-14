@@ -17,8 +17,9 @@ use crate::{
 use super::{
     auth::{gql_error, require_any_capability, require_auth, scope_for_tenant},
     types::{
-        parse_deleted_filter, parse_id, parse_optional_id, CreateResourceInput, GqlDeletedFilter,
-        Resource, ResourceList, UpdateResourceInput,
+        parse_deleted_filter, parse_id, parse_optional_id, parse_resource_order, parse_sort_dir,
+        CreateResourceInput, GqlDeletedFilter, GqlResourceOrderField, GqlSortDir, Resource,
+        ResourceList, UpdateResourceInput,
     },
 };
 
@@ -52,6 +53,8 @@ impl ResourceQuery {
         parent_group_id: Option<ID>,
         include_descendants: Option<bool>,
         deleted: Option<GqlDeletedFilter>,
+        order: Option<GqlResourceOrderField>,
+        dir: Option<GqlSortDir>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<ResourceList> {
@@ -60,6 +63,8 @@ impl ResourceQuery {
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         let parent_group_id = parse_optional_id(parent_group_id, "parentGroupId")?;
         let deleted = parse_deleted_filter(deleted);
+        let order = parse_resource_order(order);
+        let dir = parse_sort_dir(dir);
         let limit = limit.map(i64::from).unwrap_or(20);
         let offset = offset.map(i64::from).unwrap_or(0);
         let include_descendants = include_descendants.unwrap_or(false);
@@ -78,6 +83,8 @@ impl ResourceQuery {
                     deleted,
                     limit,
                     offset,
+                    order,
+                    dir,
                 },
             )
             .await
@@ -114,6 +121,10 @@ impl ResourceQuery {
                 include_descendants,
                 limit,
                 offset,
+                entity_order: Default::default(),
+                resource_order: order,
+                group_order: Default::default(),
+                dir,
             },
         )
         .await

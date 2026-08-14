@@ -1,4 +1,4 @@
-import type { CrudFilter } from "@/lib/crud/resources";
+import type { CrudFilter, CrudSortOption } from "@/lib/crud/resources";
 
 export type Row = Record<string, unknown>;
 
@@ -14,4 +14,5 @@ export type CrudTableProps = {
   serverFilters?: { search?: boolean; status?: boolean };
   /** When false, the deletedAt/deletedBy columns are hidden (live/active view). */
   showDeletedColumns?: boolean;
+  sortOptions?: CrudSortOption[];
 };

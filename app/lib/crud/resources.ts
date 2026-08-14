@@ -31,6 +31,11 @@ export type CrudFilter = {
   scopeOptionsByTenant?: boolean;
 };
 
+export type CrudSortOption = {
+  label: string;
+  value: string;
+};
+
 export type CrudResource = {
   key: string;
   title: string;
@@ -62,6 +67,7 @@ export type CrudResource = {
    * rows on the current page. Keeps the filter stable across applied filters.
    */
   statusOptions?: string[];
+  sortOptions?: CrudSortOption[];
   columns: Array<{
     key: string;
     label: string;
@@ -70,6 +76,12 @@ export type CrudResource = {
   sampleRows: Array<Record<string, unknown>>;
   missing: Partial<Record<CrudAction, string>>;
 };
+
+const commonSortOptions: CrudSortOption[] = [
+  { label: "Created", value: "created_at" },
+  { label: "Updated", value: "updated_at" },
+  { label: "Name", value: "name" },
+];
 
 const lifecycleFilter: CrudFilter = {
   key: "deleted",
@@ -101,7 +113,7 @@ export const crudResources: CrudResource[] = [
       "Top-level boundaries for entities, resources, groups, roles, and assignments.",
     icon: Building2,
     queryName: "tenants",
-    listQuery: `query Tenants($q: String, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { tenants(q: $q, deleted: $deleted, limit: $limit, offset: $offset) { total items { id name alias tags attributes status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
+    listQuery: `query Tenants($q: String, $deleted: DeletedFilter, $order: TenantOrderField, $dir: SortDir, $limit: Int = 50, $offset: Int = 0) { tenants(q: $q, deleted: $deleted, order: $order, dir: $dir, limit: $limit, offset: $offset) { total items { id name alias tags attributes status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
     createMutation: `mutation CreateTenant($input: CreateTenantInput!) { createTenant(input: $input) { id name alias tags status createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteTenant($id: ID!) { deleteTenant(id: $id) }`,
     restoreMutation: `mutation RestoreTenant($id: ID!) { restoreTenant(id: $id) { id } }`,
@@ -109,6 +121,11 @@ export const crudResources: CrudResource[] = [
     deleteIdField: "id",
     formAttributes: true,
     filters: [lifecycleFilter],
+    sortOptions: [
+      ...commonSortOptions,
+      { label: "Alias", value: "alias" },
+      { label: "Status", value: "status" },
+    ],
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "alias", label: "Alias", priority: "medium" },
@@ -134,7 +151,7 @@ export const crudResources: CrudResource[] = [
     icon: Fingerprint,
     queryName: "entities",
     tenantFilter: true,
-    listQuery: `query Entities($q: String, $tenantId: ID, $kind: EntityKind, $status: EntityStatus, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { entities(q: $q, tenantId: $tenantId, kind: $kind, status: $status, deleted: $deleted, limit: $limit, offset: $offset) { total items { id kind profileId profileVersionId name alias externalId tenantId objectGroupIds attributes status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
+    listQuery: `query Entities($q: String, $tenantId: ID, $kind: EntityKind, $status: EntityStatus, $deleted: DeletedFilter, $order: EntityOrderField, $dir: SortDir, $limit: Int = 50, $offset: Int = 0) { entities(q: $q, tenantId: $tenantId, kind: $kind, status: $status, deleted: $deleted, order: $order, dir: $dir, limit: $limit, offset: $offset) { total items { id kind profileId profileVersionId name alias externalId tenantId parentGroupId objectGroupIds attributes status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
     createMutation: `mutation CreateEntity($input: CreateEntityInput!) { createEntity(input: $input) { id kind profileId profileVersionId name alias externalId tenantId status createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteEntity($id: ID!) { deleteEntity(id: $id) }`,
     restoreMutation: `mutation RestoreEntity($id: ID!) { restoreEntity(id: $id) }`,
@@ -145,6 +162,11 @@ export const crudResources: CrudResource[] = [
     // (Disable → inactive, Enable → active), so offering it would always return
     // zero rows. Surface only the reachable states.
     statusOptions: ["active", "inactive"],
+    sortOptions: [
+      ...commonSortOptions,
+      { label: "Kind", value: "kind" },
+      { label: "Status", value: "status" },
+    ],
     filters: [
       lifecycleFilter,
       {
@@ -228,13 +250,14 @@ export const crudResources: CrudResource[] = [
     icon: Users,
     queryName: "groups",
     tenantFilter: true,
-    listQuery: `query Groups($q: String, $tenantId: ID, $status: EntityStatus, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { groups(q: $q, tenantId: $tenantId, status: $status, deleted: $deleted, limit: $limit, offset: $offset) { total items { id name tenantId groupType parentId description status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
+    listQuery: `query Groups($q: String, $tenantId: ID, $status: EntityStatus, $deleted: DeletedFilter, $order: GroupOrderField, $dir: SortDir, $limit: Int = 50, $offset: Int = 0) { groups(q: $q, tenantId: $tenantId, status: $status, deleted: $deleted, order: $order, dir: $dir, limit: $limit, offset: $offset) { total items { id name tenantId groupType parentId description status deletedAt deletedBy createdAt updatedAt managedBy } } }`,
     createMutation: `mutation CreateGroup($input: CreateGroupInput!) { createGroup(input: $input) { id name tenantId groupType description createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteGroup($id: ID!) { deleteGroup(id: $id) }`,
     restoreMutation: `mutation RestoreGroup($id: ID!) { restoreGroup(id: $id) }`,
     purgeMutation: `mutation PurgeGroup($id: ID!) { purgeGroup(id: $id) }`,
     deleteIdField: "id",
     filters: [lifecycleFilter],
+    sortOptions: [...commonSortOptions, { label: "Status", value: "status" }],
     columns: [
       { key: "name", label: "Name", priority: "high" },
       { key: "groupType", label: "Type", priority: "high" },
@@ -265,13 +288,14 @@ export const crudResources: CrudResource[] = [
     icon: Server,
     queryName: "resources",
     tenantFilter: true,
-    listQuery: `query Resources($q: String, $tenantId: ID, $kind: String, $deleted: DeletedFilter, $limit: Int = 50, $offset: Int = 0) { resources(q: $q, tenantId: $tenantId, kind: $kind, deleted: $deleted, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId objectGroupIds attributes deletedAt deletedBy createdAt updatedAt managedBy } } }`,
+    listQuery: `query Resources($q: String, $tenantId: ID, $kind: String, $deleted: DeletedFilter, $order: ResourceOrderField, $dir: SortDir, $limit: Int = 50, $offset: Int = 0) { resources(q: $q, tenantId: $tenantId, kind: $kind, deleted: $deleted, order: $order, dir: $dir, limit: $limit, offset: $offset) { total items { id kind name alias tenantId ownerId parentGroupId objectGroupIds attributes deletedAt deletedBy createdAt updatedAt managedBy } } }`,
     createMutation: `mutation CreateResource($input: CreateResourceInput!) { createResource(input: $input) { id kind name alias tenantId ownerId createdAt updatedAt } }`,
     deleteMutation: `mutation DeleteResource($id: ID!) { deleteResource(id: $id) }`,
     restoreMutation: `mutation RestoreResource($id: ID!) { restoreResource(id: $id) }`,
     purgeMutation: `mutation PurgeResource($id: ID!) { purgeResource(id: $id) }`,
     deleteIdField: "id",
     formAttributes: true,
+    sortOptions: [...commonSortOptions, { label: "Kind", value: "kind" }],
     filters: [
       lifecycleFilter,
       {

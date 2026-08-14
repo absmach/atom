@@ -25,8 +25,9 @@ use crate::{
             ListCapabilities,
         },
         enums::{
-            ActionAssignmentDecision, CredentialKind, Effect, EntityKind, EntityStatus, GrantKind,
-            ObjectKind, ScopeKind, SubjectKind, TenantStatus,
+            ActionAssignmentDecision, CredentialKind, Effect, EntityKind, EntityOrderField,
+            EntityStatus, GrantKind, GroupOrderField, ObjectKind, ResourceOrderField, ScopeKind,
+            SortDir, SubjectKind, TenantStatus,
         },
         policy::{
             CreateDirectPolicy, CreatePermissionBlock, CreatePolicyBinding, CreateRoleAssignment,
@@ -43,6 +44,60 @@ use crate::{
 };
 
 // ─── Resources ────────────────────────────────────────────────────────────────
+
+fn resource_order_by(order: ResourceOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (ResourceOrderField::CreatedAt, SortDir::Asc) => "r.created_at ASC, r.id ASC",
+        (ResourceOrderField::CreatedAt, SortDir::Desc) => "r.created_at DESC, r.id ASC",
+        (ResourceOrderField::UpdatedAt, SortDir::Asc) => "r.updated_at ASC, r.id ASC",
+        (ResourceOrderField::UpdatedAt, SortDir::Desc) => "r.updated_at DESC, r.id ASC",
+        (ResourceOrderField::Name, SortDir::Asc) => "r.name ASC, r.id ASC",
+        (ResourceOrderField::Name, SortDir::Desc) => "r.name DESC, r.id ASC",
+        (ResourceOrderField::Kind, SortDir::Asc) => "r.kind ASC, r.id ASC",
+        (ResourceOrderField::Kind, SortDir::Desc) => "r.kind DESC, r.id ASC",
+    }
+}
+
+fn authorized_entity_order_by(order: EntityOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (EntityOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
+        (EntityOrderField::CreatedAt, SortDir::Desc) => "created_at DESC, id ASC",
+        (EntityOrderField::UpdatedAt, SortDir::Asc) => "updated_at ASC, id ASC",
+        (EntityOrderField::UpdatedAt, SortDir::Desc) => "updated_at DESC, id ASC",
+        (EntityOrderField::Name, SortDir::Asc) => "name ASC, id ASC",
+        (EntityOrderField::Name, SortDir::Desc) => "name DESC, id ASC",
+        (EntityOrderField::Kind, SortDir::Asc) => "sub_kind ASC, id ASC",
+        (EntityOrderField::Kind, SortDir::Desc) => "sub_kind DESC, id ASC",
+        (EntityOrderField::Status, SortDir::Asc) => "status ASC, id ASC",
+        (EntityOrderField::Status, SortDir::Desc) => "status DESC, id ASC",
+    }
+}
+
+fn authorized_resource_order_by(order: ResourceOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (ResourceOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
+        (ResourceOrderField::CreatedAt, SortDir::Desc) => "created_at DESC, id ASC",
+        (ResourceOrderField::UpdatedAt, SortDir::Asc) => "updated_at ASC, id ASC",
+        (ResourceOrderField::UpdatedAt, SortDir::Desc) => "updated_at DESC, id ASC",
+        (ResourceOrderField::Name, SortDir::Asc) => "name ASC, id ASC",
+        (ResourceOrderField::Name, SortDir::Desc) => "name DESC, id ASC",
+        (ResourceOrderField::Kind, SortDir::Asc) => "sub_kind ASC, id ASC",
+        (ResourceOrderField::Kind, SortDir::Desc) => "sub_kind DESC, id ASC",
+    }
+}
+
+fn authorized_group_order_by(order: GroupOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (GroupOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
+        (GroupOrderField::CreatedAt, SortDir::Desc) => "created_at DESC, id ASC",
+        (GroupOrderField::UpdatedAt, SortDir::Asc) => "updated_at ASC, id ASC",
+        (GroupOrderField::UpdatedAt, SortDir::Desc) => "updated_at DESC, id ASC",
+        (GroupOrderField::Name, SortDir::Asc) => "name ASC, id ASC",
+        (GroupOrderField::Name, SortDir::Desc) => "name DESC, id ASC",
+        (GroupOrderField::Status, SortDir::Asc) => "status ASC, id ASC",
+        (GroupOrderField::Status, SortDir::Desc) => "status DESC, id ASC",
+    }
+}
 
 pub async fn create_resource_with_audit(
     pool: &PgPool,
@@ -150,8 +205,9 @@ pub async fn list_resources(
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
+    let order_by = resource_order_by(params.order, params.dir);
 
-    let items = sqlx::query_as::<_, Resource>(
+    let items_sql = format!(
         r#"WITH RECURSIVE target_groups(id) AS (
                SELECT $4::uuid WHERE $4::uuid IS NOT NULL
                UNION ALL
@@ -174,21 +230,22 @@ pub async fn list_resources(
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND r.deleted_at IS NULL)
                   OR ($8::text = 'deleted' AND r.deleted_at IS NOT NULL))
-           ORDER BY r.created_at DESC
+           ORDER BY {order_by}
            LIMIT $6 OFFSET $7"#,
-    )
-    .bind(kind.clone())
-    .bind(tenant_id)
-    .bind(q.clone())
-    .bind(parent_group_id)
-    .bind(include_descendants)
-    .bind(limit)
-    .bind(offset)
-    .bind(deleted)
-    .bind(attributes_contains.clone())
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    );
+    let items = sqlx::query_as::<_, Resource>(&items_sql)
+        .bind(kind.clone())
+        .bind(tenant_id)
+        .bind(q.clone())
+        .bind(parent_group_id)
+        .bind(include_descendants)
+        .bind(limit)
+        .bind(offset)
+        .bind(deleted)
+        .bind(attributes_contains.clone())
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
 
     let total: i64 = sqlx::query_scalar(
         r#"WITH RECURSIVE target_groups(id) AS (
@@ -5125,6 +5182,7 @@ async fn authorized_entity_ids(
     let q = search_pattern(params.q);
     let external_id = crate::models::external_id::normalize_external_id(params.external_id);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
+    let order_by = authorized_entity_order_by(params.entity_order, params.dir);
 
     let sql = r#"WITH RECURSIVE target_groups(id) AS (
                    SELECT $8::uuid WHERE $8::uuid IS NOT NULL
@@ -5145,7 +5203,8 @@ async fn authorized_entity_ids(
                    WHERE a.name = $2 AND aa.object_kind = 'entity'
                ),
                candidates AS (
-                   SELECT e.id, e.kind::text AS sub_kind, e.tenant_id, e.created_at,
+                   SELECT e.id, e.kind::text AS sub_kind, e.tenant_id, e.created_at, e.updated_at,
+                          e.name, e.status::text AS status,
                           COALESCE((SELECT array_agg(gep.group_id)
                                     FROM group_entity_parents gep
                                     WHERE gep.entity_id = e.id), '{}'::uuid[]) AS parent_group_ids
@@ -5179,7 +5238,7 @@ async fn authorized_entity_ids(
                    GROUP BY object_id
                ),
                authorized AS (
-                   SELECT c.id, c.created_at
+                   SELECT c.id, c.created_at, c.updated_at, c.name, c.sub_kind, c.status
                    FROM candidates c
                    LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
                    WHERE EXISTS (
@@ -5223,8 +5282,9 @@ async fn authorized_entity_ids(
                )
                SELECT id, COUNT(*) OVER() AS total
                FROM authorized
-               ORDER BY created_at DESC
+               ORDER BY __ORDER_BY__
                LIMIT $10 OFFSET $11"#
+        .replace("__ORDER_BY__", order_by)
         .replace("__CEILING_CTE__", &ceiling_cte("$12"));
 
     let rows = sqlx::query(&sql)
@@ -5314,6 +5374,10 @@ pub async fn authorized_resource_kinds_with_ceiling(
             include_descendants: false,
             limit: 500,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         ceiling_credential_id,
         AuthorizedResourceProjection::Kinds,
@@ -5338,20 +5402,21 @@ async fn authorized_resource_rows(
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
+    let order_by = authorized_resource_order_by(params.resource_order, params.dir);
 
     let select_clause = match projection {
-        AuthorizedResourceProjection::Ids => {
+        AuthorizedResourceProjection::Ids => format!(
             "SELECT id, COUNT(*) OVER() AS total
              FROM authorized
-             ORDER BY created_at DESC
+             ORDER BY {order_by}
              LIMIT $9 OFFSET $10"
-        }
-        AuthorizedResourceProjection::Kinds => {
+        ),
+        AuthorizedResourceProjection::Kinds => String::from(
             "SELECT DISTINCT sub_kind AS kind
              FROM authorized
              ORDER BY kind
-             LIMIT $9 OFFSET $10"
-        }
+             LIMIT $9 OFFSET $10",
+        ),
     };
     let sql = r#"WITH RECURSIVE target_groups(id) AS (
                    SELECT $6::uuid WHERE $6::uuid IS NOT NULL
@@ -5372,7 +5437,8 @@ async fn authorized_resource_rows(
                    WHERE a.name = $2 AND aa.object_kind = 'resource'
                ),
                candidates AS (
-                   SELECT r.id, r.kind AS sub_kind, r.tenant_id, r.created_at,
+                   SELECT r.id, r.kind AS sub_kind, r.tenant_id, r.created_at, r.updated_at,
+                          r.name,
                           COALESCE((SELECT array_agg(grp.group_id)
                                     FROM group_resource_parents grp
                                     WHERE grp.resource_id = r.id), '{}'::uuid[]) AS parent_group_ids
@@ -5403,7 +5469,7 @@ async fn authorized_resource_rows(
                    GROUP BY object_id
                ),
                authorized AS (
-                   SELECT c.id, c.sub_kind, c.created_at
+                   SELECT c.id, c.sub_kind, c.created_at, c.updated_at, c.name
                    FROM candidates c
                    LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
                    WHERE EXISTS (
@@ -5446,7 +5512,7 @@ async fn authorized_resource_rows(
                    ))
                )
                __SELECT__"#
-        .replace("__SELECT__", select_clause)
+        .replace("__SELECT__", &select_clause)
         .replace("__CEILING_CTE__", &ceiling_cte("$11"));
 
     sqlx::query(&sql)
@@ -5480,6 +5546,7 @@ async fn authorized_group_ids(
         crate::models::enums::EntityStatus::Inactive => "inactive".to_string(),
         crate::models::enums::EntityStatus::Suspended => "suspended".to_string(),
     });
+    let order_by = authorized_group_order_by(params.group_order, params.dir);
 
     // Scope matching is delegated to the shared `grant_scope_matches` predicate
     // (the same logic the PDP's Rust path mirrors). For groups the relevant
@@ -5505,7 +5572,8 @@ async fn authorized_group_ids(
                    WHERE a.name = $2 AND aa.object_kind = 'group'
                ),
                candidates AS (
-                   SELECT g.id, 'group'::text AS sub_kind, g.tenant_id, g.created_at,
+                   SELECT g.id, 'group'::text AS sub_kind, g.tenant_id, g.created_at, g.updated_at,
+                          g.name, g.status::text AS status,
                           CASE WHEN gph.parent_id IS NULL THEN '{}'::uuid[]
                                ELSE ARRAY[gph.parent_id] END AS parent_group_ids
                    FROM groups g
@@ -5534,7 +5602,7 @@ async fn authorized_group_ids(
                    GROUP BY object_id
                ),
                authorized AS (
-                   SELECT c.id, c.created_at
+                   SELECT c.id, c.created_at, c.updated_at, c.name, c.status
                    FROM candidates c
                    LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
                    WHERE EXISTS (
@@ -5578,8 +5646,9 @@ async fn authorized_group_ids(
                )
                SELECT id, COUNT(*) OVER() AS total
                FROM authorized
-               ORDER BY created_at DESC
+               ORDER BY __ORDER_BY__
                LIMIT $9 OFFSET $10"#
+        .replace("__ORDER_BY__", order_by)
         .replace("__CEILING_CTE__", &ceiling_cte("$11"));
 
     let rows = sqlx::query(&sql)

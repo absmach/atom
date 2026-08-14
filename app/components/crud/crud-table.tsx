@@ -56,6 +56,7 @@ export function CrudTable({
   source,
   serverFilters,
   showDeletedColumns = false,
+  sortOptions,
 }: CrudTableProps) {
   const resource = requireResource(resourceKey);
   const router = useRouter();
@@ -351,6 +352,7 @@ export function CrudTable({
         paramKey={resourceKey}
         searchPlaceholder={`Filter ${resource.title.toLowerCase()}...`}
         serverFilters={serverFilters}
+        sortOptions={sortOptions}
         statusFilter={{
           enabled: resource.columns.some((column) => column.key === "status"),
           options: resource.statusOptions,

@@ -98,6 +98,7 @@ export type DataTableProps<TData, TValue> = {
    * see the footer row count below.
    */
   serverFilters?: { search?: boolean; status?: boolean };
+  sortOptions?: Array<{ label: string; value: string }>;
   /** Rendered in the top-right toolbar area (e.g. a Create button). */
   toolbar?: React.ReactNode;
 };
@@ -114,6 +115,7 @@ export function DataTable<TData, TValue>({
   statusFilter,
   filters = EMPTY_FILTERS,
   serverFilters = NO_SERVER_FILTERS,
+  sortOptions = [],
   toolbar,
 }: DataTableProps<TData, TValue>) {
   const router = useRouter();
@@ -237,6 +239,24 @@ export function DataTable<TData, TValue>({
     commitFilterChange(filter.key, value);
   }
 
+  function handleSortOrderChange(value: string) {
+    router.replace(
+      buildUrl({
+        [`${paramKey}.order`]: value,
+        [`${paramKey}.page`]: null,
+      }),
+    );
+  }
+
+  function handleSortDirChange(value: string) {
+    router.replace(
+      buildUrl({
+        [`${paramKey}.dir`]: value,
+        [`${paramKey}.page`]: null,
+      }),
+    );
+  }
+
   const statusOptions = React.useMemo(() => {
     if (!statusFilter?.enabled) return [];
     const configured = (statusFilter.options ?? [])
@@ -263,6 +283,13 @@ export function DataTable<TData, TValue>({
   const restFilters = filters.filter((filter) => filter.key !== "deleted");
   const lifecycleStatusValue =
     filterValues.deleted === "deleted" ? "deleted" : statusValue;
+  const sortOrder = sortOptions.some(
+    (option) => option.value === searchParams.get(`${paramKey}.order`),
+  )
+    ? (searchParams.get(`${paramKey}.order`) ?? "created_at")
+    : "created_at";
+  const sortDir =
+    searchParams.get(`${paramKey}.dir`) === "asc" ? "asc" : "desc";
 
   // Filters the backend applied already narrowed `data` and `total` together,
   // so re-applying them here would be redundant. What is left runs client-side
@@ -364,6 +391,15 @@ export function DataTable<TData, TValue>({
               </div>
             ),
           )}
+          {sortOptions.length > 0 ? (
+            <SortControl
+              dir={sortDir}
+              onDirChange={handleSortDirChange}
+              onOrderChange={handleSortOrderChange}
+              options={sortOptions}
+              order={sortOrder}
+            />
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <DataTableViewOptions table={table} />
@@ -518,6 +554,63 @@ function recordsEqual(
   return (
     leftKeys.length === rightKeys.length &&
     leftKeys.every((key) => left[key] === right[key])
+  );
+}
+
+function SortControl({
+  dir,
+  onDirChange,
+  onOrderChange,
+  options,
+  order,
+}: {
+  dir: string;
+  onDirChange: (value: string) => void;
+  onOrderChange: (value: string) => void;
+  options: Array<{ label: string; value: string }>;
+  order: string;
+}) {
+  const orderLabelId = React.useId();
+  const dirLabelId = React.useId();
+
+  return (
+    <div className="flex min-w-0 gap-2">
+      <FilterField label="Sort" labelId={orderLabelId}>
+        <Select onValueChange={onOrderChange} value={order}>
+          <SelectTrigger
+            aria-labelledby={orderLabelId}
+            className="h-9 w-full sm:w-40"
+          >
+            <SelectValue placeholder="Sort" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {options.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </FilterField>
+      <FilterField label="Direction" labelId={dirLabelId}>
+        <Select onValueChange={onDirChange} value={dir}>
+          <SelectTrigger
+            aria-labelledby={dirLabelId}
+            className="h-9 w-full sm:w-28"
+          >
+            <SelectValue placeholder="Direction" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value="asc">Asc</SelectItem>
+              <SelectItem value="desc">Desc</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </FilterField>
+    </div>
   );
 }
 

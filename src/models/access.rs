@@ -6,8 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::enums::{
-    AuditOutcome, CredentialKind, CredentialStatus, Effect, EntityKind, EntityStatus, GrantKind,
-    ScopeKind, SubjectKind,
+    AuditOutcome, CredentialKind, CredentialStatus, Effect, EntityKind, EntityOrderField,
+    EntityStatus, GrantKind, GroupOrderField, ResourceOrderField, ScopeKind, SortDir, SubjectKind,
 };
 use super::{policy::PolicyBinding, role::Role};
 
@@ -111,6 +111,14 @@ pub struct AuthorizedObjectIdsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    #[serde(default)]
+    pub entity_order: EntityOrderField,
+    #[serde(default)]
+    pub resource_order: ResourceOrderField,
+    #[serde(default)]
+    pub group_order: GroupOrderField,
+    #[serde(default)]
+    pub dir: SortDir,
 }
 
 #[derive(Debug, Serialize)]

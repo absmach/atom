@@ -66,6 +66,10 @@ impl AuthzQuery {
                 include_descendants: input.include_descendants.unwrap_or(false),
                 limit: input.limit.map(i64::from).unwrap_or(100),
                 offset: input.offset.map(i64::from).unwrap_or(0),
+                entity_order: Default::default(),
+                resource_order: Default::default(),
+                group_order: Default::default(),
+                dir: Default::default(),
             },
         )
         .await

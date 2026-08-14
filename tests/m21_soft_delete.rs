@@ -568,6 +568,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             deleted: DeletedFilter::Live,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -586,6 +588,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             deleted: DeletedFilter::Deleted,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -615,6 +619,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             include_descendants: false,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -638,6 +644,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             include_descendants: false,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -670,6 +678,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             deleted: DeletedFilter::Live,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -687,6 +697,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             deleted: DeletedFilter::Deleted,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -719,6 +731,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             deleted: DeletedFilter::Live,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -739,6 +753,8 @@ async fn deleted_filter_lists_soft_deleted_objects() {
             deleted: DeletedFilter::Deleted,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -1637,6 +1653,10 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
                 include_descendants: false,
                 limit: 500,
                 offset: 0,
+                entity_order: Default::default(),
+                resource_order: Default::default(),
+                group_order: Default::default(),
+                dir: Default::default(),
             },
             None,
         )
@@ -1728,6 +1748,10 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
                 include_descendants: false,
                 limit: 500,
                 offset: 0,
+                entity_order: Default::default(),
+                resource_order: Default::default(),
+                group_order: Default::default(),
+                dir: Default::default(),
             },
             None,
         )
