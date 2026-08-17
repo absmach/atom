@@ -48,6 +48,22 @@ async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
     id
 }
 
+async fn make_updated_entity(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    name: &str,
+    days_ago: i64,
+) -> Uuid {
+    let id = make_entity(pool, tenant_id, name).await;
+    sqlx::query("UPDATE entities SET updated_at = now() - ($2::text::interval) WHERE id = $1")
+        .bind(id)
+        .bind(format!("{days_ago} days"))
+        .execute(pool)
+        .await
+        .expect("set entity updated_at");
+    id
+}
+
 async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
@@ -182,6 +198,93 @@ async fn direct_lists_apply_order_before_pagination() {
         group_names,
         vec![format!("{prefix}-a-group"), format!("{prefix}-b-group")]
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn descending_nullable_sorts_put_nulls_last() {
+    let pool = common::pool().await;
+    let suffix = Uuid::new_v4();
+    let prefix = format!("m44-null-sort-{suffix}");
+    let tenant_id = make_tenant(
+        &pool,
+        &format!("{prefix}-tenant"),
+        &format!("{prefix}-tenant"),
+    )
+    .await;
+
+    make_entity(&pool, tenant_id, &format!("{prefix}-never-updated")).await;
+    make_updated_entity(&pool, tenant_id, &format!("{prefix}-old"), 7).await;
+    make_updated_entity(&pool, tenant_id, &format!("{prefix}-new"), 1).await;
+
+    let entities = atom::identity::repo::list_entities(
+        &pool,
+        ListEntities {
+            q: Some(prefix.clone()),
+            kind: None,
+            external_id: None,
+            profile_id: None,
+            tenant_id: Some(tenant_id),
+            attributes_contains: None,
+            status: None,
+            deleted: DeletedFilter::Live,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 3,
+            offset: 0,
+            order: EntityOrderField::UpdatedAt,
+            dir: SortDir::Desc,
+        },
+    )
+    .await
+    .expect("list entities by updated_at desc");
+    let entity_names: Vec<_> = entities
+        .items
+        .into_iter()
+        .map(|entity| entity.name)
+        .collect();
+    assert_eq!(
+        entity_names,
+        vec![
+            format!("{prefix}-new"),
+            format!("{prefix}-old"),
+            format!("{prefix}-never-updated")
+        ]
+    );
+
+    make_resource(&pool, tenant_id, &format!("{prefix}-named")).await;
+    let unnamed_resource_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, kind, tenant_id) VALUES ($1, 'channel', $2)")
+        .bind(unnamed_resource_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("insert unnamed resource");
+
+    let resources = atom::authz::repo::list_resources(
+        &pool,
+        ListResources {
+            q: None,
+            kind: Some("channel".to_string()),
+            tenant_id: Some(tenant_id),
+            attributes_contains: None,
+            parent_group_id: None,
+            include_descendants: false,
+            deleted: DeletedFilter::Live,
+            limit: 2,
+            offset: 0,
+            order: ResourceOrderField::Name,
+            dir: SortDir::Desc,
+        },
+    )
+    .await
+    .expect("list resources by name desc");
+    let resource_names: Vec<_> = resources
+        .items
+        .into_iter()
+        .map(|resource| resource.name)
+        .collect();
+    assert_eq!(resource_names, vec![Some(format!("{prefix}-named")), None]);
 }
 
 #[tokio::test]
