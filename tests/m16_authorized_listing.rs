@@ -10,9 +10,7 @@
 mod common;
 
 use atom::models::{
-    access::AuthorizedObjectIdsQuery,
-    enums::DeletedFilter,
-    resource::ListResources,
+    access::AuthorizedObjectIdsQuery, enums::DeletedFilter, resource::ListResources,
 };
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};

@@ -82,8 +82,10 @@ async fn direct_lists_apply_order_before_pagination() {
         ListEntities {
             q: Some(prefix.clone()),
             kind: None,
+            external_id: None,
             profile_id: None,
             tenant_id: Some(tenant_id),
+            attributes_contains: None,
             status: None,
             deleted: DeletedFilter::Live,
             parent_group_id: None,
@@ -164,6 +166,7 @@ async fn direct_lists_apply_order_before_pagination() {
             tenant_id: Some(tenant_id),
             group_type: Some("object".to_string()),
             parent_id: None,
+            attributes_contains: None,
             status: None,
             deleted: DeletedFilter::Live,
             limit: 2,

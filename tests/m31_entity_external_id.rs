@@ -606,6 +606,10 @@ async fn list_by_external_id(pool: &PgPool, external_id: &str) -> Vec<Uuid> {
             include_descendants: false,
             limit: 100,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         None,
     )
@@ -653,6 +657,10 @@ async fn the_external_id_filter_matches_exactly_and_scopes_to_tenant() {
             include_descendants: false,
             limit: 100,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         None,
     )
@@ -704,6 +712,8 @@ async fn the_admin_deleted_listing_filters_by_external_id_too() {
             include_descendants: false,
             limit: 20,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -738,6 +748,8 @@ async fn a_blank_external_id_filter_matches_nothing_via_list_entities() {
             include_descendants: false,
             limit: 20,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
