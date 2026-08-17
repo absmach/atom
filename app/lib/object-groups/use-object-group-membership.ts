@@ -20,6 +20,7 @@ import {
 
 export const OBJECT_GROUP_MEMBERS_KEY = "object-group-members";
 export const OBJECT_GROUP_MEMBERSHIP_KEY = "object-group-membership";
+export const OBJECT_GROUP_CANDIDATES_KEY = "object-group-member-candidates";
 
 export function membersQueryKey(
   kind: ObjectMemberKind,
@@ -83,7 +84,7 @@ export function useObjectGroupMemberCandidates({
   const q = search.trim();
   return useQuery({
     enabled: Boolean(tenantId),
-    queryKey: ["object-group-member-candidates", kind, tenantId ?? null, q],
+    queryKey: [OBJECT_GROUP_CANDIDATES_KEY, kind, tenantId ?? null, q],
     queryFn: async ({ signal }) => {
       const data = await graphqlClient<{
         list: { total: number; items: ObjectGroupMember[] };
@@ -174,7 +175,8 @@ export type MembershipActionVariables = {
 /**
  * The six membership mutations, usable from either direction. Adds and removes
  * are idempotent server-side (`ON CONFLICT DO NOTHING` / zero-row delete), so
- * there is deliberately no client-side "already a member" guard here.
+ * these need no "already a member" guard; the pickers keep a redundant add out
+ * of reach instead, by hiding candidates that are already joined.
  */
 export function useObjectGroupMembershipActions(kind: ObjectMemberKind) {
   const queryClient = useQueryClient();
@@ -195,6 +197,9 @@ export function useObjectGroupMembershipActions(kind: ObjectMemberKind) {
       result.objectGroupIds,
     );
     queryClient.invalidateQueries({ queryKey: [OBJECT_GROUP_MEMBERS_KEY] });
+    // Candidate rows carry the membership the picker filters on, so they go
+    // stale the moment a member is added or removed.
+    queryClient.invalidateQueries({ queryKey: [OBJECT_GROUP_CANDIDATES_KEY] });
     toast.success(message);
   }
 

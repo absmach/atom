@@ -61,8 +61,11 @@ function respond({ query }: GraphqlCall) {
   if (query.includes("ObjectGroupPicker")) {
     return Promise.resolve({
       objectGroups: {
-        total: 1,
-        items: [{ id: "group-2", name: "Gateways" }],
+        total: 2,
+        items: [
+          { id: "group-1", name: "Floor sensors" },
+          { id: "group-2", name: "Gateways" },
+        ],
       },
     });
   }
@@ -120,6 +123,43 @@ describe("ObjectGroupMembershipField", () => {
       );
     });
     expect(mocks.toastSuccess).toHaveBeenCalledWith("Added to Gateways");
+  });
+
+  it("keeps groups the entity already belongs to out of the picker", async () => {
+    renderField();
+
+    await screen.findByText("Gateways");
+
+    const addButtons = screen.getAllByRole("button", { name: "Add" });
+    expect(addButtons).toHaveLength(1);
+    expect(addButtons[0].parentElement).toHaveTextContent("Gateways");
+    // Only the joined chip, never a second row in the picker below it.
+    expect(screen.getAllByText("Floor sensors")).toHaveLength(1);
+  });
+
+  it("says so when every match is already joined", async () => {
+    mocks.graphqlClient.mockImplementation((call: GraphqlCall) => {
+      if (call.query.includes("ObjectGroupPicker")) {
+        return Promise.resolve({
+          objectGroups: {
+            total: 1,
+            items: [{ id: "group-1", name: "Floor sensors" }],
+          },
+        });
+      }
+      return respond(call);
+    });
+
+    renderField();
+
+    expect(
+      await screen.findByText(
+        "Already a member of every matching object group.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add" }),
+    ).not.toBeInTheDocument();
   });
 
   it("removes the entity from one group", async () => {

@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  excludeJoinedMembers,
   memberDisplayName,
   memberKindLabel,
   memberKindTitle,
@@ -90,6 +91,7 @@ function ObjectGroupMemberList({
   const total = membersQuery.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const candidates = candidatesQuery.data ?? [];
+  const addable = excludeJoinedMembers(candidates, groupId);
 
   return (
     <div className="grid gap-3">
@@ -189,16 +191,18 @@ function ObjectGroupMemberList({
             <div className="text-sm text-destructive">
               {candidatesQuery.error.message}
             </div>
-          ) : candidates.length === 0 ? (
+          ) : addable.length === 0 ? (
             <div className="text-xs text-muted-foreground">
-              {search
-                ? `No matching ${kind === "entity" ? "entities" : "resources"}.`
-                : `No ${kind === "entity" ? "entities" : "resources"} available.`}
+              {candidates.length > 0
+                ? `Every matching ${kind === "entity" ? "entity is" : "resource is"} already in this group.`
+                : search
+                  ? `No matching ${kind === "entity" ? "entities" : "resources"}.`
+                  : `No ${kind === "entity" ? "entities" : "resources"} available.`}
             </div>
           ) : (
             <ScrollArea className="max-h-48">
               <div className="grid gap-1">
-                {candidates.map((candidate) => (
+                {addable.map((candidate) => (
                   <div
                     className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
                     key={candidate.id}
