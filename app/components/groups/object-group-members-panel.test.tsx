@@ -154,6 +154,44 @@ describe("ObjectGroupMembersPanel", () => {
     expect(screen.getAllByText("sensor-01")).toHaveLength(1);
   });
 
+  it("refills from later candidate pages after joined rows", async () => {
+    mocks.graphqlClient.mockImplementation((call: GraphqlCall) => {
+      if (call.query.includes("ObjectGroupEntityCandidates")) {
+        const offset = call.variables?.offset ?? 0;
+        return Promise.resolve({
+          list: {
+            total: 21,
+            items: offset === 0
+              ? [{
+                  id: "entity-1",
+                  name: "sensor-01",
+                  kind: "device",
+                  status: "active",
+                  objectGroupIds: ["group-1"],
+                }]
+              : [{
+                  id: "entity-2",
+                  name: "gateway-02",
+                  kind: "device",
+                  status: "active",
+                  objectGroupIds: [],
+                }],
+          },
+        });
+      }
+      return respond(call);
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText("gateway-02")).toBeInTheDocument();
+    expect(mocks.graphqlClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variables: expect.objectContaining({ offset: 20 }),
+      }),
+    );
+  });
+
   it("says so when every match is already a member", async () => {
     mocks.graphqlClient.mockImplementation((call: GraphqlCall) => {
       if (call.query.includes("ObjectGroupEntityCandidates")) {

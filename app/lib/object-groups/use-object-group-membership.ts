@@ -11,6 +11,7 @@ import {
   membershipVariables,
   membersQuery,
   OBJECT_GROUPS_QUERY,
+  excludeJoinedMembers,
   type ObjectGroupMember,
   type ObjectGroupMemberPage,
   type ObjectGroupMembership,
@@ -74,26 +75,57 @@ export function useObjectGroupMemberCandidates({
   kind,
   tenantId,
   search,
+  groupId,
   limit = 20,
 }: {
   kind: ObjectMemberKind;
   tenantId?: string | null;
   search: string;
+  groupId: string;
   limit?: number;
 }) {
   const q = search.trim();
   return useQuery({
     enabled: Boolean(tenantId),
-    queryKey: [OBJECT_GROUP_CANDIDATES_KEY, kind, tenantId ?? null, q],
+    queryKey: [
+      OBJECT_GROUP_CANDIDATES_KEY,
+      kind,
+      tenantId ?? null,
+      groupId,
+      q,
+    ],
     queryFn: async ({ signal }) => {
-      const data = await graphqlClient<{
-        list: { total: number; items: ObjectGroupMember[] };
-      }>({
-        query: candidatesQuery(kind),
-        variables: { tenantId: tenantId || null, q: q || null, limit },
-        signal,
-      });
-      return data.list.items;
+      const items: ObjectGroupMember[] = [];
+      let total = 0;
+      let offset = 0;
+
+      // Membership is returned on each row, so refill the picker from later
+      // pages when an earlier page consists entirely of joined members.
+      while (offset < total || offset === 0) {
+        const data = await graphqlClient<{
+          list: { total: number; items: ObjectGroupMember[] };
+        }>({
+          query: candidatesQuery(kind),
+          variables: {
+            tenantId: tenantId || null,
+            q: q || null,
+            limit,
+            offset,
+          },
+          signal,
+        });
+        total = data.list.total;
+        items.push(...excludeJoinedMembers(data.list.items, groupId));
+
+        if (
+          items.length >= limit ||
+          data.list.items.length === 0 ||
+          offset + data.list.items.length >= total
+        ) break;
+        offset += limit;
+      }
+
+      return { items: items.slice(0, limit), total };
     },
     staleTime: 30_000,
     placeholderData: (previous) => previous,

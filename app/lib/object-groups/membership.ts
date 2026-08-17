@@ -65,16 +65,16 @@ const MEMBERS_QUERIES: Record<ObjectMemberKind, string> = {
  */
 const CANDIDATES_QUERIES: Record<ObjectMemberKind, string> = {
   entity: `
-    query ObjectGroupEntityCandidates($tenantId: ID, $q: String, $limit: Int!) {
-      list: entities(tenantId: $tenantId, q: $q, limit: $limit, offset: 0) {
+    query ObjectGroupEntityCandidates($tenantId: ID, $q: String, $limit: Int!, $offset: Int!) {
+      list: entities(tenantId: $tenantId, q: $q, limit: $limit, offset: $offset) {
         total
         items { id name kind status objectGroupIds }
       }
     }
   `,
   resource: `
-    query ObjectGroupResourceCandidates($tenantId: ID, $q: String, $limit: Int!) {
-      list: resources(tenantId: $tenantId, q: $q, limit: $limit, offset: 0) {
+    query ObjectGroupResourceCandidates($tenantId: ID, $q: String, $limit: Int!, $offset: Int!) {
+      list: resources(tenantId: $tenantId, q: $q, limit: $limit, offset: $offset) {
         total
         items { id name kind objectGroupIds }
       }
@@ -240,7 +240,7 @@ export function excludeJoinedGroups<T extends { id: string }>(
 }
 
 export function excludeJoinedMembers<
-  T extends { objectGroupIds?: string[] | null },
+  T extends { id: string; objectGroupIds?: string[] | null },
 >(candidates: T[], groupId: string): T[] {
   return candidates.filter(
     (candidate) => !candidate.objectGroupIds?.includes(groupId),
