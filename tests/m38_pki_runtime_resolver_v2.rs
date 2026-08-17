@@ -486,7 +486,7 @@ async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
     // Exercise the actual versioned gRPC contract and its deprecated sibling.
     let active_keys = active_keys(&pool, &config).await;
     let admin_token = token_for(&pool, &config, &active_keys, common::admin_id()).await;
-    let state = AppState::new(pool.clone(), config.clone(), active_keys, None);
+    let state = AppState::new(pool.clone(), config.clone(), active_keys);
     let listener = grpc::bind_listener("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
@@ -553,6 +553,8 @@ async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
     assert!(global_response.tenant_id.is_empty());
     assert_eq!(global_response.issuer_id, global_issuer.id.to_string());
 
+    // v1 ResolveCertificate is removed; the wire method now returns
+    // Unimplemented so callers get a clean deprecation signal.
     let legacy_response = client
         .resolve_certificate(authed_request(
             &admin_token,
@@ -562,12 +564,8 @@ async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
             },
         ))
         .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(
-        legacy_response.credential_id,
-        legacy.credential_id.to_string()
-    );
+        .expect_err("v1 ResolveCertificate must return Unimplemented");
+    assert_eq!(legacy_response.code(), Code::Unimplemented);
     server.abort();
 }
 

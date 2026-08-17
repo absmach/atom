@@ -447,6 +447,97 @@ pub async fn insert_root_authority(
     authority_by_id_for_update(tx, id).await
 }
 
+pub struct ActiveAuthorityInsert<'a> {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub parent_id: Uuid,
+    pub kind: AuthorityKind,
+    pub version: i32,
+    pub subject: &'a str,
+    pub provisioning_mode: &'a str,
+    pub issuance_enabled: bool,
+    pub key: &'a ManagedAuthorityKey,
+    pub completed: &'a CompletedAuthority,
+    pub discovery: Option<&'a DiscoveryUrls>,
+}
+
+/// Insert an already-active authority whose certificate was supplied by the
+/// operator (bring-your-own) rather than produced by the internal
+/// CSR/import round-trip. Used by config-driven bootstraps that persist a
+/// pre-signed authority together with its encrypted private key.
+pub async fn insert_active_authority(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &ActiveAuthorityInsert<'_>,
+) -> Result<AuthorityRecord, AppError> {
+    let key = input.key.columns();
+    let (ocsp_url, ca_issuers_url, crl_distribution_point_url) = input
+        .discovery
+        .map(|urls| {
+            (
+                urls.ocsp_url.clone(),
+                urls.ca_issuers_url.clone(),
+                urls.crl_distribution_point_url.clone(),
+            )
+        })
+        .unwrap_or((None, None, None));
+    sqlx::query(
+        r#"INSERT INTO pki_authorities (
+               id, tenant_id, parent_id, kind, version, status,
+               issuance_enabled, subject, serial_number, fingerprint_sha256,
+               subject_key_id, authority_key_id, certificate_pem, chain_pem,
+               not_before, not_after,
+               key_backend, key_reference,
+               encrypted_private_key, private_key_nonce, wrapped_dek,
+               wrapped_dek_nonce, key_encryption_key_id, encryption_algorithm,
+               provisioning_mode,
+               ocsp_url, ca_issuers_url, crl_distribution_point_url,
+               activated_at
+           ) VALUES (
+               $1, $2, $3, $4, $5, 'active',
+               $6, $7, $8, $9,
+               $10, $11, $12, $13,
+               $14, $15,
+               $16, $17,
+               $18, $19, $20,
+               $21, $22, $23,
+               $24,
+               $25, $26, $27,
+               now()
+           )"#,
+    )
+    .bind(input.id)
+    .bind(input.tenant_id)
+    .bind(input.parent_id)
+    .bind(input.kind)
+    .bind(input.version)
+    .bind(input.issuance_enabled)
+    .bind(input.subject)
+    .bind(&input.completed.serial_number)
+    .bind(&input.completed.fingerprint_sha256)
+    .bind(&input.completed.subject_key_id)
+    .bind(&input.completed.authority_key_id)
+    .bind(&input.completed.certificate_pem)
+    .bind(&input.completed.chain_pem)
+    .bind(input.completed.not_before)
+    .bind(input.completed.not_after)
+    .bind(key.backend)
+    .bind(key.key_reference)
+    .bind(key.encrypted_private_key)
+    .bind(key.private_key_nonce)
+    .bind(key.wrapped_dek)
+    .bind(key.wrapped_dek_nonce)
+    .bind(key.key_encryption_key_id)
+    .bind(key.encryption_algorithm)
+    .bind(input.provisioning_mode)
+    .bind(ocsp_url)
+    .bind(ca_issuers_url)
+    .bind(crl_distribution_point_url)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    authority_by_id_for_update(tx, input.id).await
+}
+
 pub async fn insert_pending_authority(
     tx: &mut Transaction<'_, Postgres>,
     input: &PendingAuthorityInsert<'_>,

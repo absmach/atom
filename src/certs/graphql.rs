@@ -24,11 +24,6 @@ pub struct CertificateQuery;
 
 #[Object]
 impl CertificateQuery {
-    async fn ca_chain(&self, ctx: &Context<'_>) -> Result<String> {
-        let state = ctx.data::<AppState>()?;
-        service::ca_chain(&state.config, state.certificate_issuer.as_deref()).map_err(gql_error)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn certificates(
         &self,
@@ -85,26 +80,14 @@ impl CertificateQuery {
     async fn certificate(
         &self,
         ctx: &Context<'_>,
-        credential_id: Option<ID>,
-        serial_number: Option<String>,
+        credential_id: ID,
     ) -> Result<Certificate> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let cert = match (credential_id, serial_number) {
-            (Some(id), None) => {
-                service::certificate_by_id(&state.pool, parse_id(id, "credentialId")?)
-                    .await
-                    .map_err(gql_error)?
-            }
-            (None, Some(serial)) => service::legacy_certificate_by_serial(&state.pool, &serial)
+        let cert =
+            service::certificate_by_id(&state.pool, parse_id(credential_id, "credentialId")?)
                 .await
-                .map_err(gql_error)?,
-            _ => {
-                return Err(async_graphql::Error::new(
-                    "provide credentialId or serialNumber",
-                ))
-            }
-        };
+                .map_err(gql_error)?;
         require_certificate_read(state, &auth, &cert).await?;
         Ok(cert.into())
     }
@@ -149,55 +132,7 @@ pub struct CertificateMutation;
 
 #[Object]
 impl CertificateMutation {
-    async fn issue_certificate(
-        &self,
-        ctx: &Context<'_>,
-        input: IssueCertificateInput,
-    ) -> Result<IssuedCertificate> {
-        let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
-        let entity_id = parse_id(input.entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let issued = service::issue_certificate_in_tx(
-            &mut tx,
-            &state.config,
-            state.certificate_issuer.as_deref(),
-            service::IssueCertificate {
-                entity_id,
-                ttl_secs: input.ttl_secs,
-                common_name: input.common_name,
-                dns_names: input.dns_names.unwrap_or_default(),
-                ip_addresses: input.ip_addresses.unwrap_or_default(),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        commit_with_lifecycle_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(entity_id),
-                event: "certificate.issue",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "credential_id": issued.certificate.credential_id,
-                    "serial_number": issued.certificate.serial_number,
-                    "csr": false
-                }),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(issued.into())
-    }
-
-    /// Managed one-time key bootstrap. The legacy `issueCertificate` mutation
-    /// remains the explicit file-issuer compatibility path.
+    /// Managed one-time key bootstrap.
     async fn issue_generated_certificate_v2(
         &self,
         ctx: &Context<'_>,
@@ -301,53 +236,7 @@ impl CertificateMutation {
         Ok(issued.into())
     }
 
-    async fn issue_certificate_from_csr(
-        &self,
-        ctx: &Context<'_>,
-        input: IssueCertificateFromCsrInput,
-    ) -> Result<IssuedCertificate> {
-        let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
-        let entity_id = parse_id(input.entity_id, "entityId")?;
-        let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let issued = service::issue_certificate_from_csr_in_tx(
-            &mut tx,
-            &state.config,
-            state.certificate_issuer.as_deref(),
-            service::IssueCertificateFromCsr {
-                entity_id,
-                ttl_secs: input.ttl_secs,
-                csr_pem: input.csr_pem,
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        commit_with_lifecycle_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(entity_id),
-                event: "certificate.issue",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "credential_id": issued.certificate.credential_id,
-                    "serial_number": issued.certificate.serial_number,
-                    "csr": true
-                }),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(issued.into())
-    }
-
-    /// Explicitly versioned managed-issuer path.  The v1 mutation above keeps
-    /// its file-issuer behavior for compatibility.
+    /// Managed-issuer CSR issuance.
     async fn issue_certificate_from_csr_v2(
         &self,
         ctx: &Context<'_>,
@@ -481,54 +370,6 @@ impl CertificateMutation {
         Ok(issued.into())
     }
 
-    async fn renew_certificate(
-        &self,
-        ctx: &Context<'_>,
-        input: RenewCertificateInput,
-    ) -> Result<IssuedCertificate> {
-        let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
-        let old = service::legacy_certificate_by_serial(&state.pool, &input.serial_number)
-            .await
-            .map_err(gql_error)?;
-        require_certificate_rotate(state, &auth, &old).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let issued = service::renew_certificate_in_tx(
-            &mut tx,
-            &state.config,
-            state.certificate_issuer.as_deref(),
-            service::RenewCertificate {
-                serial_number: input.serial_number,
-                ttl_secs: input.ttl_secs,
-                revoke_old: input.revoke_old.unwrap_or(false),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        commit_with_lifecycle_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: old.tenant_id,
-                target_kind: Some("credential"),
-                target_id: Some(old.credential_id),
-                event: "certificate.renew",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "entity_id": old.entity_id,
-                    "old_serial_number": old.serial_number,
-                    "new_serial_number": issued.certificate.serial_number,
-                    "new_credential_id": issued.certificate.credential_id
-                }),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(issued.into())
-    }
-
     /// Exact-credential managed renewal using a subject-owned CSR.
     async fn renew_certificate_from_csr_v2(
         &self,
@@ -561,29 +402,6 @@ impl CertificateMutation {
             service::RenewalKeySource::Generated,
         )
         .await
-    }
-
-    async fn revoke_certificate(
-        &self,
-        ctx: &Context<'_>,
-        input: RevokeCertificateInput,
-    ) -> Result<Certificate> {
-        let state = ctx.data::<AppState>()?;
-        let cert = service::legacy_certificate_by_serial(&state.pool, &input.serial_number)
-            .await
-            .map_err(gql_error)?;
-        if cert.issuer_id.is_some() {
-            return Err(async_graphql::Error::new(
-                "managed certificate revocation requires revokeCertificateV2",
-            ));
-        }
-        Ok(revoke_certificate_exact(
-            ctx,
-            service::CertificateRevocationSelector::CredentialId(cert.credential_id),
-            input.reason,
-        )
-        .await?
-        .certificate)
     }
 
     /// Issuer-aware revocation by exact credential, fingerprint, or issuer and serial.

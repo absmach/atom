@@ -2,7 +2,8 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Plus } from "lucide-react";
+import { ExternalLink, Plus } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import * as React from "react";
 import { toast } from "sonner";
@@ -364,15 +365,30 @@ export function CrudTable({
                 Sample data
               </Badge>
             ) : null}
-            <Button
-              aria-expanded={open}
-              aria-haspopup="dialog"
-              disabled={Boolean(resource.missing.create)}
-              onClick={() => defer(() => setOpen(true))}
-            >
-              <Plus data-icon="inline-start" />
-              Create
-            </Button>
+            {resource.createHref ? (
+              // Resource owns a dedicated multi-step Create flow (e.g. PKI
+              // authorities and certificates). Send the operator there instead
+              // of opening the generic single-mutation create sheet.
+              <Button asChild>
+                <Link
+                  href={resource.createHref}
+                  title={resource.missing.create ?? undefined}
+                >
+                  <ExternalLink data-icon="inline-start" />
+                  Create
+                </Link>
+              </Button>
+            ) : (
+              <Button
+                aria-expanded={open}
+                aria-haspopup="dialog"
+                disabled={Boolean(resource.missing.create)}
+                onClick={() => defer(() => setOpen(true))}
+              >
+                <Plus data-icon="inline-start" />
+                Create
+              </Button>
+            )}
           </div>
         }
         total={total}

@@ -106,9 +106,8 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     // Public HTTP delivery carries a stable validator and a bounded freshness
     // lifetime. Conditional polling returns 304 with no body.
     let app = create_router(common::pki::graphql_state(pool.clone(), config.clone()));
-    // This managed-only fixture deliberately has legacy certificates disabled;
-    // a 400 from the legacy handler (rather than the router's 404) proves the
-    // compatibility route remains registered.
+    // Legacy /certs/crl has been removed with the v1 file-issuer PKI.
+    // The router must now return 404 for that path.
     let legacy_route = app
         .clone()
         .oneshot(
@@ -119,7 +118,7 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         )
         .await
         .unwrap();
-    assert_eq!(legacy_route.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(legacy_route.status(), StatusCode::NOT_FOUND);
     let response = app
         .clone()
         .oneshot(

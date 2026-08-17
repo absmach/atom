@@ -89,6 +89,13 @@ services:
       ATOM_PKI_EXPIRY_WARNING_SECS: ${ATOM_PKI_EXPIRY_WARNING_SECS:-86400}
       ATOM_PKI_AUTHORITY_WARNING_SECS: ${ATOM_PKI_AUTHORITY_WARNING_SECS:-2592000}
       ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED: ${ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED:-false}
+      # Optional paths (inside the container) to bootstrap the managed trust
+      # anchor and platform intermediate. Both are idempotent — unset skips
+      # the step. Root is public-only; platform intermediate requires cert +
+      # matching private key (wrapped with the CA KEK before persist).
+      ATOM_PKI_ROOT_CERT_PATH: ${ATOM_PKI_ROOT_CERT_PATH:-}
+      ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH: ${ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH:-}
+      ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH: ${ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH:-}
       ATOM_PKI_CA_KEY_BACKEND: ${ATOM_PKI_CA_KEY_BACKEND:-encrypted_database}
       ATOM_PKI_CA_KEY_ENCRYPTION_KEY: ${ATOM_PKI_CA_KEY_ENCRYPTION_KEY:-}
       ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID: ${ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID:-local:pki:v1}
@@ -100,14 +107,6 @@ services:
       ATOM_PKI_PKCS11_MAX_IN_FLIGHT: ${ATOM_PKI_PKCS11_MAX_IN_FLIGHT:-8}
       ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD: ${ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD:-3}
       ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS: ${ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS:-30}
-      ATOM_CERTS_ENABLED: ${ATOM_CERTS_ENABLED:-true}
-      ATOM_CERTS_CA_MODE: ${ATOM_CERTS_CA_MODE:-file_intermediate_issuer}
-      ATOM_CERTS_ROOT_CA_CERT_PATH: ${ATOM_CERTS_ROOT_CA_CERT_PATH:-/certs/root-ca.crt}
-      ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH: ${ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH:-/certs/intermediate-ca.crt}
-      ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH: ${ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH:-/certs/intermediate-ca.key}
-      ATOM_CERTS_ROOT_CA_KEY_PATH: ${ATOM_CERTS_ROOT_CA_KEY_PATH:-}
-      ATOM_CERTS_LEAF_DEFAULT_TTL_SECS: ${ATOM_CERTS_LEAF_DEFAULT_TTL_SECS:-2592000}
-      ATOM_CERTS_LEAF_MAX_TTL_SECS: ${ATOM_CERTS_LEAF_MAX_TTL_SECS:-2592000}
       ATOM_MIN_PASSWORD_CHARS: ${ATOM_MIN_PASSWORD_CHARS:-12}
       ATOM_CORS_ALLOWED_ORIGINS: ${ATOM_CORS_ALLOWED_ORIGINS:-http://localhost:8080,http://localhost:3005}
       ATOM_EMAIL_VERIFICATION_REDIRECT: ${ATOM_EMAIL_VERIFICATION_REDIRECT:-http://localhost:8080/auth/email/verify}
@@ -132,7 +131,11 @@ services:
       ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
       ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
     volumes:
-      - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
+      # Mounts the host's PKI material into the container. Used by
+      # ATOM_PKI_ROOT_CERT_PATH + ATOM_PKI_PLATFORM_INTERMEDIATE_{CERT,KEY}_PATH
+      # (bootstrap import of the trust anchor + platform intermediate) and by
+      # ATOM_PKI_ENROLLMENT_TLS_* (mTLS material for the enrollment listener).
+      - ${ATOM_PKI_CERTS_DIR:-./certs}:/certs:ro
       - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
       - ${ATOM_BOOTSTRAP_FILE:-./bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
       - ${ATOM_CALLOUTS_FILE:-./callout.yaml}:/etc/atom/callout.yaml:ro
@@ -218,6 +221,13 @@ services:
       ATOM_PKI_EXPIRY_WARNING_SECS: ${ATOM_PKI_EXPIRY_WARNING_SECS:-86400}
       ATOM_PKI_AUTHORITY_WARNING_SECS: ${ATOM_PKI_AUTHORITY_WARNING_SECS:-2592000}
       ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED: ${ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED:-false}
+      # Optional paths (inside the container) to bootstrap the managed trust
+      # anchor and platform intermediate. Both are idempotent — unset skips
+      # the step. Root is public-only; platform intermediate requires cert +
+      # matching private key (wrapped with the CA KEK before persist).
+      ATOM_PKI_ROOT_CERT_PATH: ${ATOM_PKI_ROOT_CERT_PATH:-}
+      ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH: ${ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH:-}
+      ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH: ${ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH:-}
       ATOM_PKI_CA_KEY_BACKEND: ${ATOM_PKI_CA_KEY_BACKEND:-encrypted_database}
       ATOM_PKI_CA_KEY_ENCRYPTION_KEY: ${ATOM_PKI_CA_KEY_ENCRYPTION_KEY:-}
       ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID: ${ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID:-local:pki:v1}
@@ -229,14 +239,6 @@ services:
       ATOM_PKI_PKCS11_MAX_IN_FLIGHT: ${ATOM_PKI_PKCS11_MAX_IN_FLIGHT:-8}
       ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD: ${ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD:-3}
       ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS: ${ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS:-30}
-      ATOM_CERTS_ENABLED: ${ATOM_CERTS_ENABLED:-true}
-      ATOM_CERTS_CA_MODE: ${ATOM_CERTS_CA_MODE:-file_intermediate_issuer}
-      ATOM_CERTS_ROOT_CA_CERT_PATH: ${ATOM_CERTS_ROOT_CA_CERT_PATH:-/certs/root-ca.crt}
-      ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH: ${ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH:-/certs/intermediate-ca.crt}
-      ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH: ${ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH:-/certs/intermediate-ca.key}
-      ATOM_CERTS_ROOT_CA_KEY_PATH: ${ATOM_CERTS_ROOT_CA_KEY_PATH:-}
-      ATOM_CERTS_LEAF_DEFAULT_TTL_SECS: ${ATOM_CERTS_LEAF_DEFAULT_TTL_SECS:-2592000}
-      ATOM_CERTS_LEAF_MAX_TTL_SECS: ${ATOM_CERTS_LEAF_MAX_TTL_SECS:-2592000}
       ATOM_MIN_PASSWORD_CHARS: ${ATOM_MIN_PASSWORD_CHARS:-12}
       ATOM_CORS_ALLOWED_ORIGINS: ${ATOM_CORS_ALLOWED_ORIGINS:-http://localhost:8080,http://localhost:3005}
       ATOM_PUBLIC_BASE_URL: ${ATOM_PUBLIC_BASE_URL:-http://localhost:8081}
@@ -255,7 +257,11 @@ services:
       ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
       ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
     volumes:
-      - ${ATOM_CERTS_CA_DIR:-./certs}:/certs:ro
+      # Mounts the host's PKI material into the container. Used by
+      # ATOM_PKI_ROOT_CERT_PATH + ATOM_PKI_PLATFORM_INTERMEDIATE_{CERT,KEY}_PATH
+      # (bootstrap import of the trust anchor + platform intermediate) and by
+      # ATOM_PKI_ENROLLMENT_TLS_* (mTLS material for the enrollment listener).
+      - ${ATOM_PKI_CERTS_DIR:-./certs}:/certs:ro
       - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
       - ${ATOM_BOOTSTRAP_FILE:-./bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
       - ${ATOM_CALLOUTS_FILE:-./callout.yaml}:/etc/atom/callout.yaml:ro

@@ -231,49 +231,59 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .await
         .expect("restore issuer certificate");
 
-    let platform_leaf_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pki_authorities WHERE kind = 'platform_leaf_issuer'",
+    let tenant_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'",
     )
     .fetch_one(&pool)
     .await
-    .expect("platform leaf count");
+    .expect("tenant intermediate count");
     let mut unavailable_keys = app_config.pki_ca_keys.clone();
     unavailable_keys
         .pkcs11
         .as_mut()
         .expect("PKCS#11 config")
         .module_path = "/definitely/missing/libpkcs11.so".to_string();
+    let outage_tenant = common::pki::create_tenant(&pool, "pkcs11-outage").await;
     let mut tx = pool.begin().await.expect("outage transaction");
-    provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &unavailable_keys)
-        .await
-        .expect_err("provider outage");
+    provisioning::provision_tenant_automatically_in_tx(
+        &mut tx,
+        &unavailable_keys,
+        outage_tenant,
+    )
+    .await
+    .expect_err("provider outage");
     tx.rollback().await.expect("outage rollback");
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM pki_authorities WHERE kind = 'platform_leaf_issuer'",
+            "SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'",
         )
         .fetch_one(&pool)
         .await
-        .expect("platform leaf count after outage"),
-        platform_leaf_count,
+        .expect("tenant intermediate count after outage"),
+        tenant_count,
         "provider outage cannot corrupt authority lifecycle state"
     );
 
     // The key is generated before the caller-owned SQL transaction commits.
     // Rolling that outer transaction back must also remove the token objects;
     // otherwise retries would accumulate usable keys with no authority row.
+    let rollback_tenant = common::pki::create_tenant(&pool, "pkcs11-rollback").await;
     let mut tx = pool.begin().await.expect("rollback transaction");
-    let rolled_back =
-        provisioning::begin_platform_leaf_issuer_in_tx(&mut tx, &app_config.pki_ca_keys)
-            .await
-            .expect("generate rollback candidate");
+    let rolled_back = provisioning::provision_tenant_automatically_in_tx(
+        &mut tx,
+        &app_config.pki_ca_keys,
+        rollback_tenant,
+    )
+    .await
+    .expect("generate rollback candidate");
+    let rolled_back_authority = &rolled_back.value.authority;
     let rolled_back_context = AuthorityKeyContext {
-        authority_id: rolled_back.id,
-        tenant_id: rolled_back.tenant_id,
-        version: rolled_back.version,
+        authority_id: rolled_back_authority.id,
+        tenant_id: rolled_back_authority.tenant_id,
+        version: rolled_back_authority.version,
     };
-    let rolled_back_key =
-        Pkcs11AuthorityKey::from_authority(&rolled_back.value).expect("rollback key reference");
+    let rolled_back_key = Pkcs11AuthorityKey::from_authority(rolled_back_authority)
+        .expect("rollback key reference");
     tx.rollback().await.expect("rollback generated authority");
     drop(rolled_back);
     assert_eq!(

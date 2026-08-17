@@ -175,20 +175,11 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
         certificate_status(&pool, by_issuer_serial.credential_id).await,
         "revoked"
     );
-    let legacy_managed = schema
-        .execute(
-            Request::new(format!(
-                r#"mutation {{ revokeCertificate(input: {{ serialNumber: "{}" }}) {{ credentialId }} }}"#,
-                unaffected.serial_number
-            ))
-            .data(auth(common::admin_id(), None)),
-        )
-        .await;
-    assert!(errors_contain(&legacy_managed.errors, "not found"));
+    // v1 `revokeCertificate(input: { serialNumber })` was removed with the
+    // file-issuer PKI; only revokeCertificateV2 selects managed credentials.
     assert_eq!(
         certificate_status(&pool, unaffected.credential_id).await,
-        "active",
-        "the legacy serial-only mutation must not see a managed credential"
+        "active"
     );
 
     // PR-011's issuer-scoped uniqueness permits this duplicate across issuers;
@@ -456,7 +447,9 @@ async fn assert_v2_schema_contract(schema: &atom::graphql::AtomSchema) {
         ]
     );
     let mutations = sorted_field_names(&data["mutation"]["mutationType"]["fields"]);
-    assert!(mutations.contains(&"revokeCertificate"));
+    // v1 `revokeCertificate` was removed with the file-issuer PKI. Only the
+    // v2 mutations remain.
+    assert!(!mutations.contains(&"revokeCertificate"));
     assert!(mutations.contains(&"revokeCertificateV2"));
     assert!(mutations.contains(&"revokeEntityCertificates"));
 }

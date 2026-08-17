@@ -2,7 +2,11 @@ use std::{collections::HashSet, ops::Deref};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
-use p256::{elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePublicKey, PublicKey};
+use p256::{
+    elliptic_curve::sec1::ToEncodedPoint,
+    pkcs8::{DecodePublicKey, EncodePrivateKey, EncodePublicKey},
+    PublicKey, SecretKey,
+};
 use rand::{rngs::OsRng, RngCore};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyIdMethod, KeyUsagePurpose,
@@ -13,6 +17,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::{extensions::ParsedExtension, pem::parse_x509_pem, prelude::X509Certificate};
+use zeroize::Zeroizing;
 
 use crate::{config::PkiCaKeyConfig, error::AppError};
 
@@ -240,6 +245,197 @@ pub async fn import_root_mutation_in_tx(
     Ok(AuthorityMutationOutcome::changed(authority))
 }
 
+/// Persist a bring-your-own platform intermediate CA: an operator-supplied
+/// certificate already signed by the configured root, together with its
+/// PKCS#8 or SEC1 PEM-encoded EC private key. The key is wrapped by the
+/// encrypted-database provider before it hits the row. Idempotent by
+/// certificate fingerprint.
+pub async fn import_platform_intermediate_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ca_keys: &PkiCaKeyConfig,
+    certificate_pem: &str,
+    private_key_pem: &str,
+) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
+    repo::lock_provisioning(tx).await?;
+    let parsed = parse_authority_certificate(certificate_pem)?;
+    validate_ca_shape(AuthorityKind::PlatformIntermediate, &parsed)?;
+
+    let parent = repo::active_root(tx).await?;
+    ensure_parent_available(&parent)?;
+
+    // Idempotency: replaying the same certificate against a previous import
+    // returns the existing active row without wrapping the key again.
+    if let Some(existing) = repo::authority_by_fingerprint(tx, &parsed.fingerprint_sha256).await? {
+        if existing.kind == AuthorityKind::PlatformIntermediate {
+            return Ok(AuthorityMutationOutcome::unchanged(existing));
+        }
+        return Err(AppError::conflict(
+            "certificate fingerprint already belongs to another authority",
+        ));
+    }
+
+    // Verify chain: cert's AKI matches root's SKI and its issuer DN matches
+    // the root's subject DN, and the parent actually signed it.
+    let parent_pem = parent
+        .certificate_pem
+        .as_deref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("parent certificate is missing")))?;
+    let parsed_parent = parse_authority_certificate(parent_pem)?;
+    if parent.fingerprint_sha256.as_deref() != Some(&parsed_parent.fingerprint_sha256) {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "stored parent certificate metadata does not match its certificate"
+        )));
+    }
+    let (_, child) = x509_parser::parse_x509_certificate(&parsed.der)
+        .map_err(|_| AppError::bad_request("invalid platform intermediate certificate"))?;
+    let (_, issuer) = x509_parser::parse_x509_certificate(&parsed_parent.der)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid parent certificate")))?;
+    if child.issuer() != issuer.subject() {
+        return Err(AppError::bad_request(
+            "platform intermediate issuer does not match the configured root subject",
+        ));
+    }
+    child
+        .verify_signature(Some(issuer.public_key()))
+        .map_err(|_| {
+            AppError::bad_request("platform intermediate is not signed by the configured root")
+        })?;
+    if parsed.authority_key_id.as_deref() != Some(parsed_parent.subject_key_id.as_slice()) {
+        return Err(AppError::bad_request(
+            "platform intermediate authority key identifier does not match root subject key identifier",
+        ));
+    }
+    if parsed.not_before < parsed_parent.not_before || parsed.not_after > parsed_parent.not_after {
+        return Err(AppError::bad_request(
+            "platform intermediate validity exceeds root validity",
+        ));
+    }
+
+    // Decode private key PEM to PKCS#8 DER (support PKCS#8 and SEC1 EC forms).
+    let pkcs8_der = decode_private_key_pem(private_key_pem)?;
+
+    // Verify the private key matches the certificate's public key.
+    use p256::pkcs8::DecodePrivateKey as _;
+    let signing_key = p256::ecdsa::SigningKey::from_pkcs8_der(pkcs8_der.as_slice())
+        .map_err(|_| AppError::bad_request("platform intermediate private key is invalid"))?;
+    let key_public_der = signing_key
+        .verifying_key()
+        .to_public_key_der()
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("failed to encode imported public key")))?;
+    if key_public_der.as_bytes() != parsed.subject_public_key_info.as_slice() {
+        return Err(AppError::bad_request(
+            "platform intermediate private key does not match the supplied certificate",
+        ));
+    }
+
+    // Wrap and persist through the same encrypted-database provider used for
+    // generated keys, then insert the row as already-active.
+    let authority_id = Uuid::new_v4();
+    let version =
+        repo::next_authority_version(tx, AuthorityKind::PlatformIntermediate, None).await?;
+    let context = AuthorityKeyContext {
+        authority_id,
+        tenant_id: None,
+        version,
+    };
+    let provider =
+        ManagedAuthorityKeyProvider::for_provisioning(ca_keys).map_err(key_provider_error)?;
+    let generated = provider
+        .import_pkcs8(
+            context,
+            AuthorityKeyAlgorithm::EcdsaP256Sha256,
+            pkcs8_der.as_slice(),
+        )
+        .map_err(key_provider_error)?;
+    let generated_key = GeneratedAuthorityKeyGuard::new(provider, context, generated.key);
+
+    let subject = authority_common_name(AuthorityKind::PlatformIntermediate, None, version)?;
+    let parent_chain = parent
+        .chain_pem
+        .as_deref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("parent authority has no chain")))?;
+    let chain_pem = format!("{}{}", parsed.pem, parent_chain);
+    let completed = completed_authority(&parsed, &chain_pem);
+    let discovery = discovery_urls_for(AuthorityKind::PlatformIntermediate, authority_id, ca_keys);
+
+    // A subsequent bootstrap with a fresh certificate replaces the previous
+    // active platform intermediate. The unique-active index would otherwise
+    // reject the insert; retiring the older row also preserves audit history
+    // and lets any in-flight issuance continue against the retired issuer.
+    let _replaced = repo::retire_other_active_authorities(
+        tx,
+        authority_id,
+        AuthorityKind::PlatformIntermediate,
+        None,
+    )
+    .await?;
+    let record = repo::insert_active_authority(
+        tx,
+        &repo::ActiveAuthorityInsert {
+            id: authority_id,
+            tenant_id: None,
+            parent_id: parent.id,
+            kind: AuthorityKind::PlatformIntermediate,
+            version,
+            subject: &subject,
+            provisioning_mode: "config_bootstrap",
+            issuance_enabled: AuthorityKind::PlatformIntermediate.can_issue_leaf_credentials(),
+            key: generated_key.key(),
+            completed: &completed,
+            discovery: discovery.as_ref(),
+        },
+    )
+    .await?;
+
+    Ok(AuthorityMutationOutcome::with_generated_key(
+        record,
+        generated_key,
+    ))
+}
+
+/// Decode a PEM-encoded EC private key to its PKCS#8 DER representation.
+/// Accepts both `-----BEGIN PRIVATE KEY-----` (PKCS#8) and
+/// `-----BEGIN EC PRIVATE KEY-----` (SEC1) forms; other labels are rejected.
+fn decode_private_key_pem(pem: &str) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    use p256::pkcs8::DecodePrivateKey;
+    // Skip any leading PEM blocks that aren't the private key itself
+    // (openssl-generated files may prepend "EC PARAMETERS" ahead of the key).
+    let key_pem = find_private_key_block(pem)
+        .ok_or_else(|| AppError::bad_request("no PEM private key block was found"))?;
+    if key_pem.contains("-----BEGIN PRIVATE KEY-----") {
+        let secret = SecretKey::from_pkcs8_pem(&key_pem)
+            .map_err(|_| AppError::bad_request("invalid PKCS#8 private key PEM"))?;
+        let der = secret
+            .to_pkcs8_der()
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("failed to re-encode PKCS#8 key")))?;
+        Ok(Zeroizing::new(der.as_bytes().to_vec()))
+    } else if key_pem.contains("-----BEGIN EC PRIVATE KEY-----") {
+        let secret = SecretKey::from_sec1_pem(&key_pem)
+            .map_err(|_| AppError::bad_request("invalid SEC1 EC private key PEM"))?;
+        let der = secret
+            .to_pkcs8_der()
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("failed to convert SEC1 to PKCS#8")))?;
+        Ok(Zeroizing::new(der.as_bytes().to_vec()))
+    } else {
+        Err(AppError::bad_request(
+            "platform intermediate private key must be PKCS#8 or SEC1 EC PEM",
+        ))
+    }
+}
+
+fn find_private_key_block(pem: &str) -> Option<String> {
+    for label in ["-----BEGIN PRIVATE KEY-----", "-----BEGIN EC PRIVATE KEY-----"] {
+        if let Some(start) = pem.find(label) {
+            let end_label = label.replace("BEGIN", "END");
+            if let Some(end) = pem[start..].find(&end_label) {
+                let stop = start + end + end_label.len();
+                return Some(pem[start..stop].to_string());
+            }
+        }
+    }
+    None
+}
+
 pub async fn begin_tenant_authority_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     ca_keys: &PkiCaKeyConfig,
@@ -253,56 +449,15 @@ pub async fn begin_tenant_authority_mutation_in_tx(
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    begin_offline_authority_mutation_in_tx(
+    repo::lock_provisioning(tx).await?;
+    repo::lock_active_tenant(tx, tenant_id).await?;
+    if let Some(existing) = repo::pending_authority_for_scope(
         tx,
-        ca_keys,
         AuthorityKind::TenantIntermediate,
         Some(tenant_id),
     )
-    .await
-}
-
-pub async fn begin_platform_leaf_issuer_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
-) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    begin_platform_leaf_issuer_mutation_in_tx(tx, ca_keys).await
-}
-
-pub async fn begin_platform_leaf_issuer_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
-) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    begin_offline_authority_mutation_in_tx(tx, ca_keys, AuthorityKind::PlatformLeafIssuer, None)
-        .await
-}
-
-pub async fn begin_platform_intermediate_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
-) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    begin_platform_intermediate_mutation_in_tx(tx, ca_keys).await
-}
-
-pub async fn begin_platform_intermediate_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
-) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    begin_offline_authority_mutation_in_tx(tx, ca_keys, AuthorityKind::PlatformIntermediate, None)
-        .await
-}
-
-async fn begin_offline_authority_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
-    kind: AuthorityKind,
-    tenant_id: Option<Uuid>,
-) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
-    repo::lock_provisioning(tx).await?;
-    if let Some(tenant_id) = tenant_id {
-        repo::lock_active_tenant(tx, tenant_id).await?;
-    }
-    if let Some(existing) = repo::pending_authority_for_scope(tx, kind, tenant_id).await? {
+    .await?
+    {
         if existing.provisioning_mode == "offline" {
             return Ok(AuthorityMutationOutcome::unchanged(existing));
         }
@@ -313,8 +468,15 @@ async fn begin_offline_authority_mutation_in_tx(
 
     let parent = repo::active_root(tx).await?;
     ensure_parent_available(&parent)?;
-    let (authority, generated_key) =
-        create_pending_authority(tx, ca_keys, kind, tenant_id, &parent, "offline").await?;
+    let (authority, generated_key) = create_pending_authority(
+        tx,
+        ca_keys,
+        AuthorityKind::TenantIntermediate,
+        Some(tenant_id),
+        &parent,
+        "offline",
+    )
+    .await?;
     Ok(AuthorityMutationOutcome::with_generated_key(
         authority,
         generated_key,
@@ -376,36 +538,6 @@ pub async fn provision_tenant_automatically_mutation_in_tx(
         outcome,
         generated_key,
     ))
-}
-
-pub async fn import_signed_authority_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
-    authority_id: Uuid,
-    certificate_pem: &str,
-) -> Result<AuthorityImportOutcome, AppError> {
-    Ok(
-        import_signed_authority_mutation_in_tx(tx, ca_keys, authority_id, certificate_pem)
-            .await?
-            .value,
-    )
-}
-
-pub async fn import_signed_authority_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
-    authority_id: Uuid,
-    certificate_pem: &str,
-) -> Result<AuthorityMutationOutcome<AuthorityImportOutcome>, AppError> {
-    repo::lock_provisioning(tx).await?;
-    let authority = repo::authority_by_id_for_update(tx, authority_id).await?;
-    let was_active = authority.status == AuthorityStatus::Active;
-    let outcome = import_signed_authority_locked(tx, ca_keys, authority, certificate_pem).await?;
-    Ok(if was_active {
-        AuthorityMutationOutcome::unchanged(outcome)
-    } else {
-        AuthorityMutationOutcome::changed(outcome)
-    })
 }
 
 async fn import_signed_authority_locked(

@@ -11,31 +11,6 @@ use crate::{certs::service, error::AppError, state::AppState};
 
 use super::authority::http::etag_matches;
 
-pub async fn ca_chain(State(state): State<AppState>) -> Result<Response, AppError> {
-    let pem = service::ca_chain(&state.config, state.certificate_issuer.as_deref())?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/x-pem-file"),
-    );
-    Ok((StatusCode::OK, headers, pem).into_response())
-}
-
-pub async fn crl(State(state): State<AppState>) -> Result<Response, AppError> {
-    let der = service::generate_crl(
-        &state.pool,
-        &state.config,
-        state.certificate_issuer.as_deref(),
-    )
-    .await?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/pkix-crl"),
-    );
-    Ok((StatusCode::OK, headers, der).into_response())
-}
-
 pub async fn issuer_crl(
     Path(issuer_id): Path<Uuid>,
     State(state): State<AppState>,
@@ -71,30 +46,6 @@ pub async fn issuer_crl(
         return Ok((StatusCode::NOT_MODIFIED, headers).into_response());
     }
     Ok((StatusCode::OK, headers, artifact.der).into_response())
-}
-
-pub async fn ocsp(State(state): State<AppState>, body: Bytes) -> Result<Response, AppError> {
-    let der = match service::ocsp_response(
-        &state.pool,
-        &state.config,
-        state.certificate_issuer.as_deref(),
-        &body,
-    )
-    .await
-    {
-        Ok(der) => der,
-        Err(AppError::BadRequest(_)) | Err(AppError::PayloadTooLarge(_)) => {
-            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::MalformedRequest)?
-        }
-        Err(AppError::NotFound(_)) | Err(AppError::Unauthorized(_)) | Err(AppError::Forbidden) => {
-            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::Unauthorized)?
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "legacy OCSP response generation failed");
-            service::unsuccessful_ocsp(x509_ocsp::OcspResponseStatus::InternalError)?
-        }
-    };
-    ocsp_http_response(der)
 }
 
 pub async fn issuer_ocsp(

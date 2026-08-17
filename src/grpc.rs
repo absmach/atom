@@ -414,47 +414,13 @@ struct AtomCertificates {
 impl CertificateService for AtomCertificates {
     async fn resolve_certificate(
         &self,
-        request: Request<ResolveCertificateRequest>,
+        _request: Request<ResolveCertificateRequest>,
     ) -> Result<Response<ResolveCertificateResponse>, Status> {
-        let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
-        let req = request.into_inner();
-        callout_check_grpc(
-            &self.state,
-            &auth,
-            callout_ops::CERT_RESOLVE,
-            serde_json::json!({
-                "serial_number": req.serial_number,
-                "fingerprint_sha256": req.fingerprint_sha256,
-            }),
-        )
-        .await?;
-        let identity = certs::service::resolve_certificate_identity(
-            &self.state.pool,
-            &req.serial_number,
-            (!req.fingerprint_sha256.is_empty()).then_some(req.fingerprint_sha256.as_str()),
-        )
-        .await
-        .map_err(Status::from)?;
-        require_any_capability(
-            &self.state.pool,
-            &auth,
-            &[
-                ("authz.check", scope_for_tenant(identity.tenant_id)),
-                ("authz.check", Scope::Platform),
-            ],
-        )
-        .await
-        .map_err(Status::from)?;
-
-        Ok(Response::new(ResolveCertificateResponse {
-            entity_id: identity.entity_id.to_string(),
-            tenant_id: identity
-                .tenant_id
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-            credential_id: identity.credential_id.to_string(),
-            expires_at: identity.expires_at.to_rfc3339(),
-        }))
+        // v1 file-issuer path removed. Callers must migrate to
+        // ResolveCertificateV2, which handles both fingerprint and issuer+serial.
+        Err(Status::unimplemented(
+            "ResolveCertificate is removed; use ResolveCertificateV2",
+        ))
     }
 
     async fn resolve_certificate_v2(
@@ -1051,7 +1017,6 @@ mod tests {
                 primary,
                 standby: None,
             },
-            None,
         )
     }
 }

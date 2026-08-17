@@ -12,7 +12,6 @@ use atom::{
         authority::{provisioning, repo as authority_repo, AuthorityStatus},
         service,
     },
-    config::{CertsCaMode, Config},
     routes::create_router,
 };
 use axum::{
@@ -26,9 +25,7 @@ use der::{
     Decode, Encode,
 };
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
-    SignatureAlgorithm, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519,
-    PKCS_RSA_SHA256,
+    CertificateParams, DnType, KeyPair,
 };
 use ring::digest;
 use spki::AlgorithmIdentifierOwned;
@@ -380,67 +377,6 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
         .await
         .unwrap();
     assert_status(&new_response, CertStatus::good());
-}
-
-#[tokio::test]
-#[ignore]
-async fn legacy_ocsp_verifies_every_supported_issuer_key_algorithm() {
-    let pool = common::pool().await;
-    // These are the four issuer-key families accepted by Atom's persisted-key
-    // loader and certificate-chain verifier. RSA keys are compatible with
-    // other digests, whose identifier mappings are covered in pki_core unit
-    // tests, but persisted RSA key material does not encode a digest choice.
-    let cases: [(&SignatureAlgorithm, ObjectIdentifier); 4] = [
-        (
-            &PKCS_RSA_SHA256,
-            ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
-        ),
-        (&PKCS_ECDSA_P256_SHA256, ECDSA_SHA256_OID),
-        (
-            &PKCS_ECDSA_P384_SHA384,
-            ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3"),
-        ),
-        (&PKCS_ED25519, ObjectIdentifier::new_unwrap("1.3.101.112")),
-    ];
-
-    for (index, (algorithm, expected_oid)) in cases.into_iter().enumerate() {
-        let directory =
-            std::env::temp_dir().join(format!("atom-pr010-alg-{index}-{}", Uuid::new_v4()));
-        fs::create_dir_all(&directory).unwrap();
-        let key = KeyPair::generate_for(algorithm).unwrap();
-        let key_pem = key.serialize_pem();
-        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-        params
-            .distinguished_name
-            .push(DnType::CommonName, format!("PR-010 Algorithm {index}"));
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        params.not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
-        params.not_after = OffsetDateTime::now_utc() + Duration::days(1);
-        let issuer_pem = params.self_signed(&key).unwrap().pem();
-        let certificate_path = directory.join("issuer.pem");
-        let key_path = directory.join("issuer.key");
-        fs::write(&certificate_path, &issuer_pem).unwrap();
-        fs::write(&key_path, key_pem).unwrap();
-
-        let mut config = Config::for_tests();
-        config.certs_enabled = true;
-        config.certs_ca_mode = CertsCaMode::FileRootIssuer;
-        config.certs_root_ca_cert_path = Some(certificate_path.to_string_lossy().into_owned());
-        config.certs_root_ca_key_path = Some(key_path.to_string_lossy().into_owned());
-        let issuer = service::load_file_issuer_if_enabled(&config)
-            .unwrap()
-            .unwrap();
-        let request = ocsp_request(&issuer_pem, "010203", RequestHash::Sha1, None);
-        let response = service::ocsp_response(&pool, &config, Some(&issuer), &request)
-            .await
-            .unwrap();
-        let basic = basic_response(&response);
-        assert_eq!(basic.signature_algorithm.oid, expected_oid);
-        assert_status(&response, CertStatus::unknown());
-        assert_openssl_serial_ocsp(&response, &issuer_pem, "010203");
-        fs::remove_dir_all(directory).unwrap();
-    }
 }
 
 async fn issue_managed(

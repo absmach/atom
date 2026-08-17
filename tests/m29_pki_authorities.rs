@@ -207,7 +207,13 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         .execute(&pool)
         .await
         .unwrap_err();
-    assert!(is_database_code(&delete_in_use_issuer, "23503"));
+    // Postgres 18 tightened RESTRICT violations to SQLSTATE 23001
+    // (restrict_violation); earlier versions returned the generic 23503
+    // (foreign_key_violation). Both mean the same thing here.
+    assert!(
+        is_database_code(&delete_in_use_issuer, "23001")
+            || is_database_code(&delete_in_use_issuer, "23503")
+    );
 
     let tenant_move = sqlx::query("UPDATE entities SET tenant_id = $1 WHERE id = $2")
         .bind(tenant_b)

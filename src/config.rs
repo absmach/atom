@@ -81,14 +81,19 @@ pub struct Config {
     /// One-time managed leaf-key bootstrap. This remains opt-in until the
     /// issuer-aware revocation publication path is complete.
     pub pki_generated_key_issuance_enabled: bool,
-    pub certs_enabled: bool,
-    pub certs_ca_mode: CertsCaMode,
-    pub certs_root_ca_cert_path: Option<String>,
-    pub certs_intermediate_ca_cert_path: Option<String>,
-    pub certs_intermediate_ca_key_path: Option<String>,
-    pub certs_root_ca_key_path: Option<String>,
-    pub certs_leaf_default_ttl_secs: u64,
-    pub certs_leaf_max_ttl_secs: u64,
+    /// Path to a PEM-encoded root CA certificate that Atom imports as the
+    /// managed root trust anchor on startup. Idempotent — a subsequent
+    /// restart with the same PEM finds the existing row by fingerprint and
+    /// leaves it in place. `None` skips the bootstrap step; the platform
+    /// then has no active root and cannot provision downstream authorities.
+    pub pki_root_cert_path: Option<String>,
+    /// Path to a PEM-encoded platform intermediate CA certificate that must
+    /// already be signed by the configured root. Paired with
+    /// [`Self::pki_platform_intermediate_key_path`]. Idempotent by fingerprint.
+    pub pki_platform_intermediate_cert_path: Option<String>,
+    /// Path to a PEM-encoded platform intermediate CA private key (PKCS#8).
+    /// Atom wraps the key with the CA KEK before persisting.
+    pub pki_platform_intermediate_key_path: Option<String>,
     pub broker_auth: BrokerAuthConfig,
 }
 
@@ -724,31 +729,6 @@ impl LogFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CertsCaMode {
-    FileIntermediateIssuer,
-    FileRootIssuer,
-}
-
-impl CertsCaMode {
-    pub fn from_env_value(value: &str) -> Result<Self> {
-        match value {
-            "file_intermediate_issuer" => Ok(Self::FileIntermediateIssuer),
-            "file_root_issuer" => Ok(Self::FileRootIssuer),
-            other => anyhow::bail!(
-                "ATOM_CERTS_CA_MODE must be file_intermediate_issuer or file_root_issuer, got {other}"
-            ),
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::FileIntermediateIssuer => "file_intermediate_issuer",
-            Self::FileRootIssuer => "file_root_issuer",
-        }
-    }
-}
-
 impl Config {
     pub fn from_env() -> Result<Self> {
         let public_base_url = std::env::var("ATOM_PUBLIC_BASE_URL")
@@ -846,19 +826,13 @@ impl Config {
                 "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
                 false,
             ),
-            certs_enabled: env_bool_default("ATOM_CERTS_ENABLED", true),
-            certs_ca_mode: CertsCaMode::from_env_value(
-                &std::env::var("ATOM_CERTS_CA_MODE")
-                    .unwrap_or_else(|_| "file_intermediate_issuer".to_string()),
-            )?,
-            certs_root_ca_cert_path: std::env::var("ATOM_CERTS_ROOT_CA_CERT_PATH").ok(),
-            certs_intermediate_ca_cert_path: std::env::var("ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH")
-                .ok(),
-            certs_intermediate_ca_key_path: std::env::var("ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH")
-                .ok(),
-            certs_root_ca_key_path: std::env::var("ATOM_CERTS_ROOT_CA_KEY_PATH").ok(),
-            certs_leaf_default_ttl_secs: env_u64("ATOM_CERTS_LEAF_DEFAULT_TTL_SECS", 2_592_000),
-            certs_leaf_max_ttl_secs: env_u64("ATOM_CERTS_LEAF_MAX_TTL_SECS", 2_592_000),
+            pki_root_cert_path: nonempty_env("ATOM_PKI_ROOT_CERT_PATH"),
+            pki_platform_intermediate_cert_path: nonempty_env(
+                "ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH",
+            ),
+            pki_platform_intermediate_key_path: nonempty_env(
+                "ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH",
+            ),
             broker_auth: broker_auth_from_env()?,
             public_base_url,
         })
@@ -927,14 +901,9 @@ impl Config {
             login_failure_limit: 5,
             login_failure_window_secs: 15 * 60,
             pki_generated_key_issuance_enabled: false,
-            certs_enabled: false,
-            certs_ca_mode: CertsCaMode::FileIntermediateIssuer,
-            certs_root_ca_cert_path: None,
-            certs_intermediate_ca_cert_path: None,
-            certs_intermediate_ca_key_path: None,
-            certs_root_ca_key_path: None,
-            certs_leaf_default_ttl_secs: 2_592_000,
-            certs_leaf_max_ttl_secs: 2_592_000,
+            pki_root_cert_path: None,
+            pki_platform_intermediate_cert_path: None,
+            pki_platform_intermediate_key_path: None,
             broker_auth: BrokerAuthConfig::default(),
         }
     }

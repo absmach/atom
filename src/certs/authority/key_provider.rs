@@ -288,6 +288,17 @@ pub trait AuthorityKeyProvider: Send + Sync {
         context: AuthorityKeyContext,
         algorithm: AuthorityKeyAlgorithm,
     ) -> Result<GeneratedAuthorityKey<Self::Key>, AuthorityKeyProviderError>;
+    /// Import an existing PKCS#8 DER-encoded private key so the provider wraps
+    /// the material as if it had generated the key itself. Callers must decode
+    /// PEM to DER first. Providers that cannot accept externally supplied key
+    /// material (for example, PKCS#11 tokens) return
+    /// [`AuthorityKeyProviderError::UnsupportedKeyAlgorithm`].
+    fn import_pkcs8(
+        &self,
+        context: AuthorityKeyContext,
+        algorithm: AuthorityKeyAlgorithm,
+        pkcs8_der: &[u8],
+    ) -> Result<GeneratedAuthorityKey<Self::Key>, AuthorityKeyProviderError>;
     fn public_key(
         &self,
         context: AuthorityKeyContext,
@@ -471,6 +482,36 @@ impl AuthorityKeyProvider for EncryptedDatabaseKeyProvider {
             })
         })();
         Self::observe("generate", result)
+    }
+
+    fn import_pkcs8(
+        &self,
+        context: AuthorityKeyContext,
+        algorithm: AuthorityKeyAlgorithm,
+        pkcs8_der: &[u8],
+    ) -> Result<GeneratedAuthorityKey<Self::Key>, AuthorityKeyProviderError> {
+        let result = (|| {
+            if algorithm != AuthorityKeyAlgorithm::EcdsaP256Sha256 {
+                return Err(AuthorityKeyProviderError::UnsupportedKeyAlgorithm);
+            }
+            let signing_key = SigningKey::from_pkcs8_der(pkcs8_der)
+                .map_err(|_| AuthorityKeyProviderError::CryptographicFailure)?;
+            let public_key = signing_key
+                .verifying_key()
+                .to_public_key_der()
+                .map_err(|_| AuthorityKeyProviderError::CryptographicFailure)?;
+            let private_key = Zeroizing::new(pkcs8_der.to_vec());
+            let encrypted_key =
+                self.encrypt_generated_key(context, algorithm, private_key.as_slice())?;
+            Ok(GeneratedAuthorityKey {
+                public_key: AuthorityPublicKey {
+                    algorithm,
+                    subject_public_key_info_der: public_key.as_bytes().to_vec(),
+                },
+                key: encrypted_key,
+            })
+        })();
+        Self::observe("import_pkcs8", result)
     }
 
     fn public_key(
@@ -683,6 +724,28 @@ impl AuthorityKeyProvider for ManagedAuthorityKeyProvider {
                         key: ManagedAuthorityKey::Pkcs11(generated.key),
                     })
             }
+        }
+    }
+
+    fn import_pkcs8(
+        &self,
+        context: AuthorityKeyContext,
+        algorithm: AuthorityKeyAlgorithm,
+        pkcs8_der: &[u8],
+    ) -> Result<GeneratedAuthorityKey<Self::Key>, AuthorityKeyProviderError> {
+        match self {
+            Self::EncryptedDatabase(provider) => provider
+                .import_pkcs8(context, algorithm, pkcs8_der)
+                .map(|generated| GeneratedAuthorityKey {
+                    public_key: generated.public_key,
+                    key: ManagedAuthorityKey::EncryptedDatabase(generated.key),
+                }),
+            Self::Pkcs11(provider) => provider
+                .import_pkcs8(context, algorithm, pkcs8_der)
+                .map(|generated| GeneratedAuthorityKey {
+                    public_key: generated.public_key,
+                    key: ManagedAuthorityKey::Pkcs11(generated.key),
+                }),
         }
     }
 

@@ -10,20 +10,19 @@ use std::{fs, process::Command};
 use async_graphql::{Request, Variables};
 use atom::{
     auth::AuthContext,
-    certs::authority::{provisioning, repo as authority_repo, AuthorityRecord},
-    config::{Config, PkiCaKeyConfig},
+    certs::authority::{repo as authority_repo, AuthorityRecord},
+    config::Config,
     graphql::build_schema,
     keys::{ActiveKeys, LoadedKey},
     state::AppState,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rcgen::{
-    BasicConstraints, CertificateParams, CertificateSigningRequestParams, DnType,
-    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    SanType,
 };
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::pem::parse_x509_pem;
 
@@ -31,11 +30,7 @@ const OCSP_URL: &str = "https://pki.example.test/tenant/ocsp";
 const CA_ISSUERS_URL: &str = "https://pki.example.test/tenant/ca.der";
 const CRL_URL: &str = "https://pki.example.test/tenant/crl.der";
 
-struct TestRoot {
-    params: CertificateParams,
-    key: KeyPair,
-    pem: String,
-}
+type TestRoot = common::pki::TestRoot;
 
 #[tokio::test]
 #[ignore]
@@ -51,7 +46,7 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
         create_entity(&pool, tenant_without_issuer, "pki-csr-no-issuer").await;
 
     let root = test_root();
-    let issuer = provision_tenant_issuer(&pool, &config.pki_ca_keys, &root, tenant_a).await;
+    let issuer = provision_tenant_issuer(&pool, &config, &root, tenant_a).await;
     let schema = build_schema(graphql_state(pool.clone(), config.clone()));
 
     // The public v2 contract has no tenant, issuer, CA path, key reference, or
@@ -439,7 +434,6 @@ fn graphql_state(pool: PgPool, config: Config) -> AppState {
             primary,
             standby: None,
         },
-        None,
     )
 }
 
@@ -518,86 +512,30 @@ fn pem_encode(label: &str, der: &[u8]) -> String {
 }
 
 fn test_root() -> TestRoot {
-    let key = KeyPair::generate().unwrap();
-    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-    params
-        .distinguished_name
-        .push(DnType::CommonName, "PR-005 Offline Root");
-    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(2));
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    params.key_identifier_method = KeyIdMethod::Sha256;
-    params.not_before = OffsetDateTime::now_utc() - Duration::days(1);
-    params.not_after = OffsetDateTime::now_utc() + Duration::days(365);
-    let pem = params.self_signed(&key).unwrap().pem();
-    TestRoot { params, key, pem }
+    common::pki::test_root("PR-005 Offline Root")
 }
 
 async fn provision_tenant_issuer(
     pool: &PgPool,
-    ca_keys: &PkiCaKeyConfig,
+    config: &Config,
     root: &TestRoot,
     tenant_id: Uuid,
 ) -> AuthorityRecord {
-    let mut tx = pool.begin().await.unwrap();
-    provisioning::import_root_in_tx(&mut tx, &root.pem)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-
-    let mut tx = pool.begin().await.unwrap();
-    let mut pending = provisioning::begin_platform_intermediate_in_tx(&mut tx, ca_keys)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    pending.commit_generated_key();
-    let signed = sign_authority_csr(&pending, root);
-    let mut tx = pool.begin().await.unwrap();
-    let imported =
-        provisioning::import_signed_authority_in_tx(&mut tx, ca_keys, pending.id, &signed)
-            .await
-            .unwrap();
-    assert!(imported.succeeded(), "{:?}", imported.validation_error);
-    tx.commit().await.unwrap();
-
-    let mut tx = pool.begin().await.unwrap();
-    let mut provisioned =
-        provisioning::provision_tenant_automatically_in_tx(&mut tx, ca_keys, tenant_id)
-            .await
-            .unwrap();
-    assert!(
-        provisioned.succeeded(),
-        "{:?}",
-        provisioned.validation_error
-    );
-    tx.commit().await.unwrap();
-    provisioned.commit_generated_key();
+    let record = common::pki::provision_tenant_issuer(pool, config, root, tenant_id).await;
     sqlx::query(
         r#"UPDATE pki_authorities
            SET ocsp_url = $2, ca_issuers_url = $3,
                crl_distribution_point_url = $4
            WHERE id = $1"#,
     )
-    .bind(provisioned.authority.id)
+    .bind(record.id)
     .bind(OCSP_URL)
     .bind(CA_ISSUERS_URL)
     .bind(CRL_URL)
     .execute(pool)
     .await
     .unwrap();
-    authority_repo::authority_by_id(pool, provisioned.authority.id)
-        .await
-        .unwrap()
-}
-
-fn sign_authority_csr(pending: &AuthorityRecord, root: &TestRoot) -> String {
-    let mut csr =
-        CertificateSigningRequestParams::from_pem(pending.csr_pem.as_deref().unwrap()).unwrap();
-    csr.params.not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
-    csr.params.not_after = OffsetDateTime::now_utc() + Duration::days(180);
-    csr.params.use_authority_key_identifier_extension = true;
-    csr.signed_by(&Issuer::from_params(&root.params, &root.key))
-        .unwrap()
-        .pem()
+    authority_repo::authority_by_id(pool, record.id).await.unwrap()
 }
 
 async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {

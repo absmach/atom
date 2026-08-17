@@ -50,7 +50,6 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     fs::write(&server_key_path, server.signing_key.serialize_pem()).unwrap();
 
     let mut config = common::pki::managed_config(false, true);
-    config.certs_enabled = true;
     config.enrollment.enabled = true;
     config.enrollment.listen_addr = "127.0.0.1:0".into();
     config.enrollment.tls = Some(atom::config::EnrollmentTlsConfig {
@@ -67,7 +66,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     let active_keys = keys::load_active_keys(&pool, &config.signing_keys)
         .await
         .unwrap();
-    let state = AppState::new(pool.clone(), config.clone(), active_keys, None);
+    let state = AppState::new(pool.clone(), config.clone(), active_keys);
     let prepared = enrollment_tls::prepare(&state)
         .await
         .unwrap()

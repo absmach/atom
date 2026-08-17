@@ -106,9 +106,15 @@ const REVOKE_CREDENTIAL_MUTATION = `
   }
 `;
 
-const ISSUE_CERTIFICATE_MUTATION = `
-  mutation IssueCertificate($input: IssueCertificateInput!) {
-    issueCertificate(input: $input) {
+// v1 file-issuer mutations are removed; all issuance / renewal / revoke goes
+// through the managed v2 surface, which is credentialId-keyed and requires
+// per-request idempotency keys. Subject metadata (commonName, DNS SANs, IP
+// SANs) is derived from the entity profile — the form fields below are kept
+// for the CSR path only.
+
+const ISSUE_GENERATED_CERTIFICATE_MUTATION = `
+  mutation IssueGeneratedCertificateV2($input: IssueGeneratedCertificateV2Input!) {
+    issueGeneratedCertificateV2(input: $input) {
       certificate {
         credentialId
         serialNumber
@@ -121,8 +127,8 @@ const ISSUE_CERTIFICATE_MUTATION = `
 `;
 
 const ISSUE_CERTIFICATE_FROM_CSR_MUTATION = `
-  mutation IssueCertificateFromCsr($input: IssueCertificateFromCsrInput!) {
-    issueCertificateFromCsr(input: $input) {
+  mutation IssueCertificateFromCsrV2($input: IssueCertificateFromCsrV2Input!) {
+    issueCertificateFromCsrV2(input: $input) {
       certificate {
         credentialId
         serialNumber
@@ -135,8 +141,8 @@ const ISSUE_CERTIFICATE_FROM_CSR_MUTATION = `
 `;
 
 const RENEW_CERTIFICATE_MUTATION = `
-  mutation RenewCertificate($input: RenewCertificateInput!) {
-    renewCertificate(input: $input) {
+  mutation RenewGeneratedCertificateV2($input: RenewGeneratedCertificateV2Input!) {
+    renewGeneratedCertificateV2(input: $input) {
       certificate {
         credentialId
         serialNumber
@@ -149,24 +155,22 @@ const RENEW_CERTIFICATE_MUTATION = `
 `;
 
 const REVOKE_CERTIFICATE_MUTATION = `
-  mutation RevokeCertificate($input: RevokeCertificateInput!) {
-    revokeCertificate(input: $input) {
-      credentialId
-      serialNumber
-      status
+  mutation RevokeCertificateV2($input: RevokeCertificateV2Input!) {
+    revokeCertificateV2(input: $input) {
+      certificate {
+        credentialId
+        serialNumber
+        status
+      }
+      reason
+      revokedAt
     }
   }
 `;
 
-const CA_CHAIN_QUERY = `
-  query CaChain {
-    caChain
-  }
-`;
-
 const CERTIFICATE_QUERY = `
-  query Certificate($serialNumber: String!) {
-    certificate(serialNumber: $serialNumber) {
+  query Certificate($credentialId: ID!) {
+    certificate(credentialId: $credentialId) {
       serialNumber
       certificatePem
     }
@@ -393,19 +397,19 @@ export function EntityCredentials({
   });
 
   const issueCertificate = useMutation({
-    mutationFn: async (input: {
-      entityId: string;
-      ttlSecs?: number;
-      commonName?: string;
-      dnsNames?: string[];
-      ipAddresses?: string[];
-    }) =>
-      graphqlClient<{ issueCertificate: CertificateResult }>({
-        query: ISSUE_CERTIFICATE_MUTATION,
-        variables: { input },
+    mutationFn: async (input: { entityId: string; ttlSecs?: number }) =>
+      graphqlClient<{ issueGeneratedCertificateV2: CertificateResult }>({
+        query: ISSUE_GENERATED_CERTIFICATE_MUTATION,
+        variables: {
+          input: {
+            entityId: input.entityId,
+            ttlSecs: input.ttlSecs,
+            idempotencyKey: freshIdempotencyKey(),
+          },
+        },
       }),
     onSuccess: (data) => {
-      setCreatedCertificate(data.issueCertificate);
+      setCreatedCertificate(data.issueGeneratedCertificateV2);
       setActiveForm(null);
       void refetch();
     },
@@ -418,12 +422,19 @@ export function EntityCredentials({
       ttlSecs?: number;
       csrPem: string;
     }) =>
-      graphqlClient<{ issueCertificateFromCsr: CertificateResult }>({
+      graphqlClient<{ issueCertificateFromCsrV2: CertificateResult }>({
         query: ISSUE_CERTIFICATE_FROM_CSR_MUTATION,
-        variables: { input },
+        variables: {
+          input: {
+            entityId: input.entityId,
+            ttlSecs: input.ttlSecs,
+            csrPem: input.csrPem,
+            idempotencyKey: freshIdempotencyKey(),
+          },
+        },
       }),
     onSuccess: (data) => {
-      setCreatedCertificate(data.issueCertificateFromCsr);
+      setCreatedCertificate(data.issueCertificateFromCsrV2);
       setActiveForm(null);
       void refetch();
     },
@@ -431,23 +442,25 @@ export function EntityCredentials({
   });
 
   const renewCertificate = useMutation({
-    mutationFn: async (serialNumber: string) =>
-      graphqlClient<{ renewCertificate: CertificateResult }>({
+    mutationFn: async (credentialId: string) =>
+      graphqlClient<{ renewGeneratedCertificateV2: CertificateResult }>({
         query: RENEW_CERTIFICATE_MUTATION,
-        variables: { input: { serialNumber } },
+        variables: {
+          input: { credentialId, idempotencyKey: freshIdempotencyKey() },
+        },
       }),
     onSuccess: (data) => {
-      setCreatedCertificate(data.renewCertificate);
+      setCreatedCertificate(data.renewGeneratedCertificateV2);
       void refetch();
     },
     onError: (err) => toast.error(err.message),
   });
 
   const revokeCertificate = useMutation({
-    mutationFn: async (serialNumber: string) =>
+    mutationFn: async (credentialId: string) =>
       graphqlClient({
         query: REVOKE_CERTIFICATE_MUTATION,
-        variables: { input: { serialNumber } },
+        variables: { input: { credentialId, reason: "unspecified" } },
       }),
     onSuccess: () => {
       toast.success("Certificate revoked");
@@ -457,10 +470,10 @@ export function EntityCredentials({
   });
 
   const downloadCertificate = useMutation({
-    mutationFn: async (serialNumber: string) =>
+    mutationFn: async (credentialId: string) =>
       graphqlClient<{ certificate: DownloadableCertificate }>({
         query: CERTIFICATE_QUERY,
-        variables: { serialNumber },
+        variables: { credentialId },
       }),
     onSuccess: (data) => {
       downloadCertificatePem(data.certificate);
@@ -527,13 +540,10 @@ export function EntityCredentials({
         });
         return;
       }
-      issueCertificate.mutate({
-        entityId,
-        ttlSecs,
-        commonName: form.commonName.trim() || undefined,
-        dnsNames: splitList(form.dnsNames),
-        ipAddresses: splitList(form.ipAddresses),
-      });
+      // Generated-key path (managed v2). Subject metadata comes from the
+      // entity's profile; commonName / SAN fields in the form are only
+      // meaningful on the CSR path above.
+      issueCertificate.mutate({ entityId, ttlSecs });
     }
   }
 
@@ -905,20 +915,20 @@ export function EntityCredentials({
                   )
                 )
                   return;
-                if (cred.kind === "certificate" && cred.identifier) {
-                  revokeCertificate.mutate(cred.identifier);
+                if (cred.kind === "certificate") {
+                  revokeCertificate.mutate(cred.id);
                 } else {
                   revokeCredential.mutate(cred.id);
                 }
               }}
               onRenew={
-                cred.kind === "certificate" && cred.identifier
-                  ? () => renewCertificate.mutate(cred.identifier as string)
+                cred.kind === "certificate"
+                  ? () => renewCertificate.mutate(cred.id)
                   : undefined
               }
               onDownload={
-                cred.kind === "certificate" && cred.identifier
-                  ? () => downloadCertificate.mutate(cred.identifier as string)
+                cred.kind === "certificate"
+                  ? () => downloadCertificate.mutate(cred.id)
                   : undefined
               }
               onReveal={
@@ -1311,13 +1321,6 @@ function tokenPermissionSummary(permission: TokenPermission) {
   return `${permission.actions.join(", ")} · ${scope}`;
 }
 
-function splitList(value: string) {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function downloadText(filename: string, contents: string) {
   const blob = new Blob([contents], { type: "application/x-pem-file" });
   const url = URL.createObjectURL(blob);
@@ -1337,9 +1340,22 @@ function downloadCertificatePem(certificate: DownloadableCertificate) {
   );
 }
 
+// v2 exposes the trust anchor set as `/certs/trust-bundle.pem` (a public,
+// unauthenticated route served by the app proxy). The old `caChain` GraphQL
+// query was tied to the file-issuer's single global chain and no longer exists.
 async function downloadCaChain() {
-  const data = await graphqlClient<{ caChain: string }>({
-    query: CA_CHAIN_QUERY,
+  const response = await fetch("/certs/trust-bundle.pem", {
+    credentials: "same-origin",
   });
-  downloadText("atom-ca-chain.pem", data.caChain);
+  if (!response.ok) {
+    throw new Error(`trust bundle fetch failed: HTTP ${response.status}`);
+  }
+  downloadText("atom-trust-bundle.pem", await response.text());
+}
+
+function freshIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `ui-${crypto.randomUUID()}`;
+  }
+  return `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }

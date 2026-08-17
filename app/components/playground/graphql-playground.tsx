@@ -1,7 +1,14 @@
 "use client";
 
-import { Copy, DatabaseZap, Play, RotateCcw, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  AlertCircle,
+  Copy,
+  DatabaseZap,
+  Play,
+  RotateCcw,
+  Search,
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -148,8 +155,10 @@ export function GraphqlPlayground() {
   const [result, setResult] = useState<PlaygroundResult | null>(null);
   const [schemaTypes, setSchemaTypes] = useState<SchemaType[]>([]);
   const [schemaSearch, setSchemaSearch] = useState("");
+  const [operationSearch, setOperationSearch] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [isLoadingSchema, setIsLoadingSchema] = useState(false);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
 
   const requestPayload = useMemo(() => {
     const payload: Record<string, unknown> = { query };
@@ -204,6 +213,40 @@ const payload = await response.json();`,
       })
       .slice(0, 24);
   }, [schemaSearch, schemaTypes]);
+
+  const groupedOperations = useMemo(() => {
+    const queryType = schemaTypes.find((type) => type.name === "Query");
+    const mutationType = schemaTypes.find((type) => type.name === "Mutation");
+    const queries = (queryType?.fields ?? []).map((field) => ({
+      field,
+      kind: "query" as const,
+    }));
+    const mutations = (mutationType?.fields ?? []).map((field) => ({
+      field,
+      kind: "mutation" as const,
+    }));
+    const all = groupOperations([...queries, ...mutations]);
+    const term = operationSearch.trim().toLowerCase();
+    if (!term) return all;
+    return all
+      .map((group) => ({
+        ...group,
+        entries: group.entries.filter(
+          (entry) =>
+            entry.field.name.toLowerCase().includes(term) ||
+            (entry.field.description ?? "").toLowerCase().includes(term),
+        ),
+      }))
+      .filter((group) => group.entries.length > 0);
+  }, [operationSearch, schemaTypes]);
+
+  const totalOperationCount = useMemo(() => {
+    const queryType = schemaTypes.find((type) => type.name === "Query");
+    const mutationType = schemaTypes.find((type) => type.name === "Mutation");
+    return (
+      (queryType?.fields?.length ?? 0) + (mutationType?.fields?.length ?? 0)
+    );
+  }, [schemaTypes]);
 
   async function executeOperation() {
     const parsedVariables = parseJsonObject(variables);
@@ -265,8 +308,9 @@ const payload = await response.json();`,
     }
   }
 
-  async function loadSchema() {
+  async function loadSchema(options?: { silent?: boolean }) {
     setIsLoadingSchema(true);
+    setSchemaError(null);
     try {
       const response = await fetch("/api/graphql", {
         method: "POST",
@@ -280,20 +324,46 @@ const payload = await response.json();`,
             "Schema request failed",
         );
       }
-      setSchemaTypes(payload.data?.__schema?.types ?? []);
-      toast.success("Schema loaded");
+      const types = payload.data?.__schema?.types ?? [];
+      setSchemaTypes(types);
+      if (types.length === 0) {
+        setSchemaError(
+          "Introspection returned no types. Set ATOM_GRAPHQL_INTROSPECTION_ENABLED=true and restart Atom.",
+        );
+      }
+      if (!options?.silent) {
+        toast.success("Schema loaded");
+      }
     } catch (caught) {
-      toast.error(
-        caught instanceof Error ? caught.message : "Schema request failed",
-      );
+      const message =
+        caught instanceof Error ? caught.message : "Schema request failed";
+      setSchemaError(message);
+      if (!options?.silent) {
+        toast.error(message);
+      }
     } finally {
       setIsLoadingSchema(false);
     }
   }
 
+  // Auto-load once on mount so operators land on a populated Operations panel
+  // instead of an empty "Load the schema…" placeholder. Silent on this first
+  // load — the error state below surfaces failures without a toast on boot.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fire-once mount effect
+  useEffect(() => {
+    void loadSchema({ silent: true });
+  }, []);
+
   function loadStarter(starter: (typeof STARTER_OPERATIONS)[number]) {
     setQuery(starter.query);
     setVariables(starter.variables);
+    setOperationName("");
+    setResult(null);
+  }
+
+  function loadOperation(kind: "query" | "mutation", field: SchemaField) {
+    setQuery(buildOperationTemplate(kind, field));
+    setVariables(buildVariablesTemplate(field));
     setOperationName("");
     setResult(null);
   }
@@ -415,6 +485,132 @@ const payload = await response.json();`,
       </div>
 
       <aside className="grid gap-4 self-start">
+        <Card>
+          <CardHeader className="gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <CardTitle>Operations</CardTitle>
+                <CardDescription>
+                  Every query and mutation the schema exposes, grouped by
+                  domain. Click any entry to load a template into the editor.
+                </CardDescription>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void loadSchema()}
+                disabled={isLoadingSchema}
+              >
+                <DatabaseZap data-icon="inline-start" />
+                {isLoadingSchema
+                  ? "Loading"
+                  : totalOperationCount > 0
+                    ? "Refresh"
+                    : "Load"}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {schemaError ? (
+              <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{schemaError}</span>
+              </p>
+            ) : null}
+            <label className="relative block">
+              <Search className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground" />
+              <input
+                className="h-9 w-full rounded-md border border-input bg-background pr-3 pl-9 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                value={operationSearch}
+                onChange={(event) => setOperationSearch(event.target.value)}
+                placeholder={
+                  totalOperationCount > 0
+                    ? `Search ${totalOperationCount} operations`
+                    : "Search operations"
+                }
+              />
+            </label>
+            {totalOperationCount > 0 ? (
+              <div className="grid max-h-[65vh] gap-2 overflow-auto pr-1">
+                {groupedOperations.length ? (
+                  groupedOperations.map((group) => (
+                    <details
+                      key={group.name}
+                      className="rounded-md border"
+                      open={
+                        operationSearch.length > 0 ||
+                        group.name === "certificates" ||
+                        group.name === "pki"
+                      }
+                    >
+                      <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-sm font-medium">
+                        <span>{group.label}</span>
+                        <Badge variant="outline">{group.entries.length}</Badge>
+                      </summary>
+                      <ul className="grid gap-1 border-t p-2">
+                        {group.entries.map((entry) => (
+                          <li key={`${entry.kind}:${entry.field.name}`}>
+                            <button
+                              type="button"
+                              className="grid w-full gap-0.5 rounded-md p-2 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
+                              onClick={() =>
+                                loadOperation(entry.kind, entry.field)
+                              }
+                            >
+                              <span className="flex items-center gap-2 font-mono text-xs">
+                                <Badge
+                                  variant={
+                                    entry.kind === "mutation"
+                                      ? "destructive"
+                                      : "secondary"
+                                  }
+                                  className="px-1 py-0 text-[10px] uppercase"
+                                >
+                                  {entry.kind}
+                                </Badge>
+                                {entry.field.name}
+                              </span>
+                              {entry.field.description ? (
+                                <span className="line-clamp-2 text-[11px] text-muted-foreground">
+                                  {entry.field.description}
+                                </span>
+                              ) : null}
+                              {entry.field.args &&
+                              entry.field.args.length > 0 ? (
+                                <span className="mt-1 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
+                                  {entry.field.args.map((arg) => (
+                                    <span
+                                      key={arg.name}
+                                      className="rounded bg-muted px-1.5 py-0.5 font-mono"
+                                    >
+                                      {arg.name}: {formatTypeRef(arg.type)}
+                                    </span>
+                                  ))}
+                                </span>
+                              ) : null}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ))
+                ) : (
+                  <p className="rounded-md border p-3 text-sm text-muted-foreground">
+                    No operations match “{operationSearch}”.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="rounded-md border p-3 text-sm text-muted-foreground">
+                {isLoadingSchema
+                  ? "Loading schema…"
+                  : "Introspection has not returned any operations yet. Click Load."}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader>
             <CardTitle>Starter Operations</CardTitle>
@@ -606,4 +802,176 @@ async function copyToClipboard(value: string) {
   } catch {
     toast.error("Copy failed");
   }
+}
+
+// Domain grouping is derived from operation-name prefixes because GraphQL
+// has no native namespace. The categories match how the Rust resolvers are
+// organised (see src/graphql/ and src/certs/**/graphql.rs).
+const OPERATION_GROUPS: Array<{
+  name: string;
+  label: string;
+  matches: (name: string) => boolean;
+}> = [
+  {
+    name: "pki",
+    label: "PKI Authorities",
+    matches: (name) =>
+      name.startsWith("pkiAuthorit") ||
+      name.startsWith("beginTenantAuthority") ||
+      name.startsWith("provisionTenant") ||
+      name.startsWith("beginAuthorityRetirement") ||
+      name.startsWith("completeAuthorityRetirement") ||
+      name.startsWith("transitionRetirement"),
+  },
+  {
+    name: "certificates",
+    label: "Certificates",
+    matches: (name) =>
+      name === "certificate" ||
+      name === "certificates" ||
+      name.startsWith("issueCertificate") ||
+      name.startsWith("issueGeneratedCertificate") ||
+      name.startsWith("renewCertificate") ||
+      name.startsWith("renewGeneratedCertificate") ||
+      name.startsWith("revokeCertificate") ||
+      name.startsWith("revokeEntityCertificates") ||
+      name.startsWith("bulkRevokeCertificates"),
+  },
+  {
+    name: "tenants",
+    label: "Tenants",
+    matches: (name) =>
+      name === "tenant" || name === "tenants" || name.endsWith("Tenant"),
+  },
+  {
+    name: "entities",
+    label: "Entities",
+    matches: (name) =>
+      name === "entity" || name === "entities" || name.endsWith("Entity"),
+  },
+  {
+    name: "authz",
+    label: "Authorization",
+    matches: (name) =>
+      name.startsWith("authz") ||
+      name.startsWith("role") ||
+      name.startsWith("permissionBlock") ||
+      name.startsWith("directPolicy") ||
+      name.startsWith("action"),
+  },
+  {
+    name: "identity",
+    label: "Identity & Sessions",
+    matches: (name) =>
+      name.startsWith("credential") ||
+      name.startsWith("accessToken") ||
+      name.startsWith("session") ||
+      name.startsWith("me") ||
+      name.startsWith("password") ||
+      name.startsWith("shared"),
+  },
+  {
+    name: "groups",
+    label: "Groups",
+    matches: (name) =>
+      name === "group" || name === "groups" || name.endsWith("Group"),
+  },
+  {
+    name: "resources",
+    label: "Resources",
+    matches: (name) =>
+      name === "resource" || name === "resources" || name.endsWith("Resource"),
+  },
+  {
+    name: "audit",
+    label: "Audit & Health",
+    matches: (name) =>
+      name.startsWith("audit") || name === "health" || name === "systemStatus",
+  },
+];
+
+type OperationEntry = { field: SchemaField; kind: "query" | "mutation" };
+type OperationGroup = {
+  name: string;
+  label: string;
+  entries: OperationEntry[];
+};
+
+function groupOperations(entries: OperationEntry[]): OperationGroup[] {
+  const groups = new Map<string, OperationGroup>();
+  for (const spec of OPERATION_GROUPS) {
+    groups.set(spec.name, {
+      name: spec.name,
+      label: spec.label,
+      entries: [],
+    });
+  }
+  const other: OperationGroup = { name: "other", label: "Other", entries: [] };
+
+  for (const entry of entries) {
+    const spec = OPERATION_GROUPS.find((candidate) =>
+      candidate.matches(entry.field.name),
+    );
+    if (spec) {
+      groups.get(spec.name)?.entries.push(entry);
+    } else {
+      other.entries.push(entry);
+    }
+  }
+
+  const ordered: OperationGroup[] = [];
+  for (const spec of OPERATION_GROUPS) {
+    const group = groups.get(spec.name);
+    if (group && group.entries.length > 0) {
+      group.entries.sort((a, b) => a.field.name.localeCompare(b.field.name));
+      ordered.push(group);
+    }
+  }
+  if (other.entries.length > 0) {
+    other.entries.sort((a, b) => a.field.name.localeCompare(b.field.name));
+    ordered.push(other);
+  }
+  return ordered;
+}
+
+function buildOperationTemplate(
+  kind: "query" | "mutation",
+  field: SchemaField,
+): string {
+  const args = field.args ?? [];
+  const varSignature = args
+    .map((arg) => `$${arg.name}: ${formatTypeRef(arg.type)}`)
+    .join(", ");
+  const argAssignment = args
+    .map((arg) => `${arg.name}: $${arg.name}`)
+    .join(", ");
+  const returnKind = unwrapType(field.type)?.kind ?? "SCALAR";
+  const body = returnKind === "OBJECT" ? " {\n    __typename\n  }" : "";
+  const opName = capitalize(field.name);
+  const header = varSignature ? `${opName}(${varSignature})` : opName;
+  const call = argAssignment ? `${field.name}(${argAssignment})` : field.name;
+  return `${kind} ${header} {\n  ${call}${body}\n}`;
+}
+
+function buildVariablesTemplate(field: SchemaField): string {
+  const args = field.args ?? [];
+  if (args.length === 0) {
+    return "{}";
+  }
+  const object: Record<string, unknown> = {};
+  for (const arg of args) {
+    object[arg.name] = null;
+  }
+  return JSON.stringify(object, null, 2);
+}
+
+function unwrapType(type?: TypeRef | null): TypeRef | null {
+  if (!type) return null;
+  if (type.name) return type;
+  return unwrapType(type.ofType ?? null);
+}
+
+function capitalize(value: string): string {
+  if (!value) return value;
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }

@@ -637,6 +637,18 @@ impl AuthorityKeyProvider for Pkcs11KeyProvider {
         Self::audit_result("generate", context, result)
     }
 
+    fn import_pkcs8(
+        &self,
+        _context: AuthorityKeyContext,
+        _algorithm: AuthorityKeyAlgorithm,
+        _pkcs8_der: &[u8],
+    ) -> Result<GeneratedAuthorityKey<Self::Key>, AuthorityKeyProviderError> {
+        // PKCS#11 tokens generate non-exportable keys inside the HSM. Importing
+        // external private-key material would defeat the non-exportable policy
+        // and is deliberately unsupported.
+        Err(AuthorityKeyProviderError::UnsupportedKeyAlgorithm)
+    }
+
     fn public_key(
         &self,
         context: AuthorityKeyContext,

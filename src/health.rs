@@ -73,7 +73,6 @@ pub struct SystemStatus {
     pub database: ComponentCheck,
     pub migrations: ComponentCheck,
     pub signing_keys: ComponentCheck,
-    pub certificate_issuer: ComponentCheck,
     pub db_pool: DbPoolStatus,
     pub signing_key_state: Option<SigningKeyStatus>,
     pub audit_retention: AuditRetentionStatus,
@@ -96,15 +95,8 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let database = database_check(state).await;
     let migrations = migrations_check(state).await;
     let (signing_keys, signing_key_state) = signing_keys_check(state).await;
-    let certificate_issuer = certificate_issuer_check(state);
     let grpc_ready = grpc_check(state).await;
-    let ready = readiness_ok(
-        &database,
-        &migrations,
-        &signing_keys,
-        &certificate_issuer,
-        &grpc_ready,
-    );
+    let ready = readiness_ok(&database, &migrations, &signing_keys, &grpc_ready);
     let status = if ready {
         ComponentStatus::Ok
     } else {
@@ -123,7 +115,6 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
         database,
         migrations,
         signing_keys,
-        certificate_issuer,
         db_pool: db_pool_status(state),
         signing_key_state,
         audit_retention: audit_retention_status(state).await,
@@ -141,16 +132,11 @@ fn readiness_ok(
     database: &ComponentCheck,
     migrations: &ComponentCheck,
     signing_keys: &ComponentCheck,
-    certificate_issuer: &ComponentCheck,
     grpc_ready: &ComponentCheck,
 ) -> bool {
     matches!(&database.status, ComponentStatus::Ok)
         && matches!(&migrations.status, ComponentStatus::Ok)
         && matches!(&signing_keys.status, ComponentStatus::Ok)
-        && matches!(
-            &certificate_issuer.status,
-            ComponentStatus::Ok | ComponentStatus::Disabled
-        )
         && matches!(&grpc_ready.status, ComponentStatus::Ok)
 }
 
@@ -237,29 +223,6 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
     }
 }
 
-fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
-    if !state.config.certs_enabled {
-        return ComponentCheck {
-            status: ComponentStatus::Disabled,
-            message: "certificate issuer disabled".to_string(),
-        };
-    }
-    if state.certificate_issuer.is_some() {
-        ComponentCheck {
-            status: ComponentStatus::Ok,
-            message: format!(
-                "certificate issuer loaded using {}",
-                state.config.certs_ca_mode.as_str()
-            ),
-        }
-    } else {
-        ComponentCheck {
-            status: ComponentStatus::Error,
-            message: "certificate issuer is enabled but not loaded".to_string(),
-        }
-    }
-}
-
 async fn grpc_check(state: &AppState) -> ComponentCheck {
     let status = state.grpc_status().await;
     match status.state {
@@ -340,7 +303,6 @@ mod tests {
             database: check(ComponentStatus::Ok),
             migrations: check(ComponentStatus::Ok),
             signing_keys: check(ComponentStatus::Ok),
-            certificate_issuer: check(ComponentStatus::Disabled),
             db_pool: DbPoolStatus {
                 max_connections: 0,
                 min_connections: 0,
@@ -381,27 +343,23 @@ mod tests {
         let database = check(ComponentStatus::Ok);
         let migrations = check(ComponentStatus::Ok);
         let signing_keys = check(ComponentStatus::Ok);
-        let certificate_issuer = check(ComponentStatus::Disabled);
 
         assert!(!readiness_ok(
             &database,
             &migrations,
             &signing_keys,
-            &certificate_issuer,
             &check(ComponentStatus::Degraded),
         ));
         assert!(!readiness_ok(
             &database,
             &migrations,
             &signing_keys,
-            &certificate_issuer,
             &check(ComponentStatus::Error),
         ));
         assert!(readiness_ok(
             &database,
             &migrations,
             &signing_keys,
-            &certificate_issuer,
             &check(ComponentStatus::Ok),
         ));
     }

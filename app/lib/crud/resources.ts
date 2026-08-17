@@ -3,9 +3,11 @@ import {
   Boxes,
   Braces,
   Building2,
+  FileKey,
   Fingerprint,
   GitBranch,
   KeyRound,
+  Landmark,
   Network,
   ScrollText,
   Server,
@@ -61,6 +63,12 @@ export type CrudResource = {
   deleteIdField?: string;
   formAttributes?: boolean;
   tenantFilter?: boolean;
+  /**
+   * When set, the Create button routes here instead of opening the generic
+   * single-mutation create sheet. Use for resources whose Create is a
+   * dedicated multi-step flow (e.g. PKI authority provisioning).
+   */
+  createHref?: string;
   filters?: CrudFilter[];
   /**
    * Status values always offered in the status dropdown, independent of the
@@ -754,6 +762,81 @@ export const secondaryResources: CrudResource[] = [
     missing: {
       update: "Profile version updates are not available yet.",
       delete: "Profile version deletion is not available yet.",
+    },
+  },
+  {
+    key: "pki-authorities",
+    title: "PKI Authorities",
+    route: "/pki/authorities",
+    description:
+      "Managed certificate authorities: root trust anchor, platform intermediate, platform leaf issuer, and per-tenant intermediates.",
+    icon: Landmark,
+    queryName: "pkiAuthorities",
+    tenantFilter: true,
+    createHref: "/pki/actions",
+    listQuery: `query PkiAuthorities($tenantId: ID) { pkiAuthorities(tenantId: $tenantId) { id kind version status issuanceEnabled subject serialNumber tenantId ocspUrl caIssuersUrl crlDistributionPointUrl notBefore notAfter createdAt updatedAt } }`,
+    columns: [
+      { key: "kind", label: "Kind", priority: "high" },
+      { key: "subject", label: "Subject", priority: "high" },
+      { key: "status", label: "Status", priority: "high" },
+      { key: "version", label: "Version", priority: "medium" },
+      { key: "tenantId", label: "Tenant", priority: "medium" },
+      { key: "notAfter", label: "Not after", priority: "medium" },
+      { key: "createdAt", label: "Created", priority: "low" },
+    ],
+    sampleRows: [
+      {
+        id: "authority-demo",
+        kind: "tenant_intermediate",
+        subject: "CN=demo-tenant intermediate",
+        status: "active",
+        version: 1,
+      },
+    ],
+    missing: {
+      create:
+        "Use PKI → Actions → Import Root / Provision Tenant CA. Authority provisioning is a multi-step flow that needs an offline signing ceremony.",
+      update: "Authority updates are not available yet.",
+      delete: "Use PKI → Actions → Retire Authority (2-step wizard).",
+    },
+  },
+  {
+    key: "pki-certificates",
+    title: "PKI Certificates",
+    route: "/pki/certificates",
+    description:
+      "Managed leaf certificates issued to entities across every tenant. Filter to inspect a single tenant, entity, or issuer. Delete revokes the certificate with reason `unspecified` — use the playground for a full reason code.",
+    icon: FileKey,
+    queryName: "certificates",
+    tenantFilter: true,
+    createHref: "/pki/actions",
+    listQuery: `query PkiCertificates($tenantId: ID, $entityId: ID, $issuerId: ID, $status: String, $limit: Int = 50, $offset: Int = 0) { certificates(tenantId: $tenantId, entityId: $entityId, issuerId: $issuerId, status: $status, limit: $limit, offset: $offset) { total items { credentialId entityId issuerId serialNumber fingerprintSha256 status expiresAt createdAt } } }`,
+    // The framework's Delete button maps here. `revokeCertificateV2` is a
+    // safe stand-in: it is idempotent, immutable, and the only supported
+    // "remove from active use" operation for a managed certificate.
+    deleteMutation: `mutation RevokeCertificateFromList($id: ID!) { revokeCertificateV2(input: { credentialId: $id, reason: "unspecified" }) { certificate { status } } }`,
+    deleteIdField: "credentialId",
+    columns: [
+      { key: "serialNumber", label: "Serial", priority: "high" },
+      { key: "entityId", label: "Entity", priority: "high" },
+      { key: "issuerId", label: "Issuer", priority: "medium" },
+      { key: "status", label: "Status", priority: "high" },
+      { key: "expiresAt", label: "Expires", priority: "medium" },
+      { key: "fingerprintSha256", label: "Fingerprint", priority: "low" },
+      { key: "createdAt", label: "Issued", priority: "low" },
+    ],
+    sampleRows: [
+      {
+        credentialId: "cert-demo",
+        serialNumber: "01",
+        entityId: "device-01",
+        status: "active",
+      },
+    ],
+    missing: {
+      create:
+        "Use PKI → Actions → Issue from CSR (upload a CSR) or Generate & Issue (browser-generated keypair).",
+      update: "Certificate updates are not available yet.",
     },
   },
 ];

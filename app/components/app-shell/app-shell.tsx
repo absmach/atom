@@ -6,14 +6,17 @@ import {
   Braces,
   Building2,
   Code2,
+  FileKey,
   Fingerprint,
   Home,
   KeyRound,
+  Landmark,
   Link2,
   ScrollText,
   Server,
   ShieldCheck,
   Users,
+  Wrench,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -87,6 +90,14 @@ const navSections: NavSection[] = [
         href: "/operations/signing-keys",
         icon: KeyRound,
       },
+    ],
+  },
+  {
+    title: "PKI",
+    items: [
+      { title: "Authorities", href: "/pki/authorities", icon: Landmark },
+      { title: "Certificates", href: "/pki/certificates", icon: FileKey },
+      { title: "PKI Actions", href: "/pki/actions", icon: Wrench },
     ],
   },
   {

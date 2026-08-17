@@ -35,7 +35,6 @@ fn state(pool: PgPool) -> AppState {
             primary,
             standby: None,
         },
-        None,
     )
 }
 
