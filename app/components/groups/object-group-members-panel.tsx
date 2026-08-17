@@ -83,13 +83,15 @@ function ObjectGroupMemberList({
     kind,
     tenantId,
     search,
+    groupId,
   });
   const { addToGroup, removeFromGroup } = useObjectGroupMembershipActions(kind);
 
   const members = membersQuery.data?.items ?? [];
   const total = membersQuery.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const candidates = candidatesQuery.data ?? [];
+  const candidates = candidatesQuery.data?.items ?? [];
+  const matchingCandidates = candidatesQuery.data?.total ?? 0;
 
   return (
     <div className="grid gap-3">
@@ -191,9 +193,11 @@ function ObjectGroupMemberList({
             </div>
           ) : candidates.length === 0 ? (
             <div className="text-xs text-muted-foreground">
-              {search
-                ? `No matching ${kind === "entity" ? "entities" : "resources"}.`
-                : `No ${kind === "entity" ? "entities" : "resources"} available.`}
+              {matchingCandidates > 0
+                ? `Every matching ${kind === "entity" ? "entity is" : "resource is"} already in this group.`
+                : search
+                  ? `No matching ${kind === "entity" ? "entities" : "resources"}.`
+                  : `No ${kind === "entity" ? "entities" : "resources"} available.`}
             </div>
           ) : (
             <ScrollArea className="max-h-48">

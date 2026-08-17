@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   candidatesQuery,
+  excludeJoinedGroups,
+  excludeJoinedMembers,
   memberDisplayName,
   memberIdVariableName,
   memberKindLabel,
@@ -122,6 +124,11 @@ describe("membership documents", () => {
     );
   });
 
+  it("reads candidate membership so joined rows can be filtered out", () => {
+    expect(candidatesQuery("entity")).toContain("objectGroupIds");
+    expect(candidatesQuery("resource")).toContain("objectGroupIds");
+  });
+
   it("reads a single member's membership set", () => {
     expect(membershipQuery("entity")).toContain(
       "member: entity(id: $id) { id objectGroupIds }",
@@ -134,6 +141,42 @@ describe("membership documents", () => {
   it("picks groups through objectGroups so principal groups never appear", () => {
     expect(OBJECT_GROUPS_QUERY).toContain("objectGroups(tenantId: $tenantId");
     expect(OBJECT_GROUPS_QUERY).not.toMatch(/\bgroups\(/);
+  });
+});
+
+describe("already joined candidates", () => {
+  it("drops the object groups the entity or resource is already in", () => {
+    const options = [
+      { id: "group-1", name: "Floor sensors" },
+      { id: "group-2", name: "Gateways" },
+      { id: "group-3", name: "Meters" },
+    ];
+    expect(excludeJoinedGroups(options, ["group-2"])).toEqual([
+      { id: "group-1", name: "Floor sensors" },
+      { id: "group-3", name: "Meters" },
+    ]);
+  });
+
+  it("keeps every option when nothing is joined yet", () => {
+    const options = [{ id: "group-1", name: "Floor sensors" }];
+    expect(excludeJoinedGroups(options, [])).toEqual(options);
+  });
+
+  it("drops the members already in the group being edited", () => {
+    const candidates = [
+      { id: "entity-1", objectGroupIds: ["group-1"] },
+      { id: "entity-2", objectGroupIds: ["group-9"] },
+      { id: "entity-3", objectGroupIds: [] },
+    ];
+    expect(excludeJoinedMembers(candidates, "group-1")).toEqual([
+      { id: "entity-2", objectGroupIds: ["group-9"] },
+      { id: "entity-3", objectGroupIds: [] },
+    ]);
+  });
+
+  it("keeps candidates whose membership is missing rather than empty", () => {
+    const candidates = [{ id: "resource-1" }, { id: "resource-2" }];
+    expect(excludeJoinedMembers(candidates, "group-1")).toEqual(candidates);
   });
 });
 

@@ -11,6 +11,8 @@ import {
   membershipVariables,
   membersQuery,
   OBJECT_GROUPS_QUERY,
+  excludeJoinedGroups,
+  excludeJoinedMembers,
   type ObjectGroupMember,
   type ObjectGroupMemberPage,
   type ObjectGroupMembership,
@@ -20,6 +22,7 @@ import {
 
 export const OBJECT_GROUP_MEMBERS_KEY = "object-group-members";
 export const OBJECT_GROUP_MEMBERSHIP_KEY = "object-group-membership";
+export const OBJECT_GROUP_CANDIDATES_KEY = "object-group-member-candidates";
 
 export function membersQueryKey(
   kind: ObjectMemberKind,
@@ -73,26 +76,57 @@ export function useObjectGroupMemberCandidates({
   kind,
   tenantId,
   search,
+  groupId,
   limit = 20,
 }: {
   kind: ObjectMemberKind;
   tenantId?: string | null;
   search: string;
+  groupId: string;
   limit?: number;
 }) {
   const q = search.trim();
   return useQuery({
     enabled: Boolean(tenantId),
-    queryKey: ["object-group-member-candidates", kind, tenantId ?? null, q],
+    queryKey: [
+      OBJECT_GROUP_CANDIDATES_KEY,
+      kind,
+      tenantId ?? null,
+      groupId,
+      q,
+    ],
     queryFn: async ({ signal }) => {
-      const data = await graphqlClient<{
-        list: { total: number; items: ObjectGroupMember[] };
-      }>({
-        query: candidatesQuery(kind),
-        variables: { tenantId: tenantId || null, q: q || null, limit },
-        signal,
-      });
-      return data.list.items;
+      const items: ObjectGroupMember[] = [];
+      let total = 0;
+      let offset = 0;
+
+      // Membership is returned on each row, so refill the picker from later
+      // pages when an earlier page consists entirely of joined members.
+      while (offset < total || offset === 0) {
+        const data = await graphqlClient<{
+          list: { total: number; items: ObjectGroupMember[] };
+        }>({
+          query: candidatesQuery(kind),
+          variables: {
+            tenantId: tenantId || null,
+            q: q || null,
+            limit,
+            offset,
+          },
+          signal,
+        });
+        total = data.list.total;
+        items.push(...excludeJoinedMembers(data.list.items, groupId));
+
+        if (
+          items.length >= limit ||
+          data.list.items.length === 0 ||
+          offset + data.list.items.length >= total
+        ) break;
+        offset += limit;
+      }
+
+      return { items: items.slice(0, limit), total };
     },
     staleTime: 30_000,
     placeholderData: (previous) => previous,
@@ -103,29 +137,51 @@ export function useObjectGroupMemberCandidates({
 export function useObjectGroupOptions({
   tenantId,
   search,
+  excludedGroupIds = [],
   limit = 20,
 }: {
   tenantId?: string | null;
   search: string;
+  excludedGroupIds?: readonly string[];
   limit?: number;
 }) {
   const q = search.trim();
+  const excludedKey = excludedGroupIds.join(",");
   return useQuery({
-    queryKey: ["object-group-options", tenantId ?? null, q],
+    queryKey: ["object-group-options", tenantId ?? null, q, excludedKey],
     queryFn: async ({ signal }) => {
-      const data = await graphqlClient<{
-        objectGroups: { total: number; items: ObjectGroupOption[] };
-      }>({
-        query: OBJECT_GROUPS_QUERY,
-        variables: {
-          tenantId: tenantId || null,
-          q: q || null,
-          limit,
-          offset: 0,
-        },
-        signal,
-      });
-      return data.objectGroups.items;
+      const items: ObjectGroupOption[] = [];
+      let total = 0;
+      let offset = 0;
+
+      // Refill from later pages when the first page contains only joined groups.
+      while (offset < total || offset === 0) {
+        const data = await graphqlClient<{
+          objectGroups: { total: number; items: ObjectGroupOption[] };
+        }>({
+          query: OBJECT_GROUPS_QUERY,
+          variables: {
+            tenantId: tenantId || null,
+            q: q || null,
+            limit,
+            offset,
+          },
+          signal,
+        });
+        total = data.objectGroups.total;
+        items.push(
+          ...excludeJoinedGroups(data.objectGroups.items, excludedGroupIds),
+        );
+
+        if (
+          items.length >= limit ||
+          data.objectGroups.items.length === 0 ||
+          offset + data.objectGroups.items.length >= total
+        ) break;
+        offset += limit;
+      }
+
+      return { items: items.slice(0, limit), total };
     },
     staleTime: 30_000,
     placeholderData: (previous) => previous,
@@ -174,7 +230,8 @@ export type MembershipActionVariables = {
 /**
  * The six membership mutations, usable from either direction. Adds and removes
  * are idempotent server-side (`ON CONFLICT DO NOTHING` / zero-row delete), so
- * there is deliberately no client-side "already a member" guard here.
+ * these need no "already a member" guard; the pickers keep a redundant add out
+ * of reach instead, by hiding candidates that are already joined.
  */
 export function useObjectGroupMembershipActions(kind: ObjectMemberKind) {
   const queryClient = useQueryClient();
@@ -195,6 +252,9 @@ export function useObjectGroupMembershipActions(kind: ObjectMemberKind) {
       result.objectGroupIds,
     );
     queryClient.invalidateQueries({ queryKey: [OBJECT_GROUP_MEMBERS_KEY] });
+    // Candidate rows carry the membership the picker filters on, so they go
+    // stale the moment a member is added or removed.
+    queryClient.invalidateQueries({ queryKey: [OBJECT_GROUP_CANDIDATES_KEY] });
     toast.success(message);
   }
 

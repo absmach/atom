@@ -70,13 +70,21 @@ function respond({ query, variables }: GraphqlCall) {
     expect(variables).toMatchObject({ tenantId: "tenant-1" });
     return Promise.resolve({
       list: {
-        total: 1,
+        total: 2,
         items: [
+          {
+            id: "entity-1",
+            name: "sensor-01",
+            kind: "device",
+            status: "active",
+            objectGroupIds: ["group-1"],
+          },
           {
             id: "entity-2",
             name: "gateway-02",
             kind: "device",
             status: "active",
+            objectGroupIds: [],
           },
         ],
       },
@@ -132,6 +140,89 @@ describe("ObjectGroupMembersPanel", () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
       "gateway-02 added to this group",
     );
+  });
+
+  it("keeps entities already in the group out of the add picker", async () => {
+    renderPanel();
+
+    await screen.findByText("gateway-02");
+
+    const addButtons = screen.getAllByRole("button", { name: "Add" });
+    expect(addButtons).toHaveLength(1);
+    expect(addButtons[0].parentElement).toHaveTextContent("gateway-02");
+    // Only the member row, never a second row in the picker below it.
+    expect(screen.getAllByText("sensor-01")).toHaveLength(1);
+  });
+
+  it("refills from later candidate pages after joined rows", async () => {
+    mocks.graphqlClient.mockImplementation((call: GraphqlCall) => {
+      if (call.query.includes("ObjectGroupEntityCandidates")) {
+        const offset = call.variables?.offset ?? 0;
+        return Promise.resolve({
+          list: {
+            total: 21,
+            items: offset === 0
+              ? [{
+                  id: "entity-1",
+                  name: "sensor-01",
+                  kind: "device",
+                  status: "active",
+                  objectGroupIds: ["group-1"],
+                }]
+              : [{
+                  id: "entity-2",
+                  name: "gateway-02",
+                  kind: "device",
+                  status: "active",
+                  objectGroupIds: [],
+                }],
+          },
+        });
+      }
+      return respond(call);
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText("gateway-02")).toBeInTheDocument();
+    expect(mocks.graphqlClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variables: expect.objectContaining({ offset: 20 }),
+      }),
+    );
+  });
+
+  it("says so when every match is already a member", async () => {
+    mocks.graphqlClient.mockImplementation((call: GraphqlCall) => {
+      if (call.query.includes("ObjectGroupEntityCandidates")) {
+        return Promise.resolve({
+          list: {
+            total: 1,
+            items: [
+              {
+                id: "entity-1",
+                name: "sensor-01",
+                kind: "device",
+                status: "active",
+                objectGroupIds: ["group-1"],
+              },
+            ],
+          },
+        });
+      }
+      return respond(call);
+    });
+
+    renderPanel();
+
+    expect(
+      await screen.findByText(
+        "Every matching entity is already in this group.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add" }),
+    ).not.toBeInTheDocument();
   });
 
   it("removes a member from the group", async () => {

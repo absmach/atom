@@ -17,7 +17,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { ObjectMemberKind } from "@/lib/object-groups/membership";
+import {
+  type ObjectMemberKind,
+} from "@/lib/object-groups/membership";
 import {
   useObjectGroupIds,
   useObjectGroupMembershipActions,
@@ -47,12 +49,17 @@ export function ObjectGroupMembershipField({
     memberId,
     initialObjectGroupIds,
   });
-  const optionsQuery = useObjectGroupOptions({ tenantId, search });
+  const optionsQuery = useObjectGroupOptions({
+    tenantId,
+    search,
+    excludedGroupIds: objectGroupIds,
+  });
   const { addToGroup, removeFromGroup, clearGroups } =
     useObjectGroupMembershipActions(kind);
 
   const names = useNameMap({ groupIds: objectGroupIds });
-  const options = optionsQuery.data ?? [];
+  const options = optionsQuery.data?.items ?? [];
+  const matchingOptions = optionsQuery.data?.total ?? 0;
   const isPlatformScoped = !tenantId;
 
   return (
@@ -125,9 +132,11 @@ export function ObjectGroupMembershipField({
             </div>
           ) : options.length === 0 ? (
             <div className="text-xs text-muted-foreground">
-              {search
-                ? "No matching object groups."
-                : "No object groups in this tenant."}
+              {matchingOptions > 0
+                ? "Already a member of every matching object group."
+                : search
+                  ? "No matching object groups."
+                  : "No object groups in this tenant."}
             </div>
           ) : (
             <ScrollArea className="max-h-40">
