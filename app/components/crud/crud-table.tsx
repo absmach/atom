@@ -54,6 +54,7 @@ export function CrudTable({
   page,
   limit,
   source,
+  serverFilters,
   showDeletedColumns = false,
 }: CrudTableProps) {
   const resource = requireResource(resourceKey);
@@ -349,6 +350,7 @@ export function CrudTable({
         page={page}
         paramKey={resourceKey}
         searchPlaceholder={`Filter ${resource.title.toLowerCase()}...`}
+        serverFilters={serverFilters}
         statusFilter={{
           enabled: resource.columns.some((column) => column.key === "status"),
           options: resource.statusOptions,
