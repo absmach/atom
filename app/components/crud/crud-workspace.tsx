@@ -220,8 +220,13 @@ function selectedSort(
   const selectedOrder = options.some((option) => option.value === order)
     ? order
     : "created_at";
-  const selectedDir = dir === "asc" ? "asc" : "desc";
+  const selectedDir =
+    dir === "asc" || dir === "desc" ? dir : defaultSortDir(selectedOrder);
   return { order: selectedOrder, dir: selectedDir };
+}
+
+function defaultSortDir(order: string) {
+  return order === "created_at" || order === "updated_at" ? "desc" : "asc";
 }
 
 async function resolveFilters(

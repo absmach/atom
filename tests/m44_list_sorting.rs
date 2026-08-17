@@ -10,6 +10,7 @@
 mod common;
 
 use atom::models::{
+    access::AuthorizedObjectIdsQuery,
     entity::ListEntities,
     enums::{
         DeletedFilter, EntityOrderField, GroupOrderField, ResourceOrderField, SortDir,
@@ -46,6 +47,41 @@ async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
     .await
     .expect("insert entity");
     id
+}
+
+async fn grant_entity_read(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    subject_id: Uuid,
+    object_id: Uuid,
+) {
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .bind(object_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert read block");
+    sqlx::query(
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+           SELECT $1, id FROM actions WHERE name = 'read'"#,
+    )
+    .bind(block_id)
+    .execute(pool)
+    .await
+    .expect("insert read action");
+    sqlx::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
+    )
+    .bind(tenant_id)
+    .bind(subject_id)
+    .bind(block_id)
+    .execute(pool)
+    .await
+    .expect("assign read policy");
 }
 
 async fn make_updated_entity(
@@ -198,6 +234,63 @@ async fn direct_lists_apply_order_before_pagination() {
         group_names,
         vec![format!("{prefix}-a-group"), format!("{prefix}-b-group")]
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn authorized_entity_order_survives_id_refetch_and_paginates() {
+    let pool = common::pool().await;
+    let suffix = Uuid::new_v4();
+    let prefix = format!("m44-auth-sort-{suffix}");
+    let tenant_id = make_tenant(
+        &pool,
+        &format!("{prefix}-tenant"),
+        &format!("{prefix}-tenant"),
+    )
+    .await;
+    let subject_id = make_entity(&pool, tenant_id, &format!("{prefix}-subject")).await;
+    let c = make_entity(&pool, tenant_id, &format!("{prefix}-c")).await;
+    let a = make_entity(&pool, tenant_id, &format!("{prefix}-a")).await;
+    let b = make_entity(&pool, tenant_id, &format!("{prefix}-b")).await;
+    for entity_id in [a, b, c] {
+        grant_entity_read(&pool, tenant_id, subject_id, entity_id).await;
+    }
+
+    let page = atom::authz::repo::authorized_object_ids_with_ceiling(
+        &pool,
+        AuthorizedObjectIdsQuery {
+            subject_id,
+            action: "read".to_string(),
+            object_kind: "entity".to_string(),
+            object_type: Some("entity:device".to_string()),
+            tenant_id: Some(tenant_id),
+            q: Some(prefix.clone()),
+            attributes_contains: None,
+            external_id: None,
+            profile_id: None,
+            entity_status: None,
+            group_type: None,
+            parent_group_id: None,
+            include_descendants: false,
+            limit: 2,
+            offset: 0,
+            entity_order: EntityOrderField::Name,
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: SortDir::Desc,
+        },
+        None,
+    )
+    .await
+    .expect("authorized entity listing");
+    assert_eq!(page.total, 3);
+    assert_eq!(page.ids, vec![c, b]);
+
+    let rehydrated = atom::identity::repo::list_entities_by_ids(&pool, &page.ids)
+        .await
+        .expect("rehydrate authorized entity page");
+    let names: Vec<_> = rehydrated.into_iter().map(|entity| entity.name).collect();
+    assert_eq!(names, vec![format!("{prefix}-c"), format!("{prefix}-b")]);
 }
 
 #[tokio::test]

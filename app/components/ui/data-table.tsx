@@ -243,6 +243,7 @@ export function DataTable<TData, TValue>({
     router.replace(
       buildUrl({
         [`${paramKey}.order`]: value,
+        [`${paramKey}.dir`]: defaultSortDir(value),
         [`${paramKey}.page`]: null,
       }),
     );
@@ -288,8 +289,11 @@ export function DataTable<TData, TValue>({
   )
     ? (searchParams.get(`${paramKey}.order`) ?? "created_at")
     : "created_at";
+  const rawSortDir = searchParams.get(`${paramKey}.dir`);
   const sortDir =
-    searchParams.get(`${paramKey}.dir`) === "asc" ? "asc" : "desc";
+    rawSortDir === "asc" || rawSortDir === "desc"
+      ? rawSortDir
+      : defaultSortDir(sortOrder);
 
   // Filters the backend applied already narrowed `data` and `total` together,
   // so re-applying them here would be redundant. What is left runs client-side
@@ -555,6 +559,10 @@ function recordsEqual(
     leftKeys.length === rightKeys.length &&
     leftKeys.every((key) => left[key] === right[key])
   );
+}
+
+function defaultSortDir(order: string) {
+  return order === "created_at" || order === "updated_at" ? "desc" : "asc";
 }
 
 function SortControl({
