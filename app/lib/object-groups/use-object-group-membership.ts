@@ -11,6 +11,7 @@ import {
   membershipVariables,
   membersQuery,
   OBJECT_GROUPS_QUERY,
+  excludeJoinedGroups,
   excludeJoinedMembers,
   type ObjectGroupMember,
   type ObjectGroupMemberPage,
@@ -136,29 +137,51 @@ export function useObjectGroupMemberCandidates({
 export function useObjectGroupOptions({
   tenantId,
   search,
+  excludedGroupIds = [],
   limit = 20,
 }: {
   tenantId?: string | null;
   search: string;
+  excludedGroupIds?: readonly string[];
   limit?: number;
 }) {
   const q = search.trim();
+  const excludedKey = excludedGroupIds.join(",");
   return useQuery({
-    queryKey: ["object-group-options", tenantId ?? null, q],
+    queryKey: ["object-group-options", tenantId ?? null, q, excludedKey],
     queryFn: async ({ signal }) => {
-      const data = await graphqlClient<{
-        objectGroups: { total: number; items: ObjectGroupOption[] };
-      }>({
-        query: OBJECT_GROUPS_QUERY,
-        variables: {
-          tenantId: tenantId || null,
-          q: q || null,
-          limit,
-          offset: 0,
-        },
-        signal,
-      });
-      return data.objectGroups.items;
+      const items: ObjectGroupOption[] = [];
+      let total = 0;
+      let offset = 0;
+
+      // Refill from later pages when the first page contains only joined groups.
+      while (offset < total || offset === 0) {
+        const data = await graphqlClient<{
+          objectGroups: { total: number; items: ObjectGroupOption[] };
+        }>({
+          query: OBJECT_GROUPS_QUERY,
+          variables: {
+            tenantId: tenantId || null,
+            q: q || null,
+            limit,
+            offset,
+          },
+          signal,
+        });
+        total = data.objectGroups.total;
+        items.push(
+          ...excludeJoinedGroups(data.objectGroups.items, excludedGroupIds),
+        );
+
+        if (
+          items.length >= limit ||
+          data.objectGroups.items.length === 0 ||
+          offset + data.objectGroups.items.length >= total
+        ) break;
+        offset += limit;
+      }
+
+      return { items: items.slice(0, limit), total };
     },
     staleTime: 30_000,
     placeholderData: (previous) => previous,

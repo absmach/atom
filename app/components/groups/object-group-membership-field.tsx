@@ -18,7 +18,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-  excludeJoinedGroups,
   type ObjectMemberKind,
 } from "@/lib/object-groups/membership";
 import {
@@ -50,13 +49,17 @@ export function ObjectGroupMembershipField({
     memberId,
     initialObjectGroupIds,
   });
-  const optionsQuery = useObjectGroupOptions({ tenantId, search });
+  const optionsQuery = useObjectGroupOptions({
+    tenantId,
+    search,
+    excludedGroupIds: objectGroupIds,
+  });
   const { addToGroup, removeFromGroup, clearGroups } =
     useObjectGroupMembershipActions(kind);
 
   const names = useNameMap({ groupIds: objectGroupIds });
-  const options = optionsQuery.data ?? [];
-  const addable = excludeJoinedGroups(options, objectGroupIds);
+  const options = optionsQuery.data?.items ?? [];
+  const matchingOptions = optionsQuery.data?.total ?? 0;
   const isPlatformScoped = !tenantId;
 
   return (
@@ -127,9 +130,9 @@ export function ObjectGroupMembershipField({
             <div className="text-sm text-destructive">
               {optionsQuery.error.message}
             </div>
-          ) : addable.length === 0 ? (
+          ) : options.length === 0 ? (
             <div className="text-xs text-muted-foreground">
-              {options.length > 0
+              {matchingOptions > 0
                 ? "Already a member of every matching object group."
                 : search
                   ? "No matching object groups."
@@ -138,7 +141,7 @@ export function ObjectGroupMembershipField({
           ) : (
             <ScrollArea className="max-h-40">
               <div className="grid gap-1">
-                {addable.map((option) => (
+                {options.map((option) => (
                   <div
                     className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
                     key={option.id}

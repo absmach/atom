@@ -137,6 +137,32 @@ describe("ObjectGroupMembershipField", () => {
     expect(screen.getAllByText("Floor sensors")).toHaveLength(1);
   });
 
+  it("refills from later group pages after joined rows", async () => {
+    mocks.graphqlClient.mockImplementation((call: GraphqlCall) => {
+      if (call.query.includes("ObjectGroupPicker")) {
+        const offset = call.variables?.offset ?? 0;
+        return Promise.resolve({
+          objectGroups: {
+            total: 21,
+            items: offset === 0
+              ? [{ id: "group-1", name: "Floor sensors" }]
+              : [{ id: "group-2", name: "Gateways" }],
+          },
+        });
+      }
+      return respond(call);
+    });
+
+    renderField();
+
+    expect(await screen.findByText("Gateways")).toBeInTheDocument();
+    expect(mocks.graphqlClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variables: expect.objectContaining({ offset: 20 }),
+      }),
+    );
+  });
+
   it("says so when every match is already joined", async () => {
     mocks.graphqlClient.mockImplementation((call: GraphqlCall) => {
       if (call.query.includes("ObjectGroupPicker")) {
