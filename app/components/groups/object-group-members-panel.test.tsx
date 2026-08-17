@@ -31,7 +31,7 @@ vi.stubGlobal(
   },
 );
 
-function renderPanel() {
+function renderPanel(tenantId: string | null = "tenant-1") {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -41,7 +41,7 @@ function renderPanel() {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <ObjectGroupMembersPanel groupId="group-1" tenantId="tenant-1" />
+      <ObjectGroupMembersPanel groupId="group-1" tenantId={tenantId} />
     </QueryClientProvider>,
   );
 }
@@ -151,5 +151,21 @@ describe("ObjectGroupMembersPanel", () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
       "sensor-01 removed from this group",
     );
+  });
+
+  it("does not query or render add controls for a platform-scoped group", async () => {
+    renderPanel(null);
+
+    await screen.findByText("sensor-01");
+
+    expect(screen.queryByText("Add entity")).not.toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("Search entities…"),
+    ).not.toBeInTheDocument();
+    expect(
+      mocks.graphqlClient.mock.calls.some(([call]) =>
+        call.query.includes("ObjectGroupEntityCandidates"),
+      ),
+    ).toBe(false);
   });
 });

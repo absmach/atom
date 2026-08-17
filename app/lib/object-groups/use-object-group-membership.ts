@@ -82,6 +82,7 @@ export function useObjectGroupMemberCandidates({
 }) {
   const q = search.trim();
   return useQuery({
+    enabled: Boolean(tenantId),
     queryKey: ["object-group-member-candidates", kind, tenantId ?? null, q],
     queryFn: async ({ signal }) => {
       const data = await graphqlClient<{

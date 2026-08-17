@@ -173,64 +173,66 @@ function ObjectGroupMemberList({
         </div>
       ) : null}
 
-      <div className="grid gap-3 rounded-lg border bg-muted/30 p-3">
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <Plus className="size-4 text-muted-foreground" />
-          Add {kind}
-        </div>
-        <Input
-          className="h-8 text-sm"
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder={`Search ${kind === "entity" ? "entities" : "resources"}…`}
-          value={search}
-        />
-        {candidatesQuery.isError ? (
-          <div className="text-sm text-destructive">
-            {candidatesQuery.error.message}
+      {tenantId ? (
+        <div className="grid gap-3 rounded-lg border bg-muted/30 p-3">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Plus className="size-4 text-muted-foreground" />
+            Add {kind}
           </div>
-        ) : candidates.length === 0 ? (
-          <div className="text-xs text-muted-foreground">
-            {search
-              ? `No matching ${kind === "entity" ? "entities" : "resources"}.`
-              : `No ${kind === "entity" ? "entities" : "resources"} available.`}
-          </div>
-        ) : (
-          <ScrollArea className="max-h-48">
-            <div className="grid gap-1">
-              {candidates.map((candidate) => (
-                <div
-                  className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
-                  key={candidate.id}
-                >
-                  <div className="flex min-w-0 flex-col gap-0">
-                    <span className="truncate text-xs font-medium">
-                      {memberDisplayName(candidate)}
-                    </span>
-                    <span className="truncate font-mono text-xs text-muted-foreground">
-                      {candidate.kind}
-                    </span>
-                  </div>
-                  <Button
-                    className="h-7 shrink-0 text-xs"
-                    disabled={addToGroup.isPending}
-                    onClick={() =>
-                      addToGroup.mutate({
-                        memberId: candidate.id,
-                        objectGroupId: groupId,
-                        message: `${memberDisplayName(candidate)} added to this group`,
-                      })
-                    }
-                    size="sm"
-                    variant="outline"
-                  >
-                    Add
-                  </Button>
-                </div>
-              ))}
+          <Input
+            className="h-8 text-sm"
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={`Search ${kind === "entity" ? "entities" : "resources"}…`}
+            value={search}
+          />
+          {candidatesQuery.isError ? (
+            <div className="text-sm text-destructive">
+              {candidatesQuery.error.message}
             </div>
-          </ScrollArea>
-        )}
-      </div>
+          ) : candidates.length === 0 ? (
+            <div className="text-xs text-muted-foreground">
+              {search
+                ? `No matching ${kind === "entity" ? "entities" : "resources"}.`
+                : `No ${kind === "entity" ? "entities" : "resources"} available.`}
+            </div>
+          ) : (
+            <ScrollArea className="max-h-48">
+              <div className="grid gap-1">
+                {candidates.map((candidate) => (
+                  <div
+                    className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
+                    key={candidate.id}
+                  >
+                    <div className="flex min-w-0 flex-col gap-0">
+                      <span className="truncate text-xs font-medium">
+                        {memberDisplayName(candidate)}
+                      </span>
+                      <span className="truncate font-mono text-xs text-muted-foreground">
+                        {candidate.kind}
+                      </span>
+                    </div>
+                    <Button
+                      className="h-7 shrink-0 text-xs"
+                      disabled={addToGroup.isPending}
+                      onClick={() =>
+                        addToGroup.mutate({
+                          memberId: candidate.id,
+                          objectGroupId: groupId,
+                          message: `${memberDisplayName(candidate)} added to this group`,
+                        })
+                      }
+                      size="sm"
+                      variant="outline"
+                    >
+                      Add
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
