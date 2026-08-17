@@ -1122,9 +1122,10 @@ async fn ensure_object_group(pool: &PgPool, group: &BootstrapObjectGroup) -> Res
     Ok(())
 }
 
-/// Apply an object group's parent link and entity/resource membership. An entity
-/// or resource belongs to at most one object group, so membership rows conflict
-/// on the member id and are left untouched if already present.
+/// Apply an object group's parent link and entity/resource membership. Object
+/// group membership is many-to-many, so membership rows conflict on
+/// `(group_id, member_id)`: declaring a member adds it to that group and leaves
+/// its other memberships alone, and re-running the bootstrap is a no-op.
 async fn ensure_object_group_links(pool: &PgPool, group: &BootstrapObjectGroup) -> Result<()> {
     if let Some(parent_id) = group.parent {
         sqlx::query(
@@ -1149,7 +1150,7 @@ async fn ensure_object_group_links(pool: &PgPool, group: &BootstrapObjectGroup) 
         sqlx::query(
             r#"INSERT INTO object_group_entities (group_id, entity_id, tenant_id)
                VALUES ($1, $2, $3)
-               ON CONFLICT (entity_id) DO NOTHING"#,
+               ON CONFLICT (group_id, entity_id) DO NOTHING"#,
         )
         .bind(group.id)
         .bind(entity_id)
@@ -1168,7 +1169,7 @@ async fn ensure_object_group_links(pool: &PgPool, group: &BootstrapObjectGroup) 
         sqlx::query(
             r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
                VALUES ($1, $2, $3)
-               ON CONFLICT (resource_id) DO NOTHING"#,
+               ON CONFLICT (group_id, resource_id) DO NOTHING"#,
         )
         .bind(group.id)
         .bind(resource_id)

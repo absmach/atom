@@ -69,6 +69,15 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
   let fetchError: Error | null = null;
   let accessDenied = false;
 
+  // Which of the table's own filters this query resolves server-side. The table
+  // falls back to filtering the current page in the browser for the rest, and
+  // needs to know the difference so its footer does not report `total` (the
+  // whole result set) next to a locally narrowed set of rows.
+  const serverFilters = {
+    search: Boolean(resource.listQuery?.includes("$q")),
+    status: Boolean(resource.listQuery?.includes("$status")),
+  };
+
   if (resource.listQuery) {
     const variables: Record<string, unknown> = { limit, offset };
     if (scopedTenantId) variables.tenantId = scopedTenantId;
@@ -78,6 +87,16 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
       if (value && value !== "all") {
         variables[filter.variable ?? filter.key] = value;
       }
+    }
+    // The search box writes its own URL param rather than a `resource.filters`
+    // entry. Forward it so the backend narrows both the rows and `total`,
+    // instead of the table filtering just the current page client-side.
+    const searchRaw = searchParams[`${resourceKey}.q`];
+    const searchValue = (
+      Array.isArray(searchRaw) ? searchRaw[0] : (searchRaw ?? "")
+    ).trim();
+    if (searchValue && serverFilters.search) {
+      variables.q = searchValue;
     }
     // Status lives in its own URL param (merged into the lifecycle dropdown),
     // not in `resource.filters`. Forward it server-side so the filter spans the
@@ -168,6 +187,7 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
           page={page}
           resourceKey={resourceKey}
           rows={rows}
+          serverFilters={serverFilters}
           showDeletedColumns={showDeletedColumns}
           source={source}
           total={total}

@@ -232,15 +232,23 @@ impl Entity {
         self.0.alias.as_deref()
     }
 
+    /// Identifier assigned outside Atom (serial number, MAC, SKU). Returned
+    /// byte-identical to what was stored.
+    async fn external_id(&self) -> Option<&str> {
+        self.0.external_id.as_deref()
+    }
+
     async fn tenant_id(&self) -> Option<ID> {
         self.0.tenant_id.map(id)
     }
 
-    async fn parent_group_id(&self, ctx: &Context<'_>) -> Result<Option<ID>> {
+    /// Every object group the entity belongs to. Membership is many-to-many, so
+    /// this is a set — there is no single "parent" group.
+    async fn object_group_ids(&self, ctx: &Context<'_>) -> Result<Vec<ID>> {
         let state = ctx.data::<AppState>()?;
-        identity_repo::get_entity_parent_group(&state.pool, self.0.id)
+        identity_repo::get_entity_object_groups(&state.pool, self.0.id)
             .await
-            .map(|parent_id| parent_id.map(id))
+            .map(|group_ids| group_ids.into_iter().map(id).collect())
             .map_err(|err| async_graphql::Error::new(err.to_string()))
     }
 
@@ -489,11 +497,13 @@ impl Resource {
         self.0.owner_id.map(id)
     }
 
-    async fn parent_group_id(&self, ctx: &Context<'_>) -> Result<Option<ID>> {
+    /// Every object group the resource belongs to. Membership is many-to-many,
+    /// so this is a set — there is no single "parent" group.
+    async fn object_group_ids(&self, ctx: &Context<'_>) -> Result<Vec<ID>> {
         let state = ctx.data::<AppState>()?;
-        authz_repo::get_resource_parent_group(&state.pool, self.0.id)
+        authz_repo::get_resource_object_groups(&state.pool, self.0.id)
             .await
-            .map(|parent_id| parent_id.map(id))
+            .map(|group_ids| group_ids.into_iter().map(id).collect())
             .map_err(|err| async_graphql::Error::new(err.to_string()))
     }
 
@@ -1721,6 +1731,10 @@ pub struct CreateEntityInput {
     pub kind: Option<GqlEntityKind>,
     pub name: String,
     pub alias: Option<String>,
+    /// Identifier assigned outside Atom (serial number, MAC, SKU). Opaque and
+    /// unvalidated, case-sensitive, trimmed, unique per tenant among live
+    /// entities.
+    pub external_id: Option<String>,
     pub tenant_id: Option<ID>,
     pub attributes: Option<Value>,
 }
@@ -1730,6 +1744,8 @@ pub struct UpdateEntityInput {
     pub name: Option<String>,
     pub kind: Option<GqlEntityKind>,
     pub alias: MaybeUndefined<String>,
+    /// Omit to leave unchanged, or pass `null` to clear.
+    pub external_id: MaybeUndefined<String>,
     pub tenant_id: Option<ID>,
     pub profile_id: Option<ID>,
     pub profile_version_id: Option<ID>,
@@ -2381,6 +2397,12 @@ pub struct AuthorizedObjectIdsInput {
     pub object_type: Option<String>,
     pub tenant_id: Option<ID>,
     pub q: Option<String>,
+    pub attributes_contains: Option<Value>,
+    pub external_id: Option<String>,
+    pub profile_id: Option<ID>,
+    pub entity_status: Option<GqlEntityStatus>,
+    pub parent_group_id: Option<ID>,
+    pub include_descendants: Option<bool>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
 }

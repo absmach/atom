@@ -5,9 +5,11 @@ import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 import * as React from "react";
 import { StatusBadge } from "@/components/crud/status-badge";
 import { DisplayTimeCell } from "@/components/display-time";
+import { ObjectGroupMembershipField } from "@/components/groups/object-group-membership-field";
 import { Button } from "@/components/ui/button";
 import { JsonEditor } from "@/components/ui/json-editor";
 import { graphqlClient } from "@/lib/graphql/client";
+import { objectGroupIdsFromRow } from "@/lib/object-groups/membership";
 import { Action } from "@/lib/utils";
 
 const TENANT_QUERY = `
@@ -114,6 +116,14 @@ export function EntityInspectDetails({ row }: { row: Row | null }) {
         </Field>
       ) : null}
 
+      {row.externalId ? (
+        <Field label="External ID">
+          <span className="break-all font-mono text-xs">
+            {String(row.externalId)}
+          </span>
+        </Field>
+      ) : null}
+
       <Field label="Kind">
         <span className="font-mono text-xs">{String(row.kind ?? "—")}</span>
       </Field>
@@ -128,6 +138,15 @@ export function EntityInspectDetails({ row }: { row: Row | null }) {
         <Field label="Tenant">
           <span className="text-sm">{tenantName}</span>
         </Field>
+      ) : null}
+
+      {id ? (
+        <ObjectGroupMembershipField
+          initialObjectGroupIds={objectGroupIdsFromRow(row)}
+          kind="entity"
+          memberId={id}
+          tenantId={tenantId}
+        />
       ) : null}
 
       {profileId ? (

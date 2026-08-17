@@ -169,17 +169,57 @@ pub fn db_err(e: sqlx::Error) -> AppError {
     }
 }
 
+/// The partial unique index backing entity `external_id` uniqueness
+/// (`migrations/010_entity_external_id.sql`). Postgres reports the index name as
+/// the violated constraint, which is what lets a 23505 be attributed to
+/// `external_id` rather than to `name` or `alias`.
+const ENTITY_EXTERNAL_ID_INDEX: &str = "idx_entities_external_id";
+
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
+}
+
+/// The constraint a unique-violation (23505) names, if this error is one.
+fn unique_violation_constraint(e: &sqlx::Error) -> Option<&str> {
+    match e {
+        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => db.constraint(),
+        _ => None,
+    }
+}
+
 /// Maps a unique-violation (23505) raised while clearing a tombstone back into a
-/// caller-facing conflict: a soft-deleted name/alias/email was re-taken by a live
-/// row while the record sat in the retention window, so it can no longer be
-/// restored under its old identifier. Other errors pass through `db_err`.
+/// caller-facing conflict: a soft-deleted name/alias/email/external_id was
+/// re-taken by a live row while the record sat in the retention window, so it can
+/// no longer be restored under its old identifier. Other errors pass through
+/// `db_err`.
 pub fn restore_conflict(e: sqlx::Error) -> AppError {
-    if let sqlx::Error::Database(db) = &e {
-        if db.code().as_deref() == Some("23505") {
-            return AppError::conflict(
-                "a live record already uses this name; rename the conflicting record before restoring",
-            );
-        }
+    // The `external_id` index deliberately excludes soft-deleted rows, so
+    // deleting an entity frees its identifier for a replacement device. That is
+    // the wanted behaviour, but it means a restore can lose the race — name the
+    // field so the operator knows which one to free.
+    if unique_violation_constraint(&e) == Some(ENTITY_EXTERNAL_ID_INDEX) {
+        return AppError::conflict(
+            "another live entity in this tenant took this entity's externalId while it was \
+             deleted; clear or change that entity's externalId before restoring",
+        );
+    }
+    if is_unique_violation(&e) {
+        return AppError::conflict(
+            "a live record already uses this name; rename the conflicting record before restoring",
+        );
+    }
+    db_err(e)
+}
+
+/// Maps the entity `external_id` unique-violation (23505 on
+/// `idx_entities_external_id`) into an actionable conflict naming the field.
+/// Without this the generic 23505 handling reports a bare "already exists",
+/// which a caller writing several unique fields at once cannot act on. Every
+/// other error — including a 23505 on `name` or `alias` — passes through
+/// `db_err` unchanged.
+pub fn entity_write_conflict(e: sqlx::Error) -> AppError {
+    if unique_violation_constraint(&e) == Some(ENTITY_EXTERNAL_ID_INDEX) {
+        return AppError::conflict("externalId is already used by another entity in this tenant");
     }
     db_err(e)
 }

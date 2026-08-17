@@ -281,6 +281,23 @@ impl PolicyQuery {
         })
     }
 
+    /// Direct policies, filtered forward by subject and/or backward by object.
+    ///
+    /// `objectId` returns every direct policy whose permission block **names**
+    /// the object: `object` (direct), `group` (the object *is* the named
+    /// group), `group_direct_objects`/`group_descendant_objects` (object is a
+    /// member/descendant-member of the block's group), or
+    /// `group_child_groups`/`group_descendant_groups` (object is a group
+    /// covered by the block's hierarchy scope).
+    ///
+    /// This is a policy lookup, not effective access. Blocks that reach the
+    /// object without naming it (`platform`, `tenant`, `object_kind`,
+    /// `object_type`) are excluded — this answers "who is this object shared
+    /// with", not "who can see it".
+    ///
+    /// `objectKind`/`objectType` are co-filters that disambiguate an id across
+    /// kinds; they require `objectId`. Omitting `objectId` is unchanged from
+    /// today's subject-only listing.
     #[allow(clippy::too_many_arguments)]
     async fn direct_policies(
         &self,
@@ -289,6 +306,9 @@ impl PolicyQuery {
         subject_kind: Option<GqlSubjectKind>,
         subject_id: Option<ID>,
         permission_block_id: Option<ID>,
+        object_id: Option<ID>,
+        object_kind: Option<String>,
+        object_type: Option<String>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<DirectPolicyList> {
@@ -296,6 +316,9 @@ impl PolicyQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         require_policy_read(&state.pool, &auth, tenant_id).await?;
+        let object_kind = object_kind
+            .map(|value| parse_object_kind(value, "objectKind"))
+            .transpose()?;
         let list = authz_repo::list_direct_policies(
             &state.pool,
             ListDirectPolicies {
@@ -303,6 +326,9 @@ impl PolicyQuery {
                 subject_kind: parse_optional_subject_kind(subject_kind),
                 subject_id: parse_optional_id(subject_id, "subjectId")?,
                 permission_block_id: parse_optional_id(permission_block_id, "permissionBlockId")?,
+                object_id: parse_optional_id(object_id, "objectId")?,
+                object_kind,
+                object_type,
                 limit: limit.map(i64::from).unwrap_or(20),
                 offset: offset.map(i64::from).unwrap_or(0),
             },

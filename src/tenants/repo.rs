@@ -411,7 +411,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
     let scope_match = r#"g.capability_id = c.id
               AND (g.tenant_boundary IS NULL OR g.tenant_boundary = t.id)
               AND grant_scope_matches(g.scope_kind, g.scope_ref, 'tenant', 'tenant',
-                                      t.id, t.id, NULL, '{}'::uuid[])"#;
+                                      t.id, t.id, '{}'::uuid[], '{}'::uuid[])"#;
     let auth_filter = format!(
         r#"AND EXISTS (
             SELECT 1 FROM access_caps c
@@ -430,7 +430,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
                 WHERE cl.action_id = c.id
                   AND (cl.tenant_id IS NULL OR cl.tenant_id = t.id)
                   AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'tenant', 'tenant',
-                                          t.id, t.id, NULL, '{{}}'::uuid[])
+                                          t.id, t.id, '{{}}'::uuid[], '{{}}'::uuid[])
             ))
         )"#
     );
@@ -1015,8 +1015,9 @@ pub async fn list_tenant_members(
     let q = search_pattern(q);
 
     let items = sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM tenant_memberships tm
            JOIN entities e ON e.id = tm.entity_id
            WHERE tm.tenant_id = $1
@@ -1066,8 +1067,9 @@ pub async fn list_tenant_assignable_entities(
     let q = search_pattern(Some(q));
 
     let items = sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
            WHERE e.kind = 'human'
              AND e.status = 'active'

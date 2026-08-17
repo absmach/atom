@@ -85,6 +85,7 @@ async fn bootstrap_entity_is_stamped_and_rejects_api_mutations() {
             name: Some("hijacked".to_string()),
             kind: None,
             alias: None,
+            external_id: None,
             tenant_id: None,
             profile_id: None,
             profile_version_id: None,

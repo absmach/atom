@@ -6,15 +6,17 @@ import {
 } from "@/components/crud/table/initial-values";
 
 describe("alias form initial values", () => {
-  it("loads entity aliases for editing", () => {
+  it("loads entity aliases and external IDs for editing", () => {
     const values = entityFormInitialValues({
       id: "entity-1",
       name: "Sensor",
       alias: "sensor-01",
+      externalId: "SN-001",
       kind: "device",
     });
 
     expect(values.alias).toBe("sensor-01");
+    expect(values.externalId).toBe("SN-001");
   });
 
   it("loads resource aliases for editing", () => {
@@ -31,6 +33,10 @@ describe("alias form initial values", () => {
   it("uses an empty alias when the row has none", () => {
     expect(entityFormInitialValues({ id: "entity-1" }).alias).toBe("");
     expect(resourceFormInitialValues({ id: "resource-1" }).alias).toBe("");
+  });
+
+  it("uses an empty external ID when the entity row has none", () => {
+    expect(entityFormInitialValues({ id: "entity-1" }).externalId).toBe("");
   });
 });
 

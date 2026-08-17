@@ -61,6 +61,9 @@ import {
 const PAGE_SIZES = [10, 20, 50] as const;
 const EMPTY_FILTERS: NonNullable<DataTableProps<unknown, unknown>["filters"]> =
   [];
+const NO_SERVER_FILTERS: NonNullable<
+  DataTableProps<unknown, unknown>["serverFilters"]
+> = {};
 
 export type DataTableProps<TData, TValue> = {
   columns: ColumnDef<TData, TValue>[];
@@ -88,6 +91,13 @@ export type DataTableProps<TData, TValue> = {
     placeholder?: string;
     options?: Array<{ label: string; value: string }>;
   }>;
+  /**
+   * Filters the backend already applied when it produced `data` and `total`,
+   * so the two stay in sync and paging through the filtered set works.
+   * Anything left out is filtered in the browser over the current page only —
+   * see the footer row count below.
+   */
+  serverFilters?: { search?: boolean; status?: boolean };
   /** Rendered in the top-right toolbar area (e.g. a Create button). */
   toolbar?: React.ReactNode;
 };
@@ -103,6 +113,7 @@ export function DataTable<TData, TValue>({
   noResultsMessage = "No results.",
   statusFilter,
   filters = EMPTY_FILTERS,
+  serverFilters = NO_SERVER_FILTERS,
   toolbar,
 }: DataTableProps<TData, TValue>) {
   const router = useRouter();
@@ -149,8 +160,6 @@ export function DataTable<TData, TValue>({
       recordsEqual(current, nextValues) ? current : nextValues,
     );
   }, [filters, paramKey, searchParams]);
-
-  const pageCount = total > 0 ? Math.ceil(total / limit) : 1;
 
   function buildUrl(updates: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -255,27 +264,51 @@ export function DataTable<TData, TValue>({
   const lifecycleStatusValue =
     filterValues.deleted === "deleted" ? "deleted" : statusValue;
 
-  // Client-side filter of the current page — useful when backend has no text search.
-  const filteredData = data.filter((row) => {
-    const matchesSearch =
-      !searchValue ||
-      JSON.stringify(row).toLowerCase().includes(searchValue.toLowerCase());
-    const matchesStatus =
-      statusValue === "all" ||
-      String((row as Record<string, unknown>).status ?? "") === statusValue;
-    return matchesSearch && matchesStatus;
-  });
+  // Filters the backend applied already narrowed `data` and `total` together,
+  // so re-applying them here would be redundant. What is left runs client-side
+  // over the current page only, because the backend has no text search for this
+  // resource.
+  const clientSearch = serverFilters.search ? "" : searchValue;
+  const clientStatus = serverFilters.status ? "all" : statusValue;
+  const isClientFiltered = clientSearch !== "" || clientStatus !== "all";
+
+  const filteredData = isClientFiltered
+    ? data.filter((row) => {
+        const matchesSearch =
+          !clientSearch ||
+          JSON.stringify(row)
+            .toLowerCase()
+            .includes(clientSearch.toLowerCase());
+        const matchesStatus =
+          clientStatus === "all" ||
+          String((row as Record<string, unknown>).status ?? "") ===
+            clientStatus;
+        return matchesSearch && matchesStatus;
+      })
+    : data;
+
+  // `total` counts the whole server-side result set, which is only what the
+  // user sees while every active filter was applied server-side. Once we narrow
+  // rows in the browser the reachable set is just this page, so report that
+  // instead of leaving a stale unfiltered count in the footer.
+  const rowCount = isClientFiltered ? filteredData.length : total;
+  const pageCount = isClientFiltered
+    ? 1
+    : total > 0
+      ? Math.ceil(total / limit)
+      : 1;
+  const currentPage = Math.min(page, pageCount);
 
   const table = useReactTable({
     data: filteredData,
     columns,
-    rowCount: total,
+    rowCount,
     manualPagination: true,
     getCoreRowModel: getCoreRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
     state: {
       columnVisibility,
-      pagination: { pageIndex: page - 1, pageSize: limit },
+      pagination: { pageIndex: currentPage - 1, pageSize: limit },
     },
   });
 
@@ -406,7 +439,7 @@ export function DataTable<TData, TValue>({
       {/* Pagination footer */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <span className="text-sm text-muted-foreground">
-          {total} row{total !== 1 ? "s" : ""}
+          {rowCount} row{rowCount !== 1 ? "s" : ""}
         </span>
         <div className="flex items-center gap-4">
           <div className="hidden items-center gap-2 sm:flex">
@@ -437,34 +470,34 @@ export function DataTable<TData, TValue>({
           </div>
 
           <span className="w-28 text-center text-sm text-muted-foreground">
-            Page {pageCount > 0 ? page : 0} of {pageCount}
+            Page {pageCount > 0 ? currentPage : 0} of {pageCount}
           </span>
 
           <div className="flex items-center gap-1">
             <PageLink
               aria-label="First page"
-              disabled={page <= 1}
+              disabled={currentPage <= 1}
               href={buildUrl({ [`${paramKey}.page`]: "1" })}
             >
               <ChevronsLeft className="size-4" />
             </PageLink>
             <PageLink
               aria-label="Previous page"
-              disabled={page <= 1}
-              href={buildUrl({ [`${paramKey}.page`]: String(page - 1) })}
+              disabled={currentPage <= 1}
+              href={buildUrl({ [`${paramKey}.page`]: String(currentPage - 1) })}
             >
               <ChevronLeft className="size-4" />
             </PageLink>
             <PageLink
               aria-label="Next page"
-              disabled={page >= pageCount}
-              href={buildUrl({ [`${paramKey}.page`]: String(page + 1) })}
+              disabled={currentPage >= pageCount}
+              href={buildUrl({ [`${paramKey}.page`]: String(currentPage + 1) })}
             >
               <ChevronRight className="size-4" />
             </PageLink>
             <PageLink
               aria-label="Last page"
-              disabled={page >= pageCount}
+              disabled={currentPage >= pageCount}
               href={buildUrl({ [`${paramKey}.page`]: String(pageCount) })}
             >
               <ChevronsRight className="size-4" />

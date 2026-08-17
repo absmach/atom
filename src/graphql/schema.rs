@@ -245,14 +245,12 @@ mod tests {
             "createEntity",
             "addEntityToObjectGroup",
             "removeEntityFromObjectGroup",
-            "setEntityParentGroup",
-            "clearEntityParentGroup",
+            "clearEntityObjectGroups",
             "createResource",
             "updateResource",
             "addResourceToObjectGroup",
             "removeResourceFromObjectGroup",
-            "setResourceParentGroup",
-            "clearResourceParentGroup",
+            "clearResourceObjectGroups",
             "deleteResource",
             "createApiEndpoint",
             "updateApiEndpoint",
@@ -441,6 +439,58 @@ mod tests {
         assert!(arg_names.contains("derivedKind"));
     }
 
+    /// `entities`, `groups` and `resources` all carry a JSONB `attributes`
+    /// column, so all three should expose the same containment filter under
+    /// the same name and type.
+    #[tokio::test]
+    async fn entity_group_and_resource_queries_expose_attributes_contains_filter() {
+        let schema = build_schema(test_state());
+
+        let response = schema
+            .execute(Request::new(
+                r#"
+                {
+                  __schema {
+                    queryType {
+                      fields {
+                        name
+                        args {
+                          name
+                          type { name }
+                        }
+                      }
+                    }
+                  }
+                }
+                "#,
+            ))
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().expect("json data");
+        let query_fields = data["__schema"]["queryType"]["fields"]
+            .as_array()
+            .expect("query fields");
+
+        for name in ["entities", "groups", "resources"] {
+            let field = query_fields
+                .iter()
+                .find(|field| field["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("missing query field {name}"));
+            let filter = field["args"]
+                .as_array()
+                .expect("args")
+                .iter()
+                .find(|arg| arg["name"].as_str() == Some("attributesContains"))
+                .unwrap_or_else(|| panic!("{name} is missing the attributesContains filter"));
+            assert_eq!(
+                filter["type"]["name"].as_str(),
+                Some("JSON"),
+                "{name}.attributesContains must be an optional JSON object"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn schema_enum_values_match_atom_storage_values() {
         let schema = build_schema(test_state());
@@ -495,6 +545,62 @@ mod tests {
         assert_eq!(
             enum_names(&data, "createAssignmentRuleDecision"),
             set(&["allow", "deny"])
+        );
+    }
+
+    /// The exclusion is surprising unless it is written down where a caller
+    /// reads it, so the field description is part of the deliverable, not a
+    /// nicety: `directPolicies(objectId:)` returns policies *naming* the
+    /// object, never everyone who can reach it.
+    #[tokio::test]
+    async fn direct_policies_documents_that_the_object_filter_is_not_effective_access() {
+        let schema = build_schema(test_state());
+
+        let response = schema
+            .execute(Request::new(
+                r#"
+                {
+                  __schema {
+                    queryType {
+                      fields {
+                        name
+                        description
+                        args { name }
+                      }
+                    }
+                  }
+                }
+                "#,
+            ))
+            .await;
+
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().expect("json data");
+        let field = data["__schema"]["queryType"]["fields"]
+            .as_array()
+            .expect("field array")
+            .iter()
+            .find(|field| field["name"] == "directPolicies")
+            .expect("directPolicies field")
+            .clone();
+
+        let args = field_names(&field["args"]);
+        for arg in ["objectId", "objectKind", "objectType"] {
+            assert!(args.contains(arg), "missing {arg} argument");
+        }
+
+        let description = field["description"]
+            .as_str()
+            .expect("directPolicies must carry a field description");
+        for excluded in ["platform", "tenant", "object_kind", "object_type"] {
+            assert!(
+                description.contains(excluded),
+                "the description must name the excluded {excluded} scope"
+            );
+        }
+        assert!(
+            description.contains("not effective access"),
+            "the description must say the result is not effective access"
         );
     }
 

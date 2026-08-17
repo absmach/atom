@@ -459,6 +459,7 @@ async fn soft_deleted_objects_are_read_only() {
                 name: Some("mutated".to_string()),
                 kind: None,
                 alias: None,
+                external_id: None,
                 tenant_id: None,
                 profile_id: None,
                 profile_version_id: None,
@@ -604,8 +605,10 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         ListEntities {
             q: Some(entity_name.clone()),
             kind: None,
+            external_id: None,
             profile_id: None,
             tenant_id: None,
+            attributes_contains: None,
             status: None,
             deleted: DeletedFilter::Live,
             parent_group_id: None,
@@ -625,8 +628,10 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         ListEntities {
             q: Some(entity_name),
             kind: None,
+            external_id: None,
             profile_id: None,
             tenant_id: None,
+            attributes_contains: None,
             status: None,
             deleted: DeletedFilter::Deleted,
             parent_group_id: None,
@@ -658,6 +663,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         ListGroups {
             q: Some(group_name.clone()),
             tenant_id: None,
+            attributes_contains: None,
             group_type: Some("object".to_string()),
             parent_id: None,
             status: None,
@@ -674,6 +680,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         ListGroups {
             q: Some(group_name),
             tenant_id: None,
+            attributes_contains: None,
             group_type: Some("object".to_string()),
             parent_id: None,
             status: None,
@@ -1240,7 +1247,7 @@ async fn set_group_parent_rejects_deleted_parent_or_child() {
 
 #[tokio::test]
 #[ignore]
-async fn set_resource_parent_group_rejects_deleted_resource_or_group() {
+async fn add_resource_to_object_group_rejects_deleted_resource_or_group() {
     let pool = common::pool().await;
     let tenant_id = make_tenant(&pool, &format!("sd-res-parent-ten-{}", Uuid::new_v4())).await;
     let live_resource = Uuid::new_v4();
@@ -1279,13 +1286,13 @@ async fn set_resource_parent_group_rejects_deleted_resource_or_group() {
         .expect("delete group");
 
     assert!(
-        atom::authz::repo::set_resource_parent_group(&pool, live_resource, deleted_group)
+        atom::authz::repo::add_resource_to_object_group(&pool, live_resource, deleted_group)
             .await
             .is_err(),
         "live resource must not be attached to a deleted object group"
     );
     assert!(
-        atom::authz::repo::set_resource_parent_group(&pool, deleted_resource, live_group)
+        atom::authz::repo::add_resource_to_object_group(&pool, deleted_resource, live_group)
             .await
             .is_err(),
         "deleted resource must not be attached to a live object group"
@@ -1622,6 +1629,7 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
                 tenant_id: None,
                 q: None,
                 attributes_contains: None,
+                external_id: None,
                 profile_id: None,
                 entity_status: None,
                 group_type: None,
@@ -1712,6 +1720,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
                 tenant_id: None,
                 q: None,
                 attributes_contains: None,
+                external_id: None,
                 profile_id: None,
                 entity_status: None,
                 group_type: None,

@@ -96,6 +96,9 @@ pub struct AuthorizedObjectIdsQuery {
     pub tenant_id: Option<Uuid>,
     pub q: Option<String>,
     pub attributes_contains: Option<Value>,
+    /// Only used when `object_kind == "entity"`: exact-match filter on
+    /// `entities.external_id` (case-sensitive, trimmed).
+    pub external_id: Option<String>,
     pub profile_id: Option<Uuid>,
     pub entity_status: Option<EntityStatus>,
     /// Only used when `object_kind == "group"`: restricts candidates to a

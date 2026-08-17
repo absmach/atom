@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    error::{db_err, restore_conflict, AppError},
+    error::{db_err, entity_write_conflict, restore_conflict, AppError},
     models::{
         entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
         enums::EntityKind,
@@ -107,7 +107,7 @@ pub async fn create_entity_with_audit(
 ) -> Result<Entity, AppError> {
     let id = req.id.unwrap_or_else(Uuid::new_v4);
     let attrs = normalize_attributes(req.attributes);
-    let parent_group_id = parent_group_id_from_attrs(&attrs)?;
+    reject_parent_group_attribute(&attrs)?;
     let (kind, profile_id, profile_version_id) = resolve_entity_profile(
         pool,
         req.kind,
@@ -118,33 +118,34 @@ pub async fn create_entity_with_audit(
     .await?;
     let is_human = kind == EntityKind::Human;
     let alias = crate::models::alias::validate_alias_opt(req.alias)?;
+    let external_id = crate::models::external_id::validate_external_id_opt(req.external_id)?;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let entity = sqlx::query_as::<_, Entity>(
         r#"INSERT INTO entities
-           (id, kind, name, alias, tenant_id, profile_id, profile_version_id, attributes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by"#,
+           (id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
+            attributes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING id, kind, name, alias, external_id, tenant_id, profile_id,
+                     profile_version_id, status, attributes, deleted_at, deleted_by,
+                     created_at, updated_at, managed_by"#,
     )
     .bind(id)
     .bind(kind)
     .bind(req.name)
     .bind(alias)
+    .bind(external_id)
     .bind(req.tenant_id)
     .bind(profile_id)
     .bind(profile_version_id)
     .bind(attrs)
     .fetch_one(&mut *tx)
     .await
-    .map_err(db_err)?;
+    .map_err(entity_write_conflict)?;
 
     if is_human {
         add_authenticated_user_membership_in_tx(&mut tx, entity.id).await?;
-    }
-    if let Some(parent_group_id) = parent_group_id {
-        set_entity_parent_group_in_tx(&mut tx, entity.id, parent_group_id).await?;
     }
 
     let event = crate::audit::AuditEvent {
@@ -158,6 +159,7 @@ pub async fn create_entity_with_audit(
             "kind": entity.kind,
             "name": entity.name,
             "alias": entity.alias,
+            "external_id": entity.external_id,
         }),
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
@@ -196,7 +198,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
                   status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM entities
            WHERE id = $1 AND deleted_at IS NULL"#,
@@ -216,7 +218,7 @@ pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Ent
     }
 
     sqlx::query_as::<_, Entity>(
-        r#"SELECT id, kind, name, alias, tenant_id, profile_id, profile_version_id,
+        r#"SELECT id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
                   status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM entities
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
@@ -239,6 +241,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     let include_descendants = params.include_descendants;
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
+    let external_id = crate::models::external_id::normalize_external_id(params.external_id);
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let items = sqlx::query_as::<_, Entity>(
         r#"WITH RECURSIVE target_groups(id) AS (
@@ -249,19 +253,24 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                JOIN target_groups tg ON tg.id = gh.parent_id
                WHERE $7::boolean
            )
-           SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+           SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
-           LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
            WHERE ($1::text IS NULL OR e.kind = $1)
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
              AND ($5::text IS NULL OR e.name ILIKE $5 OR e.alias ILIKE $5 OR e.attributes::text ILIKE $5)
-             AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
+             AND ($6::uuid IS NULL OR EXISTS (
+                     SELECT 1 FROM group_entity_parents gep
+                     WHERE gep.entity_id = e.id
+                       AND gep.group_id IN (SELECT id FROM target_groups)))
+             AND ($11::jsonb IS NULL OR e.attributes @> $11::jsonb)
              AND ($10::text = 'all'
                   OR ($10::text = 'live' AND e.deleted_at IS NULL)
                   OR ($10::text = 'deleted' AND e.deleted_at IS NOT NULL))
+             AND ($12::text IS NULL OR e.external_id = $12)
            ORDER BY e.created_at DESC
            LIMIT $8 OFFSET $9"#,
     )
@@ -275,6 +284,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(limit)
     .bind(offset)
     .bind(deleted)
+    .bind(attributes_contains.clone())
+    .bind(external_id.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -290,16 +301,20 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
            )
            SELECT COUNT(*)
            FROM entities e
-           LEFT JOIN group_entity_parents gep ON gep.entity_id = e.id
            WHERE ($1::text IS NULL OR e.kind = $1)
              AND ($2::uuid IS NULL OR e.profile_id = $2)
              AND ($3::uuid IS NULL OR e.tenant_id = $3)
              AND ($4::text IS NULL OR e.status = $4)
              AND ($5::text IS NULL OR e.name ILIKE $5 OR e.alias ILIKE $5 OR e.attributes::text ILIKE $5)
-             AND ($6::uuid IS NULL OR gep.group_id IN (SELECT id FROM target_groups))
+             AND ($6::uuid IS NULL OR EXISTS (
+                     SELECT 1 FROM group_entity_parents gep
+                     WHERE gep.entity_id = e.id
+                       AND gep.group_id IN (SELECT id FROM target_groups)))
+             AND ($9::jsonb IS NULL OR e.attributes @> $9::jsonb)
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND e.deleted_at IS NULL)
-                  OR ($8::text = 'deleted' AND e.deleted_at IS NOT NULL))"#,
+                  OR ($8::text = 'deleted' AND e.deleted_at IS NOT NULL))
+             AND ($10::text IS NULL OR e.external_id = $10)"#,
     )
     .bind(kind)
     .bind(profile_id)
@@ -309,6 +324,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(parent_group_id)
     .bind(include_descendants)
     .bind(deleted)
+    .bind(attributes_contains)
+    .bind(external_id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -327,18 +344,18 @@ pub async fn update_entity_with_audit(
 ) -> Result<Entity, AppError> {
     ensure_not_config_managed_entity(pool, id).await?;
     let attributes = req.attributes.clone().map(normalize_attributes);
-    let parent_group_id = attributes
-        .as_ref()
-        .and_then(|attrs| attrs.get("parent_group_id"))
-        .map(parent_group_id_from_value)
-        .transpose()?;
     if let Some(attrs) = attributes.as_ref() {
+        reject_parent_group_attribute(attrs)?;
         validate_existing_entity_attributes(pool, id, attrs).await?;
     }
 
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
+
+    let external_id = crate::models::external_id::validate_external_id_update(req.external_id)?;
+    let external_id_is_set = external_id.is_some();
+    let external_id = external_id.flatten();
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let current_tenant_id: Option<Option<Uuid>> =
@@ -384,10 +401,12 @@ pub async fn update_entity_with_audit(
                status             = COALESCE($7, status),
                attributes         = COALESCE($8, attributes),
                alias              = CASE WHEN $9 THEN $10 ELSE alias END,
+               external_id        = CASE WHEN $11 THEN $12 ELSE external_id END,
                updated_at         = now()
            WHERE id = $1 AND deleted_at IS NULL
-           RETURNING id, kind, name, alias, tenant_id, profile_id, profile_version_id,
-                     status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by"#,
+           RETURNING id, kind, name, alias, external_id, tenant_id, profile_id,
+                     profile_version_id, status, attributes, deleted_at, deleted_by,
+                     created_at, updated_at, managed_by"#,
     )
     .bind(id)
     .bind(req.name)
@@ -399,19 +418,31 @@ pub async fn update_entity_with_audit(
     .bind(attributes)
     .bind(alias_is_set)
     .bind(alias)
+    .bind(external_id_is_set)
+    .bind(external_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("entity {id} not found")),
-        other => AppError::Database(other),
+        other => entity_write_conflict(other),
     })?;
 
-    if let Some(parent_group_id) = parent_group_id {
-        match parent_group_id {
-            Some(parent_group_id) => {
-                set_entity_parent_group_in_tx(&mut tx, entity.id, parent_group_id).await?;
-            }
-            None => clear_entity_parent_group_in_tx(&mut tx, entity.id).await?,
+    // The caller builds `audit_details` before the write, so it cannot know the
+    // resulting identifier. Consumers denormalize `external_id` onto their own
+    // rows (Magistrala keeps it on every message), so the event has to carry the
+    // value the entity now has — not merely the fact that it changed.
+    //
+    // Only on the generic `entity.update`. This function also serves the status
+    // transitions (`entity.enable`/`disable`/`suspend`), which carry empty
+    // details by design and cannot change the identifier — restating it there
+    // would rewrite existing event payloads for no consumer's benefit.
+    let mut details = audit_details;
+    if event_name == "entity.update" {
+        if let Some(fields) = details.as_object_mut() {
+            fields.insert(
+                "external_id".to_string(),
+                serde_json::json!(entity.external_id),
+            );
         }
     }
 
@@ -422,7 +453,7 @@ pub async fn update_entity_with_audit(
         target_id: Some(id),
         event: event_name,
         outcome: crate::models::enums::AuditOutcome::Allow,
-        details: audit_details,
+        details,
     };
     crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
     Ok(entity)
@@ -441,26 +472,32 @@ pub async fn update_entity(pool: &PgPool, id: Uuid, req: UpdateEntity) -> Result
     .await
 }
 
-pub async fn get_entity_parent_group(
+pub async fn get_entity_object_groups(
     pool: &PgPool,
     entity_id: Uuid,
-) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT group_id FROM group_entity_parents WHERE entity_id = $1")
-        .bind(entity_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_err)
+) -> Result<Vec<Uuid>, AppError> {
+    sqlx::query_scalar(
+        r#"SELECT gep.group_id
+           FROM group_entity_parents gep
+           JOIN object_groups g ON g.id = gep.group_id AND g.deleted_at IS NULL
+           WHERE gep.entity_id = $1
+           ORDER BY gep.created_at, gep.group_id"#,
+    )
+    .bind(entity_id)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
 
-pub async fn set_entity_parent_group(
+pub async fn add_entity_to_object_group(
     pool: &PgPool,
     entity_id: Uuid,
     group_id: Uuid,
 ) -> Result<Entity, AppError> {
-    set_entity_parent_group_with_audit(pool, false, None, entity_id, group_id).await
+    add_entity_to_object_group_with_audit(pool, false, None, entity_id, group_id).await
 }
 
-pub async fn set_entity_parent_group_with_audit(
+pub async fn add_entity_to_object_group_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
@@ -468,50 +505,100 @@ pub async fn set_entity_parent_group_with_audit(
     group_id: Uuid,
 ) -> Result<Entity, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    set_entity_parent_group_in_tx(&mut tx, entity_id, group_id).await?;
+    let inserted = add_entity_to_object_group_in_tx(&mut tx, entity_id, group_id).await?;
     let entity = fetch_entity(&mut *tx, entity_id).await?;
+    if !inserted {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(entity);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: entity.tenant_id,
         target_kind: "entity",
         target_id: Some(entity_id),
-        event: "entity.parent_group.set",
+        event: "entity.object_group.add",
     };
     let details = serde_json::json!({ "group_id": group_id });
     crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(entity)
 }
 
-pub async fn clear_entity_parent_group(pool: &PgPool, entity_id: Uuid) -> Result<Entity, AppError> {
-    clear_entity_parent_group_with_audit(pool, false, None, entity_id).await
+/// Remove the entity from **one** group, leaving its other memberships (and the
+/// grants that flow through them) intact.
+pub async fn remove_entity_from_object_group(
+    pool: &PgPool,
+    entity_id: Uuid,
+    group_id: Uuid,
+) -> Result<Entity, AppError> {
+    remove_entity_from_object_group_with_audit(pool, false, None, entity_id, group_id).await
 }
 
-pub async fn clear_entity_parent_group_with_audit(
+pub async fn remove_entity_from_object_group_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    entity_id: Uuid,
+    group_id: Uuid,
+) -> Result<Entity, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let deleted = delete_entity_object_groups_in_tx(&mut tx, entity_id, Some(group_id)).await?;
+    let entity = fetch_entity(&mut *tx, entity_id).await?;
+    if deleted == 0 {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(entity);
+    }
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id: entity.tenant_id,
+        target_kind: "entity",
+        target_id: Some(entity_id),
+        event: "entity.object_group.remove",
+    };
+    let details = serde_json::json!({ "group_id": group_id });
+    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    Ok(entity)
+}
+
+/// Remove the entity from **every** group it belongs to. Distinct from
+/// [`remove_entity_from_object_group`] on purpose: with many-to-many membership
+/// "clear the group" is ambiguous, so each caller states which it means.
+pub async fn clear_entity_object_groups(
+    pool: &PgPool,
+    entity_id: Uuid,
+) -> Result<Entity, AppError> {
+    clear_entity_object_groups_with_audit(pool, false, None, entity_id).await
+}
+
+pub async fn clear_entity_object_groups_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     entity_id: Uuid,
 ) -> Result<Entity, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    clear_entity_parent_group_in_tx(&mut tx, entity_id).await?;
+    let deleted = delete_entity_object_groups_in_tx(&mut tx, entity_id, None).await?;
     let entity = fetch_entity(&mut *tx, entity_id).await?;
+    if deleted == 0 {
+        tx.commit().await.map_err(db_err)?;
+        return Ok(entity);
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id: entity.tenant_id,
         target_kind: "entity",
         target_id: Some(entity_id),
-        event: "entity.parent_group.clear",
+        event: "entity.object_groups.clear",
     };
     let details = serde_json::json!({});
     crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
     Ok(entity)
 }
 
-async fn set_entity_parent_group_in_tx(
+async fn add_entity_to_object_group_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
     group_id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     use sqlx::Row;
     let entity_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL")
@@ -555,13 +642,12 @@ async fn set_entity_parent_group_in_tx(
             "entity and parent group must belong to the same tenant",
         ));
     }
-    sqlx::query(
+    // Additive: membership is a set, so re-adding an existing membership is an
+    // idempotent no-op rather than a silent move between groups.
+    let result = sqlx::query(
         r#"INSERT INTO object_group_entities (group_id, entity_id, tenant_id)
            VALUES ($1, $2, $3)
-           ON CONFLICT (entity_id) DO UPDATE
-           SET group_id = EXCLUDED.group_id,
-               tenant_id = EXCLUDED.tenant_id,
-               updated_at = now()"#,
+           ON CONFLICT (group_id, entity_id) DO NOTHING"#,
     )
     .bind(group_id)
     .bind(entity_id)
@@ -569,13 +655,17 @@ async fn set_entity_parent_group_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
-async fn clear_entity_parent_group_in_tx(
+/// `group_id = Some(..)` removes one membership; `None` removes them all. The
+/// two callers name which they mean, so neither can inherit the other's
+/// behaviour by accident.
+async fn delete_entity_object_groups_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
-) -> Result<(), AppError> {
+    group_id: Option<Uuid>,
+) -> Result<u64, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL")
             .bind(entity_id)
@@ -601,30 +691,33 @@ async fn clear_entity_parent_group_in_tx(
     if locked.is_none() {
         return Err(AppError::not_found(format!("entity {entity_id} not found")));
     }
-    sqlx::query("DELETE FROM object_group_entities WHERE entity_id = $1")
-        .bind(entity_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_err)?;
-    Ok(())
+    let deleted = sqlx::query(
+        r#"DELETE FROM object_group_entities
+           WHERE entity_id = $1 AND ($2::uuid IS NULL OR group_id = $2)"#,
+    )
+    .bind(entity_id)
+    .bind(group_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .rows_affected();
+    Ok(deleted)
 }
 
-fn parent_group_id_from_attrs(attrs: &Value) -> Result<Option<Uuid>, AppError> {
-    attrs
-        .get("parent_group_id")
-        .map(parent_group_id_from_value)
-        .transpose()
-        .map(Option::flatten)
-}
-
-fn parent_group_id_from_value(value: &Value) -> Result<Option<Uuid>, AppError> {
-    match value.as_str().map(str::trim) {
-        Some("") | None => Ok(None),
-        Some(raw) => raw
-            .parse::<Uuid>()
-            .map(Some)
-            .map_err(|_| AppError::bad_request("parent_group_id must be a UUID")),
+/// Object group membership is a set, and a scalar attribute cannot express one.
+/// The attribute write path is gone: membership is mutated only through the
+/// explicit `addEntityToObjectGroup` / `removeEntityFromObjectGroup` /
+/// `clearEntityObjectGroups` mutations. Rejecting the attribute rather than
+/// ignoring it keeps the break loud — a caller that still sends it would
+/// otherwise believe it had placed the entity in a group.
+fn reject_parent_group_attribute(attrs: &Value) -> Result<(), AppError> {
+    if attrs.get("parent_group_id").is_some() {
+        return Err(AppError::bad_request(
+            "the parent_group_id attribute is no longer supported; \
+             use addEntityToObjectGroup / removeEntityFromObjectGroup",
+        ));
     }
+    Ok(())
 }
 
 async fn resolve_entity_profile(
@@ -1200,6 +1293,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     let q = search_pattern(params.q);
     let parent_id = params.parent_id;
     let deleted = params.deleted.as_str();
+    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
 
     let items = sqlx::query_as::<_, Group>(
         r#"SELECT g.id, g.name, g.tenant_id, g.group_type, g.description, gh.parent_id,
@@ -1212,6 +1306,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
              AND ($8::text IS NULL OR g.group_type = $8)
              AND (($4::uuid IS NULL AND $5::boolean = FALSE)
                   OR ($5::boolean = TRUE AND gh.parent_id = $4))
+             AND ($10::jsonb IS NULL OR g.attributes @> $10::jsonb)
              AND ($9::text = 'all'
                   OR ($9::text = 'live' AND g.deleted_at IS NULL)
                   OR ($9::text = 'deleted' AND g.deleted_at IS NOT NULL))
@@ -1227,6 +1322,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     .bind(offset)
     .bind(params.group_type.clone())
     .bind(deleted)
+    .bind(attributes_contains.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -1241,6 +1337,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
              AND ($6::text IS NULL OR g.group_type = $6)
              AND (($4::uuid IS NULL AND $5::boolean = FALSE)
                   OR ($5::boolean = TRUE AND gh.parent_id = $4))
+             AND ($8::jsonb IS NULL OR g.attributes @> $8::jsonb)
              AND ($7::text = 'all'
                   OR ($7::text = 'live' AND g.deleted_at IS NULL)
                   OR ($7::text = 'deleted' AND g.deleted_at IS NOT NULL))"#,
@@ -1252,6 +1349,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
     .bind(parent_id.is_some())
     .bind(params.group_type)
     .bind(deleted)
+    .bind(attributes_contains)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -1501,6 +1599,7 @@ pub async fn list_child_groups(
         ListGroups {
             q: None,
             tenant_id: None,
+            attributes_contains: None,
             group_type: Some("object".to_string()),
             parent_id: Some(parent_id),
             status: None,
@@ -1945,8 +2044,9 @@ pub async fn remove_group_member_with_audit(
 
 pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Entity>, AppError> {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
            JOIN principal_group_members gm ON gm.entity_id = e.id
            WHERE gm.group_id = $1 AND e.deleted_at IS NULL
@@ -2038,8 +2138,9 @@ pub async fn create_ownership(
 
 pub async fn list_owned(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Entity>, AppError> {
     sqlx::query_as::<_, Entity>(
-        r#"SELECT e.id, e.kind, e.name, e.alias, e.tenant_id, e.profile_id, e.profile_version_id,
-                  e.status, e.attributes, e.deleted_at, e.deleted_by, e.created_at, e.updated_at
+        r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
+                  e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
+                  e.created_at, e.updated_at
            FROM entities e
            JOIN ownerships o ON o.owned_id = e.id
            WHERE o.owner_id = $1 AND e.deleted_at IS NULL

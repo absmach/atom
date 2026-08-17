@@ -1,0 +1,241 @@
+//! Entity `external_id` normalization.
+//!
+//! An `external_id` is a foreign key into someone else's namespace (serial
+//! number, MAC address, SKU), so it stays opaque — no format validation.
+//! Contrast with [`crate::models::alias`], a human-friendly handle Atom owns
+//! and constrains to a lowercase slug.
+//!
+//! Two decisions, mirrored by CHECK constraints in
+//! `migrations/010_entity_external_id.sql`: **case-sensitive** (`ABC123` and
+//! `abc123` are different entities — vendor schemes may distinguish case, and
+//! folding is irreversible once two devices have merged) and **trimmed**
+//! (edge whitespace is a transport artifact; interior whitespace is kept).
+
+use crate::error::AppError;
+use serde::{Deserialize, Deserializer};
+
+/// Sanity cap, in characters (not bytes — matching Postgres `length()`).
+pub const MAX_EXTERNAL_ID_LEN: usize = 255;
+
+fn trim_external_id(external_id: Option<String>) -> Option<String> {
+    external_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Normalize an external identifier for a lookup filter. `None` means
+/// omitted (no filter). Blank/NUL/over-cap `Some(_)` normalizes to a value
+/// over `MAX_EXTERNAL_ID_LEN`, unmatchable per `chk_entities_external_id_length`,
+/// so it never degrades into "no filter" the way collapsing to `None` would.
+pub fn normalize_external_id(external_id: Option<String>) -> Option<String> {
+    let value = external_id?.trim().to_string();
+    if value.is_empty() || value.contains('\0') {
+        Some("x".repeat(MAX_EXTERNAL_ID_LEN + 1))
+    } else {
+        Some(value)
+    }
+}
+
+/// Normalize an optional external identifier for a write, enforcing the length
+/// cap. Empty/whitespace-only is treated as absent (`None`).
+pub fn validate_external_id_opt(external_id: Option<String>) -> Result<Option<String>, AppError> {
+    let external_id = trim_external_id(external_id);
+    if let Some(value) = external_id.as_deref() {
+        if value.chars().count() > MAX_EXTERNAL_ID_LEN {
+            return Err(AppError::bad_request(format!(
+                "externalId must be at most {MAX_EXTERNAL_ID_LEN} characters"
+            )));
+        }
+        // A Postgres TEXT column can't hold a NUL byte; reject it here with a
+        // clear message instead of a bare 500 from the database.
+        if value.contains('\0') {
+            return Err(AppError::bad_request(
+                "externalId must not contain a NUL byte",
+            ));
+        }
+    }
+    Ok(external_id)
+}
+
+/// Validate an optional external-identifier update while preserving patch
+/// semantics: `None` leaves the field unchanged, `Some(None)` clears it, and
+/// `Some(Some(value))` stores the normalized value.
+pub fn validate_external_id_update(
+    external_id: Option<Option<String>>,
+) -> Result<Option<Option<String>>, AppError> {
+    external_id.map(validate_external_id_opt).transpose()
+}
+
+/// Serde helper for PATCH-style `external_id` fields. A missing field remains
+/// `None`, explicit JSON `null` becomes `Some(None)`, and a string becomes
+/// `Some(Some(value))`.
+pub fn deserialize_external_id_update<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_arbitrary_opaque_values() {
+        // No format validation: the shapes `alias` rejects are all valid here.
+        for value in [
+            "WM-2024-ABC.123",
+            "00:1B:44:11:3A:B7",
+            "topic/with/slashes",
+            "serial with spaces",
+            "quote's \"embedded\"",
+            "序列号-42",
+            "465358f9-07f4-4ea0-8cbb-2abc654442bd",
+        ] {
+            assert_eq!(
+                validate_external_id_opt(Some(value.to_string())).unwrap(),
+                Some(value.to_string()),
+                "{value} must round-trip unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn is_case_sensitive() {
+        // Never case-folded, unlike `alias`.
+        assert_eq!(
+            validate_external_id_opt(Some("ABC123".into())).unwrap(),
+            Some("ABC123".to_string())
+        );
+        assert_eq!(
+            validate_external_id_opt(Some("abc123".into())).unwrap(),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn trims_edges_but_not_interior() {
+        assert_eq!(
+            validate_external_id_opt(Some("  ABC123  ".into())).unwrap(),
+            Some("ABC123".to_string())
+        );
+        assert_eq!(
+            validate_external_id_opt(Some("\tABC123\n".into())).unwrap(),
+            Some("ABC123".to_string())
+        );
+        assert_eq!(
+            validate_external_id_opt(Some(" A B C ".into())).unwrap(),
+            Some("A B C".to_string())
+        );
+    }
+
+    #[test]
+    fn blank_is_absent() {
+        assert_eq!(validate_external_id_opt(None).unwrap(), None);
+        assert_eq!(validate_external_id_opt(Some("".into())).unwrap(), None);
+        assert_eq!(validate_external_id_opt(Some("   ".into())).unwrap(), None);
+    }
+
+    #[test]
+    fn enforces_length_cap_in_characters() {
+        let at_cap = "é".repeat(MAX_EXTERNAL_ID_LEN);
+        assert_eq!(
+            validate_external_id_opt(Some(at_cap.clone())).unwrap(),
+            Some(at_cap)
+        );
+
+        let over_cap = "x".repeat(MAX_EXTERNAL_ID_LEN + 1);
+        let err = validate_external_id_opt(Some(over_cap)).expect_err("over-cap must be rejected");
+        assert!(
+            matches!(err, AppError::BadRequest(ref msg) if msg.contains("255")),
+            "expected an actionable length error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn length_cap_applies_after_trimming() {
+        let padded = format!("  {}  ", "x".repeat(MAX_EXTERNAL_ID_LEN));
+        assert!(
+            validate_external_id_opt(Some(padded)).is_ok(),
+            "padding must not push a legal value over the cap"
+        );
+    }
+
+    #[test]
+    fn update_preserves_undefined_clear_and_value_states() {
+        assert_eq!(validate_external_id_update(None).unwrap(), None);
+        assert_eq!(validate_external_id_update(Some(None)).unwrap(), Some(None));
+        assert_eq!(
+            validate_external_id_update(Some(Some(" WM-2024 ".into()))).unwrap(),
+            Some(Some("WM-2024".to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_the_one_byte_text_cannot_hold() {
+        let err = validate_external_id_opt(Some("ab\0cd".into()))
+            .expect_err("a NUL byte is unstorable in a TEXT column");
+        assert!(
+            matches!(err, AppError::BadRequest(ref msg) if msg.contains("NUL")),
+            "expected an actionable NUL error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_never_fails_for_lookups() {
+        let over_cap = "x".repeat(MAX_EXTERNAL_ID_LEN + 1);
+        assert_eq!(
+            normalize_external_id(Some(over_cap.clone())),
+            Some(over_cap),
+            "an over-long filter must match nothing, not error"
+        );
+        assert_eq!(
+            normalize_external_id(Some("ab\0cd".into())),
+            Some("x".repeat(MAX_EXTERNAL_ID_LEN + 1)),
+            "a NUL-bearing filter must match nothing without binding a NUL to Postgres"
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_omitted_and_blank_distinct() {
+        // Omitted (`None`): callers bind this as SQL NULL, and the query reads
+        // "IS NULL OR col = $n", so `None` means "no filter applied".
+        assert_eq!(normalize_external_id(None), None);
+
+        // Explicitly blank stays `Some(_)`: the sentinel is over
+        // `MAX_EXTERNAL_ID_LEN`, which no stored row can equal.
+        for blank in ["", "   ", "\t\n"] {
+            let normalized =
+                normalize_external_id(Some(blank.to_string())).expect("blank filter stays Some");
+            assert!(normalized.chars().count() > MAX_EXTERNAL_ID_LEN);
+        }
+    }
+
+    #[test]
+    fn patch_deserialization_distinguishes_missing_null_and_value() {
+        #[derive(Deserialize)]
+        struct Patch {
+            #[serde(default, deserialize_with = "deserialize_external_id_update")]
+            external_id: Option<Option<String>>,
+        }
+
+        assert_eq!(
+            serde_json::from_str::<Patch>("{}").unwrap().external_id,
+            None
+        );
+        assert_eq!(
+            serde_json::from_str::<Patch>(r#"{"external_id":null}"#)
+                .unwrap()
+                .external_id,
+            Some(None)
+        );
+        assert_eq!(
+            serde_json::from_str::<Patch>(r#"{"external_id":"WM-1"}"#)
+                .unwrap()
+                .external_id,
+            Some(Some("WM-1".to_string()))
+        );
+    }
+}

@@ -1,4 +1,5 @@
 use async_graphql::{Context, Object, Result, ID};
+use serde_json::Value;
 
 use crate::{
     audit,
@@ -37,6 +38,7 @@ impl GroupQuery {
         ctx: &Context<'_>,
         q: Option<String>,
         tenant_id: Option<ID>,
+        attributes_contains: Option<Value>,
         parent_id: Option<ID>,
         status: Option<GqlEntityStatus>,
         deleted: Option<GqlDeletedFilter>,
@@ -52,6 +54,7 @@ impl GroupQuery {
             None,
             q,
             tenant_id,
+            attributes_contains,
             parse_optional_id(parent_id, "parentId")?,
             parse_optional_entity_status(status),
             parse_deleted_filter(deleted),
@@ -141,6 +144,7 @@ impl GroupQuery {
             None,
             None,
             None,
+            None,
             Some(parent_id),
             None,
             DeletedFilter::Live,
@@ -171,6 +175,7 @@ impl GroupQuery {
             Some("object".to_string()),
             q,
             tenant_id,
+            None,
             parse_optional_id(parent_id, "parentId")?,
             parse_optional_entity_status(status),
             parse_deleted_filter(deleted),
@@ -201,6 +206,7 @@ impl GroupQuery {
             q,
             tenant_id,
             None,
+            None,
             parse_optional_entity_status(status),
             parse_deleted_filter(deleted),
             limit,
@@ -217,6 +223,7 @@ async fn authorized_group_list(
     group_type: Option<String>,
     q: Option<String>,
     tenant_id: Option<uuid::Uuid>,
+    attributes_contains: Option<Value>,
     parent_group_id: Option<uuid::Uuid>,
     status: Option<EntityStatus>,
     deleted: DeletedFilter,
@@ -234,6 +241,7 @@ async fn authorized_group_list(
             ListGroups {
                 q: q.clone(),
                 tenant_id,
+                attributes_contains,
                 group_type: group_type.clone(),
                 parent_id: parent_group_id,
                 status,
@@ -260,7 +268,8 @@ async fn authorized_group_list(
             object_type: None,
             tenant_id,
             q,
-            attributes_contains: None,
+            attributes_contains,
+            external_id: None,
             profile_id: None,
             entity_status: status,
             group_type,
