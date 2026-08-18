@@ -3,7 +3,9 @@ use serde_json::json;
 
 use crate::{
     identity::profile_repo,
-    models::profile::{CreateProfile, CreateProfileVersion, ListProfiles, UpdateProfile},
+    models::profile::{
+        CreateProfile, CreateProfileVersion, ListProfiles, UpdateProfile, UpdateProfileVersion,
+    },
     state::AppState,
 };
 
@@ -11,7 +13,7 @@ use super::{
     auth::{gql_error, require_auth, require_list_access, require_read_access, scope_for_tenant},
     types::{
         parse_id, parse_optional_id, CreateProfileInput, CreateProfileVersionInput, Profile,
-        ProfileList, ProfileVersion, UpdateProfileInput,
+        ProfileList, ProfileVersion, UpdateProfileInput, UpdateProfileVersionInput,
     },
 };
 
@@ -264,6 +266,71 @@ impl ProfileMutation {
 
         result.map(Into::into).map_err(gql_error)
     }
+
+    // Status only — see UpdateProfileVersionInput for why jsonSchema/uiSchema
+    // are not editable here.
+    async fn update_profile_version(
+        &self,
+        ctx: &Context<'_>,
+        id: ID,
+        input: UpdateProfileVersionInput,
+    ) -> Result<ProfileVersion> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let id = parse_id(id, "id")?;
+        let existing = profile_repo::get_profile_version(&state.pool, id)
+            .await
+            .map_err(gql_error)?;
+        let profile = profile_repo::get_profile(&state.pool, existing.profile_id)
+            .await
+            .map_err(gql_error)?;
+        validate_profile_version_status(input.status.as_deref())?;
+
+        let result = async {
+            crate::auth::require_any_capability(
+                &state.pool,
+                &auth,
+                &[
+                    ("manage", scope_for_tenant(profile.tenant_id)),
+                    ("write", scope_for_tenant(profile.tenant_id)),
+                ],
+            )
+            .await?;
+            profile_repo::update_profile_version_with_audit(
+                &state.pool,
+                state.config.events.enabled(),
+                Some(auth.entity_id),
+                profile.tenant_id,
+                id,
+                UpdateProfileVersion {
+                    json_schema: None,
+                    ui_schema: None,
+                    status: input.status,
+                },
+            )
+            .await
+        }
+        .await;
+
+        if let Err(ref err) = result {
+            crate::audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &crate::audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: profile.tenant_id,
+                    target_kind: "profile_version",
+                    target_id: Some(id),
+                    event: "profile_version.update",
+                },
+                &json!({ "profile_id": profile.id }),
+                err,
+            )
+            .await;
+        }
+
+        result.map(Into::into).map_err(gql_error)
+    }
 }
 
 fn validate_profile_status(status: Option<&str>) -> Result<()> {
@@ -271,6 +338,15 @@ fn validate_profile_status(status: Option<&str>) -> Result<()> {
         Some("active" | "deprecated" | "disabled") | None => Ok(()),
         Some(_) => Err(async_graphql::Error::new(
             "status must be active, deprecated, or disabled",
+        )),
+    }
+}
+
+fn validate_profile_version_status(status: Option<&str>) -> Result<()> {
+    match status {
+        Some("draft" | "active" | "deprecated" | "disabled") | None => Ok(()),
+        Some(_) => Err(async_graphql::Error::new(
+            "status must be draft, active, deprecated, or disabled",
         )),
     }
 }

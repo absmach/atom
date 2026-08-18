@@ -186,6 +186,77 @@ async fn update_profile_mutation_updates_metadata_and_status() {
 
 #[tokio::test]
 #[ignore]
+async fn update_profile_version_mutation_updates_status_only() {
+    let pool = common::pool().await;
+    let schema_body = json!({"type": "object"});
+    let profile_id = profile_with_schema(&pool, schema_body.clone()).await;
+    let versions = profile_repo::list_profile_versions(&pool, profile_id)
+        .await
+        .expect("list versions");
+    let version_id = versions[0].id;
+    let schema = build_schema(state(pool));
+
+    let response = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              updateProfileVersion(
+                id: "{version_id}",
+                input: {{ status: "deprecated" }}
+              ) {{
+                id
+                status
+                jsonSchema
+              }}
+            }}
+            "#
+        )))
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let version = &response.data.into_json().expect("json data")["updateProfileVersion"];
+    assert_eq!(version["id"], version_id.to_string());
+    assert_eq!(version["status"], "deprecated");
+    // jsonSchema stays exactly what it was created with — updateProfileVersion
+    // has no way to touch it, since entities already bound to this version
+    // validate writes against it.
+    assert_eq!(version["jsonSchema"], schema_body);
+}
+
+#[tokio::test]
+#[ignore]
+async fn update_profile_version_mutation_rejects_unknown_status() {
+    let pool = common::pool().await;
+    let profile_id = profile_with_schema(&pool, json!({})).await;
+    let versions = profile_repo::list_profile_versions(&pool, profile_id)
+        .await
+        .expect("list versions");
+    let version_id = versions[0].id;
+    let schema = build_schema(state(pool));
+
+    let response = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              updateProfileVersion(
+                id: "{version_id}",
+                input: {{ status: "not-a-status" }}
+              ) {{
+                id
+              }}
+            }}
+            "#
+        )))
+        .await;
+
+    assert!(!response.errors.is_empty());
+    assert!(response.errors[0]
+        .message
+        .contains("status must be draft, active, deprecated, or disabled"));
+}
+
+#[tokio::test]
+#[ignore]
 async fn create_entity_with_profile_id_derives_kind() {
     let pool = common::pool().await;
     let profile_id = seeded_client_profile(&pool).await;
