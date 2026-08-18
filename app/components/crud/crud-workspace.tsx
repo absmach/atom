@@ -217,9 +217,8 @@ function selectedSort(
   const rawDir = searchParams[`${resourceKey}.dir`];
   const order = Array.isArray(rawOrder) ? rawOrder[0] : rawOrder;
   const dir = Array.isArray(rawDir) ? rawDir[0] : rawDir;
-  const selectedOrder = options.some((option) => option.value === order)
-    ? order
-    : "created_at";
+  const selectedOrder =
+    options.find((option) => option.value === order)?.value ?? "created_at";
   const selectedDir =
     dir === "asc" || dir === "desc" ? dir : defaultSortDir(selectedOrder);
   return { order: selectedOrder, dir: selectedDir };
