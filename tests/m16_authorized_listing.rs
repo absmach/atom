@@ -275,6 +275,10 @@ async fn authorized(
             include_descendants: false,
             limit: 100,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         None,
     )
@@ -357,6 +361,10 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
             include_descendants: false,
             limit: 100,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         None,
     )
@@ -422,6 +430,8 @@ async fn list_resources_attributes_contains_filters_items_and_total() {
             deleted: DeletedFilter::Live,
             limit: 1,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await
@@ -489,6 +499,10 @@ async fn authorized_resource_attributes_contains_filters_before_limit_and_author
             include_descendants: false,
             limit: 1,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         None,
     )
@@ -923,6 +937,10 @@ async fn authorized_groups(
             include_descendants: false,
             limit,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         None,
     )

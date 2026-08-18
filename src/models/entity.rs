@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::enums::{DeletedFilter, EntityKind, EntityStatus};
+use super::enums::{DeletedFilter, EntityKind, EntityOrderField, EntityStatus, SortDir};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Entity {
@@ -89,6 +89,10 @@ pub struct ListEntities {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    #[serde(default)]
+    pub order: EntityOrderField,
+    #[serde(default)]
+    pub dir: SortDir,
 }
 
 fn default_limit() -> i64 {

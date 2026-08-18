@@ -11,8 +11,9 @@ use crate::{
         api_endpoint as api_endpoint_model, capability as capability_model, entity as entity_model,
         enums::{
             ActionAssignmentDecision, AuditOutcome, CredentialKind, CredentialStatus,
-            DeletedFilter, Effect, EntityKind, EntityStatus, GrantKind, ObjectKind, ScopeKind,
-            SubjectKind, TenantStatus,
+            DeletedFilter, Effect, EntityKind, EntityOrderField, EntityStatus, GrantKind,
+            GroupOrderField, ObjectKind, ResourceOrderField, ScopeKind, SortDir, SubjectKind,
+            TenantOrderField, TenantStatus,
         },
         group as group_model, policy as policy_model, profile as profile_model,
         resource as resource_model, role as role_model, session as session_model,
@@ -54,6 +55,51 @@ pub enum GqlDeletedFilter {
     Live,
     Deleted,
     All,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "SortDir", rename_items = "snake_case")]
+pub enum GqlSortDir {
+    Asc,
+    Desc,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "EntityOrderField", rename_items = "snake_case")]
+pub enum GqlEntityOrderField {
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Kind,
+    Status,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "ResourceOrderField", rename_items = "snake_case")]
+pub enum GqlResourceOrderField {
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Kind,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "GroupOrderField", rename_items = "snake_case")]
+pub enum GqlGroupOrderField {
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Status,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "TenantOrderField", rename_items = "snake_case")]
+pub enum GqlTenantOrderField {
+    CreatedAt,
+    UpdatedAt,
+    Name,
+    Alias,
+    Status,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
@@ -2766,6 +2812,26 @@ pub fn parse_deleted_filter(value: Option<GqlDeletedFilter>) -> DeletedFilter {
     value.map(DeletedFilter::from).unwrap_or_default()
 }
 
+pub fn parse_sort_dir(value: Option<GqlSortDir>) -> SortDir {
+    value.map(SortDir::from).unwrap_or_default()
+}
+
+pub fn parse_entity_order(value: Option<GqlEntityOrderField>) -> EntityOrderField {
+    value.map(EntityOrderField::from).unwrap_or_default()
+}
+
+pub fn parse_resource_order(value: Option<GqlResourceOrderField>) -> ResourceOrderField {
+    value.map(ResourceOrderField::from).unwrap_or_default()
+}
+
+pub fn parse_group_order(value: Option<GqlGroupOrderField>) -> GroupOrderField {
+    value.map(GroupOrderField::from).unwrap_or_default()
+}
+
+pub fn parse_tenant_order(value: Option<GqlTenantOrderField>) -> TenantOrderField {
+    value.map(TenantOrderField::from).unwrap_or_default()
+}
+
 impl From<GqlEntityKind> for EntityKind {
     fn from(kind: GqlEntityKind) -> Self {
         match kind {
@@ -2827,6 +2893,61 @@ impl From<GqlDeletedFilter> for DeletedFilter {
             GqlDeletedFilter::Live => DeletedFilter::Live,
             GqlDeletedFilter::Deleted => DeletedFilter::Deleted,
             GqlDeletedFilter::All => DeletedFilter::All,
+        }
+    }
+}
+
+impl From<GqlSortDir> for SortDir {
+    fn from(dir: GqlSortDir) -> Self {
+        match dir {
+            GqlSortDir::Asc => SortDir::Asc,
+            GqlSortDir::Desc => SortDir::Desc,
+        }
+    }
+}
+
+impl From<GqlEntityOrderField> for EntityOrderField {
+    fn from(field: GqlEntityOrderField) -> Self {
+        match field {
+            GqlEntityOrderField::CreatedAt => EntityOrderField::CreatedAt,
+            GqlEntityOrderField::UpdatedAt => EntityOrderField::UpdatedAt,
+            GqlEntityOrderField::Name => EntityOrderField::Name,
+            GqlEntityOrderField::Kind => EntityOrderField::Kind,
+            GqlEntityOrderField::Status => EntityOrderField::Status,
+        }
+    }
+}
+
+impl From<GqlResourceOrderField> for ResourceOrderField {
+    fn from(field: GqlResourceOrderField) -> Self {
+        match field {
+            GqlResourceOrderField::CreatedAt => ResourceOrderField::CreatedAt,
+            GqlResourceOrderField::UpdatedAt => ResourceOrderField::UpdatedAt,
+            GqlResourceOrderField::Name => ResourceOrderField::Name,
+            GqlResourceOrderField::Kind => ResourceOrderField::Kind,
+        }
+    }
+}
+
+impl From<GqlGroupOrderField> for GroupOrderField {
+    fn from(field: GqlGroupOrderField) -> Self {
+        match field {
+            GqlGroupOrderField::CreatedAt => GroupOrderField::CreatedAt,
+            GqlGroupOrderField::UpdatedAt => GroupOrderField::UpdatedAt,
+            GqlGroupOrderField::Name => GroupOrderField::Name,
+            GqlGroupOrderField::Status => GroupOrderField::Status,
+        }
+    }
+}
+
+impl From<GqlTenantOrderField> for TenantOrderField {
+    fn from(field: GqlTenantOrderField) -> Self {
+        match field {
+            GqlTenantOrderField::CreatedAt => TenantOrderField::CreatedAt,
+            GqlTenantOrderField::UpdatedAt => TenantOrderField::UpdatedAt,
+            GqlTenantOrderField::Name => TenantOrderField::Name,
+            GqlTenantOrderField::Alias => TenantOrderField::Alias,
+            GqlTenantOrderField::Status => TenantOrderField::Status,
         }
     }
 }

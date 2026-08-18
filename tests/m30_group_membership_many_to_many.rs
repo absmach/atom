@@ -241,6 +241,10 @@ async fn authorized(
             include_descendants: false,
             limit: 100,
             offset: 0,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: Default::default(),
+            dir: Default::default(),
         },
         None,
     )
@@ -294,6 +298,8 @@ async fn entity_belongs_to_every_group_it_is_added_to() {
                 include_descendants: false,
                 limit: 50,
                 offset: 0,
+                order: Default::default(),
+                dir: Default::default(),
             },
         )
         .await
@@ -406,6 +412,10 @@ async fn multi_group_membership_does_not_duplicate_listings_or_inflate_total() {
                 include_descendants: false,
                 limit: 1,
                 offset,
+                entity_order: Default::default(),
+                resource_order: Default::default(),
+                group_order: Default::default(),
+                dir: Default::default(),
             },
             None,
         )

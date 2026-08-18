@@ -21,9 +21,9 @@ use super::{
         gql_error, require_any_capability, require_auth, require_read_access, scope_for_tenant,
     },
     types::{
-        parse_deleted_filter, parse_id, parse_optional_entity_status, parse_optional_id,
-        CreateGroupInput, Entity, GqlDeletedFilter, GqlEntityStatus, Group, GroupList,
-        UpdateGroupInput,
+        parse_deleted_filter, parse_group_order, parse_id, parse_optional_entity_status,
+        parse_optional_id, parse_sort_dir, CreateGroupInput, Entity, GqlDeletedFilter,
+        GqlEntityStatus, GqlGroupOrderField, GqlSortDir, Group, GroupList, UpdateGroupInput,
     },
 };
 
@@ -42,6 +42,8 @@ impl GroupQuery {
         parent_id: Option<ID>,
         status: Option<GqlEntityStatus>,
         deleted: Option<GqlDeletedFilter>,
+        order: Option<GqlGroupOrderField>,
+        dir: Option<GqlSortDir>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<GroupList> {
@@ -58,6 +60,8 @@ impl GroupQuery {
             parse_optional_id(parent_id, "parentId")?,
             parse_optional_entity_status(status),
             parse_deleted_filter(deleted),
+            parse_group_order(order),
+            parse_sort_dir(dir),
             limit,
             offset,
         )
@@ -148,6 +152,8 @@ impl GroupQuery {
             Some(parent_id),
             None,
             DeletedFilter::Live,
+            Default::default(),
+            Default::default(),
             limit,
             offset,
         )
@@ -163,6 +169,8 @@ impl GroupQuery {
         parent_id: Option<ID>,
         status: Option<GqlEntityStatus>,
         deleted: Option<GqlDeletedFilter>,
+        order: Option<GqlGroupOrderField>,
+        dir: Option<GqlSortDir>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<GroupList> {
@@ -179,6 +187,8 @@ impl GroupQuery {
             parse_optional_id(parent_id, "parentId")?,
             parse_optional_entity_status(status),
             parse_deleted_filter(deleted),
+            parse_group_order(order),
+            parse_sort_dir(dir),
             limit,
             offset,
         )
@@ -193,6 +203,8 @@ impl GroupQuery {
         tenant_id: Option<ID>,
         status: Option<GqlEntityStatus>,
         deleted: Option<GqlDeletedFilter>,
+        order: Option<GqlGroupOrderField>,
+        dir: Option<GqlSortDir>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<GroupList> {
@@ -209,6 +221,8 @@ impl GroupQuery {
             None,
             parse_optional_entity_status(status),
             parse_deleted_filter(deleted),
+            parse_group_order(order),
+            parse_sort_dir(dir),
             limit,
             offset,
         )
@@ -227,6 +241,8 @@ async fn authorized_group_list(
     parent_group_id: Option<uuid::Uuid>,
     status: Option<EntityStatus>,
     deleted: DeletedFilter,
+    order: crate::models::enums::GroupOrderField,
+    dir: crate::models::enums::SortDir,
     limit: Option<i32>,
     offset: Option<i32>,
 ) -> Result<GroupList> {
@@ -248,6 +264,8 @@ async fn authorized_group_list(
                 deleted,
                 limit: limit_value,
                 offset: offset_value,
+                order,
+                dir,
             },
         )
         .await
@@ -277,6 +295,10 @@ async fn authorized_group_list(
             include_descendants: false,
             limit: limit_value,
             offset: offset_value,
+            entity_order: Default::default(),
+            resource_order: Default::default(),
+            group_order: order,
+            dir,
         },
     )
     .await

@@ -18,9 +18,10 @@ use super::{
     auth::{gql_error, require_any_capability, require_auth},
     types::{
         parse_deleted_filter, parse_id, parse_optional_id, parse_optional_tenant_status,
-        CreateTenantInput, CreateTenantInvitationInput, EntityList, GqlDeletedFilter,
-        GqlTenantStatus, InvitationTokenInput, Tenant, TenantInvitation, TenantInvitationList,
-        TenantList, UpdateTenantInput,
+        parse_sort_dir, parse_tenant_order, CreateTenantInput, CreateTenantInvitationInput,
+        EntityList, GqlDeletedFilter, GqlSortDir, GqlTenantOrderField, GqlTenantStatus,
+        InvitationTokenInput, Tenant, TenantInvitation, TenantInvitationList, TenantList,
+        UpdateTenantInput,
     },
 };
 
@@ -48,6 +49,8 @@ impl TenantQuery {
         alias: Option<String>,
         status: Option<GqlTenantStatus>,
         deleted: Option<GqlDeletedFilter>,
+        order: Option<GqlTenantOrderField>,
+        dir: Option<GqlSortDir>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<TenantList> {
@@ -62,6 +65,8 @@ impl TenantQuery {
             deleted,
             limit: limit.map(i64::from).unwrap_or(20),
             offset: offset.map(i64::from).unwrap_or(0),
+            order: parse_tenant_order(order),
+            dir: parse_sort_dir(dir),
         };
         let list = if deleted != DeletedFilter::Live {
             require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;

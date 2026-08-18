@@ -681,6 +681,8 @@ async fn list_entities_without_attributes_contains_is_unfiltered() {
             include_descendants: false,
             limit: 50,
             offset: 0,
+            order: Default::default(),
+            dir: Default::default(),
         },
     )
     .await

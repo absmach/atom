@@ -3,7 +3,11 @@ import { cookies } from "next/headers";
 
 import { CrudTable } from "@/components/crud/crud-table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { type CrudFilter, requireResource } from "@/lib/crud/resources";
+import {
+  type CrudFilter,
+  type CrudSortOption,
+  requireResource,
+} from "@/lib/crud/resources";
 import { isForbiddenError } from "@/lib/graphql/client";
 import { graphqlServer } from "@/lib/graphql/server";
 import { GLOBAL_TENANT, TENANT_COOKIE } from "@/lib/tenant/context";
@@ -80,6 +84,11 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
 
   if (resource.listQuery) {
     const variables: Record<string, unknown> = { limit, offset };
+    const sort = selectedSort(resource.sortOptions, resourceKey, searchParams);
+    if (sort) {
+      variables.order = sort.order;
+      variables.dir = sort.dir;
+    }
     if (scopedTenantId) variables.tenantId = scopedTenantId;
     for (const filter of filtersForPage ?? []) {
       const raw = searchParams[`${resourceKey}.${filter.key}`];
@@ -189,12 +198,34 @@ export async function CrudWorkspace({ resourceKey, searchParams }: Props) {
           rows={rows}
           serverFilters={serverFilters}
           showDeletedColumns={showDeletedColumns}
+          sortOptions={resource.sortOptions}
           source={source}
           total={total}
         />
       )}
     </section>
   );
+}
+
+function selectedSort(
+  options: CrudSortOption[] | undefined,
+  resourceKey: string,
+  searchParams: Record<string, string | string[] | undefined>,
+) {
+  if (!options?.length) return null;
+  const rawOrder = searchParams[`${resourceKey}.order`];
+  const rawDir = searchParams[`${resourceKey}.dir`];
+  const order = Array.isArray(rawOrder) ? rawOrder[0] : rawOrder;
+  const dir = Array.isArray(rawDir) ? rawDir[0] : rawDir;
+  const selectedOrder =
+    options.find((option) => option.value === order)?.value ?? "created_at";
+  const selectedDir =
+    dir === "asc" || dir === "desc" ? dir : defaultSortDir(selectedOrder);
+  return { order: selectedOrder, dir: selectedDir };
+}
+
+function defaultSortDir(order: string) {
+  return order === "created_at" || order === "updated_at" ? "desc" : "asc";
 }
 
 async function resolveFilters(

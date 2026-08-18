@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::enums::DeletedFilter;
+use super::enums::{DeletedFilter, ResourceOrderField, SortDir};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Resource {
@@ -60,6 +60,10 @@ pub struct ListResources {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    #[serde(default)]
+    pub order: ResourceOrderField,
+    #[serde(default)]
+    pub dir: SortDir,
 }
 
 fn default_limit() -> i64 {

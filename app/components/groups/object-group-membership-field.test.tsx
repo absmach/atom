@@ -144,9 +144,10 @@ describe("ObjectGroupMembershipField", () => {
         return Promise.resolve({
           objectGroups: {
             total: 21,
-            items: offset === 0
-              ? [{ id: "group-1", name: "Floor sensors" }]
-              : [{ id: "group-2", name: "Gateways" }],
+            items:
+              offset === 0
+                ? [{ id: "group-1", name: "Floor sensors" }]
+                : [{ id: "group-2", name: "Gateways" }],
           },
         });
       }

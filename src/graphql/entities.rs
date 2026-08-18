@@ -20,9 +20,10 @@ use super::{
         gql_error, require_any_capability, require_auth, require_read_access, scope_for_tenant,
     },
     types::{
-        parse_deleted_filter, parse_id, parse_optional_entity_kind, parse_optional_entity_status,
-        parse_optional_id, CreateEntityInput, Entity, EntityList, GqlDeletedFilter, GqlEntityKind,
-        GqlEntityStatus, Ownership, UpdateEntityInput,
+        parse_deleted_filter, parse_entity_order, parse_id, parse_optional_entity_kind,
+        parse_optional_entity_status, parse_optional_id, parse_sort_dir, CreateEntityInput, Entity,
+        EntityList, GqlDeletedFilter, GqlEntityKind, GqlEntityOrderField, GqlEntityStatus,
+        GqlSortDir, Ownership, UpdateEntityInput,
     },
 };
 
@@ -85,6 +86,8 @@ impl EntityQuery {
         include_descendants: Option<bool>,
         status: Option<GqlEntityStatus>,
         deleted: Option<GqlDeletedFilter>,
+        order: Option<GqlEntityOrderField>,
+        dir: Option<GqlSortDir>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<EntityList> {
@@ -96,6 +99,8 @@ impl EntityQuery {
         let parsed_kind = parse_optional_entity_kind(kind);
         let parsed_status = parse_optional_entity_status(status);
         let deleted = parse_deleted_filter(deleted);
+        let order = parse_entity_order(order);
+        let dir = parse_sort_dir(dir);
         let limit = limit.map(i64::from).unwrap_or(20);
         let offset = offset.map(i64::from).unwrap_or(0);
 
@@ -116,6 +121,8 @@ impl EntityQuery {
                     include_descendants: include_descendants.unwrap_or(false),
                     limit,
                     offset,
+                    order,
+                    dir,
                 },
             )
             .await
@@ -145,6 +152,10 @@ impl EntityQuery {
                 include_descendants: include_descendants.unwrap_or(false),
                 limit,
                 offset,
+                entity_order: order,
+                resource_order: Default::default(),
+                group_order: Default::default(),
+                dir,
             },
         )
         .await

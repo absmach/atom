@@ -17,9 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  type ObjectMemberKind,
-} from "@/lib/object-groups/membership";
+import type { ObjectMemberKind } from "@/lib/object-groups/membership";
 import {
   useObjectGroupIds,
   useObjectGroupMembershipActions,

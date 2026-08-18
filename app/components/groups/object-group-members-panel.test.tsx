@@ -161,21 +161,26 @@ describe("ObjectGroupMembersPanel", () => {
         return Promise.resolve({
           list: {
             total: 21,
-            items: offset === 0
-              ? [{
-                  id: "entity-1",
-                  name: "sensor-01",
-                  kind: "device",
-                  status: "active",
-                  objectGroupIds: ["group-1"],
-                }]
-              : [{
-                  id: "entity-2",
-                  name: "gateway-02",
-                  kind: "device",
-                  status: "active",
-                  objectGroupIds: [],
-                }],
+            items:
+              offset === 0
+                ? [
+                    {
+                      id: "entity-1",
+                      name: "sensor-01",
+                      kind: "device",
+                      status: "active",
+                      objectGroupIds: ["group-1"],
+                    },
+                  ]
+                : [
+                    {
+                      id: "entity-2",
+                      name: "gateway-02",
+                      kind: "device",
+                      status: "active",
+                      objectGroupIds: [],
+                    },
+                  ],
           },
         });
       }

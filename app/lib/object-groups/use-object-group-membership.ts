@@ -5,14 +5,14 @@ import { toast } from "sonner";
 import { graphqlClient } from "@/lib/graphql/client";
 import {
   candidatesQuery,
+  excludeJoinedGroups,
+  excludeJoinedMembers,
   type MembershipOperation,
   membershipMutation,
   membershipQuery,
   membershipVariables,
   membersQuery,
   OBJECT_GROUPS_QUERY,
-  excludeJoinedGroups,
-  excludeJoinedMembers,
   type ObjectGroupMember,
   type ObjectGroupMemberPage,
   type ObjectGroupMembership,
@@ -88,13 +88,7 @@ export function useObjectGroupMemberCandidates({
   const q = search.trim();
   return useQuery({
     enabled: Boolean(tenantId),
-    queryKey: [
-      OBJECT_GROUP_CANDIDATES_KEY,
-      kind,
-      tenantId ?? null,
-      groupId,
-      q,
-    ],
+    queryKey: [OBJECT_GROUP_CANDIDATES_KEY, kind, tenantId ?? null, groupId, q],
     queryFn: async ({ signal }) => {
       const items: ObjectGroupMember[] = [];
       let total = 0;
@@ -122,7 +116,8 @@ export function useObjectGroupMemberCandidates({
           items.length >= limit ||
           data.list.items.length === 0 ||
           offset + data.list.items.length >= total
-        ) break;
+        )
+          break;
         offset += limit;
       }
 
@@ -177,7 +172,8 @@ export function useObjectGroupOptions({
           items.length >= limit ||
           data.objectGroups.items.length === 0 ||
           offset + data.objectGroups.items.length >= total
-        ) break;
+        )
+          break;
         offset += limit;
       }
 

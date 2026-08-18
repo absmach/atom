@@ -15,7 +15,9 @@
 
 mod common;
 
-use atom::models::enums::{DeletedFilter, Effect, GrantKind, ScopeKind, SubjectKind};
+use atom::models::enums::{
+    DeletedFilter, Effect, GrantKind, ScopeKind, SortDir, SubjectKind, TenantOrderField,
+};
 use atom::models::policy::{CreatePolicyBinding, CreateRoleAssignment};
 use atom::models::role::CreateRole;
 use atom::models::tenant::ListTenants;
@@ -138,6 +140,8 @@ async fn visible_tenant_ids(pool: &sqlx::PgPool, entity_id: Uuid) -> Vec<Uuid> {
             deleted: DeletedFilter::Live,
             limit: 100,
             offset: 0,
+            order: TenantOrderField::CreatedAt,
+            dir: SortDir::Desc,
         },
     )
     .await
@@ -626,6 +630,8 @@ async fn ceiling_visible_tenant_ids(
             deleted: DeletedFilter::Live,
             limit: 100,
             offset: 0,
+            order: TenantOrderField::CreatedAt,
+            dir: SortDir::Desc,
         },
     )
     .await

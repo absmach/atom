@@ -1,5 +1,6 @@
 import type { ColumnDef } from "@tanstack/react-table";
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DataTable } from "@/components/ui/data-table";
 
@@ -37,6 +38,19 @@ function footerText(container: HTMLElement) {
 
 describe("DataTable", () => {
   beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    Element.prototype.hasPointerCapture ??= () => false;
+    Element.prototype.setPointerCapture ??= () => {};
+    Element.prototype.releasePointerCapture ??= () => {};
+    Element.prototype.scrollIntoView ??= () => {};
+
     mocks.replace.mockReset();
     mocks.searchParams = new URLSearchParams();
   });
@@ -195,5 +209,60 @@ describe("DataTable", () => {
 
     expect(footerText(container)).toContain("Page 1 of 1");
     expect(footerText(container)).not.toContain("Page 7 of 1");
+  });
+
+  it("updates sort URL params and defaults text fields to ascending", async () => {
+    const user = userEvent.setup();
+    mocks.searchParams = new URLSearchParams("roles.page=3");
+
+    render(
+      <DataTable
+        columns={columns}
+        data={rows("alpha", "beta")}
+        limit={10}
+        page={3}
+        paramKey="roles"
+        sortOptions={[
+          { label: "Created", value: "created_at" },
+          { label: "Updated", value: "updated_at" },
+          { label: "Name", value: "name" },
+        ]}
+        total={20}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Sort"));
+    await user.click(await screen.findByRole("option", { name: "Name" }));
+
+    expect(mocks.replace).toHaveBeenLastCalledWith(
+      "/roles?roles.order=name&roles.dir=asc",
+    );
+  });
+
+  it("defaults date sort fields to descending", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DataTable
+        columns={columns}
+        data={rows("alpha", "beta")}
+        limit={10}
+        page={1}
+        paramKey="roles"
+        sortOptions={[
+          { label: "Created", value: "created_at" },
+          { label: "Updated", value: "updated_at" },
+          { label: "Name", value: "name" },
+        ]}
+        total={20}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Sort"));
+    await user.click(await screen.findByRole("option", { name: "Updated" }));
+
+    expect(mocks.replace).toHaveBeenLastCalledWith(
+      "/roles?roles.order=updated_at&roles.dir=desc",
+    );
   });
 });

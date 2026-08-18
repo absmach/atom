@@ -8,7 +8,7 @@ use crate::{
     identity::service::{hash_secret, verify_secret},
     models::{
         entity::{Entity, EntityList},
-        enums::{SubjectKind, TenantStatus},
+        enums::{SortDir, SubjectKind, TenantOrderField, TenantStatus},
         policy::CreateRoleAssignment,
         tenant::{
             CreateTenant, CreateTenantInvitation, ListTenantInvitations, ListTenants, Tenant,
@@ -23,6 +23,36 @@ const INVITATION_COLS: &str =
     "ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
      ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
      ti.revoked_at, ti.created_at, ti.updated_at";
+
+fn tenant_order_by(order: TenantOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (TenantOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
+        (TenantOrderField::CreatedAt, SortDir::Desc) => "created_at DESC, id ASC",
+        (TenantOrderField::UpdatedAt, SortDir::Asc) => "updated_at ASC, id ASC",
+        (TenantOrderField::UpdatedAt, SortDir::Desc) => "updated_at DESC NULLS LAST, id ASC",
+        (TenantOrderField::Name, SortDir::Asc) => "lower(name) ASC, id ASC",
+        (TenantOrderField::Name, SortDir::Desc) => "lower(name) DESC, id ASC",
+        (TenantOrderField::Alias, SortDir::Asc) => "lower(alias) ASC, id ASC",
+        (TenantOrderField::Alias, SortDir::Desc) => "lower(alias) DESC NULLS LAST, id ASC",
+        (TenantOrderField::Status, SortDir::Asc) => "status ASC, id ASC",
+        (TenantOrderField::Status, SortDir::Desc) => "status DESC, id ASC",
+    }
+}
+
+fn tenant_order_by_alias(order: TenantOrderField, dir: SortDir) -> &'static str {
+    match (order, dir) {
+        (TenantOrderField::CreatedAt, SortDir::Asc) => "t.created_at ASC, t.id ASC",
+        (TenantOrderField::CreatedAt, SortDir::Desc) => "t.created_at DESC, t.id ASC",
+        (TenantOrderField::UpdatedAt, SortDir::Asc) => "t.updated_at ASC, t.id ASC",
+        (TenantOrderField::UpdatedAt, SortDir::Desc) => "t.updated_at DESC NULLS LAST, t.id ASC",
+        (TenantOrderField::Name, SortDir::Asc) => "lower(t.name) ASC, t.id ASC",
+        (TenantOrderField::Name, SortDir::Desc) => "lower(t.name) DESC, t.id ASC",
+        (TenantOrderField::Alias, SortDir::Asc) => "lower(t.alias) ASC, t.id ASC",
+        (TenantOrderField::Alias, SortDir::Desc) => "lower(t.alias) DESC NULLS LAST, t.id ASC",
+        (TenantOrderField::Status, SortDir::Asc) => "t.status ASC, t.id ASC",
+        (TenantOrderField::Status, SortDir::Desc) => "t.status DESC, t.id ASC",
+    }
+}
 
 pub struct CreatedInvitation {
     pub invitation: TenantInvitation,
@@ -303,6 +333,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     let status = params.status;
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
+    let order_by = tenant_order_by(params.order, params.dir);
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants
@@ -313,7 +344,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
              AND ($7::text = 'all'
                   OR ($7::text = 'live' AND deleted_at IS NULL)
                   OR ($7::text = 'deleted' AND deleted_at IS NOT NULL))
-           ORDER BY created_at DESC
+           ORDER BY {order_by}
            LIMIT $5 OFFSET $6"#,
     ))
     .bind(name.clone())
@@ -379,6 +410,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
     let access_actions = ["read", "manage"];
+    let order_by = tenant_order_by_alias(params.order, params.dir);
 
     // Visibility filter over the one canonical grant expansion
     // (`subject_effective_grants`), consistent with the PDP and the
@@ -453,7 +485,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         "{ctes} SELECT {TENANT_COLS} FROM tenants t \
-         WHERE {base_filter} {auth_filter} ORDER BY t.created_at DESC LIMIT $7 OFFSET $8"
+         WHERE {base_filter} {auth_filter} ORDER BY {order_by} LIMIT $7 OFFSET $8"
     ))
     .bind(entity_id)
     .bind(name.clone())
@@ -1825,6 +1857,8 @@ mod tests {
                 deleted: crate::models::enums::DeletedFilter::Live,
                 limit: 100,
                 offset: 0,
+                order: Default::default(),
+                dir: Default::default(),
             },
         )
         .await
