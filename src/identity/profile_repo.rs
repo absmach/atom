@@ -6,7 +6,7 @@ use crate::{
     error::{db_err, AppError},
     models::profile::{
         CreateProfile, CreateProfileVersion, ListProfiles, Profile, ProfileList, ProfileVersion,
-        UpdateProfile,
+        UpdateProfile, UpdateProfileVersion,
     },
 };
 
@@ -223,6 +223,57 @@ pub async fn create_profile_version_with_audit(
             event: "profile_version.create",
         },
         &serde_json::json!({ "profile_id": profile_id }),
+    )
+    .await?;
+    Ok(version)
+}
+
+pub async fn update_profile_version(
+    pool: &PgPool,
+    id: Uuid,
+    req: UpdateProfileVersion,
+) -> Result<ProfileVersion, AppError> {
+    update_profile_version_with_audit(pool, false, None, None, id, req).await
+}
+
+pub async fn update_profile_version_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    tenant_id: Option<Uuid>,
+    id: Uuid,
+    req: UpdateProfileVersion,
+) -> Result<ProfileVersion, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let version = sqlx::query_as::<_, ProfileVersion>(
+        r#"UPDATE profile_versions
+           SET json_schema = COALESCE($2, json_schema),
+               ui_schema   = COALESCE($3, ui_schema),
+               status      = COALESCE($4, status)
+           WHERE id = $1
+           RETURNING id, profile_id, version, json_schema, ui_schema, status, created_at"#,
+    )
+    .bind(id)
+    .bind(req.json_schema)
+    .bind(req.ui_schema)
+    .bind(req.status)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("profile version {id} not found")),
+        other => AppError::Database(other),
+    })?;
+    crate::audit::commit_with_observation(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "profile_version",
+            target_id: Some(id),
+            event: "profile_version.update",
+        },
+        &serde_json::json!({}),
     )
     .await?;
     Ok(version)

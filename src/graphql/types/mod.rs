@@ -1723,6 +1723,15 @@ pub struct UpdateProfileInput {
     pub status: Option<String>,
 }
 
+// Status only — jsonSchema/uiSchema stay immutable once a version is created,
+// since a bound entity's writes validate against exactly the schema its
+// version had at bind time. Retargeting that schema out from under it would
+// silently change what already-bound entities are allowed to write.
+#[derive(InputObject)]
+pub struct UpdateProfileVersionInput {
+    pub status: Option<String>,
+}
+
 #[derive(InputObject)]
 pub struct CreateEntityInput {
     pub id: Option<ID>,
