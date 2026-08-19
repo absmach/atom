@@ -106,7 +106,7 @@ Serial-number uniqueness is `(issuer_id, identifier)` — independent issuers ma
 
 Generated leaf private keys are shown once in the issuance response as `privateKeyPem` and never stored. CSR-issued certificates never expose a private key to Atom.
 
-Revocation state is recorded in `certificate_revocations` (the immutable ledger, migrations 010 / 016 / 017). Publication continuity survives authority purge — see [pr-008-revocation.md](development/pki/pr-008-revocation.md) and [pr-009-crl.md](development/pki/pr-009-crl.md).
+Revocation state is recorded in `certificate_revocations` (the immutable ledger, migrations 016 / 022 / 023). Publication continuity survives authority purge — see [pr-008-revocation.md](development/pki/pr-008-revocation.md) and [pr-009-crl.md](development/pki/pr-009-crl.md).
 
 ---
 

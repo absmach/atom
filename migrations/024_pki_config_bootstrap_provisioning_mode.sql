@@ -1,7 +1,7 @@
 -- Config-driven bootstrap of the platform intermediate authority uses a new
 -- provisioning mode value to distinguish rows that came from disk-supplied
 -- material at startup from the earlier interactive flows (imported/offline/
--- automated). The check constraint was defined in migration 006; widen it in
+-- automated). The check constraint was defined in migration 012; widen it in
 -- place instead of relaxing it, so previously-persisted rows keep their tight
 -- lexical guarantee.
 
