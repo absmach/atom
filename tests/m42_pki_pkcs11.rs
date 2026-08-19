@@ -245,13 +245,9 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .module_path = "/definitely/missing/libpkcs11.so".to_string();
     let outage_tenant = common::pki::create_tenant(&pool, "pkcs11-outage").await;
     let mut tx = pool.begin().await.expect("outage transaction");
-    provisioning::provision_tenant_automatically_in_tx(
-        &mut tx,
-        &unavailable_keys,
-        outage_tenant,
-    )
-    .await
-    .expect_err("provider outage");
+    provisioning::provision_tenant_automatically_in_tx(&mut tx, &unavailable_keys, outage_tenant)
+        .await
+        .expect_err("provider outage");
     tx.rollback().await.expect("outage rollback");
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -282,8 +278,8 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         tenant_id: rolled_back_authority.tenant_id,
         version: rolled_back_authority.version,
     };
-    let rolled_back_key = Pkcs11AuthorityKey::from_authority(rolled_back_authority)
-        .expect("rollback key reference");
+    let rolled_back_key =
+        Pkcs11AuthorityKey::from_authority(rolled_back_authority).expect("rollback key reference");
     tx.rollback().await.expect("rollback generated authority");
     drop(rolled_back);
     assert_eq!(

@@ -284,10 +284,9 @@ async fn insert_active_signing_authority(
     let provider = ManagedAuthorityKeyProvider::for_provisioning(ca_keys).unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    let version =
-        atom::certs::authority::repo::next_authority_version(&mut tx, kind, tenant_id)
-            .await
-            .unwrap();
+    let version = atom::certs::authority::repo::next_authority_version(&mut tx, kind, tenant_id)
+        .await
+        .unwrap();
     let authority_id = Uuid::new_v4();
     let context = AuthorityKeyContext {
         authority_id,
@@ -311,7 +310,10 @@ async fn insert_active_signing_authority(
                 subject_key_id = Some(hex::encode(key_id.0));
             }
             x509_parser::extensions::ParsedExtension::AuthorityKeyIdentifier(key_id) => {
-                authority_key_id = key_id.key_identifier.as_ref().map(|value| hex::encode(value.0));
+                authority_key_id = key_id
+                    .key_identifier
+                    .as_ref()
+                    .map(|value| hex::encode(value.0));
             }
             _ => {}
         }
@@ -319,16 +321,12 @@ async fn insert_active_signing_authority(
 
     let parent_chain = parent.chain_pem.as_deref().unwrap();
     let chain_pem = format!("{certificate_pem}{parent_chain}");
-    let not_before = chrono::DateTime::<chrono::Utc>::from_timestamp(
-        cert.validity().not_before.timestamp(),
-        0,
-    )
-    .unwrap();
-    let not_after = chrono::DateTime::<chrono::Utc>::from_timestamp(
-        cert.validity().not_after.timestamp(),
-        0,
-    )
-    .unwrap();
+    let not_before =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(cert.validity().not_before.timestamp(), 0)
+            .unwrap();
+    let not_after =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(cert.validity().not_after.timestamp(), 0)
+            .unwrap();
     let completed = atom::certs::authority::repo::CompletedAuthority {
         subject: cert.subject().to_string(),
         serial_number: serial,
@@ -349,9 +347,7 @@ async fn insert_active_signing_authority(
         Some(atom::certs::authority::repo::DiscoveryUrls {
             ocsp_url: Some(format!("{base}/certs/issuers/{authority_id}/ocsp")),
             ca_issuers_url: Some(format!("{base}/certs/trust-bundle.pem")),
-            crl_distribution_point_url: Some(format!(
-                "{base}/certs/issuers/{authority_id}/crl"
-            )),
+            crl_distribution_point_url: Some(format!("{base}/certs/issuers/{authority_id}/crl")),
         })
     } else {
         None
@@ -378,7 +374,9 @@ async fn insert_active_signing_authority(
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    authority_repo::authority_by_id(pool, record.id).await.unwrap()
+    authority_repo::authority_by_id(pool, record.id)
+        .await
+        .unwrap()
 }
 
 fn normalize_hex(value: &str) -> String {

@@ -5,8 +5,7 @@ use der::{
     Decode, Encode,
 };
 use rcgen::{
-    CertificateRevocationListParams, KeyIdMethod, RevocationReason, RevokedCertParams,
-    SerialNumber,
+    CertificateRevocationListParams, KeyIdMethod, RevocationReason, RevokedCertParams, SerialNumber,
 };
 use ring::digest;
 use serde::{Deserialize, Serialize};
@@ -2169,7 +2168,6 @@ fn normalize_fingerprint(value: &str) -> String {
         .collect()
 }
 
-
 fn encode_signed_ocsp<F>(
     certificate_chain_der: Vec<Vec<u8>>,
     responses: Vec<SingleResponse>,
@@ -2261,7 +2259,6 @@ fn ocsp_signature_algorithm_identifier(
         parameters: rsa_parameters.then(|| Null.into()),
     }
 }
-
 
 fn der_err(error: der::Error) -> AppError {
     AppError::Internal(anyhow::anyhow!("OCSP DER error: {error}"))

@@ -740,12 +740,14 @@ impl AuthorityKeyProvider for ManagedAuthorityKeyProvider {
                     public_key: generated.public_key,
                     key: ManagedAuthorityKey::EncryptedDatabase(generated.key),
                 }),
-            Self::Pkcs11(provider) => provider
-                .import_pkcs8(context, algorithm, pkcs8_der)
-                .map(|generated| GeneratedAuthorityKey {
-                    public_key: generated.public_key,
-                    key: ManagedAuthorityKey::Pkcs11(generated.key),
-                }),
+            Self::Pkcs11(provider) => {
+                provider
+                    .import_pkcs8(context, algorithm, pkcs8_der)
+                    .map(|generated| GeneratedAuthorityKey {
+                        public_key: generated.public_key,
+                        key: ManagedAuthorityKey::Pkcs11(generated.key),
+                    })
+            }
         }
     }
 

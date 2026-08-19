@@ -22,7 +22,7 @@ use atom::{
 use chrono::{DateTime, Duration, Utc};
 use rcgen::{CertificateParams, KeyPair};
 use serde_json::{json, Value};
-use sqlx::{Acquire, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 #[tokio::test]

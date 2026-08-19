@@ -77,11 +77,7 @@ impl CertificateQuery {
         })
     }
 
-    async fn certificate(
-        &self,
-        ctx: &Context<'_>,
-        credential_id: ID,
-    ) -> Result<Certificate> {
+    async fn certificate(&self, ctx: &Context<'_>, credential_id: ID) -> Result<Certificate> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let cert =

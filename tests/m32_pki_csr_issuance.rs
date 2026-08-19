@@ -535,7 +535,9 @@ async fn provision_tenant_issuer(
     .execute(pool)
     .await
     .unwrap();
-    authority_repo::authority_by_id(pool, record.id).await.unwrap()
+    authority_repo::authority_by_id(pool, record.id)
+        .await
+        .unwrap()
 }
 
 async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {

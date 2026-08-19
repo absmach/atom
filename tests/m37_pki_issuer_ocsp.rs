@@ -24,9 +24,7 @@ use der::{
     asn1::{Null, OctetString},
     Decode, Encode,
 };
-use rcgen::{
-    CertificateParams, DnType, KeyPair,
-};
+use rcgen::{CertificateParams, DnType, KeyPair};
 use ring::digest;
 use spki::AlgorithmIdentifierOwned;
 use sqlx::PgPool;

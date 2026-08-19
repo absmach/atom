@@ -424,7 +424,10 @@ fn decode_private_key_pem(pem: &str) -> Result<Zeroizing<Vec<u8>>, AppError> {
 }
 
 fn find_private_key_block(pem: &str) -> Option<String> {
-    for label in ["-----BEGIN PRIVATE KEY-----", "-----BEGIN EC PRIVATE KEY-----"] {
+    for label in [
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+    ] {
         if let Some(start) = pem.find(label) {
             let end_label = label.replace("BEGIN", "END");
             if let Some(end) = pem[start..].find(&end_label) {
@@ -451,12 +454,9 @@ pub async fn begin_tenant_authority_mutation_in_tx(
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
     repo::lock_active_tenant(tx, tenant_id).await?;
-    if let Some(existing) = repo::pending_authority_for_scope(
-        tx,
-        AuthorityKind::TenantIntermediate,
-        Some(tenant_id),
-    )
-    .await?
+    if let Some(existing) =
+        repo::pending_authority_for_scope(tx, AuthorityKind::TenantIntermediate, Some(tenant_id))
+            .await?
     {
         if existing.provisioning_mode == "offline" {
             return Ok(AuthorityMutationOutcome::unchanged(existing));
@@ -1194,13 +1194,10 @@ fn ensure_parent_available(parent: &AuthorityRecord) -> Result<(), AppError> {
         return Err(AppError::bad_request("parent authority is not active"));
     }
     let now = Utc::now();
-    if !parent
-        .not_before
-        .is_some_and(|not_before| not_before <= now)
-    {
+    if parent.not_before.is_none_or(|not_before| not_before > now) {
         return Err(AppError::bad_request("parent authority is not yet valid"));
     }
-    if !parent.not_after.is_some_and(|not_after| now < not_after) {
+    if parent.not_after.is_none_or(|not_after| now >= not_after) {
         return Err(AppError::bad_request("parent authority is expired"));
     }
     Ok(())

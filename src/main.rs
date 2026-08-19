@@ -203,9 +203,11 @@ async fn bootstrap_platform_intermediate(
     cert_path: &str,
     key_path: &str,
 ) -> anyhow::Result<()> {
-    let cert_pem = tokio::fs::read_to_string(cert_path).await.with_context(|| {
-        format!("failed to read ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH ({cert_path})")
-    })?;
+    let cert_pem = tokio::fs::read_to_string(cert_path)
+        .await
+        .with_context(|| {
+            format!("failed to read ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH ({cert_path})")
+        })?;
     let key_pem = tokio::fs::read_to_string(key_path).await.with_context(|| {
         format!("failed to read ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH ({key_path})")
     })?;

@@ -48,7 +48,6 @@ mod callout_ops {
     pub const AUTHZ_CHECK: &str = "atom.v1.AuthzService/Check";
     pub const AUTH_AUTHENTICATE: &str = "atom.v1.AuthService/Authenticate";
     pub const AUTH_AUTHENTICATE_CREDENTIAL: &str = "atom.v1.AuthService/AuthenticateCredential";
-    pub const CERT_RESOLVE: &str = "atom.v1.CertificateService/ResolveCertificate";
     pub const CERT_REVOKE_ENTITY: &str = "atom.v1.CertificateService/RevokeEntityCertificates";
     pub const ALIAS_RESOLVE: &str = "atom.v1.AliasService/ResolveAlias";
 }

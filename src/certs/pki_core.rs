@@ -264,10 +264,10 @@ impl PkiArtifactSigner {
                     | super::authority::AuthorityStatus::Retiring
                     | super::authority::AuthorityStatus::Retired
             )
-            || !authority
+            || authority
                 .not_before
-                .is_some_and(|not_before| not_before <= now)
-            || !authority.not_after.is_some_and(|not_after| now < not_after)
+                .is_none_or(|not_before| not_before > now)
+            || authority.not_after.is_none_or(|not_after| now >= not_after)
         {
             return Err(AppError::bad_request(
                 "authority is not eligible for artifact signing",
