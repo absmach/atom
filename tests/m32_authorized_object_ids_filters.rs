@@ -25,7 +25,7 @@ async fn state(pool: PgPool) -> AppState {
     let active_keys = keys::load_active_keys(&pool, &config.signing_keys)
         .await
         .expect("load signing keys");
-    AppState::new(pool, config, active_keys, None)
+    AppState::new(pool, config, active_keys)
 }
 
 fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
