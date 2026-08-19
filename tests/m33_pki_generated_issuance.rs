@@ -99,7 +99,6 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
         .iter()
         .any(|field| field.contains("private")));
     let mutation_fields = field_names(&introspection["mutation"]["mutationType"]["fields"]);
-    assert!(mutation_fields.contains(&"issueCertificate".to_string()));
     assert!(mutation_fields.contains(&"issueGeneratedCertificateV2".to_string()));
 
     let unauthenticated = schema

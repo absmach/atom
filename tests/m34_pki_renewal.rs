@@ -425,7 +425,6 @@ async fn assert_v2_schema_contract(schema: &atom::graphql::AtomSchema) {
     assert!(certificate_fields.contains(&"renewalDueAt"));
     assert!(certificate_fields.contains(&"renewedFromCredentialId"));
     let mutations = sorted_field_names(&data["mutation"]["mutationType"]["fields"]);
-    assert!(mutations.contains(&"renewCertificate"));
     assert!(mutations.contains(&"renewCertificateFromCsrV2"));
     assert!(mutations.contains(&"renewGeneratedCertificateV2"));
 }
