@@ -328,8 +328,10 @@ pub async fn import_platform_intermediate_mutation_in_tx(
         ));
     }
 
-    // Wrap and persist through the same encrypted-database provider used for
-    // generated keys, then insert the row as already-active.
+    // Wrap and persist through the encrypted-database provider regardless of
+    // the runtime provisioning backend. PKCS#11 tokens generate non-exportable
+    // keys inside the HSM and refuse `import_pkcs8`, so bring-your-own material
+    // must always land in the encrypted-database store.
     let authority_id = Uuid::new_v4();
     let version =
         repo::next_authority_version(tx, AuthorityKind::PlatformIntermediate, None).await?;
@@ -338,8 +340,10 @@ pub async fn import_platform_intermediate_mutation_in_tx(
         tenant_id: None,
         version,
     };
+    let mut import_keys = ca_keys.clone();
+    import_keys.provisioning_backend = crate::config::PkiCaProvisioningBackend::EncryptedDatabase;
     let provider =
-        ManagedAuthorityKeyProvider::for_provisioning(ca_keys).map_err(key_provider_error)?;
+        ManagedAuthorityKeyProvider::for_provisioning(&import_keys).map_err(key_provider_error)?;
     let generated = provider
         .import_pkcs8(
             context,
