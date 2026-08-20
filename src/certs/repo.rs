@@ -118,30 +118,6 @@ where
     .ok_or_else(|| AppError::not_found("entity not found"))
 }
 
-pub async fn insert_certificate_credential(
-    tx: &mut Transaction<'_, Postgres>,
-    entity_id: Uuid,
-    serial_number: &str,
-    metadata: Value,
-    expires_at: DateTime<Utc>,
-) -> Result<Uuid, AppError> {
-    sqlx::query_scalar(
-        r#"
-        INSERT INTO credentials (id, entity_id, kind, identifier, metadata, expires_at)
-        VALUES ($1, $2, 'certificate', $3, $4, $5)
-        RETURNING id
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(entity_id)
-    .bind(serial_number)
-    .bind(metadata)
-    .bind(expires_at)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(AppError::Database)
-}
-
 pub async fn insert_managed_certificate_credential(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,

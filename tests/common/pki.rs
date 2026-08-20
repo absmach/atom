@@ -431,6 +431,152 @@ pub async fn create_global_entity(pool: &PgPool, prefix: &str) -> Uuid {
     id
 }
 
+/// Insert a bare root → platform_intermediate → tenant_intermediate chain
+/// via raw SQL and return the tenant_intermediate id. Suitable for tests
+/// that need a valid `issuer_id` on a certificate credential without
+/// exercising full CSR issuance.
+pub async fn insert_bare_tenant_authority(pool: &PgPool, tenant_id: Uuid) -> Uuid {
+    let root_id = Uuid::new_v4();
+    let platform_id = Uuid::new_v4();
+    let tenant_authority_id = Uuid::new_v4();
+    let now = time::OffsetDateTime::now_utc();
+    let not_before =
+        chrono::DateTime::from_timestamp(now.unix_timestamp(), 0).expect("unix time in range");
+    let not_after = not_before + chrono::Duration::days(365);
+    insert_bare_authority_row(
+        pool,
+        root_id,
+        None,
+        None,
+        "root",
+        1,
+        format!("{:064x}", root_id.as_u128()),
+        not_before,
+        not_after,
+    )
+    .await;
+    insert_bare_authority_row(
+        pool,
+        platform_id,
+        None,
+        Some(root_id),
+        "platform_intermediate",
+        1,
+        format!("{:064x}", platform_id.as_u128()),
+        not_before,
+        not_after,
+    )
+    .await;
+    insert_bare_authority_row(
+        pool,
+        tenant_authority_id,
+        Some(tenant_id),
+        Some(platform_id),
+        "tenant_intermediate",
+        1,
+        format!("{:064x}", tenant_authority_id.as_u128()),
+        not_before,
+        not_after,
+    )
+    .await;
+    tenant_authority_id
+}
+
+/// Insert a bare platform_leaf_issuer chain (root → platform_intermediate →
+/// platform_leaf_issuer) and return the platform_leaf_issuer id. Used to
+/// bind certificate credentials for globally-scoped entities.
+pub async fn insert_bare_platform_leaf_authority(pool: &PgPool) -> Uuid {
+    let root_id = Uuid::new_v4();
+    let platform_id = Uuid::new_v4();
+    let leaf_id = Uuid::new_v4();
+    let now = time::OffsetDateTime::now_utc();
+    let not_before =
+        chrono::DateTime::from_timestamp(now.unix_timestamp(), 0).expect("unix time in range");
+    let not_after = not_before + chrono::Duration::days(365);
+    insert_bare_authority_row(
+        pool,
+        root_id,
+        None,
+        None,
+        "root",
+        1,
+        format!("{:064x}", root_id.as_u128()),
+        not_before,
+        not_after,
+    )
+    .await;
+    insert_bare_authority_row(
+        pool,
+        platform_id,
+        None,
+        Some(root_id),
+        "platform_intermediate",
+        1,
+        format!("{:064x}", platform_id.as_u128()),
+        not_before,
+        not_after,
+    )
+    .await;
+    insert_bare_authority_row(
+        pool,
+        leaf_id,
+        None,
+        Some(root_id),
+        "platform_leaf_issuer",
+        1,
+        format!("{:064x}", leaf_id.as_u128()),
+        not_before,
+        not_after,
+    )
+    .await;
+    leaf_id
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_bare_authority_row(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Option<Uuid>,
+    parent_id: Option<Uuid>,
+    kind: &str,
+    version: i32,
+    fingerprint: String,
+    not_before: chrono::DateTime<chrono::Utc>,
+    not_after: chrono::DateTime<chrono::Utc>,
+) {
+    let issuance_enabled = matches!(kind, "platform_leaf_issuer" | "tenant_intermediate");
+    sqlx::query(
+        r#"
+        INSERT INTO pki_authorities (
+            id, tenant_id, parent_id, kind, version, status, issuance_enabled,
+            subject, serial_number, fingerprint_sha256,
+            certificate_pem, chain_pem, not_before, not_after,
+            key_backend, key_reference
+        ) VALUES ($1, $2, $3, $4, $5, 'active', $6,
+                  $7, $8, $9,
+                  '-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n',
+                  '-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n',
+                  $10, $11,
+                  'pkcs11', $12)
+        "#,
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(parent_id)
+    .bind(kind)
+    .bind(version)
+    .bind(issuance_enabled)
+    .bind(format!("CN={kind}-{id}"))
+    .bind(format!("{:032x}", id.as_u128()))
+    .bind(fingerprint)
+    .bind(not_before)
+    .bind(not_after)
+    .bind(format!("pkcs11:object={kind}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert bare authority row");
+}
+
 pub fn assert_chain_with_openssl(leaf_pem: &str, chain_pem: &str, root_pem: &str) {
     let directory = std::env::temp_dir().join(format!("atom-managed-pki-{}", Uuid::new_v4()));
     fs::create_dir_all(&directory).unwrap();

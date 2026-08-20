@@ -272,14 +272,19 @@ async fn restore_tenant_reactivates_and_unhides_children() {
         .execute(&pool)
         .await
         .expect("insert api credential");
+    let issuer_id = common::pki::insert_bare_tenant_authority(&pool, tenant_id).await;
     let cert_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'certificate', $3, 'active')")
-        .bind(cert_id)
-        .bind(child)
-        .bind(format!("{:032x}", cert_id.as_u128()))
-        .execute(&pool)
-        .await
-        .expect("insert certificate credential");
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, identifier, issuer_id, status)
+         VALUES ($1, $2, 'certificate', $3, $4, 'active')",
+    )
+    .bind(cert_id)
+    .bind(child)
+    .bind(format!("{:032x}", cert_id.as_u128()))
+    .bind(issuer_id)
+    .execute(&pool)
+    .await
+    .expect("insert certificate credential");
 
     atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
         .await
