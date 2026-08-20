@@ -124,7 +124,6 @@ pub async fn provision_platform_leaf_issuer(
         &root_authority,
         atom::certs::authority::AuthorityKind::PlatformLeafIssuer,
         None,
-        "Atom Platform Leaf Issuer v1".to_string(),
         cert_pem,
         pkcs8_der,
     )
@@ -270,7 +269,6 @@ async fn insert_active_signing_authority(
     parent: &AuthorityRecord,
     kind: atom::certs::authority::AuthorityKind,
     tenant_id: Option<Uuid>,
-    subject: String,
     certificate_pem: String,
     pkcs8_der: Vec<u8>,
 ) -> AuthorityRecord {
@@ -360,7 +358,6 @@ async fn insert_active_signing_authority(
             parent_id: parent.id,
             kind,
             version,
-            subject: &subject,
             provisioning_mode: "config_bootstrap",
             issuance_enabled: kind.can_issue_leaf_credentials(),
             key: &ManagedAuthorityKey::EncryptedDatabase(match managed_key {

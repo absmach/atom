@@ -254,13 +254,23 @@ fn wait_for_worker<T>(
     }
 }
 
-fn wait_for_worker_completion<T>(receiver: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
+/// Wait for a spawned PKCS#11 worker to publish its result within `hard_timeout`.
+/// Used only after the soft `operation_timeout_ms` has already fired on a
+/// Mutating operation: it lets a still-in-flight mutation report its real
+/// outcome briefly, but caps the wait so a wedged token cannot hold the
+/// deployment-wide provisioning advisory lock forever. On expiry the caller
+/// treats the operation as unavailable; a late completion becomes an
+/// orphaned side effect that operators must reconcile manually.
+fn wait_for_worker_completion<T>(
+    receiver: &mpsc::Receiver<T>,
+    hard_timeout: Duration,
+) -> Result<T, mpsc::RecvTimeoutError> {
     if tokio::runtime::Handle::try_current()
         .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
     {
-        tokio::task::block_in_place(|| receiver.recv())
+        tokio::task::block_in_place(|| receiver.recv_timeout(hard_timeout))
     } else {
-        receiver.recv()
+        receiver.recv_timeout(hard_timeout)
     }
 }
 
@@ -346,17 +356,35 @@ impl Pkcs11KeyProvider {
                     Ok(result) => result,
                     Err(mpsc::RecvTimeoutError::Timeout) if class == OperationClass::Mutating => {
                         // A PKCS#11 worker cannot be cancelled safely once the token has
-                        // accepted a persistent mutation. Keep the mutation's lifecycle
-                        // serialized and observe its real result before returning or
-                        // retrying; otherwise a late generate/destroy could become an
-                        // invisible side effect or race the next attempt.
+                        // accepted a persistent mutation. Give the mutation a bounded
+                        // grace period to report its real result before releasing the
+                        // deployment-wide provisioning advisory lock; a wedged token
+                        // hitting `mutation_hard_timeout_ms` is reported as unavailable
+                        // and any late completion becomes an orphaned side effect the
+                        // operator must reconcile.
+                        let hard_timeout =
+                            Duration::from_millis(self.config.mutation_hard_timeout_ms);
                         tracing::warn!(
                             provider = PROVIDER_NAME,
                             operation,
-                            "PKCS#11 mutation exceeded its soft deadline; waiting for completion"
+                            hard_timeout_ms = self.config.mutation_hard_timeout_ms,
+                            "PKCS#11 mutation exceeded its soft deadline; waiting up to the hard timeout"
                         );
-                        wait_for_worker_completion(&receiver)
-                            .unwrap_or(Err(AuthorityKeyProviderError::ProviderUnavailable))
+                        match wait_for_worker_completion(&receiver, hard_timeout) {
+                            Ok(result) => result,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                tracing::error!(
+                                    provider = PROVIDER_NAME,
+                                    operation,
+                                    hard_timeout_ms = self.config.mutation_hard_timeout_ms,
+                                    "PKCS#11 mutation exceeded its hard timeout; abandoning wait (late completion may leave orphaned key material)"
+                                );
+                                Err(AuthorityKeyProviderError::ProviderUnavailable)
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                Err(AuthorityKeyProviderError::ProviderUnavailable)
+                            }
+                        }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         Err(AuthorityKeyProviderError::OperationTimedOut)
@@ -826,6 +854,7 @@ mod tests {
             token_label: name.to_string(),
             user_pin: SecretText::new("test-pin".to_string()).expect("PIN"),
             operation_timeout_ms: 10,
+            mutation_hard_timeout_ms: 100,
             max_retries: 0,
             max_in_flight: 1,
             circuit_failure_threshold: 10,

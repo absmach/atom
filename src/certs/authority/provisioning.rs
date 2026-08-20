@@ -353,7 +353,6 @@ pub async fn import_platform_intermediate_mutation_in_tx(
         .map_err(key_provider_error)?;
     let generated_key = GeneratedAuthorityKeyGuard::new(provider, context, generated.key);
 
-    let subject = authority_common_name(AuthorityKind::PlatformIntermediate, None, version)?;
     let parent_chain = parent
         .chain_pem
         .as_deref()
@@ -381,7 +380,6 @@ pub async fn import_platform_intermediate_mutation_in_tx(
             parent_id: parent.id,
             kind: AuthorityKind::PlatformIntermediate,
             version,
-            subject: &subject,
             provisioning_mode: "config_bootstrap",
             issuance_enabled: AuthorityKind::PlatformIntermediate.can_issue_leaf_credentials(),
             key: generated_key.key(),
@@ -680,7 +678,7 @@ pub async fn begin_retirement_in_tx(
 
 pub async fn begin_retirement_mutation_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
+    _ca_keys: &PkiCaKeyConfig,
     authority_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
@@ -696,14 +694,13 @@ pub async fn begin_retirement_mutation_in_tx(
     if authority.status != AuthorityStatus::Active {
         return Err(AppError::conflict("only an active authority can retire"));
     }
-    if authority.key_backend.can_sign() {
-        let provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, &authority)
-            .map_err(key_provider_error)?;
-        let key = ManagedAuthorityKey::from_authority(&authority).map_err(key_provider_error)?;
-        provider
-            .retire(authority_key_context(&authority), &key)
-            .map_err(key_provider_error)?;
-    }
+    // Retirement is a status transition on the authority row. Both key
+    // providers' `retire` methods only re-validate that the key is present —
+    // they never mutate the signer — so gating this transition on provider
+    // availability would block the exact case where retirement matters most
+    // (a compromised or unreachable signer). CRL/OCSP publication continues
+    // from any cached artifact until it expires; a subsequent completion
+    // still hits the provider when it actually needs to sign.
     let authority = repo::transition_authority(
         tx,
         authority_id,
@@ -1089,7 +1086,9 @@ fn parse_authority_certificate(
         .ok_or_else(|| AppError::bad_request("invalid authority notBefore"))?;
     let not_after = DateTime::<Utc>::from_timestamp(cert.validity().not_after.timestamp(), 0)
         .ok_or_else(|| AppError::bad_request("invalid authority notAfter"))?;
-    let serial_number = normalize_serial(&cert.tbs_certificate.raw_serial_as_string())?;
+    let serial_number =
+        crate::certs::service::normalize_serial(&cert.tbs_certificate.raw_serial_as_string())
+            .map_err(|_| AppError::bad_request("invalid authority serial number"))?;
     let fingerprint_sha256 = hex::encode(digest::digest(&digest::SHA256, &pem.contents));
     Ok(ParsedAuthorityCertificate {
         der: pem.contents.clone(),
@@ -1205,23 +1204,6 @@ fn ensure_parent_available(parent: &AuthorityRecord) -> Result<(), AppError> {
         return Err(AppError::bad_request("parent authority is expired"));
     }
     Ok(())
-}
-
-fn normalize_serial(value: &str) -> Result<String, AppError> {
-    let normalized = value
-        .chars()
-        .filter(|character| *character != ':' && !character.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if normalized.is_empty() || hex::decode(&normalized).is_err() {
-        return Err(AppError::bad_request("invalid authority serial number"));
-    }
-    let normalized = normalized.trim_start_matches('0');
-    Ok(if normalized.is_empty() {
-        "0".to_string()
-    } else {
-        normalized.to_string()
-    })
 }
 
 fn pem_encode_certificate(der: &[u8]) -> String {

@@ -42,6 +42,7 @@ fn provider_config(pin: &str) -> Option<PkiPkcs11Config> {
         token_label,
         user_pin: SecretText::new(pin.to_string()).expect("test PIN"),
         operation_timeout_ms: 2_000,
+        mutation_hard_timeout_ms: 60_000,
         max_retries: 1,
         max_in_flight: 4,
         circuit_failure_threshold: 3,

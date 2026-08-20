@@ -7,7 +7,9 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    build_info, keys, rate_limit,
+    build_info,
+    certs::authority::key_provider::{AuthorityKeyProviderStatus, ManagedAuthorityKeyProvider},
+    keys, rate_limit,
     state::{AppState, GrpcRuntimeState},
 };
 
@@ -73,6 +75,7 @@ pub struct SystemStatus {
     pub database: ComponentCheck,
     pub migrations: ComponentCheck,
     pub signing_keys: ComponentCheck,
+    pub certificate_issuer: ComponentCheck,
     pub db_pool: DbPoolStatus,
     pub signing_key_state: Option<SigningKeyStatus>,
     pub audit_retention: AuditRetentionStatus,
@@ -96,7 +99,14 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let migrations = migrations_check(state).await;
     let (signing_keys, signing_key_state) = signing_keys_check(state).await;
     let grpc_ready = grpc_check(state).await;
-    let ready = readiness_ok(&database, &migrations, &signing_keys, &grpc_ready);
+    let certificate_issuer = certificate_issuer_check(state).await;
+    let ready = readiness_ok(
+        &database,
+        &migrations,
+        &signing_keys,
+        &grpc_ready,
+        &certificate_issuer,
+    );
     let status = if ready {
         ComponentStatus::Ok
     } else {
@@ -115,6 +125,7 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
         database,
         migrations,
         signing_keys,
+        certificate_issuer,
         db_pool: db_pool_status(state),
         signing_key_state,
         audit_retention: audit_retention_status(state).await,
@@ -133,11 +144,16 @@ fn readiness_ok(
     migrations: &ComponentCheck,
     signing_keys: &ComponentCheck,
     grpc_ready: &ComponentCheck,
+    certificate_issuer: &ComponentCheck,
 ) -> bool {
     matches!(&database.status, ComponentStatus::Ok)
         && matches!(&migrations.status, ComponentStatus::Ok)
         && matches!(&signing_keys.status, ComponentStatus::Ok)
         && matches!(&grpc_ready.status, ComponentStatus::Ok)
+        && matches!(
+            &certificate_issuer.status,
+            ComponentStatus::Ok | ComponentStatus::Disabled
+        )
 }
 
 async fn database_check(state: &AppState) -> ComponentCheck {
@@ -223,6 +239,49 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
     }
 }
 
+/// Actively probes the configured CA signer (encrypted DB or PKCS#11 HSM) so
+/// /health/ready reports the true issuance capability rather than the
+/// startup-time snapshot alone. Deployments without a CA signer (no KEK, no
+/// HSM configured) report Disabled and stay ready — PKI is optional.
+async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
+    let ca_keys = state.config.pki_ca_keys.clone();
+    let health = tokio::task::spawn_blocking(move || {
+        ManagedAuthorityKeyProvider::for_provisioning(&ca_keys).map(|provider| {
+            use crate::certs::authority::key_provider::AuthorityKeyProvider as _;
+            provider.health()
+        })
+    })
+    .await;
+    match health {
+        Ok(Ok(health)) => match health.status {
+            AuthorityKeyProviderStatus::Ready => ComponentCheck {
+                status: ComponentStatus::Ok,
+                message: format!("{:?} signer ready", health.backend),
+            },
+            AuthorityKeyProviderStatus::Unconfigured => ComponentCheck {
+                status: ComponentStatus::Disabled,
+                message: "CA signer not configured".to_string(),
+            },
+            AuthorityKeyProviderStatus::CircuitOpen => ComponentCheck {
+                status: ComponentStatus::Error,
+                message: format!("{:?} signer circuit open", health.backend),
+            },
+            AuthorityKeyProviderStatus::Unavailable => ComponentCheck {
+                status: ComponentStatus::Error,
+                message: format!("{:?} signer unavailable", health.backend),
+            },
+        },
+        Ok(Err(_)) => ComponentCheck {
+            status: ComponentStatus::Disabled,
+            message: "CA signer not configured".to_string(),
+        },
+        Err(err) => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!("CA signer health check task failed: {err}"),
+        },
+    }
+}
+
 async fn grpc_check(state: &AppState) -> ComponentCheck {
     let status = state.grpc_status().await;
     match status.state {
@@ -303,6 +362,7 @@ mod tests {
             database: check(ComponentStatus::Ok),
             migrations: check(ComponentStatus::Ok),
             signing_keys: check(ComponentStatus::Ok),
+            certificate_issuer: check(ComponentStatus::Ok),
             db_pool: DbPoolStatus {
                 max_connections: 0,
                 min_connections: 0,
@@ -343,24 +403,49 @@ mod tests {
         let database = check(ComponentStatus::Ok);
         let migrations = check(ComponentStatus::Ok);
         let signing_keys = check(ComponentStatus::Ok);
+        let ca = check(ComponentStatus::Ok);
 
         assert!(!readiness_ok(
             &database,
             &migrations,
             &signing_keys,
             &check(ComponentStatus::Degraded),
+            &ca,
         ));
         assert!(!readiness_ok(
             &database,
             &migrations,
             &signing_keys,
             &check(ComponentStatus::Error),
+            &ca,
         ));
         assert!(readiness_ok(
             &database,
             &migrations,
             &signing_keys,
             &check(ComponentStatus::Ok),
+            &ca,
+        ));
+    }
+
+    #[test]
+    fn readiness_blocks_when_certificate_issuer_is_unavailable() {
+        let ok = check(ComponentStatus::Ok);
+        assert!(!readiness_ok(
+            &ok,
+            &ok,
+            &ok,
+            &ok,
+            &check(ComponentStatus::Error),
+        ));
+        // A deployment without PKI configured stays ready — the check
+        // reports Disabled and does not block.
+        assert!(readiness_ok(
+            &ok,
+            &ok,
+            &ok,
+            &ok,
+            &check(ComponentStatus::Disabled),
         ));
     }
 }

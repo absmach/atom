@@ -453,7 +453,6 @@ pub struct ActiveAuthorityInsert<'a> {
     pub parent_id: Uuid,
     pub kind: AuthorityKind,
     pub version: i32,
-    pub subject: &'a str,
     pub provisioning_mode: &'a str,
     pub issuance_enabled: bool,
     pub key: &'a ManagedAuthorityKey,
@@ -511,7 +510,7 @@ pub async fn insert_active_authority(
     .bind(input.kind)
     .bind(input.version)
     .bind(input.issuance_enabled)
-    .bind(input.subject)
+    .bind(&input.completed.subject)
     .bind(&input.completed.serial_number)
     .bind(&input.completed.fingerprint_sha256)
     .bind(&input.completed.subject_key_id)

@@ -326,6 +326,13 @@ pub struct PkiPkcs11Config {
     pub token_label: String,
     pub user_pin: SecretText,
     pub operation_timeout_ms: u64,
+    /// Hard upper bound on how long a Mutating PKCS#11 operation may block
+    /// after it has already blown the `operation_timeout_ms` soft deadline.
+    /// A wedged token holding the deployment-wide provisioning advisory lock
+    /// still frees the lock at this deadline; a late completion becomes an
+    /// orphaned side effect that operators must reconcile manually. Must be
+    /// >= `operation_timeout_ms`.
+    pub mutation_hard_timeout_ms: u64,
     pub max_retries: u32,
     pub max_in_flight: u32,
     pub circuit_failure_threshold: u32,
@@ -339,6 +346,7 @@ impl fmt::Debug for PkiPkcs11Config {
             .field("token_label", &self.token_label)
             .field("user_pin", &"<redacted>")
             .field("operation_timeout_ms", &self.operation_timeout_ms)
+            .field("mutation_hard_timeout_ms", &self.mutation_hard_timeout_ms)
             .field("max_retries", &self.max_retries)
             .field("max_in_flight", &self.max_in_flight)
             .field("circuit_failure_threshold", &self.circuit_failure_threshold)
@@ -1070,6 +1078,8 @@ fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
             Ok(value)
         };
         let operation_timeout_ms = env_parse("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS", 2_000_u64)?;
+        let mutation_hard_timeout_ms =
+            env_parse("ATOM_PKI_PKCS11_MUTATION_HARD_TIMEOUT_MS", 60_000_u64)?;
         let max_retries = env_parse("ATOM_PKI_PKCS11_MAX_RETRIES", 1_u32)?;
         let max_in_flight = env_parse("ATOM_PKI_PKCS11_MAX_IN_FLIGHT", 8_u32)?;
         let circuit_failure_threshold =
@@ -1077,6 +1087,11 @@ fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
         let circuit_reset_secs = env_parse("ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS", 30_u64)?;
         if operation_timeout_ms == 0 {
             anyhow::bail!("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS must be greater than zero");
+        }
+        if mutation_hard_timeout_ms < operation_timeout_ms {
+            anyhow::bail!(
+                "ATOM_PKI_PKCS11_MUTATION_HARD_TIMEOUT_MS must be >= ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS"
+            );
         }
         if max_retries > 3 {
             anyhow::bail!("ATOM_PKI_PKCS11_MAX_RETRIES must be at most 3");
@@ -1095,6 +1110,7 @@ fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
             token_label: required("ATOM_PKI_PKCS11_TOKEN_LABEL")?,
             user_pin: SecretText::new(required("ATOM_PKI_PKCS11_USER_PIN")?)?,
             operation_timeout_ms,
+            mutation_hard_timeout_ms,
             max_retries,
             max_in_flight,
             circuit_failure_threshold,
