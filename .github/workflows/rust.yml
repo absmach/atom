@@ -155,4 +155,3 @@ jobs:
           PKI_TEST_DATABASE_NAME: atom_pki_test
           RUST_BACKTRACE: '1'
         run: ./scripts/pki-test.sh smoke
-

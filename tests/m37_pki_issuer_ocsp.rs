@@ -607,39 +607,3 @@ fn assert_openssl_ocsp(
         "OpenSSL did not independently verify the response: {text}"
     );
 }
-
-fn assert_openssl_serial_ocsp(response_der: &[u8], issuer_pem: &str, serial: &str) {
-    let directory = std::env::temp_dir().join(format!("atom-pr010-serial-{}", Uuid::new_v4()));
-    fs::create_dir_all(&directory).unwrap();
-    let response_path = directory.join("response.der");
-    let issuer_path = directory.join("issuer.pem");
-    fs::write(&response_path, response_der).unwrap();
-    fs::write(&issuer_path, issuer_pem).unwrap();
-    let output = Command::new("openssl")
-        .arg("ocsp")
-        .arg("-respin")
-        .arg(&response_path)
-        .arg("-issuer")
-        .arg(&issuer_path)
-        .arg("-serial")
-        .arg(format!("0x{serial}"))
-        .arg("-CAfile")
-        .arg(&issuer_path)
-        .args(["-no_nonce", "-text"])
-        .output()
-        .expect("OpenSSL must be installed for PR-010 verification");
-    fs::remove_dir_all(directory).unwrap();
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.status.success(),
-        "OpenSSL OCSP verification failed: {text}"
-    );
-    assert!(
-        text.to_ascii_lowercase().contains("response verify ok"),
-        "OpenSSL did not independently verify the response: {text}"
-    );
-}

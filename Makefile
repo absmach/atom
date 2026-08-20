@@ -328,4 +328,3 @@ pki-material:
 		echo "==> config changed — restarting atom to pick up bootstrap paths"; \
 		docker compose --env-file $$ENV_FILE up -d atom; \
 	fi
-
