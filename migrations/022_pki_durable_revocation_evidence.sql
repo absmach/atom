@@ -25,21 +25,21 @@ CREATE UNIQUE INDEX idx_certificate_revocations_issuer_serial
     ON certificate_revocations(issuer_id, serial_number)
     WHERE issuer_id IS NOT NULL;
 
-CREATE INDEX idx_certificate_revocations_fingerprint_serial
+-- Orphaned rows (authority purged, issuer_id cleared by 023's FK cascade)
+-- retain fingerprint evidence for audit but no longer feed publication.
+CREATE INDEX idx_certificate_revocations_orphaned_fingerprint
     ON certificate_revocations(issuer_fingerprint_sha256, serial_number)
-    WHERE issuer_fingerprint_sha256 IS NOT NULL;
+    WHERE issuer_id IS NULL;
 
 -- PR-009's issuer-keyed state function is retained here with one additional
 -- immutable value: the credential expiry copied at the revocation boundary.
 CREATE OR REPLACE FUNCTION record_certificate_revocation()
 RETURNS trigger AS $$
 DECLARE
-    event_time             TIMESTAMPTZ;
-    event_reason           TEXT;
-    event_actor            UUID;
-    issuer_fingerprint     TEXT;
-    existing_fingerprint   TEXT;
-    existing_issuer        UUID;
+    event_time         TIMESTAMPTZ;
+    event_reason       TEXT;
+    event_actor        UUID;
+    issuer_fingerprint TEXT;
 BEGIN
     IF NEW.kind <> 'certificate' OR NEW.status <> 'revoked' THEN
         RETURN NEW;
@@ -48,22 +48,21 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    SELECT a.fingerprint_sha256
+      INTO issuer_fingerprint
+      FROM pki_authorities a
+     WHERE a.id = NEW.issuer_id;
+    IF issuer_fingerprint IS NULL THEN
+        RAISE EXCEPTION 'revoked certificate % missing pki_authorities row for issuer_id %',
+            NEW.id, NEW.issuer_id USING ERRCODE = '23514';
+    END IF;
+
     event_time := COALESCE((NEW.metadata->>'revoked_at')::timestamptz, now());
     event_reason := left(
         COALESCE(NULLIF(btrim(NEW.metadata->>'revocation_reason'), ''), 'unspecified'),
         128
     );
     event_actor := NULLIF(NEW.metadata->>'revoked_by_entity_id', '')::uuid;
-    IF NEW.issuer_id IS NOT NULL THEN
-        SELECT a.fingerprint_sha256
-          INTO issuer_fingerprint
-          FROM pki_authorities a
-         WHERE a.id = NEW.issuer_id;
-    END IF;
-    issuer_fingerprint := COALESCE(
-        issuer_fingerprint,
-        NULLIF(NEW.metadata->>'issuer_fingerprint_sha256', '')
-    );
 
     INSERT INTO certificate_revocations (
         credential_id, issuer_id, issuer_fingerprint_sha256, serial_number,
@@ -75,52 +74,13 @@ BEGIN
     )
     ON CONFLICT (credential_id) DO NOTHING;
 
-    IF issuer_fingerprint IS NULL THEN
-        RETURN NEW;
-    END IF;
-
-    IF NEW.issuer_id IS NOT NULL THEN
-        SELECT s.issuer_fingerprint_sha256
-          INTO existing_fingerprint
-          FROM certificate_crl_state s
-         WHERE s.issuer_id = NEW.issuer_id
-         FOR UPDATE;
-        IF FOUND THEN
-            IF existing_fingerprint <> issuer_fingerprint THEN
-                RAISE EXCEPTION 'certificate issuer artifact fingerprint mismatch'
-                    USING ERRCODE = '23514';
-            END IF;
-            UPDATE certificate_crl_state
-               SET dirty = TRUE, updated_at = now()
-             WHERE issuer_id = NEW.issuer_id;
-            RETURN NEW;
-        END IF;
-    END IF;
-
-    SELECT s.issuer_id
-      INTO existing_issuer
-      FROM certificate_crl_state s
-     WHERE s.issuer_fingerprint_sha256 = issuer_fingerprint
-     FOR UPDATE;
-    IF FOUND
-       AND existing_issuer IS NOT NULL
-       AND existing_issuer IS DISTINCT FROM NEW.issuer_id THEN
-        RAISE EXCEPTION 'certificate artifact fingerprint belongs to another issuer'
-            USING ERRCODE = '23514';
-    END IF;
-
     INSERT INTO certificate_crl_state (
-        issuer_fingerprint_sha256, issuer_id, crl_number, dirty
+        issuer_id, issuer_fingerprint_sha256, crl_number, dirty
     ) VALUES (
-        issuer_fingerprint, NEW.issuer_id, 0, TRUE
+        NEW.issuer_id, issuer_fingerprint, 0, TRUE
     )
-    ON CONFLICT (issuer_fingerprint_sha256) DO UPDATE
-        SET dirty = TRUE,
-            issuer_id = COALESCE(
-                certificate_crl_state.issuer_id,
-                EXCLUDED.issuer_id
-            ),
-            updated_at = now();
+    ON CONFLICT (issuer_id) DO UPDATE
+        SET dirty = TRUE, updated_at = now();
 
     RETURN NEW;
 END;

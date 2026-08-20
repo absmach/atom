@@ -52,7 +52,7 @@ pub const PKI_ENROLLMENT_OPERATIONS: &str = "atom_pki_enrollment_operations_tota
 pub const PKI_LIFECYCLE_OPERATIONS: &str = "atom_pki_lifecycle_operations_total";
 /// Gauge of certificate inventory by bounded lifecycle state and expiry bucket.
 pub const PKI_CERTIFICATE_EXPIRY_COUNT: &str = "atom_pki_certificate_expiry_count";
-/// Current CRL artifact size, labelled only by legacy/managed publication path.
+/// Current CRL artifact size for the managed publication path.
 pub const PKI_CRL_SIZE_BYTES: &str = "atom_pki_crl_size_bytes";
 /// Histogram of actual CRL regeneration time (cache hits are not observations).
 pub const PKI_CRL_GENERATION_DURATION: &str = "atom_pki_crl_generation_duration_seconds";

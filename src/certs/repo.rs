@@ -340,33 +340,6 @@ pub async fn complete_certificate_renewal(
     Ok(())
 }
 
-/// Legacy file-issuer lookup. Managed credentials are deliberately excluded:
-/// after PR-011 only the `issuer_id IS NULL` namespace has serial-only
-/// compatibility, and that namespace retains its own unique index.
-pub async fn legacy_certificate_by_serial<'e, E>(
-    executor: E,
-    serial_number: &str,
-) -> Result<CertificateCredential, AppError>
-where
-    E: sqlx::Executor<'e, Database = Postgres>,
-{
-    sqlx::query_as::<_, CertificateCredential>(
-        r#"
-        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
-               c.expires_at, c.created_at
-        FROM credentials c
-        JOIN entities e ON e.id = c.entity_id
-        WHERE c.kind = 'certificate'
-          AND c.issuer_id IS NULL
-          AND c.identifier = $1
-        "#,
-    )
-    .bind(serial_number)
-    .fetch_one(executor)
-    .await
-    .map_err(db_err)
-}
-
 pub async fn runtime_certificate_by_fingerprint(
     pool: &PgPool,
     fingerprint_sha256: &str,
@@ -395,9 +368,6 @@ pub async fn runtime_certificate_by_fingerprint(
     .map_err(db_err)
 }
 
-/// Managed-issuer selector. Legacy file-issuer rows have no authoritative
-/// `issuer_id` to return and remain reachable through DER/fingerprint v2
-/// selectors or the deprecated legacy resolver.
 pub async fn runtime_certificate_by_issuer_fingerprint_serial(
     pool: &PgPool,
     issuer_fingerprint_sha256: &str,
@@ -424,34 +394,6 @@ pub async fn runtime_certificate_by_issuer_fingerprint_serial(
         "#,
     )
     .bind(issuer_fingerprint_sha256)
-    .bind(serial_number)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)
-}
-
-pub async fn runtime_legacy_certificate_by_serial(
-    pool: &PgPool,
-    serial_number: &str,
-) -> Result<RuntimeCertificateCredential, AppError> {
-    sqlx::query_as::<_, RuntimeCertificateCredential>(
-        r#"
-        SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier,
-               c.status AS credential_status, c.metadata, c.expires_at,
-               e.status AS entity_status, e.deleted_at AS entity_deleted_at,
-               t.status AS tenant_status, t.deleted_at AS tenant_deleted_at,
-               NULL::text AS issuer_status,
-               NULL::boolean AS issuer_issuance_enabled,
-               NULL::timestamptz AS issuer_not_before,
-               NULL::timestamptz AS issuer_not_after
-        FROM credentials c
-        JOIN entities e ON e.id = c.entity_id
-        LEFT JOIN tenants t ON t.id = e.tenant_id
-        WHERE c.kind = 'certificate'
-          AND c.issuer_id IS NULL
-          AND c.identifier = $1
-        "#,
-    )
     .bind(serial_number)
     .fetch_one(pool)
     .await
@@ -831,94 +773,6 @@ where
     .map_err(AppError::Database)
 }
 
-/// Unexpired durable revocations for a legacy file issuer. The caller's
-/// transaction already owns the legacy CRL state lock; querying through it
-/// avoids a nested pool acquire and keeps the published snapshot consistent.
-pub async fn revocations_by_fingerprint_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    issuer_fingerprint_sha256: &str,
-) -> Result<Vec<IssuerRevocationEntry>, AppError> {
-    sqlx::query_as::<_, IssuerRevocationEntry>(
-        r#"
-        SELECT credential_id, serial_number, reason, revoked_at
-        FROM certificate_revocations
-        WHERE issuer_fingerprint_sha256 = $1
-          AND expires_at > now()
-        ORDER BY revoked_at, credential_id
-        "#,
-    )
-    .bind(issuer_fingerprint_sha256)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(AppError::Database)
-}
-
-pub async fn crl_state_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    issuer_fingerprint_sha256: &str,
-) -> Result<CrlState, AppError> {
-    sqlx::query(
-        r#"
-        INSERT INTO certificate_crl_state
-            (issuer_fingerprint_sha256, crl_number, dirty)
-        VALUES ($1, 0, TRUE)
-        ON CONFLICT (issuer_fingerprint_sha256) DO NOTHING
-        "#,
-    )
-    .bind(issuer_fingerprint_sha256)
-    .execute(&mut **tx)
-    .await
-    .map_err(AppError::Database)?;
-
-    sqlx::query_as::<_, CrlState>(
-        r#"
-        SELECT issuer_fingerprint_sha256, crl_number, crl_der, crl_sha256,
-               this_update, next_update, dirty
-        FROM certificate_crl_state
-        WHERE issuer_fingerprint_sha256 = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(issuer_fingerprint_sha256)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(AppError::Database)
-}
-
-pub async fn store_crl_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    issuer_fingerprint_sha256: &str,
-    crl_number: i64,
-    crl_der: &[u8],
-    crl_sha256: &str,
-    this_update: DateTime<Utc>,
-    next_update: DateTime<Utc>,
-) -> Result<(), AppError> {
-    sqlx::query(
-        r#"
-        UPDATE certificate_crl_state
-        SET crl_number = $1,
-            crl_der = $2,
-            crl_sha256 = $3,
-            this_update = $4,
-            next_update = $5,
-            dirty = FALSE,
-            updated_at = now()
-        WHERE issuer_fingerprint_sha256 = $6
-        "#,
-    )
-    .bind(crl_number)
-    .bind(crl_der)
-    .bind(crl_sha256)
-    .bind(this_update)
-    .bind(next_update)
-    .bind(issuer_fingerprint_sha256)
-    .execute(&mut **tx)
-    .await
-    .map_err(AppError::Database)?;
-    Ok(())
-}
-
 pub async fn issuer_crl_state(
     pool: &PgPool,
     issuer_id: Uuid,
@@ -942,28 +796,19 @@ pub async fn issuer_crl_state_tx(
     issuer_id: Uuid,
     issuer_fingerprint_sha256: &str,
 ) -> Result<CrlState, AppError> {
-    let result = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO certificate_crl_state
-            (issuer_fingerprint_sha256, issuer_id, crl_number, dirty)
+            (issuer_id, issuer_fingerprint_sha256, crl_number, dirty)
         VALUES ($1, $2, 0, TRUE)
-        ON CONFLICT (issuer_fingerprint_sha256) DO UPDATE
-        SET issuer_id = EXCLUDED.issuer_id,
-            updated_at = now()
-        WHERE certificate_crl_state.issuer_id IS NULL
-           OR certificate_crl_state.issuer_id = EXCLUDED.issuer_id
+        ON CONFLICT (issuer_id) DO NOTHING
         "#,
     )
-    .bind(issuer_fingerprint_sha256)
     .bind(issuer_id)
+    .bind(issuer_fingerprint_sha256)
     .execute(&mut **tx)
     .await
     .map_err(AppError::Database)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::conflict(
-            "CRL fingerprint is already assigned to another issuer",
-        ));
-    }
 
     sqlx::query_as::<_, CrlState>(
         r#"

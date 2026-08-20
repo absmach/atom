@@ -1,7 +1,4 @@
 -- Atom-native multi-tenant PKI authority registry.
---
--- Existing v1 file-issued certificates keep issuer_id = NULL and retain global
--- serial uniqueness until resolver v2 migrates every live serial-only reader.
 
 CREATE TABLE pki_authorities (
     id                      UUID        PRIMARY KEY,
@@ -40,7 +37,6 @@ CREATE TABLE pki_authorities (
     not_before              TIMESTAMPTZ NOT NULL,
     not_after               TIMESTAMPTZ NOT NULL,
 
-    -- The legacy v1 file issuer remains outside this registry as issuer_id=NULL.
     key_backend             TEXT        NOT NULL
                                         CHECK (key_backend IN (
                                             'public_only',
@@ -192,10 +188,8 @@ ALTER TABLE credentials
 
 ALTER TABLE credentials
     ADD CONSTRAINT chk_credentials_issuer_certificate_only
-    CHECK (issuer_id IS NULL OR kind = 'certificate');
+    CHECK ((kind = 'certificate') = (issuer_id IS NOT NULL));
 
--- Keep the v1 global serial unique index. PR-011 replaces it only after every
--- serial-only reader is issuer/fingerprint aware.
 CREATE INDEX idx_credentials_certificate_issuer_serial_lookup
     ON credentials(issuer_id, identifier)
     WHERE kind = 'certificate' AND identifier IS NOT NULL;
@@ -217,7 +211,7 @@ DECLARE
     authority_tenant_id UUID;
     authority_kind      TEXT;
 BEGIN
-    IF NEW.kind <> 'certificate' OR NEW.issuer_id IS NULL THEN
+    IF NEW.kind <> 'certificate' THEN
         RETURN NEW;
     END IF;
 

@@ -81,10 +81,15 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     .await;
     assert!(artifact_dirty(&pool, issuer_a.id).await);
     assert!(!artifact_dirty(&pool, issuer_b.id).await);
-    assert!(service::resolve_certificate_identity(
+    assert!(service::resolve_certificate_identity_v2(
         &pool,
-        &exact.serial_number,
-        Some(&exact.fingerprint_sha256),
+        service::ResolveCertificateV2 {
+            certificate_der: None,
+            fingerprint_sha256: Some(exact.fingerprint_sha256.clone()),
+            issuer_fingerprint_sha256: None,
+            serial_number: None,
+            expected_tenant_id: None,
+        },
     )
     .await
     .is_err());
@@ -340,10 +345,15 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     )
     .await
     .unwrap();
-    assert!(service::resolve_certificate_identity(
+    assert!(service::resolve_certificate_identity_v2(
         &pool,
-        &lifecycle.serial_number,
-        Some(&lifecycle.fingerprint_sha256),
+        service::ResolveCertificateV2 {
+            certificate_der: None,
+            fingerprint_sha256: Some(lifecycle.fingerprint_sha256.clone()),
+            issuer_fingerprint_sha256: None,
+            serial_number: None,
+            expected_tenant_id: None,
+        },
     )
     .await
     .is_err());
@@ -364,10 +374,15 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(service::resolve_certificate_identity(
+    assert!(service::resolve_certificate_identity_v2(
         &pool,
-        &lifecycle.serial_number,
-        Some(&lifecycle.fingerprint_sha256),
+        service::ResolveCertificateV2 {
+            certificate_der: None,
+            fingerprint_sha256: Some(lifecycle.fingerprint_sha256.clone()),
+            issuer_fingerprint_sha256: None,
+            serial_number: None,
+            expected_tenant_id: None,
+        },
     )
     .await
     .is_err());
@@ -404,10 +419,15 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     )
     .await;
     assert!(artifact_dirty(&pool, lifecycle_issuer.id).await);
-    assert!(service::resolve_certificate_identity(
+    assert!(service::resolve_certificate_identity_v2(
         &pool,
-        &lifecycle.serial_number,
-        Some(&lifecycle.fingerprint_sha256),
+        service::ResolveCertificateV2 {
+            certificate_der: None,
+            fingerprint_sha256: Some(lifecycle.fingerprint_sha256.clone()),
+            issuer_fingerprint_sha256: None,
+            serial_number: None,
+            expected_tenant_id: None,
+        },
     )
     .await
     .is_err());

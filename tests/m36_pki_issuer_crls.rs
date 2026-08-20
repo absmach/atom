@@ -60,30 +60,19 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     assert_eq!(cached_a.crl_number, 1);
     assert_eq!(cached_a.der, empty_a.der);
 
-    // Adopt a fingerprint-keyed row for the same physical Tenant B CA. The
-    // issuer-keyed representation must continue at 41, never restart at 1.
-    let issuer_b_fingerprint = issuer_b.fingerprint_sha256.as_deref().unwrap();
-    sqlx::query(
-        r#"INSERT INTO certificate_crl_state
-              (issuer_fingerprint_sha256, crl_number, dirty)
-           VALUES ($1, 40, TRUE)"#,
-    )
-    .bind(issuer_b_fingerprint)
-    .execute(&pool)
-    .await
-    .unwrap();
+    // Tenant B publishes a fresh CRL keyed on issuer_id, starting at 1.
     let empty_b = service::issuer_crl(&pool, &config, issuer_b.id)
         .await
         .unwrap();
-    assert_eq!(empty_b.crl_number, 41);
+    assert_eq!(empty_b.crl_number, 1);
     assert!(crl_serials(&empty_b.der).is_empty());
-    let b_state_key: String =
-        sqlx::query_scalar("SELECT state_key FROM certificate_crl_state WHERE issuer_id = $1")
+    let b_issuer_id: Uuid =
+        sqlx::query_scalar("SELECT issuer_id FROM certificate_crl_state WHERE issuer_id = $1")
             .bind(issuer_b.id)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(b_state_key, format!("issuer:{}", issuer_b.id));
+    assert_eq!(b_issuer_id, issuer_b.id);
 
     // The platform leaf issuer publishes too; roots and platform
     // intermediates never expose leaf-credential CRLs.
@@ -106,9 +95,8 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     // Public HTTP delivery carries a stable validator and a bounded freshness
     // lifetime. Conditional polling returns 304 with no body.
     let app = create_router(common::pki::graphql_state(pool.clone(), config.clone()));
-    // Legacy /certs/crl has been removed with the v1 file-issuer PKI.
-    // The router must now return 404 for that path.
-    let legacy_route = app
+    // /certs/crl is not a registered route; only per-issuer CRLs are served.
+    let unrouted = app
         .clone()
         .oneshot(
             Request::builder()
@@ -118,7 +106,7 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         )
         .await
         .unwrap();
-    assert_eq!(legacy_route.status(), StatusCode::NOT_FOUND);
+    assert_eq!(unrouted.status(), StatusCode::NOT_FOUND);
     let response = app
         .clone()
         .oneshot(
@@ -204,7 +192,7 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         .await
         .unwrap();
     assert!(still_b.cache_hit);
-    assert_eq!(still_b.crl_number, 41);
+    assert_eq!(still_b.crl_number, empty_b.crl_number);
     assert_eq!(still_b.der, empty_b.der);
     assert_openssl_rejects_crl(&revoked_a.der, issuer_b.certificate_pem.as_deref().unwrap());
 
@@ -418,7 +406,7 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     let changed_b = service::issuer_crl(&pool, &config, issuer_b.id)
         .await
         .unwrap();
-    assert_eq!(changed_b.crl_number, 42);
+    assert_eq!(changed_b.crl_number, still_b.crl_number + 1);
     assert_eq!(
         crl_serials(&changed_b.der),
         vec![hex::decode(&b_leaf.serial_number).unwrap()]

@@ -1193,29 +1193,6 @@ pub async fn issuer_ocsp_response(
     )
 }
 
-/// Deprecated runtime compatibility resolver for the legacy file issuer.
-///
-/// Serial-only resolution is safe solely inside the `issuer_id IS NULL`
-/// namespace, which retains a dedicated unique index. Managed certificates are
-/// intentionally invisible here and must use [`resolve_certificate_identity_v2`].
-pub async fn resolve_certificate_identity(
-    pool: &sqlx::PgPool,
-    serial_number: &str,
-    fingerprint_sha256: Option<&str>,
-) -> Result<CertificateIdentity, AppError> {
-    let serial = normalize_serial(serial_number)?;
-    let record = repo::runtime_legacy_certificate_by_serial(pool, &serial).await?;
-    if let Some(expected) = fingerprint_sha256 {
-        let expected = validated_fingerprint(expected)?;
-        if expected != runtime_stored_fingerprint(&record)? {
-            return Err(AppError::Unauthorized(
-                "certificate fingerprint mismatch".into(),
-            ));
-        }
-    }
-    runtime_identity_from_row(record, None)
-}
-
 /// Authoritative, issuer-aware certificate resolver. Every supplied selector
 /// is independently verified and, when more than one is present, all selectors
 /// must identify the same credential.

@@ -12,12 +12,10 @@ use atom::{
     config::Config,
     graphql::build_schema,
 };
-use chrono::{Duration as ChronoDuration, Utc};
-use rcgen::{CertificateParams, DnType, KeyPair};
-use ring::digest;
+use chrono::Utc;
+use rcgen::{CertificateParams, KeyPair};
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::pem::parse_x509_pem;
 use zeroize::Zeroize;
@@ -337,60 +335,6 @@ async fn issuer_aware_renewal_enforces_the_pr007_contract() {
         .await;
     assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
 
-    // Legacy issuer_id=NULL credentials migrate by renewal, never rewriting:
-    // tenant subjects use their tenant issuer and global subjects use the
-    // separately provisioned platform leaf issuer.
-    let legacy_tenant = insert_legacy_certificate(&pool, entity_a).await;
-    let tenant_migration = schema
-        .execute(renew_csr_request(
-            common::admin_id(),
-            None,
-            legacy_tenant,
-            &csr(),
-            "legacy-tenant",
-            false,
-        ))
-        .await;
-    assert!(
-        tenant_migration.errors.is_empty(),
-        "{:?}",
-        tenant_migration.errors
-    );
-    assert_eq!(
-        tenant_migration.data.into_json().unwrap()["renewCertificateFromCsrV2"]["certificate"]
-            ["issuerId"],
-        issuer_v2.id.to_string()
-    );
-    assert!(service::certificate_by_id(&pool, legacy_tenant)
-        .await
-        .unwrap()
-        .issuer_id
-        .is_none());
-
-    let global_entity = common::pki::create_global_entity(&pool, "pki-renew-global").await;
-    let platform_issuer = common::pki::provision_platform_leaf_issuer(&pool, &config, &root).await;
-    let legacy_global = insert_legacy_certificate(&pool, global_entity).await;
-    let global_migration = schema
-        .execute(renew_csr_request(
-            common::admin_id(),
-            None,
-            legacy_global,
-            &csr(),
-            "legacy-global",
-            false,
-        ))
-        .await;
-    assert!(
-        global_migration.errors.is_empty(),
-        "{:?}",
-        global_migration.errors
-    );
-    assert_eq!(
-        global_migration.data.into_json().unwrap()["renewCertificateFromCsrV2"]["certificate"]
-            ["issuerId"],
-        platform_issuer.id.to_string()
-    );
-
     generated_key.zeroize();
 }
 
@@ -689,55 +633,6 @@ async fn revoke_certificate(pool: &PgPool, credential_id: Uuid) {
     .execute(pool)
     .await
     .unwrap();
-}
-
-async fn insert_legacy_certificate(pool: &PgPool, entity_id: Uuid) -> Uuid {
-    let key = KeyPair::generate().unwrap();
-    let mut params = CertificateParams::default();
-    params
-        .distinguished_name
-        .push(DnType::CommonName, entity_id.to_string());
-    params.not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
-    params.not_after = OffsetDateTime::now_utc() + Duration::days(1);
-    let certificate = params.self_signed(&key).unwrap();
-    let fingerprint = hex::encode(digest::digest(&digest::SHA256, certificate.der().as_ref()));
-    let id = Uuid::new_v4();
-    let now = Utc::now();
-    let expires_at = now + ChronoDuration::days(1);
-    let metadata = json!({
-        "certificate_pem": certificate.pem(),
-        "chain_pem": null,
-        "subject": {"common_name": entity_id},
-        "dns_names": [],
-        "ip_addresses": [],
-        "issuer_kind": "legacy_file_issuer",
-        "issuer_subject": "PR-007 legacy issuer",
-        "issuer_serial_number": "01",
-        "issuer_fingerprint_sha256": format!("legacy-{}", Uuid::new_v4()),
-        "fingerprint_sha256": fingerprint,
-        "profile_id": null,
-        "profile_name": null,
-        "identity_uri": null,
-        "not_before": now - ChronoDuration::minutes(1),
-        "not_after": expires_at,
-        "issued_from_csr": false,
-        "revoked_at": null,
-        "revocation_reason": null,
-    });
-    sqlx::query(
-        r#"INSERT INTO credentials (
-               id, entity_id, kind, identifier, metadata, expires_at, issuer_id
-           ) VALUES ($1, $2, 'certificate', $3, $4, $5, NULL)"#,
-    )
-    .bind(id)
-    .bind(entity_id)
-    .bind(Uuid::new_v4().simple().to_string())
-    .bind(metadata)
-    .bind(expires_at)
-    .execute(pool)
-    .await
-    .unwrap();
-    id
 }
 
 fn assert_key_matches_certificate(private_key_pem: &str, certificate_pem: &str) {

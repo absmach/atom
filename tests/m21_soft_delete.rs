@@ -60,29 +60,6 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
         .execute(&pool)
         .await
         .expect("insert credential");
-    let cert_id = Uuid::new_v4();
-    let serial = format!("{:032x}", cert_id.as_u128());
-    let issuer = format!("{:032x}{:032x}", cert_id.as_u128(), cert_id.as_u128());
-    sqlx::query(
-        "INSERT INTO credentials (id, entity_id, kind, identifier, status, metadata)
-         VALUES ($1, $2, 'certificate', $3, 'active',
-                 jsonb_build_object('issuer_fingerprint_sha256', $4::text))",
-    )
-    .bind(cert_id)
-    .bind(id)
-    .bind(&serial)
-    .bind(&issuer)
-    .execute(&pool)
-    .await
-    .expect("insert certificate credential");
-    sqlx::query(
-        "INSERT INTO certificate_crl_state (issuer_fingerprint_sha256, dirty)
-         VALUES ($1, FALSE)",
-    )
-    .bind(&issuer)
-    .execute(&pool)
-    .await
-    .expect("insert crl state");
     let session_id = atom::identity::repo::create_session(&pool, id, 3600)
         .await
         .expect("create session")
@@ -111,31 +88,6 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
         .await
         .expect("credential");
     assert_eq!(cred_status, "revoked");
-    let (cert_status, cert_metadata): (String, serde_json::Value) =
-        sqlx::query_as("SELECT status, metadata FROM credentials WHERE id = $1")
-            .bind(cert_id)
-            .fetch_one(&pool)
-            .await
-            .expect("certificate credential");
-    assert_eq!(cert_status, "revoked");
-    assert_eq!(
-        cert_metadata
-            .get("revocation_reason")
-            .and_then(serde_json::Value::as_str),
-        Some("entity_deleted")
-    );
-    assert!(
-        cert_metadata.get("revoked_at").is_some(),
-        "certificate revocation time should be recorded"
-    );
-    let crl_dirty: bool = sqlx::query_scalar(
-        "SELECT dirty FROM certificate_crl_state WHERE issuer_fingerprint_sha256 = $1",
-    )
-    .bind(&issuer)
-    .fetch_one(&pool)
-    .await
-    .expect("crl state");
-    assert!(crl_dirty, "entity certificate revocation should dirty CRLs");
 
     let revoked: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
@@ -1357,29 +1309,6 @@ async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
     .execute(&pool)
     .await
     .expect("insert api credential");
-    let cert_id = Uuid::new_v4();
-    let issuer = format!("{:032x}{:032x}", cert_id.as_u128(), cert_id.as_u128());
-    sqlx::query(
-        "INSERT INTO credentials (id, entity_id, kind, identifier, status, metadata)
-         VALUES ($1, $2, 'certificate', $3, 'active',
-                 jsonb_build_object('issuer_fingerprint_sha256', $4::text))",
-    )
-    .bind(cert_id)
-    .bind(entity_id)
-    .bind(format!("{:032x}", cert_id.as_u128()))
-    .bind(&issuer)
-    .execute(&pool)
-    .await
-    .expect("insert certificate credential");
-    sqlx::query(
-        "INSERT INTO certificate_crl_state (issuer_fingerprint_sha256, dirty)
-         VALUES ($1, FALSE)",
-    )
-    .bind(&issuer)
-    .execute(&pool)
-    .await
-    .expect("insert crl state");
-
     atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
         .await
         .expect("soft delete tenant");
@@ -1406,31 +1335,6 @@ async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
         .await
         .expect("api credential");
     assert_eq!(api_status, "revoked");
-    let (cert_status, cert_metadata): (String, serde_json::Value) =
-        sqlx::query_as("SELECT status, metadata FROM credentials WHERE id = $1")
-            .bind(cert_id)
-            .fetch_one(&pool)
-            .await
-            .expect("certificate credential");
-    assert_eq!(cert_status, "revoked");
-    assert_eq!(
-        cert_metadata
-            .get("revocation_reason")
-            .and_then(serde_json::Value::as_str),
-        Some("tenant_deleted")
-    );
-    assert!(
-        cert_metadata.get("revoked_at").is_some(),
-        "certificate revocation time should be recorded"
-    );
-    let crl_dirty: bool = sqlx::query_scalar(
-        "SELECT dirty FROM certificate_crl_state WHERE issuer_fingerprint_sha256 = $1",
-    )
-    .bind(&issuer)
-    .fetch_one(&pool)
-    .await
-    .expect("crl state");
-    assert!(crl_dirty, "tenant certificate revocation should dirty CRLs");
 
     // Tenant is hidden from reads.
     assert!(atom::tenants::repo::get_tenant(&pool, tenant_id)

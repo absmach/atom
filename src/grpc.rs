@@ -415,8 +415,6 @@ impl CertificateService for AtomCertificates {
         &self,
         _request: Request<ResolveCertificateRequest>,
     ) -> Result<Response<ResolveCertificateResponse>, Status> {
-        // v1 file-issuer path removed. Callers must migrate to
-        // ResolveCertificateV2, which handles both fingerprint and issuer+serial.
         Err(Status::unimplemented(
             "ResolveCertificate is removed; use ResolveCertificateV2",
         ))

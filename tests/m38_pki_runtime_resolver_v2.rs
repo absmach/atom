@@ -1,12 +1,12 @@
-//! DB-gated contract tests for PR-011 certificate runtime resolution.
+//! DB-gated contract tests for the certificate runtime resolver v2.
 //!
 //! Run with:
 //! ```bash
 //! DATABASE_URL=postgres://... cargo test --test m38_pki_runtime_resolver_v2 -- --ignored
 //! ```
 
-// Legacy compatibility is a mandatory PR-011 test, so this binary deliberately
-// invokes the protobuf method marked deprecated by the new contract.
+// Deliberately invokes the removed v1 protobuf method to assert it returns
+// Unimplemented.
 #![allow(deprecated)]
 
 mod common;
@@ -28,7 +28,6 @@ use atom::{
     keys::{self, ActiveKeys},
     state::AppState,
 };
-use chrono::{Duration as ChronoDuration, Utc};
 use rcgen::{CertificateParams, DnType, KeyPair};
 use ring::digest;
 use serde_json::{json, Value};
@@ -44,10 +43,10 @@ use x509_parser::pem::parse_x509_pem;
 
 #[tokio::test]
 #[ignore]
-async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
+async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     let pool = common::pool().await;
     let config = common::pki::managed_config(false, true);
-    let root = common::pki::test_root("PR-011 Offline Root");
+    let root = common::pki::test_root("Resolver Test Root");
     let tenant_a = common::pki::create_tenant(&pool, "pki-resolver-a").await;
     let tenant_b = common::pki::create_tenant(&pool, "pki-resolver-b").await;
     let entity_a = common::pki::create_entity(&pool, tenant_a, "pki-resolver-a").await;
@@ -56,73 +55,13 @@ async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
     let issuer_b = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant_b).await;
     let leaf_a = issue_managed(&pool, &config, tenant_a, entity_a, "resolver-a").await;
     let leaf_b = issue_managed(&pool, &config, tenant_b, entity_b, "resolver-b").await;
-    let legacy = insert_legacy_certificate(&pool, entity_a).await;
 
-    // Simulate the production roll-forward with representative legacy and
-    // managed rows already present. Both replacement indexes are built before
-    // the global index is removed, and all existing rows survive the cutover.
-    let mut migration = pool.begin().await.unwrap();
-    sqlx::query("DROP INDEX idx_credentials_certificate_issuer_serial")
-        .execute(&mut *migration)
-        .await
-        .unwrap();
-    sqlx::query("DROP INDEX idx_credentials_certificate_legacy_serial")
-        .execute(&mut *migration)
-        .await
-        .unwrap();
-    sqlx::query(
-        "CREATE UNIQUE INDEX idx_credentials_certificate_serial
-         ON credentials(identifier)
-         WHERE kind = 'certificate' AND identifier IS NOT NULL",
-    )
-    .execute(&mut *migration)
-    .await
-    .unwrap();
-    let preserved: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM credentials WHERE id = ANY($1::uuid[])")
-            .bind(vec![
-                leaf_a.credential_id,
-                leaf_b.credential_id,
-                legacy.credential_id,
-            ])
-            .fetch_one(&mut *migration)
-            .await
-            .unwrap();
-    assert_eq!(preserved, 3);
-    sqlx::query(
-        "CREATE UNIQUE INDEX idx_credentials_certificate_issuer_serial
-         ON credentials(issuer_id, identifier)
-         WHERE kind = 'certificate' AND issuer_id IS NOT NULL AND identifier IS NOT NULL",
-    )
-    .execute(&mut *migration)
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE UNIQUE INDEX idx_credentials_certificate_legacy_serial
-         ON credentials(identifier)
-         WHERE kind = 'certificate' AND issuer_id IS NULL AND identifier IS NOT NULL",
-    )
-    .execute(&mut *migration)
-    .await
-    .unwrap();
-    sqlx::query("DROP INDEX idx_credentials_certificate_serial")
-        .execute(&mut *migration)
-        .await
-        .unwrap();
-    migration.commit().await.unwrap();
-
-    // The same serial can now exist under two managed issuers and in the
-    // isolated legacy namespace. A duplicate inside one issuer is still a
-    // database-level conflict.
+    // The same serial may exist under two managed issuers because the unique
+    // index is `(issuer_id, identifier)`. A duplicate inside one issuer is
+    // still a database-level conflict.
     sqlx::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
         .bind(&leaf_a.serial_number)
         .bind(leaf_b.credential_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
-        .bind(&leaf_a.serial_number)
-        .bind(legacy.credential_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -270,32 +209,6 @@ async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
         .await,
         Err(AppError::PayloadTooLarge(_))
     ));
-
-    // The deprecated resolver can see exactly the legacy namespace, even when
-    // two managed issuers share that serial. It can never select either managed
-    // row accidentally.
-    let legacy_identity = service::resolve_certificate_identity(
-        &pool,
-        &leaf_a.serial_number,
-        Some(&legacy.fingerprint_sha256),
-    )
-    .await
-    .unwrap();
-    assert_eq!(legacy_identity.credential_id, legacy.credential_id);
-    assert!(legacy_identity.issuer_id.is_none());
-    let legacy_v2 = resolve(
-        &pool,
-        ResolveCertificateV2 {
-            certificate_der: Some(legacy.der.clone()),
-            fingerprint_sha256: Some(legacy.fingerprint_sha256.clone()),
-            issuer_fingerprint_sha256: None,
-            serial_number: None,
-            expected_tenant_id: Some(tenant_a),
-        },
-    )
-    .await;
-    assert_eq!(legacy_v2.credential_id, legacy.credential_id);
-    assert!(legacy_v2.issuer_id.is_none());
 
     // Retiring and retained issuers remain valid for verification. Pending or
     // revoked credentials, expired leaves, disabled/expired issuers, inactive
@@ -555,17 +468,14 @@ async fn runtime_resolver_v2_enforces_the_pr011_cutover_contract() {
 
     // v1 ResolveCertificate is removed; the wire method now returns
     // Unimplemented so callers get a clean deprecation signal.
-    let legacy_response = client
+    let removed_response = client
         .resolve_certificate(authed_request(
             &admin_token,
-            ResolveCertificateRequest {
-                serial_number: leaf_a.serial_number.clone(),
-                fingerprint_sha256: legacy.fingerprint_sha256,
-            },
+            ResolveCertificateRequest::default(),
         ))
         .await
         .expect_err("v1 ResolveCertificate must return Unimplemented");
-    assert_eq!(legacy_response.code(), Code::Unimplemented);
+    assert_eq!(removed_response.code(), Code::Unimplemented);
     server.abort();
 }
 
@@ -666,72 +576,6 @@ fn csr(label: &str) -> String {
     params.not_before = OffsetDateTime::now_utc() - TimeDuration::minutes(1);
     params.not_after = OffsetDateTime::now_utc() + TimeDuration::hours(2);
     params.serialize_request(&key).unwrap().pem().unwrap()
-}
-
-struct LegacyCertificate {
-    credential_id: Uuid,
-    fingerprint_sha256: String,
-    der: Vec<u8>,
-}
-
-async fn insert_legacy_certificate(pool: &PgPool, entity_id: Uuid) -> LegacyCertificate {
-    let key = KeyPair::generate().unwrap();
-    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-    params
-        .distinguished_name
-        .push(DnType::CommonName, "PR-011 legacy leaf");
-    params.not_before = OffsetDateTime::now_utc() - TimeDuration::minutes(1);
-    params.not_after = OffsetDateTime::now_utc() + TimeDuration::hours(2);
-    let certificate = params.self_signed(&key).unwrap();
-    let certificate_pem = certificate.pem();
-    let der = certificate_der(&certificate_pem);
-    let fingerprint_sha256 = sha256(&der);
-    let issuer_fingerprint_sha256 = sha256(b"PR-011 legacy file issuer");
-    let credential_id = Uuid::new_v4();
-    let now = Utc::now();
-    let expires_at = now + ChronoDuration::hours(1);
-    let metadata = json!({
-        "certificate_pem": certificate_pem,
-        "chain_pem": null,
-        "subject": {"common_name": "PR-011 legacy leaf"},
-        "dns_names": [],
-        "ip_addresses": [],
-        "issuer_kind": "legacy_file",
-        "issuer_subject": "PR-011 legacy file issuer",
-        "issuer_serial_number": "01",
-        "issuer_fingerprint_sha256": issuer_fingerprint_sha256,
-        "fingerprint_sha256": fingerprint_sha256,
-        "profile_id": null,
-        "profile_name": null,
-        "identity_uri": null,
-        "renewed_from_credential_id": null,
-        "renewal_threshold_seconds": null,
-        "renewal_due_at": null,
-        "not_before": now - ChronoDuration::minutes(1),
-        "not_after": expires_at,
-        "issued_from_csr": false,
-        "revoked_at": null,
-        "revocation_reason": null
-    });
-    let serial = Uuid::new_v4().simple().to_string();
-    sqlx::query(
-        "INSERT INTO credentials
-             (id, entity_id, kind, identifier, metadata, expires_at)
-         VALUES ($1, $2, 'certificate', $3, $4, $5)",
-    )
-    .bind(credential_id)
-    .bind(entity_id)
-    .bind(serial)
-    .bind(metadata)
-    .bind(expires_at)
-    .execute(pool)
-    .await
-    .unwrap();
-    LegacyCertificate {
-        credential_id,
-        fingerprint_sha256,
-        der,
-    }
 }
 
 async fn set_issuer_status(pool: &PgPool, issuer_id: Uuid, status: &str, enabled: bool) {
