@@ -538,6 +538,8 @@ ATOM_PKI_ENROLLMENT_LISTEN_ADDR=0.0.0.0:8443
 ATOM_PKI_ENROLLMENT_TLS_CERT_PATH=/certs/enrollment-server.crt
 ATOM_PKI_ENROLLMENT_TLS_KEY_PATH=/certs/enrollment-server.key
 ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS=10
+ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS=10
+ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS=30
 ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS=300
 ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS=30
 ```
@@ -553,9 +555,11 @@ The verifier refreshes the database trust bundle every 60 seconds by default,
 so newly provisioned or rotated authorities become eligible without restarting
 Atom. A refresh failure retains the last known-good verifier and emits a
 warning; tune the interval with `ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS`.
-Slow handshakes cannot hold a connection permit indefinitely, established
-connections have a configured lifetime, and shutdown waits for active
-connections only up to the configured drain deadline before aborting them.
+Slow handshakes, HTTP headers, and request bodies cannot hold a connection
+permit indefinitely. The listener also caps concurrent connections both
+globally and per source IP. Established connections have a configured lifetime,
+and shutdown waits for active connections only up to the configured drain
+deadline before aborting them.
 
 Per-entity (10/minute by default) and per-tenant (1000/minute) limits are stored
 atomically in PostgreSQL, so replicas share enforcement. `429` responses include

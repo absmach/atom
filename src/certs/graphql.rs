@@ -487,6 +487,7 @@ impl CertificateMutation {
         input: BulkRevokeCertificatesInput,
     ) -> Result<BulkRevokeCertificatesPayload> {
         let auth = require_auth(ctx)?;
+        crate::graphql::auth::deny_scoped_token(&auth)?;
         let state = ctx.data::<AppState>()?;
         let selector = match (input.tenant_id, input.issuer_id, input.principal_group_id) {
             (Some(id), None, None) => {
@@ -1217,4 +1218,59 @@ async fn require_certificate_revoke(
     }
     require_credential_management(state, auth, cert.entity_id).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use async_graphql::Request;
+    use sqlx::postgres::PgPoolOptions;
+
+    use crate::{
+        config::Config,
+        keys::{ActiveKeys, LoadedKey},
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn bulk_revocation_rejects_scoped_tokens_before_database_access() {
+        let schema = crate::graphql::build_schema(test_state());
+        let tenant_id = Uuid::new_v4();
+        let response = schema
+            .execute(
+                Request::new(format!(
+                    r#"mutation {{ bulkRevokeCertificates(input: {{ tenantId: "{tenant_id}" }}) {{ complete }} }}"#
+                ))
+                .data(AuthContext {
+                    entity_id: Uuid::new_v4(),
+                    scoped: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        assert_eq!(response.errors.len(), 1, "{:#?}", response.errors);
+        assert_eq!(response.errors[0].message, "forbidden");
+    }
+
+    fn test_state() -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://atom:atom@localhost/atom_test")
+            .expect("create lazy test pool");
+        let primary = LoadedKey {
+            kid: "test".into(),
+            public_key_pem: String::new(),
+            private_key_pem: String::new(),
+            x_b64: String::new(),
+            y_b64: String::new(),
+        };
+        AppState::new(
+            pool,
+            Config::for_tests(),
+            ActiveKeys {
+                primary,
+                standby: None,
+            },
+        )
+    }
 }

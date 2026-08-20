@@ -188,7 +188,11 @@ fn category_for_path(path: &str) -> Option<RateLimitCategory> {
     if path.starts_with("/api/custom/") {
         return Some(RateLimitCategory::CustomEndpoints);
     }
-    if path.starts_with("/certs/") || path == "/.well-known/jwks.json" {
+    if path.starts_with("/certs/")
+        || path.starts_with("/pki/")
+        || path.starts_with("/.well-known/est/")
+        || path == "/.well-known/jwks.json"
+    {
         return Some(RateLimitCategory::PublicRoutes);
     }
     if path == "/auth/public-config"
@@ -307,6 +311,18 @@ mod tests {
         assert_eq!(category_for_path("/health"), None);
         assert_eq!(category_for_path("/health/live"), None);
         assert_eq!(category_for_path("/health/ready"), None);
+    }
+
+    #[test]
+    fn enrollment_paths_use_the_public_ip_rate_limit() {
+        assert_eq!(
+            category_for_path("/pki/enroll"),
+            Some(RateLimitCategory::PublicRoutes)
+        );
+        assert_eq!(
+            category_for_path("/.well-known/est/simpleenroll"),
+            Some(RateLimitCategory::PublicRoutes)
+        );
     }
 
     #[test]

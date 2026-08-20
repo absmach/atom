@@ -454,8 +454,11 @@ pub struct EnrollmentConfig {
     pub tenant_rate_limit: RateLimitPolicyConfig,
     pub max_csr_bytes: usize,
     pub max_connections: usize,
+    pub max_connections_per_ip: usize,
     pub trust_bundle_refresh_secs: u64,
     pub tls_handshake_timeout_secs: u64,
+    pub http_header_timeout_secs: u64,
+    pub request_body_timeout_secs: u64,
     pub connection_timeout_secs: u64,
     pub shutdown_drain_timeout_secs: u64,
 }
@@ -476,8 +479,11 @@ impl Default for EnrollmentConfig {
             },
             max_csr_bytes: 64 * 1024,
             max_connections: 256,
+            max_connections_per_ip: 8,
             trust_bundle_refresh_secs: 60,
             tls_handshake_timeout_secs: 10,
+            http_header_timeout_secs: 10,
+            request_body_timeout_secs: 30,
             connection_timeout_secs: 300,
             shutdown_drain_timeout_secs: 30,
         }
@@ -1431,6 +1437,10 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
             "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
             default.max_connections,
         )?,
+        max_connections_per_ip: env_parse(
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP",
+            default.max_connections_per_ip,
+        )?,
         trust_bundle_refresh_secs: env_parse(
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             default.trust_bundle_refresh_secs,
@@ -1438,6 +1448,14 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
         tls_handshake_timeout_secs: env_parse(
             "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
             default.tls_handshake_timeout_secs,
+        )?,
+        http_header_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS",
+            default.http_header_timeout_secs,
+        )?,
+        request_body_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS",
+            default.request_body_timeout_secs,
         )?,
         connection_timeout_secs: env_parse(
             "ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS",
@@ -1454,11 +1472,20 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
     if cfg.max_connections == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS must be greater than zero");
     }
+    if cfg.max_connections_per_ip == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP must be greater than zero");
+    }
     if cfg.trust_bundle_refresh_secs == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS must be greater than zero");
     }
     if cfg.tls_handshake_timeout_secs == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.http_header_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.request_body_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS must be greater than zero");
     }
     if cfg.connection_timeout_secs == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS must be greater than zero");
@@ -1890,7 +1917,10 @@ mod tests {
         assert!(!cfg.enrollment.enabled);
         assert!(cfg.enrollment.tls.is_none());
         assert_eq!(cfg.enrollment.max_csr_bytes, 64 * 1024);
+        assert_eq!(cfg.enrollment.max_connections_per_ip, 8);
         assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 10);
+        assert_eq!(cfg.enrollment.http_header_timeout_secs, 10);
+        assert_eq!(cfg.enrollment.request_body_timeout_secs, 30);
         assert_eq!(cfg.enrollment.connection_timeout_secs, 300);
         assert_eq!(cfg.enrollment.shutdown_drain_timeout_secs, 30);
 
@@ -1905,14 +1935,20 @@ mod tests {
         std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_KEY_PATH", "/tls/server-key.pem");
         std::env::set_var("ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT", "7");
         std::env::set_var("ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT", "70");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP", "3");
         std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS", "11");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS", "12");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS", "32");
         std::env::set_var("ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS", "301");
         std::env::set_var("ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS", "31");
         let cfg = Config::from_env().expect("enrollment config");
         assert!(cfg.enrollment.enabled);
         assert_eq!(cfg.enrollment.entity_rate_limit.max_requests, 7);
         assert_eq!(cfg.enrollment.tenant_rate_limit.max_requests, 70);
+        assert_eq!(cfg.enrollment.max_connections_per_ip, 3);
         assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 11);
+        assert_eq!(cfg.enrollment.http_header_timeout_secs, 12);
+        assert_eq!(cfg.enrollment.request_body_timeout_secs, 32);
         assert_eq!(cfg.enrollment.connection_timeout_secs, 301);
         assert_eq!(cfg.enrollment.shutdown_drain_timeout_secs, 31);
         assert_eq!(
@@ -2049,8 +2085,11 @@ mod tests {
             "ATOM_PKI_ENROLLMENT_TENANT_RATE_WINDOW_SECS",
             "ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES",
             "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP",
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS",
             "ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS",
             "ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS",
             "ATOM_PKI_LIFECYCLE_ENABLED",

@@ -1,10 +1,17 @@
 //! In-process TLS termination for the public enrollment listener.
 
-use std::{io::Cursor, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    io::Cursor,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
+use axum::extract::ConnectInfo;
 use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
     server::conn::auto::Builder,
     service::TowerToHyperService,
 };
@@ -29,7 +36,9 @@ pub struct PreparedEnrollmentServer {
     listener: TcpListener,
     acceptor: TlsAcceptor,
     max_connections: usize,
+    max_connections_per_ip: usize,
     tls_handshake_timeout: Duration,
+    http_header_timeout: Duration,
     connection_timeout: Duration,
     shutdown_drain_timeout: Duration,
 }
@@ -68,9 +77,11 @@ pub async fn prepare(state: &AppState) -> Result<Option<PreparedEnrollmentServer
         listener,
         acceptor: TlsAcceptor::from(Arc::new(server_config)),
         max_connections: state.config.enrollment.max_connections,
+        max_connections_per_ip: state.config.enrollment.max_connections_per_ip,
         tls_handshake_timeout: Duration::from_secs(
             state.config.enrollment.tls_handshake_timeout_secs,
         ),
+        http_header_timeout: Duration::from_secs(state.config.enrollment.http_header_timeout_secs),
         connection_timeout: Duration::from_secs(state.config.enrollment.connection_timeout_secs),
         shutdown_drain_timeout: Duration::from_secs(
             state.config.enrollment.shutdown_drain_timeout_secs,
@@ -81,7 +92,9 @@ pub async fn prepare(state: &AppState) -> Result<Option<PreparedEnrollmentServer
 pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Result<()> {
     let address = prepared.local_addr()?;
     let permits = Arc::new(Semaphore::new(prepared.max_connections));
+    let ip_connections = PerIpConnectionLimiter::new(prepared.max_connections_per_ip);
     let handshake_timeout = prepared.tls_handshake_timeout;
+    let http_header_timeout = prepared.http_header_timeout;
     let connection_timeout = prepared.connection_timeout;
     let shutdown_drain_timeout = prepared.shutdown_drain_timeout;
     let refresh_secs = state.config.enrollment.trust_bundle_refresh_secs;
@@ -134,10 +147,18 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
                 continue;
             }
         };
+        let ip_connection = match ip_connections.try_acquire(remote_addr.ip()) {
+            Some(permit) => permit,
+            None => {
+                tracing::warn!(%remote_addr, "enrollment per-IP connection limit reached");
+                continue;
+            }
+        };
         let acceptor = acceptor.clone();
         let router = router.clone();
         connections.spawn(async move {
             let _permit = permit;
+            let _ip_connection = ip_connection;
             let stream = match timeout(handshake_timeout, acceptor.accept(stream)).await {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
@@ -157,12 +178,18 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
                 .map(|certificate| {
                     VerifiedPeerCertificate(Arc::from(certificate.as_ref().to_vec()))
                 });
+            let connection_router = router.layer(axum::Extension(ConnectInfo(remote_addr)));
             let connection_router = match peer {
-                Some(peer) => router.layer(axum::Extension(peer)),
-                None => router,
+                Some(peer) => connection_router.layer(axum::Extension(peer)),
+                None => connection_router,
             };
             let service = TowerToHyperService::new(connection_router);
-            let builder = Builder::new(TokioExecutor::new());
+            let mut builder = Builder::new(TokioExecutor::new());
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(http_header_timeout)
+                .keep_alive(false);
             match timeout(
                 connection_timeout,
                 builder.serve_connection(TokioIo::new(stream), service),
@@ -200,6 +227,62 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
     }
     tracing::info!(%address, "PKI enrollment listener stopped");
     Ok(())
+}
+
+#[derive(Clone)]
+struct PerIpConnectionLimiter {
+    max_connections_per_ip: usize,
+    active: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl PerIpConnectionLimiter {
+    fn new(max_connections_per_ip: usize) -> Self {
+        Self {
+            max_connections_per_ip,
+            active: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn try_acquire(&self, ip: IpAddr) -> Option<PerIpConnectionPermit> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = active.entry(ip).or_default();
+        if *count >= self.max_connections_per_ip {
+            return None;
+        }
+        *count += 1;
+        Some(PerIpConnectionPermit {
+            limiter: self.clone(),
+            ip,
+        })
+    }
+
+    fn release(&self, ip: IpAddr) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match active.get_mut(&ip) {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                active.remove(&ip);
+            }
+            None => tracing::error!(%ip, "enrollment per-IP connection permit released twice"),
+        }
+    }
+}
+
+struct PerIpConnectionPermit {
+    limiter: PerIpConnectionLimiter,
+    ip: IpAddr,
+}
+
+impl Drop for PerIpConnectionPermit {
+    fn drop(&mut self) {
+        self.limiter.release(self.ip);
+    }
 }
 
 async fn load_server_config(state: &AppState, tls: &EnrollmentTlsConfig) -> Result<ServerConfig> {
@@ -246,4 +329,24 @@ async fn load_server_config(state: &AppState, tls: &EnrollmentTlsConfig) -> Resu
         .with_client_cert_verifier(verifier)
         .with_single_cert(certificates, private_key)
         .context("build enrollment TLS server configuration")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_ip_connection_cap_releases_when_a_connection_finishes() {
+        let limiter = PerIpConnectionLimiter::new(1);
+        let ip = "203.0.113.8".parse().expect("IP address");
+
+        let permit = limiter.try_acquire(ip).expect("first connection allowed");
+        assert!(
+            limiter.try_acquire(ip).is_none(),
+            "second connection denied"
+        );
+
+        drop(permit);
+        assert!(limiter.try_acquire(ip).is_some(), "slot released on drop");
+    }
 }

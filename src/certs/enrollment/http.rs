@@ -1,12 +1,15 @@
 //! Thin Atom-native enrollment adapter.
 
+use std::time::Duration;
+
 use axum::{
     extract::{DefaultBodyLimit, State},
+    middleware,
     routing::post,
     Extension, Json, Router,
 };
 use serde::Deserialize;
-use tower_http::trace::TraceLayer;
+use tower_http::{timeout::RequestBodyTimeoutLayer, trace::TraceLayer};
 
 use crate::{audit, auth::AuthContext, error::AppError, state::AppState};
 
@@ -48,12 +51,19 @@ pub fn create_router(state: AppState) -> Router {
         .saturating_div(3)
         .saturating_mul(4)
         .saturating_add(16 * 1024);
+    let request_body_timeout =
+        Duration::from_secs(state.config.enrollment.request_body_timeout_secs);
     Router::new()
         .route("/pki/enroll", post(first_enrollment))
         .route("/pki/reenroll", post(re_enrollment))
         .merge(est::routes())
         .layer(DefaultBodyLimit::max(native_body_limit.max(est_body_limit)))
+        .layer(RequestBodyTimeoutLayer::new(request_body_timeout))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::rate_limit::middleware,
+        ))
         .with_state(state)
 }
 

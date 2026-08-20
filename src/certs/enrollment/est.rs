@@ -70,12 +70,12 @@ async fn simple_enroll(
     body: Bytes,
 ) -> Result<Response, EstError> {
     require_media_type(&headers, PKCS10_MEDIA_TYPE)?;
+    let auth = authenticate_http(&state, &headers).await?;
     let csr_der = decode_request_body(
         maximum_der_csr_bytes(state.config.enrollment.max_csr_bytes),
         &body,
     )?;
     validate_csr(&csr_der)?;
-    let auth = authenticate_http(&state, &headers).await?;
     let result = service::enroll(
         &state,
         auth.clone(),
@@ -166,12 +166,12 @@ async fn server_keygen(
     body: Bytes,
 ) -> Result<Response, EstError> {
     require_media_type(&headers, PKCS10_MEDIA_TYPE)?;
+    let auth = authenticate_http(&state, &headers).await?;
     let csr_der = decode_request_body(
         maximum_der_csr_bytes(state.config.enrollment.max_csr_bytes),
         &body,
     )?;
     validate_csr(&csr_der)?;
-    let auth = authenticate_http(&state, &headers).await?;
 
     let result = service::enroll_generated(&state, auth.clone()).await;
     if let Err(ref error) = result {
@@ -592,6 +592,13 @@ impl IntoResponse for EstError {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::postgres::PgPoolOptions;
+
+    use crate::{
+        config::Config,
+        keys::{ActiveKeys, LoadedKey},
+    };
+
     use super::*;
 
     #[test]
@@ -633,5 +640,63 @@ mod tests {
             decode_request_body(maximum_der, rejected_body.as_bytes()),
             Err(AppError::PayloadTooLarge(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn simple_enroll_authenticates_before_decoding_the_csr() {
+        let response = simple_enroll(
+            State(test_state()),
+            pkcs10_headers(),
+            Bytes::from_static(b"%%%"),
+        )
+        .await
+        .expect_err("missing authentication must be rejected before invalid CSR parsing")
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn server_keygen_authenticates_before_decoding_the_csr() {
+        let response = server_keygen(
+            State(test_state()),
+            pkcs10_headers(),
+            Bytes::from_static(b"%%%"),
+        )
+        .await
+        .expect_err("missing authentication must be rejected before invalid CSR parsing")
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn pkcs10_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(PKCS10_MEDIA_TYPE),
+        );
+        headers
+    }
+
+    fn test_state() -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://atom:atom@localhost/atom_test")
+            .expect("create lazy test pool");
+        let primary = LoadedKey {
+            kid: "test".into(),
+            public_key_pem: String::new(),
+            private_key_pem: String::new(),
+            x_b64: String::new(),
+            y_b64: String::new(),
+        };
+        AppState::new(
+            pool,
+            Config::for_tests(),
+            ActiveKeys {
+                primary,
+                standby: None,
+            },
+        )
     }
 }
