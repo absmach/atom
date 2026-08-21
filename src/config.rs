@@ -362,8 +362,8 @@ pub struct PkiCaKeyConfig {
     pub provisioning_backend: PkiCaProvisioningBackend,
     pub pkcs11: Option<PkiPkcs11Config>,
     /// Public HTTPS base URL under which the `/certs/issuers/{id}/{ocsp,crl}`
-    /// artifact routes and `/certs/trust-bundle.pem` are served. Populated at
-    /// `Config::from_env` from `ATOM_PUBLIC_BASE_URL`; carried on
+    /// artifact routes and `/certs/trust-bundle.pem` are served. Populated only
+    /// when `ATOM_PUBLIC_BASE_URL` is explicitly configured; carried on
     /// `PkiCaKeyConfig` so provisioning helpers can embed per-authority
     /// discovery URLs at activation without a separate signature parameter.
     /// `None` preserves the legacy manual-SQL workflow.
@@ -750,7 +750,14 @@ impl Config {
         let ui_auth_callback = public_url(&public_base_url, "/auth/callback");
         let signing_keys = signing_keys_from_env()?;
         let mut pki_ca_keys = pki_ca_keys_from_env()?;
-        pki_ca_keys.artifact_base_url = Some(public_base_url.trim_end_matches('/').to_string());
+        // `public_base_url` has a localhost default for local UI and auth
+        // flows. Certificate discovery URLs are permanent certificate
+        // metadata, so they must never inherit that implicit development
+        // value. Without an explicitly configured public URL, leave them
+        // unset and let leaf issuance fail closed instead of minting
+        // certificates with unreachable CRL/AIA endpoints.
+        pki_ca_keys.artifact_base_url =
+            nonempty_env("ATOM_PUBLIC_BASE_URL").map(|url| url.trim_end_matches('/').to_string());
         if let (Some(signing_kek), Some(ca_kek)) = (
             signing_keys.key_encryption_key.as_ref(),
             pki_ca_keys.key_encryption_key.as_ref(),
@@ -1641,6 +1648,10 @@ mod tests {
             PkiCaProvisioningBackend::EncryptedDatabase
         );
         assert!(cfg.pki_ca_keys.pkcs11.is_none());
+        assert!(
+            cfg.pki_ca_keys.artifact_base_url.is_none(),
+            "certificate discovery URLs must not inherit the localhost UI default"
+        );
         assert!(!cfg.audit_policy.hot_path_allow_db_enabled);
         assert_eq!(cfg.audit_retention.days, 365);
         assert_eq!(cfg.login_failure_limit, 5);
@@ -1765,6 +1776,25 @@ mod tests {
         std::env::set_var("ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED", "true");
         let cfg = Config::from_env().expect("config");
         assert!(cfg.pki_generated_key_issuance_enabled);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn certificate_artifact_base_url_requires_explicit_public_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert!(cfg.pki_ca_keys.artifact_base_url.is_none());
+
+        std::env::set_var("ATOM_PUBLIC_BASE_URL", "https://pki.example.test/");
+        let cfg = Config::from_env().expect("explicit public URL");
+        assert_eq!(
+            cfg.pki_ca_keys.artifact_base_url.as_deref(),
+            Some("https://pki.example.test")
+        );
 
         clear_hardening_env();
     }
@@ -2069,6 +2099,7 @@ mod tests {
             "ATOM_LOGIN_FAILURE_LIMIT",
             "ATOM_LOGIN_FAILURE_WINDOW_SECS",
             "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
+            "ATOM_PUBLIC_BASE_URL",
             "ATOM_RATE_LIMIT_ENABLED",
             "ATOM_TRUSTED_PROXY_CIDRS",
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
