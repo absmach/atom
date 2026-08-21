@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     build_info,
-    certs::authority::key_provider::{AuthorityKeyProviderStatus, ManagedAuthorityKeyProvider},
+    config::{PkiCaKeyConfig, PkiCaProvisioningBackend},
     keys, rate_limit,
     state::{AppState, GrpcRuntimeState},
 };
@@ -99,7 +99,7 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let migrations = migrations_check(state).await;
     let (signing_keys, signing_key_state) = signing_keys_check(state).await;
     let grpc_ready = grpc_check(state).await;
-    let certificate_issuer = certificate_issuer_check(state).await;
+    let certificate_issuer = certificate_issuer_check(&state.config.pki_ca_keys);
     let ready = readiness_ok(
         &database,
         &migrations,
@@ -239,46 +239,39 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
     }
 }
 
-/// Actively probes the configured CA signer (encrypted DB or PKCS#11 HSM) so
-/// /health/ready reports the true issuance capability rather than the
-/// startup-time snapshot alone. Deployments without a CA signer (no KEK, no
-/// HSM configured) report Disabled and stay ready — PKI is optional.
-async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
-    let ca_keys = state.config.pki_ca_keys.clone();
-    let health = tokio::task::spawn_blocking(move || {
-        ManagedAuthorityKeyProvider::for_provisioning(&ca_keys).map(|provider| {
-            use crate::certs::authority::key_provider::AuthorityKeyProvider as _;
-            provider.health()
-        })
-    })
-    .await;
-    match health {
-        Ok(Ok(health)) => match health.status {
-            AuthorityKeyProviderStatus::Ready => ComponentCheck {
-                status: ComponentStatus::Ok,
-                message: format!("{:?} signer ready", health.backend),
-            },
-            AuthorityKeyProviderStatus::Unconfigured => ComponentCheck {
-                status: ComponentStatus::Disabled,
-                message: "CA signer not configured".to_string(),
-            },
-            AuthorityKeyProviderStatus::CircuitOpen => ComponentCheck {
-                status: ComponentStatus::Error,
-                message: format!("{:?} signer circuit open", health.backend),
-            },
-            AuthorityKeyProviderStatus::Unavailable => ComponentCheck {
-                status: ComponentStatus::Error,
-                message: format!("{:?} signer unavailable", health.backend),
-            },
-        },
-        Ok(Err(_)) => ComponentCheck {
-            status: ComponentStatus::Disabled,
-            message: "CA signer not configured".to_string(),
-        },
-        Err(err) => ComponentCheck {
-            status: ComponentStatus::Error,
-            message: format!("CA signer health check task failed: {err}"),
-        },
+/// Reports whether certificate issuance was configured and validated at
+/// startup. This endpoint is unauthenticated and called repeatedly by load
+/// balancers, so it must never open a PKCS#11 session or affect the HSM
+/// provider's circuit breaker. Startup validation performs the active probe;
+/// issuance operations remain the runtime signal for subsequent HSM failures.
+fn certificate_issuer_check(ca_keys: &PkiCaKeyConfig) -> ComponentCheck {
+    match ca_keys.provisioning_backend {
+        PkiCaProvisioningBackend::EncryptedDatabase => {
+            if ca_keys.key_encryption_key.is_some() {
+                ComponentCheck {
+                    status: ComponentStatus::Ok,
+                    message: "encrypted database signer configured".to_string(),
+                }
+            } else {
+                ComponentCheck {
+                    status: ComponentStatus::Disabled,
+                    message: "CA signer not configured".to_string(),
+                }
+            }
+        }
+        PkiCaProvisioningBackend::Pkcs11 => {
+            if ca_keys.pkcs11.is_some() {
+                ComponentCheck {
+                    status: ComponentStatus::Ok,
+                    message: "PKCS#11 signer configured and verified at startup".to_string(),
+                }
+            } else {
+                ComponentCheck {
+                    status: ComponentStatus::Error,
+                    message: "PKCS#11 signer configuration missing".to_string(),
+                }
+            }
+        }
     }
 }
 
@@ -339,10 +332,13 @@ async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        readiness_ok, AuditRetentionStatus, ComponentCheck, ComponentStatus, DbPoolStatus,
-        SystemStatus,
+        certificate_issuer_check, readiness_ok, AuditRetentionStatus, ComponentCheck,
+        ComponentStatus, DbPoolStatus, SystemStatus,
     };
-    use crate::rate_limit::RateLimitStatus;
+    use crate::{
+        config::{Config, PkiCaProvisioningBackend, PkiPkcs11Config, SecretText},
+        rate_limit::RateLimitStatus,
+    };
 
     fn check(status: ComponentStatus) -> ComponentCheck {
         ComponentCheck {
@@ -447,5 +443,26 @@ mod tests {
             &ok,
             &check(ComponentStatus::Disabled),
         ));
+    }
+
+    #[test]
+    fn pkcs11_readiness_does_not_probe_the_hsm() {
+        let mut config = Config::for_tests();
+        config.pki_ca_keys.provisioning_backend = PkiCaProvisioningBackend::Pkcs11;
+        config.pki_ca_keys.pkcs11 = Some(PkiPkcs11Config {
+            module_path: "/nonexistent/pkcs11-module.so".to_string(),
+            token_label: "missing-token".to_string(),
+            user_pin: SecretText::new("test-pin".to_string()).expect("PIN"),
+            operation_timeout_ms: 1,
+            mutation_hard_timeout_ms: 1,
+            max_retries: 0,
+            max_in_flight: 1,
+            circuit_failure_threshold: 1,
+            circuit_reset_secs: 1,
+        });
+
+        let status = certificate_issuer_check(&config.pki_ca_keys);
+        assert!(matches!(status.status, ComponentStatus::Ok));
+        assert!(status.message.contains("verified at startup"));
     }
 }

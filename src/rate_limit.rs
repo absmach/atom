@@ -179,8 +179,11 @@ fn policy_for_category(
 }
 
 fn category_for_path(path: &str) -> Option<RateLimitCategory> {
-    if path == "/health" || path == "/health/live" || path == "/health/ready" {
+    if path == "/health/live" {
         return None;
+    }
+    if path == "/health" || path == "/health/ready" {
+        return Some(RateLimitCategory::PublicRoutes);
     }
     if path == "/graphql" {
         return Some(RateLimitCategory::Graphql);
@@ -307,10 +310,16 @@ mod tests {
     }
 
     #[test]
-    fn health_paths_are_not_limited() {
-        assert_eq!(category_for_path("/health"), None);
+    fn readiness_paths_use_the_public_ip_rate_limit() {
+        assert_eq!(
+            category_for_path("/health"),
+            Some(RateLimitCategory::PublicRoutes)
+        );
         assert_eq!(category_for_path("/health/live"), None);
-        assert_eq!(category_for_path("/health/ready"), None);
+        assert_eq!(
+            category_for_path("/health/ready"),
+            Some(RateLimitCategory::PublicRoutes)
+        );
     }
 
     #[test]

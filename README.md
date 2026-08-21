@@ -1296,6 +1296,9 @@ ANY /api/custom/*
 ```
 
 The health endpoints are unauthenticated, so they do not carry build identity.
+`/health` and `/health/ready` use the public IP rate limit and report the
+certificate signer's configuration/startup validation without probing an HSM;
+`/health/live` remains an inexpensive, unthrottled process liveness check.
 The embedded `version` and full Git `revision` are exposed on the GraphQL
 `systemStatus` field, which requires `manage` on the platform scope; the same
 values are on each image as OCI labels. Operators verify a running binary
