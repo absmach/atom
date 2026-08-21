@@ -518,6 +518,7 @@ pub struct RateLimitConfig {
     pub enabled: bool,
     pub auth_routes: RateLimitPolicyConfig,
     pub public_routes: RateLimitPolicyConfig,
+    pub enrollment: RateLimitPolicyConfig,
     pub graphql: RateLimitPolicyConfig,
     pub custom_endpoints: RateLimitPolicyConfig,
     pub admin_routes: RateLimitPolicyConfig,
@@ -534,6 +535,13 @@ impl Default for RateLimitConfig {
             },
             public_routes: RateLimitPolicyConfig {
                 max_requests: 120,
+                window_secs: 60,
+            },
+            enrollment: RateLimitPolicyConfig {
+                // Keep a shared NAT gateway from becoming stricter than the
+                // durable per-tenant enrollment limit by default. Operators
+                // may lower this independent public-surface policy.
+                max_requests: 1_000,
                 window_secs: 60,
             },
             graphql: RateLimitPolicyConfig {
@@ -1212,6 +1220,11 @@ fn rate_limits_from_env() -> Result<RateLimitConfig> {
             "ATOM_HTTP_RATE_LIMIT_PUBLIC_ROUTES",
             "ATOM_HTTP_RATE_LIMIT_PUBLIC_WINDOW_SECS",
             default.public_routes,
+        )?,
+        enrollment: rate_limit_policy_from_env(
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT",
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS",
+            default.enrollment,
         )?,
         graphql: rate_limit_policy_from_env(
             "ATOM_HTTP_RATE_LIMIT_GRAPHQL",
@@ -1993,6 +2006,25 @@ mod tests {
     }
 
     #[test]
+    fn enrollment_ip_rate_limit_has_its_own_policy() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert_eq!(cfg.rate_limits.enrollment.max_requests, 1_000);
+        assert_eq!(cfg.rate_limits.enrollment.window_secs, 60);
+
+        std::env::set_var("ATOM_HTTP_RATE_LIMIT_ENROLLMENT", "321");
+        std::env::set_var("ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS", "45");
+        let cfg = Config::from_env().expect("custom enrollment rate limit");
+        assert_eq!(cfg.rate_limits.enrollment.max_requests, 321);
+        assert_eq!(cfg.rate_limits.enrollment.window_secs, 45);
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn pki_lifecycle_automation_is_opt_in_and_bounded() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -2101,6 +2133,8 @@ mod tests {
             "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
             "ATOM_PUBLIC_BASE_URL",
             "ATOM_RATE_LIMIT_ENABLED",
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT",
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS",
             "ATOM_TRUSTED_PROXY_CIDRS",
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
             "ATOM_GRPC_TLS_CERT_PATH",

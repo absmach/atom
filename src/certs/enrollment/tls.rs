@@ -184,7 +184,10 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
                 None => connection_router,
             };
             let service = TowerToHyperService::new(connection_router);
-            let mut builder = Builder::new(TokioExecutor::new());
+            // Do not let the auto builder sniff an HTTP/2 preface: that read
+            // has no HTTP/1 header timer, and HTTP/2 would bypass the
+            // single-request/disabled-keep-alive limits below.
+            let mut builder = Builder::new(TokioExecutor::new()).http1_only();
             builder
                 .http1()
                 .timer(TokioTimer::new())
@@ -323,12 +326,16 @@ async fn load_server_config(state: &AppState, tls: &EnrollmentTlsConfig) -> Resu
         .allow_unauthenticated()
         .build()
         .context("build enrollment client-certificate verifier")?;
-    ServerConfig::builder_with_provider(provider)
+    let mut config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .context("select safe enrollment TLS protocol versions")?
         .with_client_cert_verifier(verifier)
         .with_single_cert(certificates, private_key)
-        .context("build enrollment TLS server configuration")
+        .context("build enrollment TLS server configuration")?;
+    // Enrollment serves HTTP/1.1 only. This advertises the same contract to
+    // TLS clients that the connection builder enforces after the handshake.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ use crate::{
 pub enum RateLimitCategory {
     AuthRoutes,
     PublicRoutes,
+    Enrollment,
     Graphql,
     CustomEndpoints,
     AdminRoutes,
@@ -36,6 +37,7 @@ impl RateLimitCategory {
         match self {
             Self::AuthRoutes => "auth_routes",
             Self::PublicRoutes => "public_routes",
+            Self::Enrollment => "enrollment",
             Self::Graphql => "graphql",
             Self::CustomEndpoints => "custom_endpoints",
             Self::AdminRoutes => "admin_routes",
@@ -142,6 +144,7 @@ pub fn status(cfg: &RateLimitConfig) -> RateLimitStatus {
         policies: vec![
             policy_status(RateLimitCategory::AuthRoutes, cfg.auth_routes),
             policy_status(RateLimitCategory::PublicRoutes, cfg.public_routes),
+            policy_status(RateLimitCategory::Enrollment, cfg.enrollment),
             policy_status(RateLimitCategory::Graphql, cfg.graphql),
             policy_status(RateLimitCategory::CustomEndpoints, cfg.custom_endpoints),
             policy_status(RateLimitCategory::AdminRoutes, cfg.admin_routes),
@@ -172,6 +175,7 @@ fn policy_for_category(
     match category {
         RateLimitCategory::AuthRoutes => cfg.auth_routes,
         RateLimitCategory::PublicRoutes => cfg.public_routes,
+        RateLimitCategory::Enrollment => cfg.enrollment,
         RateLimitCategory::Graphql => cfg.graphql,
         RateLimitCategory::CustomEndpoints => cfg.custom_endpoints,
         RateLimitCategory::AdminRoutes => cfg.admin_routes,
@@ -191,11 +195,10 @@ fn category_for_path(path: &str) -> Option<RateLimitCategory> {
     if path.starts_with("/api/custom/") {
         return Some(RateLimitCategory::CustomEndpoints);
     }
-    if path.starts_with("/certs/")
-        || path.starts_with("/pki/")
-        || path.starts_with("/.well-known/est/")
-        || path == "/.well-known/jwks.json"
-    {
+    if path.starts_with("/pki/") || path.starts_with("/.well-known/est/") {
+        return Some(RateLimitCategory::Enrollment);
+    }
+    if path.starts_with("/certs/") || path == "/.well-known/jwks.json" {
         return Some(RateLimitCategory::PublicRoutes);
     }
     if path == "/auth/public-config"
@@ -323,13 +326,17 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_paths_use_the_public_ip_rate_limit() {
+    fn enrollment_paths_use_an_independent_ip_rate_limit() {
         assert_eq!(
             category_for_path("/pki/enroll"),
-            Some(RateLimitCategory::PublicRoutes)
+            Some(RateLimitCategory::Enrollment)
         );
         assert_eq!(
             category_for_path("/.well-known/est/simpleenroll"),
+            Some(RateLimitCategory::Enrollment)
+        );
+        assert_eq!(
+            category_for_path("/certs/issuers/issuer/crl"),
             Some(RateLimitCategory::PublicRoutes)
         );
     }

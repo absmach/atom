@@ -9,7 +9,7 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::Deserialize;
-use tower_http::{timeout::RequestBodyTimeoutLayer, trace::TraceLayer};
+use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 
 use crate::{audit, auth::AuthContext, error::AppError, state::AppState};
 
@@ -51,6 +51,9 @@ pub fn create_router(state: AppState) -> Router {
         .saturating_div(3)
         .saturating_mul(4)
         .saturating_add(16 * 1024);
+    // This is a total request deadline, not an inactivity timeout. It wraps
+    // handler body extraction, so a client cannot retain a connection permit
+    // indefinitely by sending a body one byte at a time.
     let request_body_timeout =
         Duration::from_secs(state.config.enrollment.request_body_timeout_secs);
     Router::new()
@@ -58,12 +61,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/pki/reenroll", post(re_enrollment))
         .merge(est::routes())
         .layer(DefaultBodyLimit::max(native_body_limit.max(est_body_limit)))
-        .layer(RequestBodyTimeoutLayer::new(request_body_timeout))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::rate_limit::middleware,
         ))
+        .layer(TimeoutLayer::new(request_body_timeout))
         .with_state(state)
 }
 
@@ -136,4 +139,39 @@ async fn re_enrollment(
         .await;
     }
     result.map(Json)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::post,
+    };
+    use tokio::time::sleep;
+    use tower::ServiceExt;
+
+    use super::TimeoutLayer;
+
+    #[tokio::test]
+    async fn request_timeout_is_a_total_deadline() {
+        let app = axum::Router::new()
+            .route(
+                "/",
+                post(|| async {
+                    sleep(Duration::from_millis(20)).await;
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .layer(TimeoutLayer::new(Duration::from_millis(1)));
+
+        let response = app
+            .oneshot(Request::post("/").body(Body::empty()).expect("request"))
+            .await
+            .expect("infallible router");
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
 }
