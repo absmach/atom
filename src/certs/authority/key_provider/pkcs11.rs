@@ -41,6 +41,25 @@ const P256_OID_DER: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x
 
 static RUNTIMES: OnceLock<Mutex<HashMap<String, Arc<Pkcs11Runtime>>>> = OnceLock::new();
 
+fn runtime_key(config: &PkiPkcs11Config) -> String {
+    format!("{}\0{}", config.module_path, config.token_label)
+}
+
+/// Return the shared runtime circuit state without creating a provider,
+/// opening a PKCS#11 session, or copying the configured PIN. Readiness uses
+/// this to report a known-open signer circuit while remaining probe-safe.
+pub(crate) fn circuit_is_open(config: &PkiPkcs11Config) -> bool {
+    let Some(runtimes) = RUNTIMES.get() else {
+        return false;
+    };
+    let runtimes = runtimes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    runtimes
+        .get(&runtime_key(config))
+        .is_some_and(|runtime| runtime.circuit_open(Duration::from_secs(config.circuit_reset_secs)))
+}
+
 #[derive(Clone)]
 pub struct Pkcs11AuthorityKey {
     reference: String,
@@ -292,7 +311,7 @@ impl fmt::Debug for Pkcs11KeyProvider {
 
 impl Pkcs11KeyProvider {
     pub fn new(config: PkiPkcs11Config) -> Self {
-        let runtime_key = format!("{}\0{}", config.module_path, config.token_label);
+        let runtime_key = runtime_key(&config);
         let runtimes = RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut runtimes = runtimes
             .lock()

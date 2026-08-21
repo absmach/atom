@@ -3,7 +3,12 @@
 //! Callers provide stored profile and subject records plus opaque issuer
 //! material.  No rcgen or x509-parser type crosses this module's public API.
 
-use std::{collections::HashSet, fmt, net::IpAddr};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    net::IpAddr,
+    sync::{Mutex, OnceLock},
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
@@ -44,6 +49,14 @@ const LEAF_CLOCK_SKEW_SECONDS: i64 = 300;
 const AIA_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 1, 1];
 const OCSP_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 1];
 const CA_ISSUERS_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 2];
+
+/// Authority-key ownership has to be established against the provider, but
+/// doing that before every signature turns a public-key comparison into an
+/// HSM login (or CA-key unwrap) on every issuance and artifact request. The
+/// certificate fingerprint is part of the cache value so replacing a
+/// certificate for an authority makes the next signing path verify again.
+static VERIFIED_MANAGED_AUTHORITY_KEYS: OnceLock<Mutex<HashMap<uuid::Uuid, String>>> =
+    OnceLock::new();
 
 enum PkiSigningKey {
     Local(KeyPair),
@@ -392,11 +405,14 @@ fn managed_authority_material(
     let provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, authority)
         .map_err(managed_key_provider_error)?;
     let key = ManagedAuthorityKey::from_authority(authority).map_err(managed_key_provider_error)?;
-    // Authority activation proves provider-key/certificate ownership. Calling
-    // `public_key` again here would unwrap the encrypted key (or open a second
-    // PKCS#11 session) for every leaf, CRL, and OCSP signature. Keep the
-    // certificate's already validated public key and reserve provider access
-    // for the signature itself.
+    verify_managed_authority_key_ownership(
+        authority,
+        &fingerprint,
+        &certificate,
+        &provider,
+        context,
+        &key,
+    )?;
     let raw_public_key = certificate.public_key().subject_public_key.data.to_vec();
     let not_before = certificate.validity().not_before.to_datetime();
     let not_after = certificate.validity().not_after.to_datetime();
@@ -413,6 +429,40 @@ fn managed_authority_material(
         not_before,
         not_after,
     })
+}
+
+fn verify_managed_authority_key_ownership(
+    authority: &AuthorityRecord,
+    fingerprint: &str,
+    certificate: &X509Certificate<'_>,
+    provider: &ManagedAuthorityKeyProvider,
+    context: AuthorityKeyContext,
+    key: &ManagedAuthorityKey,
+) -> Result<(), AppError> {
+    let verified = VERIFIED_MANAGED_AUTHORITY_KEYS.get_or_init(|| Mutex::new(HashMap::new()));
+    if verified
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&authority.id)
+        .is_some_and(|cached_fingerprint| cached_fingerprint == fingerprint)
+    {
+        return Ok(());
+    }
+
+    let public_key = provider
+        .public_key(context, key)
+        .map_err(managed_key_provider_error)?;
+    if certificate.public_key().raw != public_key.subject_public_key_info_der.as_slice() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "managed authority key does not match its certificate"
+        )));
+    }
+
+    verified
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(authority.id, fingerprint.to_string());
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

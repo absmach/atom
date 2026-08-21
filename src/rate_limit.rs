@@ -188,11 +188,11 @@ fn policy_for_category(
 }
 
 fn category_for_path(path: &str) -> Option<RateLimitCategory> {
-    if path == "/health/live" {
+    // Load-balancer health checks must not compete with public certificate
+    // artifacts for a finite request bucket. A 429 here is interpreted as an
+    // unhealthy instance and can cause a cascading removal from service.
+    if path == "/health" || path == "/health/live" || path == "/health/ready" {
         return None;
-    }
-    if path == "/health" || path == "/health/ready" {
-        return Some(RateLimitCategory::PublicRoutes);
     }
     if path == "/graphql" {
         return Some(RateLimitCategory::Graphql);
@@ -247,6 +247,7 @@ fn client_key(
 pub(crate) fn aggregate_ip(ip: IpAddr, ipv6_prefix_len: u8) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
+        IpAddr::V6(_) if ipv6_prefix_len == 0 => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
         IpAddr::V6(ip) if ipv6_prefix_len >= 128 => IpAddr::V6(ip),
         IpAddr::V6(ip) => {
             let bits = u128::from_be_bytes(ip.octets());
@@ -333,15 +334,18 @@ mod tests {
     }
 
     #[test]
-    fn readiness_paths_use_the_public_ip_rate_limit() {
-        assert_eq!(
-            category_for_path("/health"),
-            Some(RateLimitCategory::PublicRoutes)
-        );
+    fn readiness_paths_are_exempt_from_the_ip_rate_limit() {
+        assert_eq!(category_for_path("/health"), None);
         assert_eq!(category_for_path("/health/live"), None);
+        assert_eq!(category_for_path("/health/ready"), None);
+    }
+
+    #[test]
+    fn ipv6_zero_prefix_uses_one_shared_bucket_without_shifting_by_128() {
+        let address = "2001:db8:abcd:42::1".parse().expect("IPv6 address");
         assert_eq!(
-            category_for_path("/health/ready"),
-            Some(RateLimitCategory::PublicRoutes)
+            aggregate_ip(address, 0),
+            "::".parse::<IpAddr>().expect("unspecified IPv6 address")
         );
     }
 

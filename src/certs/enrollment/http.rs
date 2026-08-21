@@ -34,19 +34,37 @@ struct NativeEnrollmentRequest {
 struct ReenrollmentPeer(VerifiedPeerCertificate);
 
 #[axum::async_trait]
-impl<S> FromRequestParts<S> for ReenrollmentPeer
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<AppState> for ReenrollmentPeer {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        parts
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
             .extensions
             .get::<VerifiedPeerCertificate>()
             .cloned()
-            .map(Self)
-            .ok_or_else(|| AppError::unauthorized("a verified client certificate is required"))
+            .map(Self);
+        let Some(peer) = peer else {
+            let error = AppError::unauthorized("a verified client certificate is required");
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: None,
+                    tenant_id: None,
+                    target_kind: "credential",
+                    target_id: None,
+                    event: "certificate.reenroll",
+                },
+                &serde_json::json!({"mode": "reenroll", "transport": "native"}),
+                &error,
+            )
+            .await;
+            return Err(error);
+        };
+        Ok(peer)
     }
 }
 
@@ -76,8 +94,7 @@ pub fn create_router(state: AppState) -> Router {
     // This is a total request deadline, not an inactivity timeout. It wraps
     // handler body extraction, so a client cannot retain a connection permit
     // indefinitely by sending a body one byte at a time.
-    let request_body_timeout =
-        Duration::from_secs(state.config.enrollment.request_body_timeout_secs);
+    let request_timeout = Duration::from_secs(state.config.enrollment.request_timeout_secs);
     Router::new()
         .route("/pki/enroll", post(first_enrollment))
         .route("/pki/reenroll", post(re_enrollment))
@@ -90,7 +107,7 @@ pub fn create_router(state: AppState) -> Router {
         // Keep the trace outermost relative to the limiter so 429 responses
         // are recorded with the same request span as successful enrollment.
         .layer(TraceLayer::new_for_http())
-        .layer(TimeoutLayer::new(request_body_timeout))
+        .layer(TimeoutLayer::new(request_timeout))
         .with_state(state)
 }
 

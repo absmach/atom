@@ -281,13 +281,12 @@ impl PerIpConnectionLimiter {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let count = active
-            .get_mut(&ip)
-            .expect("per-source permit must own an active entry");
-        if *count > 1 {
-            *count -= 1;
-        } else {
-            active.remove(&ip);
+        if let Some(count) = active.get_mut(&ip) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                active.remove(&ip);
+            }
         }
     }
 }
@@ -370,6 +369,17 @@ mod tests {
 
         drop(permit);
         assert!(limiter.try_acquire(ip).is_some(), "slot released on drop");
+    }
+
+    #[test]
+    fn releasing_an_already_released_source_is_a_noop() {
+        let limiter = PerIpConnectionLimiter::new(1, 64);
+        let ip = "203.0.113.8".parse().expect("IP address");
+        let permit = limiter.try_acquire(ip).expect("connection allowed");
+
+        limiter.release(ip);
+        drop(permit);
+        assert!(limiter.try_acquire(ip).is_some(), "limiter remains usable");
     }
 
     #[test]

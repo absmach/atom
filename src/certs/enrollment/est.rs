@@ -8,11 +8,11 @@ use std::io::Cursor;
 
 use axum::{
     body::Bytes,
-    extract::State,
-    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    extract::{FromRequestParts, State},
+    http::{header, request::Parts, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Extension, Router,
+    Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use cms::content_info::ContentInfo;
@@ -45,6 +45,46 @@ const SERVER_KEYGEN_BOUNDARY: &str = "atom-est-serverkeygen-boundary";
 const BASIC_CHALLENGE: &str = "Basic realm=\"Atom EST\"";
 const CSR_PEM_HEADER: &str = "-----BEGIN CERTIFICATE REQUEST-----\n";
 const CSR_PEM_FOOTER: &str = "-----END CERTIFICATE REQUEST-----\n";
+
+/// EST simple re-enrollment authenticates the TLS peer before accepting a
+/// request body. Rejections are audited in the extractor because handlers are
+/// never invoked for an extractor failure.
+struct EstReenrollmentPeer(VerifiedPeerCertificate);
+
+#[axum::async_trait]
+impl FromRequestParts<AppState> for EstReenrollmentPeer {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<VerifiedPeerCertificate>()
+            .cloned()
+            .map(Self);
+        let Some(peer) = peer else {
+            let error = AppError::unauthorized("a verified client certificate is required");
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &audit::AuditMeta {
+                    actor_entity_id: None,
+                    tenant_id: None,
+                    target_kind: "credential",
+                    target_id: None,
+                    event: "certificate.reenroll",
+                },
+                &serde_json::json!({"mode": "reenroll", "transport": "est"}),
+                &error,
+            )
+            .await;
+            return Err(error);
+        };
+        Ok(peer)
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -108,14 +148,11 @@ async fn simple_enroll(
 
 async fn simple_reenroll(
     State(state): State<AppState>,
-    peer: Option<Extension<VerifiedPeerCertificate>>,
+    EstReenrollmentPeer(peer): EstReenrollmentPeer,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, EstError> {
     require_media_type(&headers, PKCS10_MEDIA_TYPE)?;
-    let peer = peer
-        .map(|Extension(peer)| peer)
-        .ok_or_else(|| AppError::unauthorized("a verified client certificate is required"))?;
     let csr_der = decode_request_body(
         maximum_der_csr_bytes(state.config.enrollment.max_csr_bytes),
         &body,

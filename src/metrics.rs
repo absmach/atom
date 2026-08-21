@@ -56,9 +56,11 @@ pub const PKI_ENROLLMENT_CONNECTION_REJECTIONS: &str =
 pub const PKI_LIFECYCLE_OPERATIONS: &str = "atom_pki_lifecycle_operations_total";
 /// Gauge of certificate inventory by bounded lifecycle state and expiry bucket.
 pub const PKI_CERTIFICATE_EXPIRY_COUNT: &str = "atom_pki_certificate_expiry_count";
-/// Current CRL artifact size for the managed publication path.
+/// Current CRL artifact size for the managed publication path, labelled by
+/// bounded authority kind rather than issuer UUID.
 pub const PKI_CRL_SIZE_BYTES: &str = "atom_pki_crl_size_bytes";
-/// Histogram of actual CRL regeneration time (cache hits are not observations).
+/// Histogram of actual CRL regeneration time by bounded authority kind (cache
+/// hits are not observations).
 pub const PKI_CRL_GENERATION_DURATION: &str = "atom_pki_crl_generation_duration_seconds";
 /// Minimum active/retiring authority time-to-expiry by bounded authority kind.
 pub const PKI_AUTHORITY_TIME_TO_EXPIRY: &str = "atom_pki_authority_time_to_expiry_seconds";
@@ -256,15 +258,13 @@ mod backend {
     }
 
     pub fn record_pki_crl(
-        issuer_id: uuid::Uuid,
+        issuer_kind: &'static str,
         size_bytes: usize,
         generation_elapsed: Option<Duration>,
     ) {
-        let issuer_id = issuer_id.to_string();
-        metrics::gauge!(PKI_CRL_SIZE_BYTES, "issuer_id" => issuer_id.clone())
-            .set(size_bytes as f64);
+        metrics::gauge!(PKI_CRL_SIZE_BYTES, "issuer_kind" => issuer_kind).set(size_bytes as f64);
         if let Some(elapsed) = generation_elapsed {
-            metrics::histogram!(PKI_CRL_GENERATION_DURATION, "issuer_id" => issuer_id)
+            metrics::histogram!(PKI_CRL_GENERATION_DURATION, "issuer_kind" => issuer_kind)
                 .record(elapsed.as_secs_f64());
         }
     }
@@ -326,7 +326,7 @@ mod backend {
     }
     #[inline]
     pub fn record_pki_crl(
-        _issuer_id: uuid::Uuid,
+        _issuer_kind: &'static str,
         _size_bytes: usize,
         _generation_elapsed: Option<Duration>,
     ) {

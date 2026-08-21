@@ -1026,7 +1026,7 @@ pub async fn issuer_crl(
     };
     if let Some(cached) = cached {
         validate_crl_authority_retention(&authority, true, now)?;
-        crate::metrics::record_pki_crl(issuer_id, cached.der.len(), None);
+        crate::metrics::record_pki_crl(authority_kind_name(authority.kind), cached.der.len(), None);
         return Ok(cached);
     }
     validate_crl_authority_retention(&authority, false, now)?;
@@ -1054,7 +1054,7 @@ pub async fn issuer_crl(
     let state = repo::issuer_crl_state_tx(&mut tx, issuer_id, fingerprint).await?;
     if let Some(cached) = cached_crl_artifact(&state, fingerprint, now) {
         tx.commit().await.map_err(AppError::Database)?;
-        crate::metrics::record_pki_crl(issuer_id, cached.der.len(), None);
+        crate::metrics::record_pki_crl(authority_kind_name(authority.kind), cached.der.len(), None);
         return Ok(cached);
     }
 
@@ -1111,7 +1111,11 @@ pub async fn issuer_crl(
     )
     .await?;
     tx.commit().await.map_err(AppError::Database)?;
-    crate::metrics::record_pki_crl(issuer_id, crl_der.len(), Some(generation_started.elapsed()));
+    crate::metrics::record_pki_crl(
+        authority_kind_name(authority.kind),
+        crl_der.len(),
+        Some(generation_started.elapsed()),
+    );
     Ok(CrlArtifact {
         der: crl_der,
         sha256: crl_sha256,

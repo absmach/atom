@@ -232,6 +232,22 @@ pub async fn active_leaf_issuer_backends(
     .map_err(db_err)
 }
 
+/// Count configured leaf issuers regardless of lifecycle eligibility. This
+/// distinguishes a deployment with no PKI from one whose issuers are all
+/// expired, disabled, or otherwise unable to sign.
+pub async fn leaf_issuer_authority_count(pool: &PgPool) -> Result<i64, AppError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM pki_authorities
+        WHERE kind IN ('platform_leaf_issuer', 'tenant_intermediate')
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)
+}
+
 pub async fn list_tenant_authorities(
     pool: &PgPool,
     tenant_id: Uuid,
