@@ -25,7 +25,10 @@ use crate::{
     state::{AppState, GrpcRuntimeStatus},
 };
 
-// Generated code from proto/atom.proto
+// Generated code from proto/atom.proto. Tonic's public service trait uses
+// `tonic::Status` as its error type; it is intentionally large, and the
+// generated trait signatures cannot change it.
+#[allow(clippy::result_large_err)]
 pub mod proto {
     tonic::include_proto!("atom.v1");
 }
@@ -57,6 +60,9 @@ mod callout_ops {
 /// `Status::permission_denied`; on transport failure follows the per-endpoint
 /// `on_error` policy (deny by default). Also writes a `callout.deny` audit row
 /// fire-and-forget for observability.
+// Tonic service implementations must return `Status`; boxing it would change
+// the wire-facing trait contract and is not an option here.
+#[allow(clippy::result_large_err)]
 async fn callout_check_grpc(
     state: &AppState,
     auth: &AuthContext,
@@ -245,6 +251,8 @@ impl AuthzService for AtomAuthz {
 
 // ─── AuthService ──────────────────────────────────────────────────────────────
 
+// The caller is a Tonic service implementation and must propagate `Status`.
+#[allow(clippy::result_large_err)]
 async fn auth_context_from_metadata(
     state: &AppState,
     metadata: &MetadataMap,
@@ -381,6 +389,8 @@ impl AuthService for AtomAuth {
     }
 }
 
+// The caller is a Tonic service implementation and must propagate `Status`.
+#[allow(clippy::result_large_err)]
 async fn require_credential_auth_access(
     pool: &sqlx::PgPool,
     auth: &AuthContext,

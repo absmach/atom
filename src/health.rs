@@ -267,18 +267,10 @@ fn certificate_issuer_config_check(
         };
     }
 
-    let uses_encrypted_database = backends
-        .iter()
-        .any(|backend| *backend == AuthorityKeyBackend::EncryptedDatabase);
-    let uses_pkcs11 = backends
-        .iter()
-        .any(|backend| *backend == AuthorityKeyBackend::Pkcs11);
-    let uses_kms = backends
-        .iter()
-        .any(|backend| *backend == AuthorityKeyBackend::Kms);
-    let uses_public_only = backends
-        .iter()
-        .any(|backend| *backend == AuthorityKeyBackend::PublicOnly);
+    let uses_encrypted_database = backends.contains(&AuthorityKeyBackend::EncryptedDatabase);
+    let uses_pkcs11 = backends.contains(&AuthorityKeyBackend::Pkcs11);
+    let uses_kms = backends.contains(&AuthorityKeyBackend::Kms);
+    let uses_public_only = backends.contains(&AuthorityKeyBackend::PublicOnly);
 
     if uses_kms {
         return ComponentCheck {

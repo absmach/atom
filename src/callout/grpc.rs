@@ -17,6 +17,9 @@ use super::envelope::{CalloutRequest, CalloutResponse, Decision};
 // shares the atom.v1 package with atom.proto, so both generate into the same
 // module; we re-include here so this file has a local `proto` for the callout
 // types without depending on src/grpc.rs's module layout.
+// Tonic generates server trait signatures too; they use the required, large
+// `tonic::Status` error type even though this module only uses the client.
+#[allow(clippy::result_large_err)]
 pub mod proto {
     tonic::include_proto!("atom.v1");
 }

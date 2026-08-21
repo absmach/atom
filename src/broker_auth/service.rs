@@ -31,7 +31,10 @@ use crate::{
 use super::topic::TopicMatch;
 
 // Generated from the vendored proto/broker/v1/auth.proto. The module path is
-// the proto package, which is also the gRPC wire path a broker dials.
+// the proto package, which is also the gRPC wire path a broker dials. Tonic's
+// generated service traits must return the wire-level `tonic::Status`, whose
+// size is outside this crate's control.
+#[allow(clippy::result_large_err)]
 pub mod proto {
     tonic::include_proto!("broker.auth.v1");
 }
