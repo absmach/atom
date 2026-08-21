@@ -557,7 +557,8 @@ Atom. A refresh failure retains the last known-good verifier and emits a
 warning; tune the interval with `ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS`.
 Slow handshakes, HTTP headers, and request bodies cannot hold a connection
 permit indefinitely. The listener also caps concurrent connections both
-globally and per source IP. Established connections have a configured lifetime,
+globally and per source IP; IPv6 sources are aggregated to a configurable `/64`
+prefix by default. Established connections have a configured lifetime,
 and shutdown waits for active connections only up to the configured drain
 deadline before aborting them.
 
@@ -569,6 +570,11 @@ CRL/OCSP bucket; it is disabled with `ATOM_RATE_LIMIT_ENABLED=false`. `429` resp
 `atom_pki_enrollment_operations_total` expose bounded operational labels. CSR
 input defaults to a 64 KiB maximum and the entire HTTP body is bounded before
 full allocation.
+
+HTTP/1.1 keep-alive is disabled by default to bound connection reuse. Set
+`ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE=true` to enable it. Tune IPv6 aggregation
+with `ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN` for connection caps and
+`ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN` for request-rate buckets.
 
 An expired, revoked, unknown, or not-yet-valid certificate, an inactive entity,
 or a frozen/inactive/deleted tenant cannot re-enroll. Recovery is first

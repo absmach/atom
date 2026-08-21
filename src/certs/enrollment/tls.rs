@@ -19,7 +19,10 @@ use rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig};
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-use crate::{certs::authority::provisioning, config::EnrollmentTlsConfig, state::AppState};
+use crate::{
+    certs::authority::provisioning, config::EnrollmentTlsConfig, rate_limit::aggregate_ip,
+    state::AppState,
+};
 
 use super::http;
 
@@ -37,6 +40,8 @@ pub struct PreparedEnrollmentServer {
     acceptor: TlsAcceptor,
     max_connections: usize,
     max_connections_per_ip: usize,
+    ipv6_prefix_len: u8,
+    http_keep_alive: bool,
     tls_handshake_timeout: Duration,
     http_header_timeout: Duration,
     connection_timeout: Duration,
@@ -78,6 +83,8 @@ pub async fn prepare(state: &AppState) -> Result<Option<PreparedEnrollmentServer
         acceptor: TlsAcceptor::from(Arc::new(server_config)),
         max_connections: state.config.enrollment.max_connections,
         max_connections_per_ip: state.config.enrollment.max_connections_per_ip,
+        ipv6_prefix_len: state.config.enrollment.ipv6_prefix_len,
+        http_keep_alive: state.config.enrollment.http_keep_alive,
         tls_handshake_timeout: Duration::from_secs(
             state.config.enrollment.tls_handshake_timeout_secs,
         ),
@@ -92,10 +99,12 @@ pub async fn prepare(state: &AppState) -> Result<Option<PreparedEnrollmentServer
 pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Result<()> {
     let address = prepared.local_addr()?;
     let permits = Arc::new(Semaphore::new(prepared.max_connections));
-    let ip_connections = PerIpConnectionLimiter::new(prepared.max_connections_per_ip);
+    let ip_connections =
+        PerIpConnectionLimiter::new(prepared.max_connections_per_ip, prepared.ipv6_prefix_len);
     let handshake_timeout = prepared.tls_handshake_timeout;
     let http_header_timeout = prepared.http_header_timeout;
     let connection_timeout = prepared.connection_timeout;
+    let http_keep_alive = prepared.http_keep_alive;
     let shutdown_drain_timeout = prepared.shutdown_drain_timeout;
     let refresh_secs = state.config.enrollment.trust_bundle_refresh_secs;
     let refresh_state = state.clone();
@@ -143,14 +152,16 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
         let permit = match permits.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                tracing::warn!(%remote_addr, "enrollment connection limit reached");
+                crate::metrics::record_pki_enrollment_connection_rejection("global");
+                tracing::debug!(%remote_addr, "enrollment connection limit reached");
                 continue;
             }
         };
         let ip_connection = match ip_connections.try_acquire(remote_addr.ip()) {
             Some(permit) => permit,
             None => {
-                tracing::warn!(%remote_addr, "enrollment per-IP connection limit reached");
+                crate::metrics::record_pki_enrollment_connection_rejection("source");
+                tracing::debug!(%remote_addr, "enrollment per-source connection limit reached");
                 continue;
             }
         };
@@ -192,7 +203,7 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
                 .http1()
                 .timer(TokioTimer::new())
                 .header_read_timeout(http_header_timeout)
-                .keep_alive(false);
+                .keep_alive(http_keep_alive);
             match timeout(
                 connection_timeout,
                 builder.serve_connection(TokioIo::new(stream), service),
@@ -235,18 +246,21 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
 #[derive(Clone)]
 struct PerIpConnectionLimiter {
     max_connections_per_ip: usize,
+    ipv6_prefix_len: u8,
     active: Arc<Mutex<HashMap<IpAddr, usize>>>,
 }
 
 impl PerIpConnectionLimiter {
-    fn new(max_connections_per_ip: usize) -> Self {
+    fn new(max_connections_per_ip: usize, ipv6_prefix_len: u8) -> Self {
         Self {
             max_connections_per_ip,
+            ipv6_prefix_len,
             active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     fn try_acquire(&self, ip: IpAddr) -> Option<PerIpConnectionPermit> {
+        let ip = aggregate_ip(ip, self.ipv6_prefix_len);
         let mut active = self
             .active
             .lock()
@@ -267,12 +281,13 @@ impl PerIpConnectionLimiter {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match active.get_mut(&ip) {
-            Some(count) if *count > 1 => *count -= 1,
-            Some(_) => {
-                active.remove(&ip);
-            }
-            None => tracing::error!(%ip, "enrollment per-IP connection permit released twice"),
+        let count = active
+            .get_mut(&ip)
+            .expect("per-source permit must own an active entry");
+        if *count > 1 {
+            *count -= 1;
+        } else {
+            active.remove(&ip);
         }
     }
 }
@@ -344,7 +359,7 @@ mod tests {
 
     #[test]
     fn per_ip_connection_cap_releases_when_a_connection_finishes() {
-        let limiter = PerIpConnectionLimiter::new(1);
+        let limiter = PerIpConnectionLimiter::new(1, 64);
         let ip = "203.0.113.8".parse().expect("IP address");
 
         let permit = limiter.try_acquire(ip).expect("first connection allowed");
@@ -355,5 +370,18 @@ mod tests {
 
         drop(permit);
         assert!(limiter.try_acquire(ip).is_some(), "slot released on drop");
+    }
+
+    #[test]
+    fn ipv6_sources_share_the_configured_prefix() {
+        let limiter = PerIpConnectionLimiter::new(1, 64);
+        let first = "2001:db8:1:2::1".parse().expect("first IPv6 address");
+        let same_prefix = "2001:db8:1:2::2".parse().expect("second IPv6 address");
+
+        let permit = limiter
+            .try_acquire(first)
+            .expect("first connection allowed");
+        assert!(limiter.try_acquire(same_prefix).is_none());
+        drop(permit);
     }
 }

@@ -3,10 +3,11 @@
 use std::time::Duration;
 
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, FromRequestParts, State},
+    http::request::Parts,
     middleware,
     routing::post,
-    Extension, Json, Router,
+    Json, Router,
 };
 use serde::Deserialize;
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
@@ -26,6 +27,27 @@ struct NativeEnrollmentRequest {
     #[serde(default)]
     ttl_secs: Option<u64>,
     idempotency_key: String,
+}
+
+/// A native re-enrollment request must prove possession of an existing
+/// certificate before Axum reads or parses its body.
+struct ReenrollmentPeer(VerifiedPeerCertificate);
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for ReenrollmentPeer
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<VerifiedPeerCertificate>()
+            .cloned()
+            .map(Self)
+            .ok_or_else(|| AppError::unauthorized("a verified client certificate is required"))
+    }
 }
 
 impl From<NativeEnrollmentRequest> for EnrollmentInput {
@@ -61,11 +83,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/pki/reenroll", post(re_enrollment))
         .merge(est::routes())
         .layer(DefaultBodyLimit::max(native_body_limit.max(est_body_limit)))
-        .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::rate_limit::middleware,
         ))
+        // Keep the trace outermost relative to the limiter so 429 responses
+        // are recorded with the same request span as successful enrollment.
+        .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::new(request_body_timeout))
         .with_state(state)
 }
@@ -97,30 +121,9 @@ async fn first_enrollment(
 
 async fn re_enrollment(
     State(state): State<AppState>,
-    peer: Option<Extension<VerifiedPeerCertificate>>,
+    ReenrollmentPeer(peer): ReenrollmentPeer,
     Json(request): Json<NativeEnrollmentRequest>,
 ) -> Result<Json<EnrollmentResponse>, AppError> {
-    let peer = match peer.map(|Extension(peer)| peer) {
-        Some(peer) => peer,
-        None => {
-            let error = AppError::unauthorized("a verified client certificate is required");
-            audit::observe_error(
-                &state.pool,
-                state.config.events.enabled(),
-                &audit::AuditMeta {
-                    actor_entity_id: None,
-                    tenant_id: None,
-                    target_kind: "credential",
-                    target_id: None,
-                    event: "certificate.reenroll",
-                },
-                &serde_json::json!({"mode": "reenroll", "transport": "native"}),
-                &error,
-            )
-            .await;
-            return Err(error);
-        }
-    };
     let result = service::re_enroll(&state, peer, request.into()).await;
     if let Err(ref error) = result {
         audit::observe_error(
@@ -153,7 +156,7 @@ mod tests {
     use tokio::time::sleep;
     use tower::ServiceExt;
 
-    use super::TimeoutLayer;
+    use super::{create_router, TimeoutLayer};
 
     #[tokio::test]
     async fn request_timeout_is_a_total_deadline() {
@@ -173,5 +176,21 @@ mod tests {
             .expect("infallible router");
 
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn native_reenrollment_rejects_missing_peer_before_json_extraction() {
+        let app = create_router(crate::certs::test_state_without_database());
+        let response = app
+            .oneshot(
+                Request::post("/pki/reenroll")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not json"))
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible router");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

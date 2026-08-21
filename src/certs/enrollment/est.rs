@@ -592,13 +592,6 @@ impl IntoResponse for EstError {
 
 #[cfg(test)]
 mod tests {
-    use sqlx::postgres::PgPoolOptions;
-
-    use crate::{
-        config::Config,
-        keys::{ActiveKeys, LoadedKey},
-    };
-
     use super::*;
 
     #[test]
@@ -680,23 +673,6 @@ mod tests {
     }
 
     fn test_state() -> AppState {
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://atom:atom@localhost/atom_test")
-            .expect("create lazy test pool");
-        let primary = LoadedKey {
-            kid: "test".into(),
-            public_key_pem: String::new(),
-            private_key_pem: String::new(),
-            x_b64: String::new(),
-            y_b64: String::new(),
-        };
-        AppState::new(
-            pool,
-            Config::for_tests(),
-            ActiveKeys {
-                primary,
-                standby: None,
-            },
-        )
+        crate::certs::test_state_without_database()
     }
 }

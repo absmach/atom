@@ -128,7 +128,12 @@ pub async fn middleware(State(state): State<AppState>, req: Request<Body>, next:
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0);
-    let client = client_key(req.headers(), peer_addr, &cfg.trusted_proxy_cidrs);
+    let client = client_key(
+        req.headers(),
+        peer_addr,
+        &cfg.trusted_proxy_cidrs,
+        cfg.ipv6_prefix_len,
+    );
     match state.rate_limiter.check(category, client, policy) {
         Ok(()) => next.run(req).await,
         Err(retry_after_secs) => {
@@ -220,6 +225,7 @@ fn client_key(
     headers: &HeaderMap,
     peer_addr: Option<SocketAddr>,
     trusted_proxy_cidrs: &[IpNet],
+    ipv6_prefix_len: u8,
 ) -> String {
     let Some(peer_addr) = peer_addr else {
         tracing::warn!("rate limit peer address missing; using unknown peer bucket");
@@ -229,11 +235,25 @@ fn client_key(
 
     if is_trusted_proxy(peer_ip, trusted_proxy_cidrs) {
         if let Some(forwarded_ip) = forwarded_client(headers, trusted_proxy_cidrs) {
-            return format!("ip:{forwarded_ip}");
+            return format!("ip:{}", aggregate_ip(forwarded_ip, ipv6_prefix_len));
         }
     }
 
-    format!("ip:{peer_ip}")
+    format!("ip:{}", aggregate_ip(peer_ip, ipv6_prefix_len))
+}
+
+/// Collapse IPv6 sources to an operator-selected network before allocating a
+/// bucket. IPv4 has no comparable delegated-prefix ambiguity and is preserved.
+pub(crate) fn aggregate_ip(ip: IpAddr, ipv6_prefix_len: u8) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(ip) if ipv6_prefix_len >= 128 => IpAddr::V6(ip),
+        IpAddr::V6(ip) => {
+            let bits = u128::from_be_bytes(ip.octets());
+            let mask = u128::MAX << (128 - u32::from(ipv6_prefix_len));
+            IpAddr::V6((bits & mask).into())
+        }
+    }
 }
 
 fn forwarded_client(headers: &HeaderMap, trusted_proxy_cidrs: &[IpNet]) -> Option<IpAddr> {
@@ -355,6 +375,7 @@ mod tests {
             &headers,
             Some(addr("203.0.113.5:1234")),
             &[cidr("10.0.0.0/8")],
+            64,
         );
 
         assert_eq!(key, "ip:203.0.113.5");
@@ -365,7 +386,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.10"));
 
-        let key = client_key(&headers, Some(addr("10.1.2.3:1234")), &[cidr("10.0.0.0/8")]);
+        let key = client_key(
+            &headers,
+            Some(addr("10.1.2.3:1234")),
+            &[cidr("10.0.0.0/8")],
+            64,
+        );
 
         assert_eq!(key, "ip:198.51.100.10");
     }
@@ -378,7 +404,12 @@ mod tests {
             HeaderValue::from_static("198.51.100.10, 10.1.1.1, 10.2.2.2"),
         );
 
-        let key = client_key(&headers, Some(addr("10.3.3.3:1234")), &[cidr("10.0.0.0/8")]);
+        let key = client_key(
+            &headers,
+            Some(addr("10.3.3.3:1234")),
+            &[cidr("10.0.0.0/8")],
+            64,
+        );
 
         assert_eq!(key, "ip:198.51.100.10");
     }
@@ -389,16 +420,39 @@ mod tests {
         headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
         headers.insert("x-real-ip", HeaderValue::from_static("also-not-an-ip"));
 
-        let key = client_key(&headers, Some(addr("10.1.2.3:1234")), &[cidr("10.0.0.0/8")]);
+        let key = client_key(
+            &headers,
+            Some(addr("10.1.2.3:1234")),
+            &[cidr("10.0.0.0/8")],
+            64,
+        );
 
         assert_eq!(key, "ip:10.1.2.3");
     }
 
     #[test]
     fn missing_headers_use_peer_ip_not_anonymous() {
-        let key = client_key(&HeaderMap::new(), Some(addr("203.0.113.5:1234")), &[]);
+        let key = client_key(&HeaderMap::new(), Some(addr("203.0.113.5:1234")), &[], 64);
 
         assert_eq!(key, "ip:203.0.113.5");
+    }
+
+    #[test]
+    fn ipv6_clients_are_bucketed_by_prefix() {
+        let first = client_key(
+            &HeaderMap::new(),
+            Some(addr("[2001:db8:1:2::1]:1234")),
+            &[],
+            64,
+        );
+        let same_prefix = client_key(
+            &HeaderMap::new(),
+            Some(addr("[2001:db8:1:2::2]:1234")),
+            &[],
+            64,
+        );
+
+        assert_eq!(first, same_prefix);
     }
 
     fn addr(value: &str) -> SocketAddr {

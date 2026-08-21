@@ -172,7 +172,7 @@ Dedicated TLS listener, opt-in with `ATOM_PKI_ENROLLMENT_ENABLED=true`. Binds `A
 
 Both handlers accept CSR + optional TTL + idempotency key. Tenant / entity / issuer / profile / scope come from the authenticated subject — the caller cannot select them.
 
-Rate limits: `ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT`, `_TENANT_RATE_LIMIT`, `_ENTITY_RATE_WINDOW_SECS`, `_TENANT_RATE_WINDOW_SECS`, plus the separate IP-based `ATOM_HTTP_RATE_LIMIT_ENROLLMENT` policy when `ATOM_RATE_LIMIT_ENABLED` is true. TLS/HTTP connection bounds: `_MAX_CONNECTIONS`, `_MAX_CONNECTIONS_PER_IP`, `_HANDSHAKE_TIMEOUT_SECS`, `_HTTP_HEADER_TIMEOUT_SECS`, `_REQUEST_BODY_TIMEOUT_SECS`, `_CONNECTION_TIMEOUT_SECS`, `_SHUTDOWN_DRAIN_TIMEOUT_SECS`.
+Rate limits: `ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT`, `_TENANT_RATE_LIMIT`, `_ENTITY_RATE_WINDOW_SECS`, `_TENANT_RATE_WINDOW_SECS`, plus the separate IP-based `ATOM_HTTP_RATE_LIMIT_ENROLLMENT` policy when `ATOM_RATE_LIMIT_ENABLED` is true. IPv6 source buckets use `/64` by default and can be tuned separately with `ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN` (connections) and `ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN` (requests). TLS/HTTP connection bounds: `_MAX_CONNECTIONS`, `_MAX_CONNECTIONS_PER_IP`, `_HANDSHAKE_TIMEOUT_SECS`, `_HTTP_HEADER_TIMEOUT_SECS`, `_REQUEST_BODY_TIMEOUT_SECS`, `_CONNECTION_TIMEOUT_SECS`, `_SHUTDOWN_DRAIN_TIMEOUT_SECS`; HTTP keep-alive is disabled by default and may be enabled with `ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE=true`.
 
 RFC 7030 EST is served on the same listener at `/.well-known/est/{cacerts,csrattrs,simpleenroll,simplereenroll,serverkeygen}` — see [pr-014b-est-adapter.md](development/pki/pr-014b-est-adapter.md).
 
@@ -258,6 +258,8 @@ Tenant admins can manage certificates only for tenant-owned entities in their te
 | `ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT` / `_WINDOW_SECS` | `1000` / `60` | Per-tenant enrollment rate cap. |
 | `ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES` | `65536` | CSR body limit. |
 | `ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS` / `_MAX_CONNECTIONS_PER_IP` | `256` / `8` | Global and per-source concurrent enrollment TLS connection caps. |
+| `ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN` / `_HTTP_KEEP_ALIVE` | `64` / `false` | IPv6 aggregation prefix for connection caps; opt in to HTTP/1.1 connection reuse. |
+| `ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN` | `64` | IPv6 aggregation prefix for HTTP IP-rate buckets. |
 | `ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS` / `_REQUEST_BODY_TIMEOUT_SECS` | `10` / `30` | Maximum header-read time and total request-body/handler time. |
 | `ATOM_PKI_LIFECYCLE_ENABLED` | `false` | Turn on the expiry / warning sweeper. |
 | `ATOM_PKI_LIFECYCLE_INTERVAL_SECS` | `60` | Sweeper cadence. |

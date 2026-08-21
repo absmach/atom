@@ -7,7 +7,6 @@ use std::{collections::HashSet, fmt, net::IpAddr};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
-use p256::{elliptic_curve::sec1::ToEncodedPoint, pkcs8::DecodePublicKey, PublicKey};
 use rcgen::{
     CertificateParams, CertificateRevocationListParams, CertificateSigningRequestParams,
     CrlDistributionPoint, CustomExtension, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -393,17 +392,12 @@ fn managed_authority_material(
     let provider = ManagedAuthorityKeyProvider::for_authority(ca_keys, authority)
         .map_err(managed_key_provider_error)?;
     let key = ManagedAuthorityKey::from_authority(authority).map_err(managed_key_provider_error)?;
-    let public = provider
-        .public_key(context, &key)
-        .map_err(managed_key_provider_error)?;
-    if public.subject_public_key_info_der != certificate.public_key().raw {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "managed authority key does not match its certificate"
-        )));
-    }
-    let public_key = PublicKey::from_public_key_der(&public.subject_public_key_info_der)
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid managed authority key")))?;
-    let raw_public_key = public_key.to_encoded_point(false).as_bytes().to_vec();
+    // Authority activation proves provider-key/certificate ownership. Calling
+    // `public_key` again here would unwrap the encrypted key (or open a second
+    // PKCS#11 session) for every leaf, CRL, and OCSP signature. Keep the
+    // certificate's already validated public key and reserve provider access
+    // for the signature itself.
+    let raw_public_key = certificate.public_key().subject_public_key.data.to_vec();
     let not_before = certificate.validity().not_before.to_datetime();
     let not_after = certificate.validity().not_after.to_datetime();
 
@@ -835,11 +829,7 @@ fn approve_sans(
                 }
             }
             SanType::URI(uri) => {
-                if uri.as_str() != identity_uri {
-                    return Err(AppError::bad_request(
-                        "CSR cannot substitute the canonical identity URI",
-                    ));
-                }
+                enforce_identity_uri_rule(&profile.san_policy.uri, uri.as_str(), identity_uri)?;
             }
             SanType::OtherName(_) => {
                 return Err(AppError::bad_request(
@@ -854,6 +844,7 @@ fn approve_sans(
         }
     }
 
+    enforce_identity_uri_rule(&profile.san_policy.uri, identity_uri, identity_uri)?;
     sans.push(SanType::URI(identity_uri.to_string().try_into().map_err(
         |_| AppError::Internal(anyhow::anyhow!("generated identity URI is invalid")),
     )?));
@@ -863,6 +854,24 @@ fn approve_sans(
         ip_addresses,
         identity_uri: identity_uri.to_string(),
     })
+}
+
+fn enforce_identity_uri_rule(
+    rule: &SanRule,
+    requested: &str,
+    identity_uri: &str,
+) -> Result<(), AppError> {
+    match rule.mode {
+        SanRuleMode::Identity if rule.values.is_empty() && requested == identity_uri => Ok(()),
+        SanRuleMode::Identity => Err(AppError::bad_request(
+            "CSR cannot substitute the canonical identity URI",
+        )),
+        SanRuleMode::Deny | SanRuleMode::Allowlist | SanRuleMode::EntityTemplate => {
+            Err(AppError::Internal(anyhow::anyhow!(
+                "stored certificate profile has an invalid identity URI policy"
+            )))
+        }
+    }
 }
 
 fn enforce_san_rule(
@@ -995,7 +1004,7 @@ fn validate_issued_certificate(
     for extension in certificate.extensions() {
         match extension.parsed_extension() {
             ParsedExtension::SubjectAlternativeName(names) => {
-                found_identity = names.general_names.iter().any(|name| {
+                found_identity |= names.general_names.iter().any(|name| {
                     matches!(name, x509_parser::extensions::GeneralName::URI(uri) if *uri == identity_uri)
                 });
             }
@@ -1269,6 +1278,33 @@ mod tests {
         let mut requested = CertificateParams::default();
         requested.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         assert!(validate_requested_extensions(&profile, &requested).is_err());
+    }
+
+    #[test]
+    fn identity_uri_policy_accepts_only_the_canonical_uri() {
+        let rule = SanRule {
+            mode: SanRuleMode::Identity,
+            values: vec![],
+        };
+
+        assert!(
+            enforce_identity_uri_rule(&rule, "urn:atom:entity:one", "urn:atom:entity:one").is_ok()
+        );
+        assert!(
+            enforce_identity_uri_rule(&rule, "urn:atom:entity:two", "urn:atom:entity:one").is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_uri_rule_fails_closed() {
+        let rule = SanRule {
+            mode: SanRuleMode::Deny,
+            values: vec![],
+        };
+
+        assert!(
+            enforce_identity_uri_rule(&rule, "urn:atom:entity:one", "urn:atom:entity:one").is_err()
+        );
     }
 
     #[test]

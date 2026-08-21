@@ -348,10 +348,6 @@ async fn revoke_candidate(
     reason: Option<String>,
     candidate: &repo::BulkCandidate,
 ) -> Result<BulkRevocationItem, AppError> {
-    // Parse the current record before opening the transaction. This avoids a
-    // second pool acquisition while a transaction is held and makes malformed
-    // legacy data a reportable per-item failure rather than a batch abort.
-    let current = certificates::certificate_by_id(&state.pool, candidate.credential_id).await?;
     let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
     let revoked = certificates::revoke_certificate_v2_in_tx(
         &mut tx,
@@ -359,8 +355,11 @@ async fn revoke_candidate(
             selector: CertificateRevocationSelector::CredentialId(candidate.credential_id),
             reason,
             actor_entity_id: Some(actor_entity_id),
-            expected_entity_id: current.entity_id,
-            expected_tenant_id: current.tenant_id,
+            // The candidate was selected inside the requested scope. Recheck
+            // that snapshot under the row lock so concurrent reassignment
+            // cannot widen this bulk operation.
+            expected_entity_id: candidate.entity_id,
+            expected_tenant_id: candidate.tenant_id,
         },
     )
     .await?;

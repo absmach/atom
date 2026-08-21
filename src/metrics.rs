@@ -47,6 +47,10 @@ pub const PKI_KEY_PROVIDER_OPERATIONS: &str = "atom_pki_key_provider_operations_
 /// Counter of subject enrollment operations. Labels are the bounded native
 /// modes (`first`/`reenroll`) and outcomes; identities are never labels.
 pub const PKI_ENROLLMENT_OPERATIONS: &str = "atom_pki_enrollment_operations_total";
+/// Counter of rejected enrollment TCP connections, labelled by bounded limit
+/// scope (`global` or `source`).
+pub const PKI_ENROLLMENT_CONNECTION_REJECTIONS: &str =
+    "atom_pki_enrollment_connection_rejections_total";
 /// Counter for issuance, renewal, revocation, and enrollment outcomes. Rates
 /// are derived by the metrics backend; labels are a fixed operation vocabulary.
 pub const PKI_LIFECYCLE_OPERATIONS: &str = "atom_pki_lifecycle_operations_total";
@@ -174,6 +178,10 @@ mod backend {
         .increment(1);
     }
 
+    pub fn record_pki_enrollment_connection_rejection(scope: &'static str) {
+        metrics::counter!(PKI_ENROLLMENT_CONNECTION_REJECTIONS, "scope" => scope).increment(1);
+    }
+
     pub fn record_pki_lifecycle_operation(operation: &'static str, outcome: &'static str) {
         metrics::counter!(
             PKI_LIFECYCLE_OPERATIONS,
@@ -248,13 +256,15 @@ mod backend {
     }
 
     pub fn record_pki_crl(
-        scope: &'static str,
+        issuer_id: uuid::Uuid,
         size_bytes: usize,
         generation_elapsed: Option<Duration>,
     ) {
-        metrics::gauge!(PKI_CRL_SIZE_BYTES, "scope" => scope).set(size_bytes as f64);
+        let issuer_id = issuer_id.to_string();
+        metrics::gauge!(PKI_CRL_SIZE_BYTES, "issuer_id" => issuer_id.clone())
+            .set(size_bytes as f64);
         if let Some(elapsed) = generation_elapsed {
-            metrics::histogram!(PKI_CRL_GENERATION_DURATION, "scope" => scope)
+            metrics::histogram!(PKI_CRL_GENERATION_DURATION, "issuer_id" => issuer_id)
                 .record(elapsed.as_secs_f64());
         }
     }
@@ -305,6 +315,8 @@ mod backend {
     #[inline]
     pub fn record_pki_enrollment(_mode: &'static str, _outcome: &'static str) {}
     #[inline]
+    pub fn record_pki_enrollment_connection_rejection(_scope: &'static str) {}
+    #[inline]
     pub fn record_pki_lifecycle_operation(_operation: &'static str, _outcome: &'static str) {}
     #[inline]
     pub fn record_pki_fleet_snapshot(
@@ -314,7 +326,7 @@ mod backend {
     }
     #[inline]
     pub fn record_pki_crl(
-        _scope: &'static str,
+        _issuer_id: uuid::Uuid,
         _size_bytes: usize,
         _generation_elapsed: Option<Duration>,
     ) {
@@ -324,6 +336,7 @@ mod backend {
 pub use backend::{
     enabled, init, record_audit_db_suppressed, record_audit_failure, record_callout,
     record_decision, record_outbox_exhausted, record_outbox_publish_failure, record_pki_crl,
-    record_pki_enrollment, record_pki_fleet_snapshot, record_pki_key_provider_operation,
-    record_pki_lifecycle_operation, record_rate_limit_rejection, render,
+    record_pki_enrollment, record_pki_enrollment_connection_rejection, record_pki_fleet_snapshot,
+    record_pki_key_provider_operation, record_pki_lifecycle_operation, record_rate_limit_rejection,
+    render,
 };

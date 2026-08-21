@@ -455,6 +455,11 @@ pub struct EnrollmentConfig {
     pub max_csr_bytes: usize,
     pub max_connections: usize,
     pub max_connections_per_ip: usize,
+    /// IPv6 sources are grouped by this prefix before applying the
+    /// per-source connection cap. A /64 is the standard routed allocation.
+    pub ipv6_prefix_len: u8,
+    /// Whether HTTP/1.1 connections may serve more than one request.
+    pub http_keep_alive: bool,
     pub trust_bundle_refresh_secs: u64,
     pub tls_handshake_timeout_secs: u64,
     pub http_header_timeout_secs: u64,
@@ -480,6 +485,8 @@ impl Default for EnrollmentConfig {
             max_csr_bytes: 64 * 1024,
             max_connections: 256,
             max_connections_per_ip: 8,
+            ipv6_prefix_len: 64,
+            http_keep_alive: false,
             trust_bundle_refresh_secs: 60,
             tls_handshake_timeout_secs: 10,
             http_header_timeout_secs: 10,
@@ -522,6 +529,8 @@ pub struct RateLimitConfig {
     pub graphql: RateLimitPolicyConfig,
     pub custom_endpoints: RateLimitPolicyConfig,
     pub admin_routes: RateLimitPolicyConfig,
+    /// IPv6 client addresses are grouped by this prefix for IP buckets.
+    pub ipv6_prefix_len: u8,
     pub trusted_proxy_cidrs: Vec<IpNet>,
 }
 
@@ -556,6 +565,7 @@ impl Default for RateLimitConfig {
                 max_requests: 300,
                 window_secs: 60,
             },
+            ipv6_prefix_len: 64,
             trusted_proxy_cidrs: Vec::new(),
         }
     }
@@ -1209,7 +1219,7 @@ fn purge_from_env() -> Result<PurgeConfig> {
 
 fn rate_limits_from_env() -> Result<RateLimitConfig> {
     let default = RateLimitConfig::default();
-    Ok(RateLimitConfig {
+    let cfg = RateLimitConfig {
         enabled: env_bool_default("ATOM_RATE_LIMIT_ENABLED", default.enabled),
         auth_routes: rate_limit_policy_from_env(
             "ATOM_HTTP_RATE_LIMIT_AUTH_ROUTES",
@@ -1241,8 +1251,16 @@ fn rate_limits_from_env() -> Result<RateLimitConfig> {
             "ATOM_HTTP_RATE_LIMIT_ADMIN_WINDOW_SECS",
             default.admin_routes,
         )?,
+        ipv6_prefix_len: env_parse(
+            "ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN",
+            default.ipv6_prefix_len,
+        )?,
         trusted_proxy_cidrs: trusted_proxy_cidrs_from_env()?,
-    })
+    };
+    if cfg.ipv6_prefix_len == 0 || cfg.ipv6_prefix_len > 128 {
+        anyhow::bail!("ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN must be between 1 and 128");
+    }
+    Ok(cfg)
 }
 
 fn events_from_env() -> Result<EventsConfig> {
@@ -1461,6 +1479,14 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
             "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP",
             default.max_connections_per_ip,
         )?,
+        ipv6_prefix_len: env_parse(
+            "ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN",
+            default.ipv6_prefix_len,
+        )?,
+        http_keep_alive: env_bool_default(
+            "ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE",
+            default.http_keep_alive,
+        ),
         trust_bundle_refresh_secs: env_parse(
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             default.trust_bundle_refresh_secs,
@@ -1494,6 +1520,9 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
     }
     if cfg.max_connections_per_ip == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP must be greater than zero");
+    }
+    if cfg.ipv6_prefix_len == 0 || cfg.ipv6_prefix_len > 128 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN must be between 1 and 128");
     }
     if cfg.trust_bundle_refresh_secs == 0 {
         anyhow::bail!("ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS must be greater than zero");
@@ -1961,6 +1990,8 @@ mod tests {
         assert!(cfg.enrollment.tls.is_none());
         assert_eq!(cfg.enrollment.max_csr_bytes, 64 * 1024);
         assert_eq!(cfg.enrollment.max_connections_per_ip, 8);
+        assert_eq!(cfg.enrollment.ipv6_prefix_len, 64);
+        assert!(!cfg.enrollment.http_keep_alive);
         assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 10);
         assert_eq!(cfg.enrollment.http_header_timeout_secs, 10);
         assert_eq!(cfg.enrollment.request_body_timeout_secs, 30);
@@ -1979,6 +2010,8 @@ mod tests {
         std::env::set_var("ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT", "7");
         std::env::set_var("ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT", "70");
         std::env::set_var("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP", "3");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN", "56");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE", "true");
         std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS", "11");
         std::env::set_var("ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS", "12");
         std::env::set_var("ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS", "32");
@@ -1989,6 +2022,8 @@ mod tests {
         assert_eq!(cfg.enrollment.entity_rate_limit.max_requests, 7);
         assert_eq!(cfg.enrollment.tenant_rate_limit.max_requests, 70);
         assert_eq!(cfg.enrollment.max_connections_per_ip, 3);
+        assert_eq!(cfg.enrollment.ipv6_prefix_len, 56);
+        assert!(cfg.enrollment.http_keep_alive);
         assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 11);
         assert_eq!(cfg.enrollment.http_header_timeout_secs, 12);
         assert_eq!(cfg.enrollment.request_body_timeout_secs, 32);
@@ -2014,12 +2049,15 @@ mod tests {
         let cfg = Config::from_env().expect("default config");
         assert_eq!(cfg.rate_limits.enrollment.max_requests, 1_000);
         assert_eq!(cfg.rate_limits.enrollment.window_secs, 60);
+        assert_eq!(cfg.rate_limits.ipv6_prefix_len, 64);
 
         std::env::set_var("ATOM_HTTP_RATE_LIMIT_ENROLLMENT", "321");
         std::env::set_var("ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS", "45");
+        std::env::set_var("ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN", "56");
         let cfg = Config::from_env().expect("custom enrollment rate limit");
         assert_eq!(cfg.rate_limits.enrollment.max_requests, 321);
         assert_eq!(cfg.rate_limits.enrollment.window_secs, 45);
+        assert_eq!(cfg.rate_limits.ipv6_prefix_len, 56);
 
         clear_hardening_env();
     }
@@ -2135,6 +2173,7 @@ mod tests {
             "ATOM_RATE_LIMIT_ENABLED",
             "ATOM_HTTP_RATE_LIMIT_ENROLLMENT",
             "ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS",
+            "ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN",
             "ATOM_TRUSTED_PROXY_CIDRS",
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
             "ATOM_GRPC_TLS_CERT_PATH",
@@ -2151,6 +2190,8 @@ mod tests {
             "ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES",
             "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
             "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP",
+            "ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN",
+            "ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE",
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
             "ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS",
