@@ -323,6 +323,12 @@ impl Pkcs11KeyProvider {
         let mut final_result = Err(AuthorityKeyProviderError::ProviderUnavailable);
 
         for attempt in 0..=self.config.max_retries {
+            // A hard timeout means the spawned mutating worker is still alive
+            // and may still hold the lifecycle lock. It must still count as a
+            // provider failure for the circuit breaker, but retrying it would
+            // queue another worker behind the first one and extend the caller's
+            // advisory-lock hold indefinitely.
+            let mut retry_forbidden = false;
             if let Err(error) = self.runtime.before_operation(reset_after) {
                 final_result = Err(error);
                 break;
@@ -379,6 +385,7 @@ impl Pkcs11KeyProvider {
                                     hard_timeout_ms = self.config.mutation_hard_timeout_ms,
                                     "PKCS#11 mutation exceeded its hard timeout; abandoning wait (late completion may leave orphaned key material)"
                                 );
+                                retry_forbidden = true;
                                 Err(AuthorityKeyProviderError::ProviderUnavailable)
                             }
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -401,10 +408,11 @@ impl Pkcs11KeyProvider {
                 }
             }
 
-            let retry = final_result
-                .as_ref()
-                .err()
-                .is_some_and(AuthorityKeyProviderError::is_transient)
+            let retry = !retry_forbidden
+                && final_result
+                    .as_ref()
+                    .err()
+                    .is_some_and(AuthorityKeyProviderError::is_transient)
                 && attempt < self.config.max_retries;
             if !retry {
                 break;
@@ -979,6 +987,43 @@ mod tests {
 
         assert!(started.elapsed() >= Duration::from_millis(50));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn hard_timed_out_mutation_is_not_retried_while_its_worker_is_alive() {
+        let mut config = executor_config("mutating-hard-timeout-no-retry");
+        config.mutation_hard_timeout_ms = 20;
+        config.max_retries = 1;
+        config.max_in_flight = 2;
+        let provider = Pkcs11KeyProvider::new(config);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+
+        assert_eq!(
+            provider
+                .execute(
+                    "test_hard_timeout",
+                    OperationClass::Mutating,
+                    move |provider| {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        let _lifecycle = provider
+                            .runtime
+                            .lifecycle_lock
+                            .write()
+                            .expect("lifecycle lock");
+                        thread::sleep(Duration::from_millis(80));
+                        Ok(())
+                    },
+                )
+                .expect_err("hard-timed-out mutation must fail"),
+            AuthorityKeyProviderError::ProviderUnavailable
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.runtime.in_flight.load(Ordering::SeqCst), 1);
+
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(provider.runtime.in_flight.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

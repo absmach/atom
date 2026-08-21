@@ -8,7 +8,10 @@ use serde::Serialize;
 
 use crate::{
     build_info,
-    config::{PkiCaKeyConfig, PkiCaProvisioningBackend},
+    certs::authority::{
+        key_provider::AuthorityKeyProviderError, repo as authority_repo, AuthorityKeyBackend,
+    },
+    config::PkiCaKeyConfig,
     keys, rate_limit,
     state::{AppState, GrpcRuntimeState},
 };
@@ -99,7 +102,7 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let migrations = migrations_check(state).await;
     let (signing_keys, signing_key_state) = signing_keys_check(state).await;
     let grpc_ready = grpc_check(state).await;
-    let certificate_issuer = certificate_issuer_check(&state.config.pki_ca_keys);
+    let certificate_issuer = certificate_issuer_check(state).await;
     let ready = readiness_ok(
         &database,
         &migrations,
@@ -239,39 +242,85 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
     }
 }
 
-/// Reports whether certificate issuance was configured and validated at
-/// startup. This endpoint is unauthenticated and called repeatedly by load
-/// balancers, so it must never open a PKCS#11 session or affect the HSM
-/// provider's circuit breaker. Startup validation performs the active probe;
-/// issuance operations remain the runtime signal for subsequent HSM failures.
-fn certificate_issuer_check(ca_keys: &PkiCaKeyConfig) -> ComponentCheck {
-    match ca_keys.provisioning_backend {
-        PkiCaProvisioningBackend::EncryptedDatabase => {
-            if ca_keys.key_encryption_key.is_some() {
-                ComponentCheck {
-                    status: ComponentStatus::Ok,
-                    message: "encrypted database signer configured".to_string(),
-                }
-            } else {
-                ComponentCheck {
-                    status: ComponentStatus::Disabled,
-                    message: "CA signer not configured".to_string(),
-                }
-            }
-        }
-        PkiCaProvisioningBackend::Pkcs11 => {
-            if ca_keys.pkcs11.is_some() {
-                ComponentCheck {
-                    status: ComponentStatus::Ok,
-                    message: "PKCS#11 signer configured and verified at startup".to_string(),
-                }
-            } else {
-                ComponentCheck {
-                    status: ComponentStatus::Error,
-                    message: "PKCS#11 signer configuration missing".to_string(),
-                }
-            }
-        }
+/// Reports whether the providers selected by live leaf issuers are configured
+/// and were validated at startup. This endpoint is unauthenticated and called
+/// repeatedly by load balancers, so it must never open a PKCS#11 session or
+/// affect the HSM provider's circuit breaker.
+async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
+    match authority_repo::active_leaf_issuer_backends(&state.pool).await {
+        Ok(backends) => certificate_issuer_config_check(&state.config.pki_ca_keys, &backends),
+        Err(error) => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!("certificate issuer status query failed: {error}"),
+        },
+    }
+}
+
+fn certificate_issuer_config_check(
+    ca_keys: &PkiCaKeyConfig,
+    backends: &[AuthorityKeyBackend],
+) -> ComponentCheck {
+    if backends.is_empty() {
+        return ComponentCheck {
+            status: ComponentStatus::Disabled,
+            message: "no active certificate issuers".to_string(),
+        };
+    }
+
+    let uses_encrypted_database = backends
+        .iter()
+        .any(|backend| *backend == AuthorityKeyBackend::EncryptedDatabase);
+    let uses_pkcs11 = backends
+        .iter()
+        .any(|backend| *backend == AuthorityKeyBackend::Pkcs11);
+    let uses_kms = backends
+        .iter()
+        .any(|backend| *backend == AuthorityKeyBackend::Kms);
+    let uses_public_only = backends
+        .iter()
+        .any(|backend| *backend == AuthorityKeyBackend::PublicOnly);
+
+    if uses_kms {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "an active certificate issuer requires an unavailable KMS provider"
+                .to_string(),
+        };
+    }
+    if uses_public_only {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "an active certificate issuer has no signing key".to_string(),
+        };
+    }
+    if uses_encrypted_database && ca_keys.key_encryption_key.is_none() {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "an active certificate issuer requires the encrypted database CA key"
+                .to_string(),
+        };
+    }
+    if uses_pkcs11 && ca_keys.pkcs11.is_none() {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!(
+                "active PKCS#11 certificate issuer provider configuration failed: {}",
+                AuthorityKeyProviderError::Unconfigured
+            ),
+        };
+    }
+
+    let providers = [
+        uses_encrypted_database.then_some("encrypted database"),
+        uses_pkcs11.then_some("PKCS#11"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" and ");
+    ComponentCheck {
+        status: ComponentStatus::Ok,
+        message: format!("{providers} certificate issuer configured and verified at startup"),
     }
 }
 
@@ -332,11 +381,12 @@ async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        certificate_issuer_check, readiness_ok, AuditRetentionStatus, ComponentCheck,
+        certificate_issuer_config_check, readiness_ok, AuditRetentionStatus, ComponentCheck,
         ComponentStatus, DbPoolStatus, SystemStatus,
     };
     use crate::{
-        config::{Config, PkiCaProvisioningBackend, PkiPkcs11Config, SecretText},
+        certs::authority::AuthorityKeyBackend,
+        config::{Config, PkiPkcs11Config, SecretText},
         rate_limit::RateLimitStatus,
     };
 
@@ -446,9 +496,8 @@ mod tests {
     }
 
     #[test]
-    fn pkcs11_readiness_does_not_probe_the_hsm() {
+    fn readiness_uses_active_issuer_backends_without_probing_the_hsm() {
         let mut config = Config::for_tests();
-        config.pki_ca_keys.provisioning_backend = PkiCaProvisioningBackend::Pkcs11;
         config.pki_ca_keys.pkcs11 = Some(PkiPkcs11Config {
             module_path: "/nonexistent/pkcs11-module.so".to_string(),
             token_label: "missing-token".to_string(),
@@ -461,8 +510,21 @@ mod tests {
             circuit_reset_secs: 1,
         });
 
-        let status = certificate_issuer_check(&config.pki_ca_keys);
+        let status =
+            certificate_issuer_config_check(&config.pki_ca_keys, &[AuthorityKeyBackend::Pkcs11]);
         assert!(matches!(status.status, ComponentStatus::Ok));
         assert!(status.message.contains("verified at startup"));
+    }
+
+    #[test]
+    fn readiness_rejects_an_active_issuer_without_its_provider_configuration() {
+        let config = Config::for_tests();
+        let status =
+            certificate_issuer_config_check(&config.pki_ca_keys, &[AuthorityKeyBackend::Pkcs11]);
+        let ok = check(ComponentStatus::Ok);
+
+        assert!(matches!(status.status, ComponentStatus::Error));
+        assert!(status.message.contains("CA key provider is not configured"));
+        assert!(!readiness_ok(&ok, &ok, &ok, &ok, &status));
     }
 }

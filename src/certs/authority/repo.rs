@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use crate::error::{db_err, AppError};
 
-use super::{key_provider::ManagedAuthorityKey, AuthorityKind, AuthorityRecord, AuthorityStatus};
+use super::{
+    key_provider::ManagedAuthorityKey, AuthorityKeyBackend, AuthorityKind, AuthorityRecord,
+    AuthorityStatus,
+};
 
 const PROVISIONING_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_504b_4933;
 
@@ -203,6 +206,30 @@ where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     fetch_active_leaf_issuer_for_scope(executor, Some(tenant_id)).await
+}
+
+/// Return the key backends used by authorities that can issue leaves now.
+/// Readiness uses this narrow, non-secret projection to validate the providers
+/// that live issuance will select, rather than the default backend used for
+/// future provisioning.
+pub async fn active_leaf_issuer_backends(
+    pool: &PgPool,
+) -> Result<Vec<AuthorityKeyBackend>, AppError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT key_backend
+        FROM pki_authorities
+        WHERE kind IN ('platform_leaf_issuer', 'tenant_intermediate')
+          AND status = 'active'
+          AND issuance_enabled = true
+          AND not_before <= now()
+          AND not_after > now()
+        ORDER BY key_backend
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)
 }
 
 pub async fn list_tenant_authorities(
