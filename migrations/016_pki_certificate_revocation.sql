@@ -36,8 +36,24 @@ CREATE INDEX idx_certificate_revocations_issuer_fingerprint
 -- Preserve already-revoked data during rollout. Old rows did not have a
 -- normalized actor column; that nullable field stays explicitly unknown
 -- rather than being invented. Every revoked certificate must map to a
--- managed pki_authorities row — the join is INNER, so any orphan cert
--- fails migration loud.
+-- managed pki_authorities row. Check that invariant before the insert: an
+-- INNER JOIN alone would silently omit an orphaned certificate.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM credentials c
+          LEFT JOIN pki_authorities a ON a.id = c.issuer_id
+         WHERE c.kind = 'certificate'
+           AND c.status = 'revoked'
+           AND a.id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'revoked certificate is missing a managed issuer authority'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
 INSERT INTO certificate_revocations (
     credential_id, issuer_id, issuer_fingerprint_sha256, serial_number,
     reason, actor_entity_id, revoked_at

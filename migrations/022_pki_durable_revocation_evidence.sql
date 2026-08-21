@@ -25,12 +25,6 @@ CREATE UNIQUE INDEX idx_certificate_revocations_issuer_serial
     ON certificate_revocations(issuer_id, serial_number)
     WHERE issuer_id IS NOT NULL;
 
--- Orphaned rows (authority purged, issuer_id cleared by 023's FK cascade)
--- retain fingerprint evidence for audit but no longer feed publication.
-CREATE INDEX idx_certificate_revocations_orphaned_fingerprint
-    ON certificate_revocations(issuer_fingerprint_sha256, serial_number)
-    WHERE issuer_id IS NULL;
-
 -- PR-009's issuer-keyed state function is retained here with one additional
 -- immutable value: the credential expiry copied at the revocation boundary.
 CREATE OR REPLACE FUNCTION record_certificate_revocation()

@@ -60,6 +60,31 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     assert_eq!(cached_a.crl_number, 1);
     assert_eq!(cached_a.der, empty_a.der);
 
+    // A stale CRL-state fingerprint is a data-integrity failure, not a cache
+    // miss. Regenerating would re-sign on every public request forever while
+    // leaving the corrupted state untouched.
+    sqlx::query(
+        "UPDATE certificate_crl_state SET issuer_fingerprint_sha256 = repeat('0', 64) WHERE issuer_id = $1",
+    )
+    .bind(issuer_a.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mismatch = service::issuer_crl(&pool, &config, issuer_a.id)
+        .await
+        .unwrap_err();
+    assert!(mismatch
+        .to_string()
+        .contains("CRL state fingerprint does not match"));
+    sqlx::query(
+        "UPDATE certificate_crl_state SET issuer_fingerprint_sha256 = $1 WHERE issuer_id = $2",
+    )
+    .bind(issuer_a.fingerprint_sha256.as_deref().unwrap())
+    .bind(issuer_a.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     // Tenant B publishes a fresh CRL keyed on issuer_id, starting at 1.
     let empty_b = service::issuer_crl(&pool, &config, issuer_b.id)
         .await

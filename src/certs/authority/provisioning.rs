@@ -668,17 +668,15 @@ fn discovery_urls_for(
 
 pub async fn begin_retirement_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    ca_keys: &PkiCaKeyConfig,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
-    Ok(begin_retirement_mutation_in_tx(tx, ca_keys, authority_id)
+    Ok(begin_retirement_mutation_in_tx(tx, authority_id)
         .await?
         .value)
 }
 
 pub async fn begin_retirement_mutation_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    _ca_keys: &PkiCaKeyConfig,
     authority_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
@@ -1087,8 +1085,7 @@ fn parse_authority_certificate(
     let not_after = DateTime::<Utc>::from_timestamp(cert.validity().not_after.timestamp(), 0)
         .ok_or_else(|| AppError::bad_request("invalid authority notAfter"))?;
     let serial_number =
-        crate::certs::service::normalize_serial(&cert.tbs_certificate.raw_serial_as_string())
-            .map_err(|_| AppError::bad_request("invalid authority serial number"))?;
+        crate::certs::normalize_serial(&cert.tbs_certificate.raw_serial_as_string())?;
     let fingerprint_sha256 = hex::encode(digest::digest(&digest::SHA256, &pem.contents));
     Ok(ParsedAuthorityCertificate {
         der: pem.contents.clone(),

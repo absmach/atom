@@ -786,7 +786,7 @@ pub async fn issuer_crl_state_tx(
     .await
     .map_err(AppError::Database)?;
 
-    sqlx::query_as::<_, CrlState>(
+    let state = sqlx::query_as::<_, CrlState>(
         r#"
         SELECT issuer_fingerprint_sha256, crl_number, crl_der, crl_sha256,
                this_update, next_update, dirty
@@ -798,7 +798,15 @@ pub async fn issuer_crl_state_tx(
     .bind(issuer_id)
     .fetch_one(&mut **tx)
     .await
-    .map_err(AppError::Database)
+    .map_err(AppError::Database)?;
+
+    if state.issuer_fingerprint_sha256 != issuer_fingerprint_sha256 {
+        return Err(AppError::conflict(
+            "issuer CRL state fingerprint does not match the authority certificate",
+        ));
+    }
+
+    Ok(state)
 }
 
 pub async fn issuer_revocations_tx(

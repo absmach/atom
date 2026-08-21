@@ -206,12 +206,7 @@ impl AuthorityMutation {
             let mut outcome = if complete {
                 provisioning::complete_retirement_mutation_in_tx(&mut tx, authority_id).await?
             } else {
-                provisioning::begin_retirement_mutation_in_tx(
-                    &mut tx,
-                    &state.config.pki_ca_keys,
-                    authority_id,
-                )
-                .await?
+                provisioning::begin_retirement_mutation_in_tx(&mut tx, authority_id).await?
             };
             commit_authority_mutation(
                 state,

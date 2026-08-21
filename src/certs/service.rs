@@ -29,7 +29,7 @@ use crate::{config::Config, error::AppError, identity};
 
 use super::{
     authority::{repo as authority_repo, AuthorityKind, AuthorityRecord, AuthorityStatus},
-    pki_core, profile, repo,
+    normalize_serial, pki_core, profile, repo,
 };
 
 const ISSUER_CRL_LOCK_DOMAIN: i64 = 0x504b_4939_4352_4c00;
@@ -1389,18 +1389,6 @@ fn runtime_identity_from_row(
 
 fn runtime_selector_mismatch() -> AppError {
     AppError::Unauthorized("certificate selectors do not identify the same credential".into())
-}
-
-pub fn normalize_serial(serial_number: &str) -> Result<String, AppError> {
-    let normalized = serial_number
-        .chars()
-        .filter(|ch| *ch != ':' && !ch.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if normalized.is_empty() || normalized.len() % 2 != 0 || hex::decode(&normalized).is_err() {
-        return Err(AppError::bad_request("invalid certificate serial number"));
-    }
-    Ok(normalized)
 }
 
 fn validated_fingerprint(value: &str) -> Result<String, AppError> {
