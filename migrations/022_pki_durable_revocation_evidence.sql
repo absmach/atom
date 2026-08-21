@@ -42,6 +42,13 @@ BEGIN
         RETURN NEW;
     END IF;
 
+    -- Migration 011 explicitly marks pre-registry leaves. They retain local
+    -- status revocation but cannot produce artifacts for an unknown issuer.
+    IF NEW.issuer_id IS NULL
+       AND NEW.metadata->>'issuer_migration' = 'legacy_unmanaged' THEN
+        RETURN NEW;
+    END IF;
+
     SELECT a.fingerprint_sha256
       INTO issuer_fingerprint
       FROM pki_authorities a

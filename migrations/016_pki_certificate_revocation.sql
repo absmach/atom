@@ -35,9 +35,12 @@ CREATE INDEX idx_certificate_revocations_issuer_fingerprint
 
 -- Preserve already-revoked data during rollout. Old rows did not have a
 -- normalized actor column; that nullable field stays explicitly unknown
--- rather than being invented. Every revoked certificate must map to a
--- managed pki_authorities row. Check that invariant before the insert: an
--- INNER JOIN alone would silently omit an orphaned certificate.
+-- rather than being invented.  Migration 011 marks pre-registry leaves as
+-- `issuer_migration = legacy_unmanaged`: those records have no trustworthy
+-- authority to publish against and must not be fabricated into this ledger.
+-- Every other revoked certificate must map to a managed pki_authorities row.
+-- Check that invariant before the insert: an INNER JOIN alone would silently
+-- omit an orphaned managed certificate.
 DO $$
 BEGIN
     IF EXISTS (
@@ -46,7 +49,13 @@ BEGIN
           LEFT JOIN pki_authorities a ON a.id = c.issuer_id
          WHERE c.kind = 'certificate'
            AND c.status = 'revoked'
-           AND a.id IS NULL
+           AND (
+               (c.issuer_id IS NOT NULL AND a.id IS NULL)
+               OR (
+                   c.issuer_id IS NULL
+                   AND c.metadata->>'issuer_migration' IS DISTINCT FROM 'legacy_unmanaged'
+               )
+           )
     ) THEN
         RAISE EXCEPTION 'revoked certificate is missing a managed issuer authority'
             USING ERRCODE = '23514';
@@ -105,6 +114,14 @@ BEGIN
         RETURN NEW;
     END IF;
     IF TG_OP = 'UPDATE' AND OLD.status = 'revoked' THEN
+        RETURN NEW;
+    END IF;
+
+    -- Pre-registry credentials remain locally revocable through
+    -- credentials.status, but have no authority under which Atom can publish
+    -- CRL/OCSP evidence.  Migration 011 marked this exact bounded exception.
+    IF NEW.issuer_id IS NULL
+       AND NEW.metadata->>'issuer_migration' = 'legacy_unmanaged' THEN
         RETURN NEW;
     END IF;
 

@@ -186,9 +186,31 @@ CREATE TRIGGER trg_pki_authorities_parent
 ALTER TABLE credentials
     ADD COLUMN issuer_id UUID REFERENCES pki_authorities(id) ON DELETE RESTRICT;
 
+-- Credentials issued before the authority registry have no trustworthy
+-- authority row to reference.  Preserve them as explicitly unmanaged legacy
+-- leaves: guessing an issuer would let Atom publish CRL/OCSP data under the
+-- wrong CA.  New managed issuance always supplies issuer_id, so this marker is
+-- only the forward-migration bridge for rows that existed before this column.
+UPDATE credentials
+   SET metadata = jsonb_set(
+           metadata,
+           '{issuer_migration}',
+           '"legacy_unmanaged"'::jsonb,
+           true
+       )
+ WHERE kind = 'certificate';
+
 ALTER TABLE credentials
     ADD CONSTRAINT chk_credentials_issuer_certificate_only
-    CHECK ((kind = 'certificate') = (issuer_id IS NOT NULL));
+    CHECK (
+        (kind = 'certificate' AND issuer_id IS NOT NULL)
+        OR (
+            kind = 'certificate'
+            AND issuer_id IS NULL
+            AND metadata->>'issuer_migration' IS NOT DISTINCT FROM 'legacy_unmanaged'
+        )
+        OR (kind <> 'certificate' AND issuer_id IS NULL)
+    );
 
 CREATE INDEX idx_credentials_certificate_issuer_serial_lookup
     ON credentials(issuer_id, identifier)
@@ -213,6 +235,23 @@ DECLARE
 BEGIN
     IF NEW.kind <> 'certificate' THEN
         RETURN NEW;
+    END IF;
+
+    -- The only issuer-less certificates permitted after this migration are
+    -- rows that existed before issuer_id and were marked above.  Do not let a
+    -- later import manufacture that compatibility marker to bypass managed
+    -- issuer binding.
+    IF NEW.issuer_id IS NULL THEN
+        IF TG_OP = 'UPDATE'
+           AND OLD.kind = 'certificate'
+           AND OLD.issuer_id IS NULL
+           AND OLD.metadata->>'issuer_migration' IS NOT DISTINCT FROM 'legacy_unmanaged'
+           AND NEW.metadata->>'issuer_migration' IS NOT DISTINCT FROM 'legacy_unmanaged' THEN
+            RETURN NEW;
+        END IF;
+
+        RAISE EXCEPTION 'certificate requires a managed issuer authority'
+            USING ERRCODE = '23514';
     END IF;
 
     IF NEW.entity_id IS NULL THEN
