@@ -329,7 +329,7 @@ fn action_name(action: i32) -> Option<&'static str> {
     match Action::try_from(action) {
         Ok(Action::Publish) => Some("publish"),
         Ok(Action::Subscribe) => Some("subscribe"),
-        Ok(Action::None) | Err(_) => None,
+        Ok(Action::Unspecified) | Err(_) => None,
     }
 }
 
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn unset_and_unknown_actions_are_rejected() {
-        assert_eq!(action_name(Action::None as i32), None);
+        assert_eq!(action_name(Action::Unspecified as i32), None);
         assert_eq!(action_name(99), None);
     }
 
