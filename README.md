@@ -381,9 +381,9 @@ default `ATOM_CORS_ALLOWED_ORIGINS`.
 
 ### Certificates (optional)
 
-Certificates are off by default for local dev. To enable the PKI endpoints
-(`GET /certs/ca-chain`, `GET /certs/crl`, `POST /certs/ocsp`), generate a local
-root CA and flip the cert vars in `.env`:
+Certificates are off by default for local dev. To enable the legacy v1 PKI
+endpoints (`GET /certs/ca-chain`, `GET /certs/crl`, `POST /certs/ocsp`), generate
+a local root CA and flip the cert vars in `.env`:
 
 ```bash
 mkdir -p certs
@@ -401,10 +401,12 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 ```
 
 Compose mounts `./certs` at `/certs:ro`; a host `cargo run` reads the files
-directly, so use `./certs/...` paths there. Production should use
-`ATOM_CERTS_CA_MODE=file_intermediate_issuer` with root certificate,
-intermediate certificate, and intermediate private key files mounted
-read-only. Atom never stores CA certificates or CA private keys in Postgres.
+directly, so use `./certs/...` paths there. The legacy production mode uses
+`ATOM_CERTS_CA_MODE=file_intermediate_issuer` with read-only files. The managed
+authority registry instead imports only the root certificate and publishes its
+dynamic trust set at `GET /certs/trust-bundle.pem`. Managed CA keys may be
+envelope-encrypted in Postgres or generated as non-exportable PKCS#11 token
+objects; Atom never accepts a production root private key.
 
 ### Metrics
 
@@ -755,6 +757,18 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_GRPC_TLS_CERT_PATH`                                                                                                      | *(unset)*                                            | PEM server certificate chain; set with `ATOM_GRPC_TLS_KEY_PATH` to enable gRPC TLS      |
 | `ATOM_GRPC_TLS_KEY_PATH`                                                                                                       | *(unset)*                                            | PEM server private key; setting only one TLS cert/key path fails startup                |
 | `ATOM_GRPC_TLS_CLIENT_CA_PATH`                                                                                                 | *(unset)*                                            | PEM client CA bundle; requires server cert/key and enables mandatory mTLS               |
+| `ATOM_PKI_ENROLLMENT_ENABLED`                                                                                                 | `false`                                              | Enables the dedicated native and RFC 7030 EST enrollment TLS listener                  |
+| `ATOM_PKI_ENROLLMENT_LISTEN_ADDR`                                                                                             | `0.0.0.0:8443`                                       | Enrollment bind address; this is a public machine-facing surface                        |
+| `ATOM_PKI_ENROLLMENT_TLS_CERT_PATH` / `ATOM_PKI_ENROLLMENT_TLS_KEY_PATH`                                                      | *(unset)*                                            | Required server cert/key pair when enrollment is enabled; TLS terminates in Atom        |
+| `ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT` / `ATOM_PKI_ENROLLMENT_ENTITY_RATE_WINDOW_SECS`                                      | `10` / `60`                                          | Durable per-entity enrollment limit and fixed-window seconds                            |
+| `ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT` / `ATOM_PKI_ENROLLMENT_TENANT_RATE_WINDOW_SECS`                                      | `1000` / `60`                                        | Durable per-tenant enrollment limit and fixed-window seconds                            |
+| `ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES` / `ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS` / `ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP` | `65536` / `256` / `8`                                | CSR bound plus global and per-source concurrent TLS connection caps                     |
+| `ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN` / `ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE` | `64` / `false` | IPv6 source aggregation prefix for the connection cap; opt in to HTTP/1.1 connection reuse |
+| `ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS` / `ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS`                                  | `10` / `30`                                          | Bound header reads and the total request/handler lifetime before enrollment authentication |
+| `ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS`                                                                                      | `60`                                                 | Refresh interval for live database authority changes in the client-cert verifier        |
+| `ATOM_PKI_LIFECYCLE_ENABLED`                                                                                                  | `false`                                              | Enables replica-safe certificate and authority expiry event sweeps                       |
+| `ATOM_PKI_LIFECYCLE_INTERVAL_SECS` / `ATOM_PKI_LIFECYCLE_BATCH_SIZE`                                                         | `60` / `250`                                         | Sweep cadence and bounded per-run notification batch                                     |
+| `ATOM_PKI_EXPIRY_WARNING_SECS` / `ATOM_PKI_AUTHORITY_WARNING_SECS`                                                           | `86400` / `2592000`                                  | Critical leaf-expiry and CA-rotation lead windows                                        |
 | `ATOM_DB_MAX_CONNECTIONS` / `ATOM_DB_MIN_CONNECTIONS`                                                                          | `20` / `0`                                           | Postgres pool size controls                                                             |
 | `ATOM_DB_ACQUIRE_TIMEOUT_SECS` / `ATOM_DB_CONNECT_TIMEOUT_SECS`                                                                | `30` / `10`                                          | Pool acquire and startup connect timeouts                                               |
 | `ATOM_DB_IDLE_TIMEOUT_SECS` / `ATOM_DB_MAX_LIFETIME_SECS`                                                                      | `600` / `1800`                                       | Pool idle and lifetime limits                                                           |
@@ -775,7 +789,9 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_RATE_LIMIT_ENABLED`                                                                                                      | `true`                                               | Enables in-process HTTP rate limits                                                     |
 | `ATOM_TRUSTED_PROXY_CIDRS`                                                                                                     | *(empty)*                                            | Comma-separated proxy CIDRs whose forwarded client IP headers Atom may trust            |
 | `ATOM_HTTP_RATE_LIMIT_AUTH_ROUTES` / `ATOM_HTTP_RATE_LIMIT_AUTH_WINDOW_SECS`                                                   | `30` / `60`                                          | Auth route rate-limit policy                                                            |
-| `ATOM_HTTP_RATE_LIMIT_PUBLIC_ROUTES` / `ATOM_HTTP_RATE_LIMIT_PUBLIC_WINDOW_SECS`                                               | `120` / `60`                                         | JWKS and public PKI rate-limit policy                                                   |
+| `ATOM_HTTP_RATE_LIMIT_PUBLIC_ROUTES` / `ATOM_HTTP_RATE_LIMIT_PUBLIC_WINDOW_SECS`                                               | `120` / `60`                                         | JWKS and public certificate-artifact rate-limit policy                                  |
+| `ATOM_HTTP_RATE_LIMIT_ENROLLMENT` / `ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS`                                               | `1000` / `60`                                        | Separate IP-based native and EST enrollment rate-limit policy (when rate limiting is enabled) |
+| `ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN`                                                                                            | `64`                                                 | IPv6 source aggregation prefix for IP rate-limit buckets                                |
 | `ATOM_HTTP_RATE_LIMIT_GRAPHQL` / `ATOM_HTTP_RATE_LIMIT_GRAPHQL_WINDOW_SECS`                                                    | `120` / `60`                                         | GraphQL rate-limit policy                                                               |
 | `ATOM_HTTP_RATE_LIMIT_CUSTOM_ENDPOINTS` / `ATOM_HTTP_RATE_LIMIT_CUSTOM_ENDPOINTS_WINDOW_SECS`                                  | `120` / `60`                                         | Custom endpoint rate-limit policy                                                       |
 | `ATOM_HTTP_RATE_LIMIT_ADMIN_ROUTES` / `ATOM_HTTP_RATE_LIMIT_ADMIN_WINDOW_SECS`                                                 | `300` / `60`                                         | Authenticated REST admin route rate-limit policy                                        |
@@ -800,7 +816,7 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_UI_FORWARD_CLIENT_IP_HEADERS`                                                                                            | `false`                                              | UI service only; forwards client IP headers to Atom proxy calls when explicitly enabled |
 | `ATOM_SIGNUP_ENABLED`                                                                                                          | *(legacy alias)*                                     | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED`                          |
 | `ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN`                                                                                            | `false`                                              | Development-only password login before email verification                               |
-| `ATOM_PUBLIC_BASE_URL`                                                                                                         | `http://localhost:8080`                              | Public URL used for issuer and redirect defaults                                        |
+| `ATOM_PUBLIC_BASE_URL`                                                                                                         | `http://localhost:8080`                              | Public URL used for issuer and redirect defaults; set it explicitly before issuing certificates so CRL/AIA URLs are embedded |
 | `ATOM_EMAIL_VERIFICATION_REDIRECT`                                                                                             | `http://localhost:8080/auth/email/verify`            | URL that verifies email tokens                                                          |
 | `ATOM_PASSWORD_RESET_REDIRECT`                                                                                                 | `http://localhost:8080/reset-password`               | Frontend URL for password reset tokens                                                  |
 | `ATOM_INVITATION_REDIRECT`                                                                                                     | `http://localhost:8080/invitations/accept`           | Frontend URL for invitation tokens                                                      |
@@ -823,9 +839,16 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_CERTS_ROOT_CA_KEY_PATH`                                                                                                  | *(optional)*                                         | Mounted root CA private key path for `file_root_issuer`                                 |
 | `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS`                                                                                             | `2592000`                                            | Default issued certificate lifetime                                                     |
 | `ATOM_CERTS_LEAF_MAX_TTL_SECS`                                                                                                 | `2592000`                                            | Maximum issued certificate lifetime                                                     |
+| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY`                                                                                               | *(unset)*                                            | Dedicated base64-encoded 32-byte KEK required for managed CA keys                       |
+| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID`                                                                                            | `local-ca:v1`                                        | Operator-visible identifier for the managed CA KEK                                      |
+| `ATOM_PKI_CA_KEY_BACKEND`                                                                                                     | `encrypted_database`                                 | Operator-selected backend for newly provisioned CAs: `encrypted_database` or `pkcs11`  |
+| `ATOM_PKI_PKCS11_MODULE_PATH` / `ATOM_PKI_PKCS11_TOKEN_LABEL` / `ATOM_PKI_PKCS11_USER_PIN`                                    | *(unset)*                                            | PKCS#11 module, token selector, and redacted login credential                           |
+| `ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS` / `ATOM_PKI_PKCS11_MAX_RETRIES` / `ATOM_PKI_PKCS11_MAX_IN_FLIGHT`                       | `2000` / `1` / `8`                                   | Bounded provider call, retry, and concurrency policy                                    |
+| `ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD` / `ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS`                                             | `3` / `30`                                           | Fail-closed PKCS#11 circuit policy                                                      |
+| `ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED`                                                                                      | `false`                                              | Enables managed one-time key bootstrap; keep off in production until PR-010             |
 | `ATOM_CERTS_CA_DIR`                                                                                                            | `./certs`                                            | Docker Compose host directory mounted at `/certs:ro`                                    |
 | `ATOM_EMAIL_TEMPLATES_HOST_DIR`                                                                                                | `./email-templates`                                  | Docker Compose host directory mounted at `/email-templates:ro`                          |
-| `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8081` / `18081` / `3005` | Docker Compose host ports                                                               |
+| `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_PKI_ENROLLMENT_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_DEV_PKI_ENROLLMENT_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8443` / `8081` / `18081` / `18443` / `3005` | Docker Compose host ports                                                               |
 | `ATOM_GRAPHQL_URL`                                                                                                             | `http://atom:8080/graphql`                           | GraphQL endpoint used by the Dockerized Next UI                                         |
 | `RUST_LOG`                                                                                                                     | *(legacy fallback)*                                  | Used only when `ATOM_LOG_LEVEL` is unset                                                |
 
@@ -1047,6 +1070,7 @@ Authorization: Bearer <token>
 
 The public HTTP routes that do not require an existing Bearer token are
 `GET /health`, `GET /.well-known/jwks.json`, `GET /certs/ca-chain`,
+`GET /certs/trust-bundle.pem`,
 `GET /certs/crl`, `POST /certs/ocsp`, `GET /auth/public-config`,
 `POST /auth/login`, `GET /auth/email/verify`, `POST /auth/email/resend`,
 `POST /auth/password/reset/request`, `POST /auth/password/reset`,
@@ -1253,6 +1277,7 @@ GET  /health/live
 GET  /health/ready
 GET  /.well-known/jwks.json
 GET  /certs/ca-chain
+GET  /certs/trust-bundle.pem
 GET  /certs/crl
 POST /certs/ocsp
 GET  /auth/public-config
@@ -1274,6 +1299,9 @@ ANY /api/custom/*
 ```
 
 The health endpoints are unauthenticated, so they do not carry build identity.
+`/health` and `/health/ready` use the public IP rate limit and report the
+certificate signer's configuration/startup validation without probing an HSM;
+`/health/live` remains an inexpensive, unthrottled process liveness check.
 The embedded `version` and full Git `revision` are exposed on the GraphQL
 `systemStatus` field, which requires `manage` on the platform scope; the same
 values are on each image as OCI labels. Operators verify a running binary

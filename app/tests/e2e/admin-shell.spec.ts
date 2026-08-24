@@ -38,6 +38,9 @@ test("authenticated admin can reach core workflows", async ({ page }) => {
     ["/audit", "Audit Logs"],
     ["/endpoints", "API Endpoints"],
     ["/playground", "Playground"],
+    ["/pki/authorities", "PKI Authorities"],
+    ["/pki/certificates", "PKI Certificates"],
+    ["/pki/actions", "PKI Actions"],
     ["/settings", "Session and platform settings"],
   ] as const) {
     await page.goto(route[0]);

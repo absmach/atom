@@ -202,7 +202,6 @@ mod tests {
             "groupMembers",
             "entityGroups",
             "credentials",
-            "caChain",
             "certificates",
             "certificate",
             "ownedEntities",
@@ -271,10 +270,11 @@ mod tests {
             "createSharedKey",
             "revealSharedKey",
             "revokeCredential",
-            "issueCertificate",
-            "issueCertificateFromCsr",
-            "renewCertificate",
-            "revokeCertificate",
+            "issueGeneratedCertificateV2",
+            "issueCertificateFromCsrV2",
+            "renewCertificateFromCsrV2",
+            "renewGeneratedCertificateV2",
+            "revokeCertificateV2",
             "revokeEntityCertificates",
             "addOwnership",
             "removeOwnership",
@@ -626,7 +626,6 @@ mod tests {
                 primary,
                 standby: None,
             },
-            None,
         )
     }
 

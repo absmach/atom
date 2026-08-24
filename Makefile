@@ -15,6 +15,15 @@ ATOM_VERSION ?= $(GIT_DESCRIBE)
 ATOM_REVISION ?= $(GIT_REVISION)
 RELEASE_TAG ?= $(shell git describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null)
 DOCKER_BUILD_ARGS = --build-arg ATOM_VERSION="$(ATOM_VERSION)" --build-arg ATOM_REVISION="$(ATOM_REVISION)"
+# BuildKit is required for the Dockerfile cache mounts (--mount=type=cache).
+# Docker 23+ enables it by default; export for older setups regardless.
+export DOCKER_BUILDKIT ?= 1
+# DOCKER_NO_CACHE=1 disables layer cache reuse — the -prod build variants set
+# this so releases don't accidentally reuse a stale intermediate image layer.
+# Cache mounts (--mount=type=cache) survive independently: they're populated
+# during RUN, not baked into image layers, so they don't affect reproducibility.
+DOCKER_NO_CACHE ?=
+DOCKER_CACHE_FLAG = $(if $(DOCKER_NO_CACHE),--no-cache,)
 # Second tag applied alongside the primary one; `release` uses it to move
 # `:latest` in the same build. Empty for every other target.
 ATOM_IMAGE_EXTRA ?=
@@ -30,29 +39,37 @@ COMPOSE_ENV = ATOM_IMAGE="$(ATOM_IMAGE)" ATOM_UI_IMAGE="$(ATOM_UI_IMAGE)"
 DEV_HTTP_PORT ?= 8090
 DEV_UI_PORT ?= 3000
 
-.PHONY: help db dev build latest release release-check atom-build docker_atom_dev ui-build up down logs restart docker-build docker-build-release proto proto-lint proto-check
+.PHONY: help db dev build build-prod latest release release-check atom-build atom-build-prod docker_atom_dev ui-build ui-build-prod up down logs restart docker-build docker-build-prod docker-build-release docker-build-release-prod proto proto-lint proto-check pki-material
 
 help:
 	@echo "First run: create .env in the repo root — see README Quick Start"
+	@echo "  (PKI trust anchor material is generated into ./certs/ automatically)"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make build               Rebuild Atom backend + Atom UI images (run after code changes)"
-	@echo "  make latest              Build both images as :latest with Git-derived build metadata"
-	@echo "  make release             Build both images from a clean exact vX.Y.Z tag, also tagging :latest"
-	@echo "  make atom-build          Rebuild only the Atom backend image"
-	@echo "  make docker_atom_dev     Build Atom on the host, then copy the binary into a Docker image"
-	@echo "  make ui-build            Rebuild only the Atom UI image"
-	@echo "  make up                  Start Postgres, Atom, and Atom UI (builds images only if missing)"
-	@echo "  make db                  Start only Postgres (for host 'cargo run')"
-	@echo "  make dev                 Postgres (Docker) + host cargo run (:$(DEV_HTTP_PORT)) + host UI (:$(DEV_UI_PORT)); runs alongside 'make up'"
-	@echo "  make restart             Restart the Compose stack (no rebuild; use 'make build' first)"
-	@echo "  make proto               Regenerate protobuf outputs (gRPC reference docs + Rust bindings)"
-	@echo "  make proto-lint          Lint the protos Atom owns"
-	@echo "  make proto-check         Verify the vendored broker contract still matches upstream"
-	@echo "  make logs                Follow Atom + Atom UI logs"
-	@echo "  make down                Stop the local Compose stack"
-	@echo "  make docker-build        Build the raw Atom Docker image for BUILD_TARGET"
-	@echo "  make docker-build-release Build the raw release Docker image"
+	@echo "  make build                     Rebuild both images with BuildKit cache reuse (dev)"
+	@echo "  make build-prod                Rebuild both images with --no-cache (release-clean)"
+	@echo "  make latest                    Build both images as :latest with Git-derived build metadata"
+	@echo "  make release                   Build both images from a clean exact vX.Y.Z tag, also tagging :latest (no-cache)"
+	@echo "  make atom-build                Rebuild only the Atom backend image (cached)"
+	@echo "  make atom-build-prod           Rebuild only the Atom backend image (--no-cache)"
+	@echo "  make docker_atom_dev           Build Atom on the host, then copy the binary into a Docker image"
+	@echo "  make ui-build                  Rebuild only the Atom UI image (cached)"
+	@echo "  make ui-build-prod             Rebuild only the Atom UI image (--no-cache)"
+	@echo "  make up                        Start Postgres, Atom, and Atom UI (builds images only if missing)"
+	@echo "  make db                        Start only Postgres (for host 'cargo run')"
+	@echo "  make dev                       Postgres (Docker) + host cargo run (:$(DEV_HTTP_PORT)) + host UI (:$(DEV_UI_PORT)); runs alongside 'make up'"
+	@echo "  make restart                   Restart the Compose stack (no rebuild; use 'make build' first)"
+	@echo "  make proto                     Regenerate protobuf outputs (gRPC reference docs + Rust bindings)"
+	@echo "  make proto-lint                Lint the protos Atom owns"
+	@echo "  make proto-check               Verify the vendored broker contract still matches upstream"
+	@echo "  make logs                      Follow Atom + Atom UI logs"
+	@echo "  make down                      Stop the local Compose stack"
+	@echo "  make docker-build              Build the raw Atom Docker image for BUILD_TARGET (cached)"
+	@echo "  make docker-build-prod         Build the raw Atom Docker image for BUILD_TARGET (--no-cache)"
+	@echo "  make docker-build-release      Build the raw release Docker image (cached)"
+	@echo "  make docker-build-release-prod Build the raw release Docker image (--no-cache)"
+	@echo "  make pki-material              Generate PKI trust anchor material into ./certs/ (idempotent)"
+	@echo "                                 See app/tests/visual/README.md for the visual walkthrough."
 	@echo ""
 	@echo "Variables:"
 	@echo "  COMPOSE=$(COMPOSE)"
@@ -72,7 +89,18 @@ help:
 	@echo "  DOCKER_ATOM_DEV_IMAGE=$(DOCKER_ATOM_DEV_IMAGE)"
 	@echo "  DOCKER_ATOM_DEV_CONTEXT=$(DOCKER_ATOM_DEV_CONTEXT)"
 
-db:
+# Copies .env.example → .env on first bring-up so a fresh clone Just Works.
+# Prints a hint about rotating the local-only KEKs before any shared use.
+$(DEV_ENV_FILE):
+	@echo "==> creating $(DEV_ENV_FILE) from .env.example (first run only)"
+	@cp .env.example $(DEV_ENV_FILE)
+	@echo ""
+	@echo "  $(DEV_ENV_FILE) uses local-dev defaults (weak admin secret, static KEKs)."
+	@echo "  Before any shared or production use, rotate:"
+	@echo "    ADMIN_SECRET, ATOM_KEY_ENCRYPTION_KEY, ATOM_PKI_CA_KEY_ENCRYPTION_KEY"
+	@echo ""
+
+db: $(DEV_ENV_FILE)
 	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) up -d postgres
 
 # Full host dev loop: Postgres in Docker, Atom and the Next UI on the host.
@@ -90,15 +118,20 @@ dev: db
 
 build: atom-build ui-build
 
+build-prod:
+	$(MAKE) build DOCKER_NO_CACHE=1
+
 latest:
 	$(MAKE) build IMAGE_TAG=latest ATOM_VERSION="$(ATOM_VERSION)" ATOM_REVISION="$(ATOM_REVISION)"
 
 # Also moves the local `:latest` tags, matching what the image workflow
 # publishes on a tag push. Without it `make release && make up` would still
-# run the previous build, since Compose defaults to `:latest`.
+# run the previous build, since Compose defaults to `:latest`. Uses
+# --no-cache so a release never reuses a stale intermediate layer.
 release: release-check
 	$(MAKE) build IMAGE_TAG="$(RELEASE_TAG)" ATOM_VERSION="$(RELEASE_TAG)" ATOM_REVISION="$(ATOM_REVISION)" \
-		ATOM_IMAGE_EXTRA="$(IMAGE_NAME):latest" ATOM_UI_IMAGE_EXTRA="$(ATOM_UI_IMAGE_NAME):latest"
+		ATOM_IMAGE_EXTRA="$(IMAGE_NAME):latest" ATOM_UI_IMAGE_EXTRA="$(ATOM_UI_IMAGE_NAME):latest" \
+		DOCKER_NO_CACHE=1
 
 release-check:
 	@set -eu; \
@@ -123,12 +156,16 @@ release-check:
 
 atom-build:
 	docker build \
+		$(DOCKER_CACHE_FLAG) \
 		-f $(DOCKERFILE) \
 		--target $(BUILD_TARGET) \
 		$(DOCKER_BUILD_ARGS) \
 		-t "$(ATOM_IMAGE)" \
 		$(ATOM_EXTRA_TAG) \
 		$(BUILD_CONTEXT)
+
+atom-build-prod:
+	$(MAKE) atom-build DOCKER_NO_CACHE=1
 
 docker_atom_dev:
 	@command -v cargo >/dev/null 2>&1 || { echo "cargo is required for 'make docker_atom_dev'"; exit 1; }
@@ -146,14 +183,24 @@ docker_atom_dev:
 
 ui-build:
 	docker build \
+		$(DOCKER_CACHE_FLAG) \
 		-f app/Dockerfile \
 		$(DOCKER_BUILD_ARGS) \
 		-t "$(ATOM_UI_IMAGE)" \
 		$(ATOM_UI_EXTRA_TAG) \
 		app
 
-up:
+ui-build-prod:
+	$(MAKE) ui-build DOCKER_NO_CACHE=1
+
+up: $(DEV_ENV_FILE) pki-material
 	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) up -d postgres atom atom-ui
+	@echo ""
+	@echo "  Atom is coming up. When health checks pass:"
+	@echo "    UI:        http://localhost:$${ATOM_UI_HTTP_PORT:-3006}"
+	@echo "    GraphQL:   http://localhost:$${ATOM_HTTP_PORT:-18080}/graphql"
+	@echo "    Playbook:  app/tests/visual/README.md  # visual PKI walkthrough"
+	@echo ""
 
 restart: down up
 
@@ -165,14 +212,21 @@ down:
 
 docker-build:
 	docker build \
+		$(DOCKER_CACHE_FLAG) \
 		-f $(DOCKERFILE) \
 		--target $(BUILD_TARGET) \
 		$(DOCKER_BUILD_ARGS) \
 		-t $(IMAGE_NAME):$(IMAGE_TAG) \
 		$(BUILD_CONTEXT)
 
+docker-build-prod:
+	$(MAKE) docker-build DOCKER_NO_CACHE=1
+
 docker-build-release:
 	$(MAKE) docker-build BUILD_TARGET=release IMAGE_TAG=release
+
+docker-build-release-prod:
+	$(MAKE) docker-build BUILD_TARGET=release IMAGE_TAG=release DOCKER_NO_CACHE=1
 
 # ─── Protobuf ─────────────────────────────────────────────────────────────────
 #
@@ -203,3 +257,74 @@ proto-lint:
 # an upstream change surfaces at runtime. CI runs the same script.
 proto-check:
 	scripts/check-vendored-proto.sh
+
+# ─── PKI trust anchor bootstrap ──────────────────────────────────────────────
+# Generate the trust-anchor material Atom's config-bootstrap needs and make
+# sure the running atom container has picked it up. Idempotent: on re-run,
+# reuses existing PEMs on disk and only restarts atom if config drifted.
+PKI_MATERIAL_DIR ?= certs
+pki-material:
+	@set -e; \
+	if ! command -v openssl >/dev/null 2>&1; then \
+		echo "  openssl is required to generate PKI trust anchor material."; \
+		exit 1; \
+	fi; \
+	mkdir -p $(PKI_MATERIAL_DIR); \
+	ROOT_KEY=$(PKI_MATERIAL_DIR)/pki-root.key; \
+	ROOT_PEM=$(PKI_MATERIAL_DIR)/pki-root.pem; \
+	PI_KEY=$(PKI_MATERIAL_DIR)/pki-platform-intermediate.key; \
+	PI_PEM=$(PKI_MATERIAL_DIR)/pki-platform-intermediate.pem; \
+	if [ ! -f $$ROOT_KEY ] || [ ! -f $$ROOT_PEM ]; then \
+		echo "==> generating offline root CA in $(PKI_MATERIAL_DIR)/"; \
+		openssl ecparam -name prime256v1 -genkey -noout -out $$ROOT_KEY; \
+		openssl req -x509 -new -key $$ROOT_KEY -days 3650 -out $$ROOT_PEM \
+			-subj "/CN=Atom Local Root" \
+			-addext "keyUsage=critical,keyCertSign,cRLSign" \
+			-addext "basicConstraints=critical,CA:TRUE,pathlen:2"; \
+	fi; \
+	if [ ! -f $$PI_KEY ] || [ ! -f $$PI_PEM ]; then \
+		echo "==> generating platform intermediate CA (signed by root)"; \
+		openssl ecparam -name prime256v1 -genkey -noout -out $$PI_KEY; \
+		openssl req -new -key $$PI_KEY -out $(PKI_MATERIAL_DIR)/pki-platform-intermediate.csr \
+			-subj "/CN=Atom Platform Intermediate v1"; \
+		printf "basicConstraints=critical,CA:TRUE,pathlen:1\nkeyUsage=critical,keyCertSign,cRLSign,digitalSignature\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n" \
+			> $(PKI_MATERIAL_DIR)/pki-platform-intermediate.ext; \
+		openssl x509 -req -CA $$ROOT_PEM -CAkey $$ROOT_KEY -CAcreateserial \
+			-in $(PKI_MATERIAL_DIR)/pki-platform-intermediate.csr \
+			-out $$PI_PEM -days 1825 \
+			-extfile $(PKI_MATERIAL_DIR)/pki-platform-intermediate.ext; \
+		rm -f $(PKI_MATERIAL_DIR)/pki-platform-intermediate.csr \
+			$(PKI_MATERIAL_DIR)/pki-platform-intermediate.ext \
+			$$ROOT_PEM.srl 2>/dev/null || true; \
+	fi; \
+	chmod 0644 $$ROOT_PEM $$PI_PEM $$PI_KEY; \
+	chmod 0600 $$ROOT_KEY; \
+	ENV_FILE=$(DEV_ENV_FILE); \
+	if [ -z "$$ENV_FILE" ]; then ENV_FILE=.env; fi; \
+	if [ ! -f $$ENV_FILE ]; then \
+		echo "  $$ENV_FILE missing — run 'make up' first (or copy .env.example)."; \
+		exit 1; \
+	fi; \
+	changed=0; \
+	for pair in \
+		"ATOM_PKI_ROOT_CERT_PATH=/certs/pki-root.pem" \
+		"ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH=/certs/pki-platform-intermediate.pem" \
+		"ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH=/certs/pki-platform-intermediate.key"; \
+	do \
+		key=$${pair%%=*}; \
+		if grep -q "^$$key=" $$ENV_FILE; then \
+			current=$$(grep "^$$key=" $$ENV_FILE | head -1 | cut -d= -f2-); \
+			if [ "$$current" != "$${pair#*=}" ]; then \
+				sed -i.bak "s|^$$key=.*|$$pair|" $$ENV_FILE && rm -f $$ENV_FILE.bak; \
+				changed=1; \
+			fi; \
+		else \
+			echo "$$pair" >> $$ENV_FILE; \
+			changed=1; \
+		fi; \
+	done; \
+	if [ $$changed -eq 1 ] && command -v docker >/dev/null 2>&1 \
+	   && [ -n "$$(docker compose ps -q atom 2>/dev/null)" ]; then \
+		echo "==> config changed — restarting atom to pick up bootstrap paths"; \
+		docker compose --env-file $$ENV_FILE up -d atom; \
+	fi

@@ -1,6 +1,6 @@
 ---
 title: Certificates
-description: Atom-native certificate credentials, CA files, CRL, OCSP, and runtime lookup.
+description: Atom-native certificate credentials, managed authorities, trust distribution, CRL, OCSP, and runtime lookup.
 ---
 
 Certificates are credentials for machines. Instead of sending a password or API key, a client proves identity with a certificate during mTLS.
@@ -39,9 +39,372 @@ Atom owns the certificate lifecycle for issued client certificates:
 
 **What this means:** the operator mounts CA files. Atom uses them to issue a certificate for an entity. The issued certificate is stored as a credential row. Later, a runtime service receives an mTLS client certificate and asks Atom which entity it belongs to.
 
-## CA Files
+## Managed authorities
 
-Atom does not store CA certificates or CA private keys in Postgres. It loads issuer files during startup.
+Atom can provision a versioned private-CA hierarchy while keeping the production
+root key offline:
+
+- import only the root certificate as a `public_only` trust anchor;
+- generate an encrypted tenant-intermediate or platform-leaf-issuer key and CSR;
+- export the CSR for offline signing and import the signed CA certificate;
+- optionally provision a platform intermediate, then use the separately
+  authorized automated operation to sign tenant intermediates;
+- rotate issuers through `active`, `retiring`, and `retired` states without
+  deleting their validation history.
+
+The management mutations derive the subject, hierarchy, constraints, and tenant
+scope from stored state. Callers cannot submit an issuer ID, CA subject, key
+reference, or path-length constraint. Every managed tenant intermediate and the
+platform leaf issuer has `pathLen=0`, `CA=true`, `keyCertSign`, and `cRLSign`.
+
+## Certificate profiles
+
+Managed leaf shape is stored in `certificate_profiles`, rather than selected by
+certificate-construction branches. Atom ships conservative `client` and
+`server` platform profiles. The client profile contains only `clientAuth`; the
+server profile contains only `serverAuth`. A certificate carrying both usages
+requires an additional explicit profile row.
+
+Each profile records permitted key algorithms and sizes, default and maximum
+validity, the renewal threshold, key usages, extended key usages, per-SAN-type
+policy, leaf basic constraints, and the canonical identity URI template. A
+tenant override references a platform profile and may shorten its time limits
+or narrow its SAN policy, but cannot widen the platform ceiling.
+
+The PKI core derives identity from the stored entity and tenant:
+
+```text
+urn:atom:tenant:<tenant-id>:entity:<entity-id>
+urn:atom:entity:<entity-id>                  # global entity
+```
+
+CSR signatures are verified. Requested certificate extensions are not trusted:
+CA capability, CA key usages, non-profile EKUs, identity substitution, and SANs
+outside the stored policy are rejected. The resulting leaf points to the
+issuer's configured OCSP, CA-issuers, and CRL routes. The legacy v1 issuance API
+continues to use its existing behavior until the managed issuance cutover.
+
+Managed encrypted-database keys require a dedicated CA key-encryption key:
+
+```text
+ATOM_PKI_CA_KEY_ENCRYPTION_KEY=<base64 encoded 32-byte key>
+ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID=local-ca:v1
+```
+
+Generate this value independently from every JWT or credential-encryption key.
+Atom never accepts or stores the production root private key.
+
+For production HSM-backed authorities, set the provisioning backend and token
+configuration instead:
+
+```text
+ATOM_PKI_CA_KEY_BACKEND=pkcs11
+ATOM_PKI_PKCS11_MODULE_PATH=/opt/vendor/lib/libpkcs11.so
+ATOM_PKI_PKCS11_TOKEN_LABEL=atom-production-ca
+ATOM_PKI_PKCS11_USER_PIN=<injected secret>
+```
+
+New authority keys are generated inside the token as sensitive,
+non-extractable P-256 objects. Postgres receives only an opaque,
+authority-bound reference. Existing encrypted-database authorities remain
+usable when the provisioning backend changes, provided their CA KEK remains
+configured. Atom validates token availability and certificate/public-key
+matching before it starts serving. See the
+[PKCS#11 operations and recovery runbook](https://github.com/absmach/atom/blob/certificates/product-docs/development/pki/PKCS11-RUNBOOK.md).
+
+The authenticated GraphQL API exposes the following lifecycle operations to
+callers holding `pki.provision` in the authority's stored scope:
+
+```text
+importRootAuthority
+beginTenantAuthorityProvisioning
+beginPlatformLeafIssuerProvisioning
+beginPlatformIntermediateProvisioning
+importSignedAuthority
+beginAuthorityRetirement
+completeAuthorityRetirement
+```
+
+`provisionTenantAuthorityAutomatically` additionally requires the platform-wide
+`pki.provision_automated` capability. Scoped access tokens cannot invoke CA
+lifecycle mutations.
+
+## Managed CSR signing (v2)
+
+`issueCertificateFromCsrV2` is the first managed leaf-issuance path. The
+existing `issueCertificateFromCsr` mutation remains the legacy file-issuer API;
+the explicit `V2` suffix prevents an authority migration from silently changing
+existing clients.
+
+The v2 input accepts only:
+
+- the target `entityId`;
+- the device-generated `csrPem`;
+- an optional requested `ttlSecs`; and
+- a required, caller-generated `idempotencyKey` (1–256 non-control UTF-8 bytes).
+
+Tenant, profile, issuer, CA path, and key reference are deliberately absent.
+Atom authorizes and locks the stored entity, derives its tenant, selects and
+locks that scope's active issuer, and resolves the stored `client` profile. The
+response includes the leaf, immutable issuing chain, issuer/profile IDs, and
+canonical identity URI. `privateKeyPem` is always null on this path because the
+device key never enters Atom.
+
+```graphql
+mutation SignDeviceCsr($input: IssueCertificateFromCsrV2Input!) {
+  issueCertificateFromCsrV2(input: $input) {
+    idempotentReplay
+    chainPem
+    certificate {
+      credentialId
+      issuerId
+      serialNumber
+      certificatePem
+      profileId
+      identityUri
+    }
+  }
+}
+```
+
+Reuse the same idempotency key only for an exact retry. Atom stores a digest of
+the key and request—not the token or CSR—and returns the original credential
+with `idempotentReplay: true`. Reusing it with different CSR or TTL content is a
+conflict. A replay does not enqueue a second `certificate.issue` domain event.
+
+Serial conflicts are retried in nested savepoints on the caller's transaction.
+The credential, issuer link, completion ledger, and outbox event commit
+together. If CA signing succeeds but any database write or final commit fails,
+the certificate is neither returned nor registered as a runtime credential;
+the uncommitted ledger row disappears too. Retrying the same key therefore
+either returns the prior committed credential or performs a clean replacement
+attempt. Operators reconcile an uncertain client response by retrying the same
+request and checking the credential ID, issuance ledger, audit log, and outbox;
+there is no separately usable orphan artifact to import.
+
+## Managed generated-key bootstrap (v2)
+
+`issueGeneratedCertificateV2` uses the same stored entity, `client` profile,
+managed issuer, verification, savepoint, and transaction boundaries as v2 CSR
+signing. Its input contains only `entityId` and optional `ttlSecs`; tenant,
+issuer, profile, algorithm, names, extensions, and key references cannot be
+supplied by the caller. The first Atom-supported algorithm and size in the
+stored profile is used as the profile's generation preference.
+
+```graphql
+mutation BootstrapDevice($input: IssueGeneratedCertificateV2Input!) {
+  issueGeneratedCertificateV2(input: $input) {
+    privateKeyPem
+    chainPem
+    certificate {
+      credentialId
+      issuerId
+      certificatePem
+      profileId
+      identityUri
+    }
+  }
+}
+```
+
+The private key exists only in the one successful response. Atom stores the
+certificate and non-secret issuer/profile metadata, never the key, and exposes
+no reveal, recovery, escrow, or historical download operation. Secret response
+buffers are redacted from debug output and zeroized on drop where the Rust and
+cryptographic-library APIs permit it. Audit and outbox details contain only
+credential, serial, issuer, and profile identifiers.
+
+If the database write or commit fails, no credential, audit event, or outbox
+row survives and no key is returned. If the commit succeeds but the response is
+lost or cannot be serialized to the caller, the certificate remains visible in
+the credential list and in `certificate.issue` audit/outbox records, but its
+private key is permanently unrecoverable. Operators must treat that credential
+as unusable, disable or revoke it, and perform a new bootstrap; they must never
+log response bodies while investigating.
+
+This route is gated by `ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED`, which defaults
+to `false` in code, examples, and Compose. Per-issuer CRL and OCSP publication
+is available; operators may enable generated-key bootstrap only after verifying
+that every relying party consumes the managed issuer URLs and trust bundle. The
+legacy `issueCertificate` mutation remains available as the explicit v1
+migration path and is not silently redirected to managed authorities.
+
+## Issuer-aware renewal (v2)
+
+Managed renewal identifies the certificate being replaced by its exact
+`credentialId`, never by serial alone. Use `renewCertificateFromCsrV2` when the
+subject keeps its key outside Atom, or the separately named
+`renewGeneratedCertificateV2` when an operator explicitly requests a new
+one-time private key. Neither input accepts an entity, tenant, issuer, profile,
+subject name, or key reference.
+
+```graphql
+mutation RenewDevice($input: RenewCertificateFromCsrV2Input!) {
+  renewCertificateFromCsrV2(input: $input) {
+    idempotentReplay
+    chainPem
+    certificate {
+      credentialId
+      renewedFromCredentialId
+      issuerId
+      renewalDueAt
+      certificatePem
+    }
+  }
+}
+```
+
+Both v2 mutations require an idempotency key. A certificate can have only one
+replacement: an exact retry returns that replacement with
+`idempotentReplay: true`, while a changed key, CSR, TTL, mode, or revocation
+policy conflicts. Generated-key retries never reveal the private key again; if
+the first response was lost, use the same unusable-key response procedure as a
+lost bootstrap response.
+
+The replacement is issued under the subject scope's current active issuer and
+current `client` profile. This moves a leaf from a retiring issuer to its
+replacement and is the only migration path for legacy `issuerId: null`
+certificates: tenant-owned entities move to their tenant intermediate, while
+global entities move to the platform leaf issuer. Atom stores an exact
+`renewedFromCredentialId` relation and derives `renewalDueAt` from the old
+certificate's profile threshold, never from a global renewal constant.
+
+By default the old and new credentials overlap and remain independently
+resolvable. Set `revokeOld: true` for immediate, atomic revocation of the old
+credential. The replacement, history link, optional revocation, and outbox
+event commit together; the compliance audit row follows the repository's
+existing post-commit, best-effort policy.
+
+The service boundary also accepts renewal authorization from the exact
+certificate being replaced so the enrollment transport in PR-014 can attach
+without changing renewal policy. `renewalDueAt` tells clients when renewal is
+normally due, but does not block an intentional early key rotation.
+Certificate-authenticated renewal is accepted only when the credential is
+active, unexpired, and issued by a legacy, active, or retiring issuer. It is
+rejected once expired or revoked. A normally authorized operator may recover an
+expired but not revoked subject by renewing it with a new CSR or explicit
+generated-key request; a revoked subject must use fresh enrollment. This
+recovery never treats an expired or revoked certificate as authentication.
+
+The original serial-based `renewCertificate` mutation remains the explicit v1
+compatibility path for `issuerId: null` file-issuer credentials. It is isolated
+to that separately unique legacy namespace; new integrations use the
+exact-credential v2 mutations.
+
+## Issuer-aware revocation (v2)
+
+Use `revokeCertificateV2` for managed certificates. It accepts exactly one of
+these selectors:
+
+- `credentialId`;
+- `fingerprintSha256`; or
+- `issuerId` together with `serialNumber`.
+
+Serial alone is deliberately not a managed-certificate selector. The original
+`revokeCertificate` mutation is retained only for legacy `issuerId: null`
+credentials; it rejects managed certificates so new callers cannot create an
+ambiguous mutation dependency after the resolver-v2 cutover.
+
+```graphql
+mutation RevokeManagedCertificate($input: RevokeCertificateV2Input!) {
+  revokeCertificateV2(input: $input) {
+    idempotentReplay
+    reason
+    actorEntityId
+    revokedAt
+    certificate {
+      credentialId
+      issuerId
+      serialNumber
+      status
+    }
+  }
+}
+```
+
+Revocation transitions the exact credential directly from `active` to
+`revoked`; Atom does not use a publication-dependent pending state. The status
+change, immutable `certificate_revocations` evidence, and dirty flag for only
+the affected issuer commit in one database transaction. Runtime resolution
+denies the credential from that commit onward, even before a CRL or OCSP
+artifact is regenerated. PR-009 and PR-010 own artifact encoding and serving.
+
+Reason values are short reason codes (for example `key_compromise`,
+`superseded`, or `cessation_of_operation`), not free-form incident notes. Audit
+and lifecycle outbox payloads identify the actor, credential, issuer,
+fingerprint, serial, reason, and revocation time but contain no certificate,
+key, CSR, or other secret material.
+
+An exact repeated request is idempotent: it returns the original actor, reason,
+and time with `idempotentReplay: true`, does not rewrite history, and does not
+enqueue a second `certificate.revoke` event. Revoked credentials cannot use the
+renewal recovery path; enroll a fresh credential instead.
+
+`revokeEntityCertificates` revokes every active certificate for one authorized
+entity and records the affected credential and issuer IDs in its event. Entity
+suspension and tenant freeze/delete fail closed in runtime resolution. Tenant
+or entity deletion also records exact revocation evidence for every certificate
+it transitions; restoring the subject never reactivates those certificates.
+
+## Per-issuer CRLs
+
+Each managed leaf issuer publishes its own DER-encoded CRL at
+`/certs/issuers/{issuer_id}/crl`. A CRL contains only revocations for
+certificates signed by that exact issuer, preserves the recorded RFC 5280 reason
+code, and is signed through the issuer's configured key provider. During CA
+rotation, `retiring` and `retired` issuers continue publishing their retained
+CRLs even though they cannot issue new leaves. An `expired` issuer may serve a
+still-valid cached artifact, but it cannot sign a replacement.
+
+The response uses `application/pkix-crl`, an ETag, bounded `Cache-Control`, and
+`If-None-Match` support. Pollers should retain every issuer URL needed by their
+certificate-validation window; a new issuer has a separate CRL and does not
+replace the old issuer's artifact. CRL numbers increase monotonically for the
+physical CA, including when legacy fingerprint-keyed state is adopted into the
+issuer-keyed cache.
+
+CRLs are compliance and interoperability artifacts, not Atom's primary
+revocation control. Runtime access is denied immediately from authoritative
+credential and subject state. Deployments should combine that resolver denial
+with short certificate lifetimes instead of waiting for a relying party's next
+CRL poll.
+
+## Per-issuer OCSP
+
+Each managed leaf issuer answers DER OCSP requests at
+`POST /certs/issuers/{issuer_id}/ocsp`. The responder accepts SHA-1 and SHA-256
+CertIDs, resolves the exact issuer plus serial, and returns signed `good`,
+`revoked`, or `unknown` status. A serial issued by another authority is always
+`unknown`. Revoked responses carry the immutable revocation time and the
+recorded RFC 5280 reason.
+
+Responses are signed directly by the route issuer and embed its validated chain
+to the retained root. The signature algorithm identifier is selected from the
+actual signing key. `retiring` and `retired` issuers remain available until
+their certificate expires, so relying parties must retain old issuer URLs and
+trust material for their full validation window. Atom does not use a delegated
+OCSP responder in this release.
+
+`producedAt` and `thisUpdate` describe the current database evaluation;
+`nextUpdate` is no more than five minutes later and never exceeds issuer expiry.
+Responses use `Cache-Control: no-store, max-age=0`, because revocation becomes
+authoritative immediately. A single request-level nonce of 1–32 bytes is
+echoed; absent nonces stay absent. Unsupported hashes, malformed DER, duplicate
+or misplaced nonces, more than 16 CertIDs, and requests larger than 16 KiB are
+rejected with bounded processing. Unknown issuer identifiers produce the same
+RFC `unauthorized` response without tenant detail.
+
+The original `POST /certs/ocsp` endpoint remains the compatibility route for
+the configured file-backed v1 issuer. It now uses the same bounded parser,
+nonce policy, response timing, and key-derived signature encoding, but it keeps
+the legacy global-serial data model. Managed certificates and all new
+integrations must use the per-issuer endpoint carried in the certificate AIA.
+
+## Legacy CA files
+
+The original v1 issuer remains available for backward compatibility and loads
+issuer files during startup. Managed-authority provisioning does not alter v1
+leaf issuance until the later PKI issuance cutover.
 
 Production should use:
 
@@ -60,18 +423,24 @@ ATOM_CERTS_ROOT_CA_CERT_PATH=/certs/root-ca.crt
 ATOM_CERTS_ROOT_CA_KEY_PATH=/certs/root-ca.key
 ```
 
-Root issuer mode is less safe because the root private key is mounted into Atom. Production should prefer an intermediate issuer so the root private key can stay offline.
+Root issuer mode is less safe because the root private key is mounted into Atom.
+It is a legacy-development mode only. Production managed authorities use the
+offline-root flow above.
 
 ## What Is Stored
 
 | Item | Stored where |
 |---|---|
-| Root CA certificate | Mounted file |
-| Intermediate CA certificate | Mounted file |
-| Issuer private key | Mounted file, loaded at startup |
+| Managed root CA certificate | `pki_authorities` as `public_only` |
+| Managed intermediate certificate and chain | `pki_authorities` |
+| Managed issuer private key | Envelope-encrypted in `pki_authorities` |
+| Production root private key | Offline; never accepted by Atom |
+| Legacy v1 CA certificate/key | Mounted files, loaded at startup |
 | Issued leaf certificate | `credentials` row with `kind = certificate` |
-| Issued leaf private key | Returned once, never stored |
+| Generated-path leaf private key | Returned once by legacy/generated issuance, never stored |
 | CSR private key | Never enters Atom |
+| Managed CSR idempotency state | Request/key digests and committed credential ID only |
+| Certificate revocation evidence | `certificate_revocations`, one immutable row per exact credential |
 | CRL cache | `certificate_crl_state` |
 
 ## Public PKI Endpoints
@@ -80,12 +449,214 @@ These endpoints are public because clients and runtimes need to verify certifica
 
 ```text
 GET  /certs/ca-chain
+GET  /certs/trust-bundle.pem
 GET  /certs/crl
+GET  /certs/issuers/{issuer_id}/crl
 POST /certs/ocsp
+POST /certs/issuers/{issuer_id}/ocsp
 ```
+
+`/certs/trust-bundle.pem` is assembled from current database authority state on
+every request. It returns an ETag derived from the bundle, accepts
+`If-None-Match`, and includes cache directives so relying parties can poll
+cheaply and notice a newly provisioned or rotated tenant authority without an
+Atom restart.
+
+`/certs/crl` remains the compatibility route for the legacy file-backed issuer.
+Managed-authority clients should use the issuer-specific route carried by their
+certificate's CRL distribution point. Likewise, `/certs/ocsp` is the legacy
+file-backed route; managed clients use their issuer-specific AIA URL.
+
+## Subject enrollment and re-enrollment
+
+Atom exposes the native enrollment adapter on a dedicated public TLS listener,
+separate from the main HTTP and gRPC ports. It is disabled by default. When
+enabled, Atom terminates TLS in process and asks for (but does not require) a
+client certificate. This permits bearer-authenticated first enrollment and
+certificate-only re-enrollment on the same port without trusting any proxy
+header.
+
+```text
+POST /pki/enroll     # Bearer Atom access token or login session
+POST /pki/reenroll   # verified mTLS client certificate; bearer is ignored
+```
+
+Both operations accept the same consumer-neutral JSON body:
+
+```json
+{
+  "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...",
+  "ttl_secs": 86400,
+  "idempotency_key": "client-generated-retry-key"
+}
+```
+
+There is intentionally no entity, tenant, issuer, profile, subject, or product
+field. For first enrollment Atom derives identity from the authenticated
+credential. For re-enrollment it derives the exact credential from the leaf DER
+verified by the TLS handshake and the authoritative runtime resolver. The
+internal enrollment service then calls the same managed issuance/renewal paths
+as the management API. The native HTTP code only adapts request and response
+shapes, so a later protocol adapter does not duplicate policy.
+
+The response returns `credential_id`, `entity_id`, `tenant_id`, `issuer_id`,
+`profile_id`, `profile_name`, `identity_uri`, `serial_number`,
+`certificate_pem`, `chain_pem`, `not_after`, `renewal_due_at`, the profile's
+exact `renewal_threshold_seconds`, and `idempotent_replay`. Keep the CSR private
+key locally; it never enters Atom. Exact retries return the same certificate.
+The old certificate remains active for the normal renewal overlap window.
+
+The listener also exposes RFC 7030 EST for standards-based firmware and tools:
+
+```text
+GET  /.well-known/est/cacerts
+GET  /.well-known/est/csrattrs
+POST /.well-known/est/simpleenroll
+POST /.well-known/est/simplereenroll
+POST /.well-known/est/serverkeygen
+```
+
+EST requests and responses use the RFC media types and base64 transfer
+encoding. `simpleenroll`, `serverkeygen`, and `csrattrs` accept HTTP Basic with
+the entity UUID and its Atom password credential (or an Atom Bearer token).
+`simplereenroll` accepts only the certificate being replaced in the TLS
+handshake. `serverkeygen` returns a multipart PKCS#8 key and certs-only PKCS#7;
+the key is delivered once and never persisted. `cacerts` is the PKCS#7
+representation of the same database trust bundle as
+`/certs/trust-bundle.pem`.
+
+EST adds no subject selectors: an additional path segment is not mounted, and
+query parameters or headers cannot select an entity, tenant, issuer, or
+profile. Those values are resolved by the same subject-driven enrollment
+service used by the native adapter.
+
+Enable and bind the listener with:
+
+```text
+ATOM_PKI_ENROLLMENT_ENABLED=true
+ATOM_PKI_ENROLLMENT_LISTEN_ADDR=0.0.0.0:8443
+ATOM_PKI_ENROLLMENT_TLS_CERT_PATH=/certs/enrollment-server.crt
+ATOM_PKI_ENROLLMENT_TLS_KEY_PATH=/certs/enrollment-server.key
+ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS=10
+ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS=10
+ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS=30
+ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS=300
+ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS=30
+```
+
+The cert/key identify the enrollment server. Client certificates are verified
+against Atom's database-backed trust bundle, inside the process. Setting only
+one server TLS path, or enabling enrollment without both, fails startup. Never
+forward a client identity in `X-Client-Cert`, `X-Forwarded-Client-Cert`,
+`SSL-Client-Cert`, or application metadata: these values are ignored and cannot
+replace the TLS peer certificate.
+
+The verifier refreshes the database trust bundle every 60 seconds by default,
+so newly provisioned or rotated authorities become eligible without restarting
+Atom. A refresh failure retains the last known-good verifier and emits a
+warning; tune the interval with `ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS`.
+Slow handshakes, HTTP headers, and request bodies cannot hold a connection
+permit indefinitely. The listener also caps concurrent connections both
+globally and per source IP; IPv6 sources are aggregated to a configurable `/64`
+prefix by default. Established connections have a configured lifetime,
+and shutdown waits for active connections only up to the configured drain
+deadline before aborting them.
+
+Per-entity (10/minute by default) and per-tenant (1000/minute) limits are stored
+atomically in PostgreSQL, so replicas share enforcement. The optional IP limiter
+uses its separate enrollment bucket (1000/minute by default), not the public
+CRL/OCSP bucket; it is disabled with `ATOM_RATE_LIMIT_ENABLED=false`. `429` responses include
+`Retry-After`; `atom_rate_limit_rejections_total`,
+`atom_pki_enrollment_operations_total`, and
+`atom_pki_enrollment_peer_rejections_total` expose bounded operational labels.
+Missing peer certificates are counted and logged without creating durable
+outbox rows. CSR input defaults to a 64 KiB maximum and the entire HTTP body is
+bounded before full allocation.
+
+HTTP/1.1 keep-alive is disabled by default to bound connection reuse. Set
+`ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE=true` to enable it. Tune IPv6 aggregation
+with `ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN` for connection caps and
+`ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN` for request-rate buckets.
+
+An expired, revoked, unknown, or not-yet-valid certificate, an inactive entity,
+or a frozen/inactive/deleted tenant cannot re-enroll. Recovery is first
+enrollment with an active non-certificate Atom credential. If none remains, an
+operator must use the normal credential-management recovery flow; weakening
+mTLS validation is never a recovery mechanism.
 
 ## Runtime Lookup
 
-Runtime services should prefer certificate fingerprint plus serial number when asking Atom to resolve a certificate. Atom returns identity only for active, known, non-expired, non-revoked certificates.
+Runtime services use `CertificateService.ResolveCertificateV2`. Supply at least
+one exact selector:
 
-If the certificate is unknown, expired, revoked, or issued by the wrong issuer, Atom returns a negative result.
+- the complete leaf DER, from which Atom derives SHA-256;
+- the leaf DER SHA-256 fingerprint; or
+- a managed issuer fingerprint together with the normalized leaf serial.
+
+When more than one selector is supplied, every selector must identify the same
+credential. Atom returns the entity, tenant, credential, issuer, expiry, and
+status. A global entity returns an empty tenant and never acquires tenant scope.
+Use `expectedTenantId` to bind a resolution to the relying party's requested
+scope before normal authorization.
+
+Resolution denies unknown, `revocation_pending`, revoked, expired,
+inactive/deleted-entity, frozen/deleted-tenant, and unavailable-issuer state.
+Retiring and retained retired issuers continue to verify existing leaves until
+expiry. Managed serial uniqueness is scoped to `issuerId`; independent issuers
+may safely use the same serial.
+
+`CertificateService.ResolveCertificate` is deprecated and can see only the
+separately unique legacy file-issuer namespace where `issuerId` is null. It can
+never select a managed credential.
+
+When event publishing is configured, invalidate resolver caches from
+`certificate.issue`, `certificate.renew`, `certificate.revoke`, and
+`certificate.revoke_entity`, plus entity, tenant, and authority lifecycle
+events. Cache the returned credential, issuer, entity, and tenant IDs with the
+lookup key so invalidation is exact and idempotent under at-least-once delivery.
+
+CRL and OCSP remain interoperability artifacts. Immediate resolver denial plus
+short certificate lifetimes are the primary revocation control.
+
+## Lifecycle automation and fleet operations
+
+Lifecycle automation is opt-in. Set `ATOM_PKI_LIFECYCLE_ENABLED=true` to run the
+replica-safe sweeper. Its interval and bounded scan size are controlled by
+`ATOM_PKI_LIFECYCLE_INTERVAL_SECS` and `ATOM_PKI_LIFECYCLE_BATCH_SIZE`.
+Disabling the job leaves issuance and all interactive certificate operations
+unchanged.
+
+The sweeper emits `certificate.expiring` once when an active leaf enters each
+of two windows: its profile-derived renewal window and the configured critical
+expiry window. The stored renewal threshold takes precedence; otherwise Atom
+resolves the applicable referenced, tenant-default, or platform-default
+certificate profile. Durable notification claims and the outbox event are
+written in one transaction, while a PostgreSQL advisory transaction lock
+coordinates replicas and restarts. Authority certificates emit
+`certificate.authority_expiring` within the configured rotation lead time.
+Events contain issuer, credential, entity, and tenant identifiers but no
+certificate, subject, key, CSR, or secret material.
+
+The `certificates` GraphQL query accepts `issuerId`, `expiresFrom`, and
+`expiresBefore` in addition to its existing filters. `expiresFrom` is inclusive
+and `expiresBefore` is exclusive. Expiry queries use a stable
+`(expires_at, credential_id)` order, and tenant authorization is applied in SQL
+before pagination rather than by filtering returned rows.
+
+`bulkRevokeCertificates` revokes one bounded page selected by exactly one of
+`tenantId`, `issuerId`, or `principalGroupId`. It reports every attempted item
+and returns the last contiguous successful credential as
+`nextCursor`. The first page also returns `snapshotAt`; every request carrying
+`afterCredentialId` must send that same snapshot timestamp. A caller can repair
+a failed item and resume from the cursor without absorbing certificates issued
+between pages; already revoked credentials are not selected again. A new bulk
+operation handles certificates created after the snapshot. Bulk issuance and
+notification delivery remain outside Atom.
+
+Prometheus metrics expose lifecycle operation counts, certificate expiry
+buckets, authority time to expiry, and CRL size and generation duration. Metric
+labels are deliberately bounded to operation, result, status, and time bucket;
+they never carry tenant, entity, credential, issuer, subject, serial, or key
+material. Operation successes are counted only after commit. If an authority
+kind is absent from the current fleet snapshot, its gauge is `NaN`, not a
+zero-second value that could produce a false expiry alert.

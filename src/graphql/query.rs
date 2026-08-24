@@ -11,6 +11,7 @@ pub struct QueryRoot(
     super::groups::GroupQuery,
     super::credentials::CredentialQuery,
     super::certificates::CertificateQuery,
+    super::pki_authorities::AuthorityQuery,
     super::authz::AuthzQuery,
     super::policies::PolicyQuery,
     super::admin::AdminQuery,

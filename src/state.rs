@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    callout::CalloutService, certs::service::CertificateIssuer, config::Config,
-    events::publisher::EventPublisher, keys::ActiveKeys, rate_limit::RateLimiter,
+    callout::CalloutService, config::Config, events::publisher::EventPublisher, keys::ActiveKeys,
+    rate_limit::RateLimiter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +54,6 @@ pub struct AppState {
     pub pool: sqlx::PgPool,
     pub config: Config,
     pub keys: Arc<RwLock<ActiveKeys>>,
-    pub certificate_issuer: Option<Arc<CertificateIssuer>>,
     pub rate_limiter: Arc<RateLimiter>,
     /// Delivers domain events out of the outbox (see `src/events/mod.rs`).
     /// `None` (the default) means no broker is configured: event publishing
@@ -70,18 +69,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        pool: sqlx::PgPool,
-        config: Config,
-        keys: ActiveKeys,
-        certificate_issuer: Option<CertificateIssuer>,
-    ) -> Self {
+    pub fn new(pool: sqlx::PgPool, config: Config, keys: ActiveKeys) -> Self {
         let grpc_status = GrpcRuntimeStatus::starting(config.grpc_addr.clone());
         AppState {
             pool,
             config,
             keys: Arc::new(RwLock::new(keys)),
-            certificate_issuer: certificate_issuer.map(Arc::new),
             rate_limiter: Arc::new(RateLimiter::default()),
             event_publisher: None,
             callouts: CalloutService::disabled(),

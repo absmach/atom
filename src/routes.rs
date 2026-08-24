@@ -59,10 +59,21 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health", get(health::legacy_health))
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
-        // Public PKI artifacts
-        .route("/certs/ca-chain", get(certs::http::ca_chain))
-        .route("/certs/crl", get(certs::http::crl))
-        .route("/certs/ocsp", post(certs::http::ocsp))
+        // Public PKI artifacts (v2 managed only — per-issuer)
+        .route(
+            "/certs/trust-bundle.pem",
+            get(certs::authority::http::trust_bundle),
+        )
+        .route(
+            "/certs/issuers/:issuer_id/crl",
+            get(certs::http::issuer_crl),
+        )
+        .route(
+            "/certs/issuers/:issuer_id/ocsp",
+            post(certs::http::issuer_ocsp).layer(DefaultBodyLimit::max(
+                certs::service::OCSP_REQUEST_MAX_BYTES,
+            )),
+        )
         // GraphQL
         .route(
             "/graphql",
@@ -379,7 +390,6 @@ mod tests {
                 primary,
                 standby: None,
             },
-            None,
         )
     }
 }

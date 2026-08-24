@@ -4,6 +4,7 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use std::{fmt, str::FromStr};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 // 00000000-0000-0000-0000-000000000001
 pub const ADMIN_ENTITY_ID: Uuid =
@@ -21,7 +22,14 @@ pub struct Config {
     /// In-process TLS for the gRPC server. `None` = plaintext (the transport
     /// must then be secured by the deployment: private network / service mesh).
     pub grpc_tls: Option<GrpcTlsConfig>,
+    /// Dedicated public TLS listener for subject certificate enrollment.
+    /// Disabled by default; when enabled, TLS is always terminated in process.
+    pub enrollment: EnrollmentConfig,
+    /// Replica-safe certificate expiry visibility and bounded fleet operations.
+    /// Background automation is opt-in; query and mutation APIs remain usable.
+    pub pki_lifecycle: PkiLifecycleConfig,
     pub signing_keys: SigningKeyConfig,
+    pub pki_ca_keys: PkiCaKeyConfig,
     pub audit_policy: AuditPolicyConfig,
     pub audit_retention: AuditRetentionConfig,
     pub purge: PurgeConfig,
@@ -70,14 +78,22 @@ pub struct Config {
     pub auth_exchange_code_expiry_secs: u64,
     pub login_failure_limit: i64,
     pub login_failure_window_secs: i64,
-    pub certs_enabled: bool,
-    pub certs_ca_mode: CertsCaMode,
-    pub certs_root_ca_cert_path: Option<String>,
-    pub certs_intermediate_ca_cert_path: Option<String>,
-    pub certs_intermediate_ca_key_path: Option<String>,
-    pub certs_root_ca_key_path: Option<String>,
-    pub certs_leaf_default_ttl_secs: u64,
-    pub certs_leaf_max_ttl_secs: u64,
+    /// One-time managed leaf-key bootstrap. This remains opt-in until the
+    /// issuer-aware revocation publication path is complete.
+    pub pki_generated_key_issuance_enabled: bool,
+    /// Path to a PEM-encoded root CA certificate that Atom imports as the
+    /// managed root trust anchor on startup. Idempotent — a subsequent
+    /// restart with the same PEM finds the existing row by fingerprint and
+    /// leaves it in place. `None` skips the bootstrap step; the platform
+    /// then has no active root and cannot provision downstream authorities.
+    pub pki_root_cert_path: Option<String>,
+    /// Path to a PEM-encoded platform intermediate CA certificate that must
+    /// already be signed by the configured root. Paired with
+    /// [`Self::pki_platform_intermediate_key_path`]. Idempotent by fingerprint.
+    pub pki_platform_intermediate_cert_path: Option<String>,
+    /// Path to a PEM-encoded platform intermediate CA private key (PKCS#8).
+    /// Atom wraps the key with the CA KEK before persisting.
+    pub pki_platform_intermediate_key_path: Option<String>,
     pub broker_auth: BrokerAuthConfig,
 }
 
@@ -222,6 +238,42 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// Redacted, zeroizing configuration text for provider credentials whose
+/// length is provider-defined (for example, a PKCS#11 user PIN).
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretText(String);
+
+impl SecretText {
+    pub fn new(value: String) -> Result<Self> {
+        if value.trim().is_empty() {
+            anyhow::bail!("secret text must not be blank");
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl Drop for SecretText {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningKeyConfig {
     pub key_encryption_key: Option<SecretBytes>,
@@ -235,6 +287,97 @@ impl Default for SigningKeyConfig {
             key_encryption_key: None,
             key_encryption_key_id: "local:v1".to_string(),
             allow_plaintext_signing_keys: false,
+        }
+    }
+}
+
+/// Dedicated key-encryption-key configuration for managed CA private keys.
+///
+/// This is intentionally separate from [`SigningKeyConfig`]: compromise or
+/// rotation of JWT/credential encryption must not grant access to CA keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PkiCaProvisioningBackend {
+    EncryptedDatabase,
+    Pkcs11,
+}
+
+impl PkiCaProvisioningBackend {
+    pub fn from_env_value(value: &str) -> Result<Self> {
+        match value {
+            "encrypted_database" => Ok(Self::EncryptedDatabase),
+            "pkcs11" => Ok(Self::Pkcs11),
+            other => anyhow::bail!(
+                "ATOM_PKI_CA_KEY_BACKEND must be encrypted_database or pkcs11, got {other}"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EncryptedDatabase => "encrypted_database",
+            Self::Pkcs11 => "pkcs11",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct PkiPkcs11Config {
+    pub module_path: String,
+    pub token_label: String,
+    pub user_pin: SecretText,
+    pub operation_timeout_ms: u64,
+    /// Hard upper bound on how long a Mutating PKCS#11 operation may block
+    /// after it has already blown the `operation_timeout_ms` soft deadline.
+    /// A wedged token holding the deployment-wide provisioning advisory lock
+    /// still frees the lock at this deadline; a late completion becomes an
+    /// orphaned side effect that operators must reconcile manually. Must be
+    /// >= `operation_timeout_ms`.
+    pub mutation_hard_timeout_ms: u64,
+    pub max_retries: u32,
+    pub max_in_flight: u32,
+    pub circuit_failure_threshold: u32,
+    pub circuit_reset_secs: u64,
+}
+
+impl fmt::Debug for PkiPkcs11Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PkiPkcs11Config")
+            .field("module_path", &self.module_path)
+            .field("token_label", &self.token_label)
+            .field("user_pin", &"<redacted>")
+            .field("operation_timeout_ms", &self.operation_timeout_ms)
+            .field("mutation_hard_timeout_ms", &self.mutation_hard_timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("circuit_failure_threshold", &self.circuit_failure_threshold)
+            .field("circuit_reset_secs", &self.circuit_reset_secs)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkiCaKeyConfig {
+    pub key_encryption_key: Option<SecretBytes>,
+    pub key_encryption_key_id: String,
+    pub provisioning_backend: PkiCaProvisioningBackend,
+    pub pkcs11: Option<PkiPkcs11Config>,
+    /// Public HTTPS base URL under which the `/certs/issuers/{id}/{ocsp,crl}`
+    /// artifact routes and `/certs/trust-bundle.pem` are served. Populated only
+    /// when `ATOM_PUBLIC_BASE_URL` is explicitly configured; carried on
+    /// `PkiCaKeyConfig` so provisioning helpers can embed per-authority
+    /// discovery URLs at activation without a separate signature parameter.
+    /// `None` preserves the legacy manual-SQL workflow.
+    pub artifact_base_url: Option<String>,
+}
+
+impl Default for PkiCaKeyConfig {
+    fn default() -> Self {
+        Self {
+            key_encryption_key: None,
+            key_encryption_key_id: "local-ca:v1".to_string(),
+            provisioning_backend: PkiCaProvisioningBackend::EncryptedDatabase,
+            pkcs11: None,
+            artifact_base_url: None,
         }
     }
 }
@@ -297,13 +440,99 @@ pub struct RateLimitPolicyConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentTlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollmentConfig {
+    pub enabled: bool,
+    pub listen_addr: String,
+    pub tls: Option<EnrollmentTlsConfig>,
+    pub entity_rate_limit: RateLimitPolicyConfig,
+    pub tenant_rate_limit: RateLimitPolicyConfig,
+    pub max_csr_bytes: usize,
+    pub max_connections: usize,
+    pub max_connections_per_ip: usize,
+    /// IPv6 sources are grouped by this prefix before applying the
+    /// per-source connection cap. A /64 is the standard routed allocation.
+    pub ipv6_prefix_len: u8,
+    /// Whether HTTP/1.1 connections may serve more than one request.
+    pub http_keep_alive: bool,
+    pub trust_bundle_refresh_secs: u64,
+    pub tls_handshake_timeout_secs: u64,
+    pub http_header_timeout_secs: u64,
+    /// Total time allowed for an enrollment request, including body receipt
+    /// and handler execution.
+    pub request_timeout_secs: u64,
+    pub connection_timeout_secs: u64,
+    pub shutdown_drain_timeout_secs: u64,
+}
+
+impl Default for EnrollmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: "0.0.0.0:8443".to_string(),
+            tls: None,
+            entity_rate_limit: RateLimitPolicyConfig {
+                max_requests: 10,
+                window_secs: 60,
+            },
+            tenant_rate_limit: RateLimitPolicyConfig {
+                max_requests: 1_000,
+                window_secs: 60,
+            },
+            max_csr_bytes: 64 * 1024,
+            max_connections: 256,
+            max_connections_per_ip: 8,
+            ipv6_prefix_len: 64,
+            http_keep_alive: false,
+            trust_bundle_refresh_secs: 60,
+            tls_handshake_timeout_secs: 10,
+            http_header_timeout_secs: 10,
+            request_timeout_secs: 30,
+            connection_timeout_secs: 300,
+            shutdown_drain_timeout_secs: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PkiLifecycleConfig {
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub batch_size: i64,
+    pub expiry_warning_secs: u64,
+    pub authority_warning_secs: u64,
+}
+
+impl Default for PkiLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 60,
+            batch_size: 250,
+            expiry_warning_secs: 86_400,
+            // Thirty days leaves time for the documented PR-003 rotation
+            // procedure and a controlled rollout of the successor chain.
+            authority_warning_secs: 30 * 86_400,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RateLimitConfig {
     pub enabled: bool,
     pub auth_routes: RateLimitPolicyConfig,
     pub public_routes: RateLimitPolicyConfig,
+    pub enrollment: RateLimitPolicyConfig,
     pub graphql: RateLimitPolicyConfig,
     pub custom_endpoints: RateLimitPolicyConfig,
     pub admin_routes: RateLimitPolicyConfig,
+    /// IPv6 client addresses are grouped by this prefix for IP buckets.
+    pub ipv6_prefix_len: u8,
     pub trusted_proxy_cidrs: Vec<IpNet>,
 }
 
@@ -319,6 +548,13 @@ impl Default for RateLimitConfig {
                 max_requests: 120,
                 window_secs: 60,
             },
+            enrollment: RateLimitPolicyConfig {
+                // Keep a shared NAT gateway from becoming stricter than the
+                // durable per-tenant enrollment limit by default. Operators
+                // may lower this independent public-surface policy.
+                max_requests: 1_000,
+                window_secs: 60,
+            },
             graphql: RateLimitPolicyConfig {
                 max_requests: 120,
                 window_secs: 60,
@@ -331,6 +567,7 @@ impl Default for RateLimitConfig {
                 max_requests: 300,
                 window_secs: 60,
             },
+            ipv6_prefix_len: 64,
             trusted_proxy_cidrs: Vec::new(),
         }
     }
@@ -526,36 +763,31 @@ impl LogFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CertsCaMode {
-    FileIntermediateIssuer,
-    FileRootIssuer,
-}
-
-impl CertsCaMode {
-    pub fn from_env_value(value: &str) -> Result<Self> {
-        match value {
-            "file_intermediate_issuer" => Ok(Self::FileIntermediateIssuer),
-            "file_root_issuer" => Ok(Self::FileRootIssuer),
-            other => anyhow::bail!(
-                "ATOM_CERTS_CA_MODE must be file_intermediate_issuer or file_root_issuer, got {other}"
-            ),
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::FileIntermediateIssuer => "file_intermediate_issuer",
-            Self::FileRootIssuer => "file_root_issuer",
-        }
-    }
-}
-
 impl Config {
     pub fn from_env() -> Result<Self> {
         let public_base_url = std::env::var("ATOM_PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".into());
         let ui_auth_callback = public_url(&public_base_url, "/auth/callback");
+        let signing_keys = signing_keys_from_env()?;
+        let mut pki_ca_keys = pki_ca_keys_from_env()?;
+        // `public_base_url` has a localhost default for local UI and auth
+        // flows. Certificate discovery URLs are permanent certificate
+        // metadata, so they must never inherit that implicit development
+        // value. Without an explicitly configured public URL, leave them
+        // unset and let leaf issuance fail closed instead of minting
+        // certificates with unreachable CRL/AIA endpoints.
+        pki_ca_keys.artifact_base_url =
+            nonempty_env("ATOM_PUBLIC_BASE_URL").map(|url| url.trim_end_matches('/').to_string());
+        if let (Some(signing_kek), Some(ca_kek)) = (
+            signing_keys.key_encryption_key.as_ref(),
+            pki_ca_keys.key_encryption_key.as_ref(),
+        ) {
+            if signing_kek.expose() == ca_kek.expose() {
+                anyhow::bail!(
+                    "ATOM_PKI_CA_KEY_ENCRYPTION_KEY must not reuse ATOM_KEY_ENCRYPTION_KEY"
+                );
+            }
+        }
         Ok(Config {
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
             db_pool: db_pool_from_env()?,
@@ -564,7 +796,10 @@ impl Config {
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             grpc_tls: grpc_tls_from_env()?,
-            signing_keys: signing_keys_from_env()?,
+            enrollment: enrollment_from_env()?,
+            pki_lifecycle: pki_lifecycle_from_env()?,
+            signing_keys,
+            pki_ca_keys,
             audit_policy: AuditPolicyConfig {
                 hot_path_allow_db_enabled: env_bool_default(
                     "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
@@ -628,19 +863,17 @@ impl Config {
             auth_exchange_code_expiry_secs: env_u64("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", 300),
             login_failure_limit: env_positive_i64("ATOM_LOGIN_FAILURE_LIMIT", 5)?,
             login_failure_window_secs: env_positive_i64("ATOM_LOGIN_FAILURE_WINDOW_SECS", 15 * 60)?,
-            certs_enabled: env_bool_default("ATOM_CERTS_ENABLED", true),
-            certs_ca_mode: CertsCaMode::from_env_value(
-                &std::env::var("ATOM_CERTS_CA_MODE")
-                    .unwrap_or_else(|_| "file_intermediate_issuer".to_string()),
-            )?,
-            certs_root_ca_cert_path: std::env::var("ATOM_CERTS_ROOT_CA_CERT_PATH").ok(),
-            certs_intermediate_ca_cert_path: std::env::var("ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH")
-                .ok(),
-            certs_intermediate_ca_key_path: std::env::var("ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH")
-                .ok(),
-            certs_root_ca_key_path: std::env::var("ATOM_CERTS_ROOT_CA_KEY_PATH").ok(),
-            certs_leaf_default_ttl_secs: env_u64("ATOM_CERTS_LEAF_DEFAULT_TTL_SECS", 2_592_000),
-            certs_leaf_max_ttl_secs: env_u64("ATOM_CERTS_LEAF_MAX_TTL_SECS", 2_592_000),
+            pki_generated_key_issuance_enabled: env_bool_default(
+                "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
+                false,
+            ),
+            pki_root_cert_path: nonempty_env("ATOM_PKI_ROOT_CERT_PATH"),
+            pki_platform_intermediate_cert_path: nonempty_env(
+                "ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH",
+            ),
+            pki_platform_intermediate_key_path: nonempty_env(
+                "ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH",
+            ),
             broker_auth: broker_auth_from_env()?,
             public_base_url,
         })
@@ -655,12 +888,19 @@ impl Config {
             listen_addr: "127.0.0.1:0".into(),
             grpc_addr: "127.0.0.1:0".into(),
             grpc_tls: None,
+            enrollment: EnrollmentConfig::default(),
+            pki_lifecycle: PkiLifecycleConfig::default(),
             signing_keys: SigningKeyConfig {
                 allow_plaintext_signing_keys: true,
                 // Provide a deterministic KEK so tests exercise encryption at rest
                 // for recoverable secrets (shared keys).
                 key_encryption_key: SecretBytes::new(vec![7u8; 32]).ok(),
                 ..SigningKeyConfig::default()
+            },
+            pki_ca_keys: PkiCaKeyConfig {
+                key_encryption_key: SecretBytes::new(vec![8u8; 32]).ok(),
+                artifact_base_url: Some("https://pki.example.test".into()),
+                ..PkiCaKeyConfig::default()
             },
             audit_policy: AuditPolicyConfig::default(),
             audit_retention: AuditRetentionConfig::default(),
@@ -701,14 +941,10 @@ impl Config {
             auth_exchange_code_expiry_secs: 300,
             login_failure_limit: 5,
             login_failure_window_secs: 15 * 60,
-            certs_enabled: false,
-            certs_ca_mode: CertsCaMode::FileIntermediateIssuer,
-            certs_root_ca_cert_path: None,
-            certs_intermediate_ca_cert_path: None,
-            certs_intermediate_ca_key_path: None,
-            certs_root_ca_key_path: None,
-            certs_leaf_default_ttl_secs: 2_592_000,
-            certs_leaf_max_ttl_secs: 2_592_000,
+            pki_generated_key_issuance_enabled: false,
+            pki_root_cert_path: None,
+            pki_platform_intermediate_cert_path: None,
+            pki_platform_intermediate_key_path: None,
             broker_auth: BrokerAuthConfig::default(),
         }
     }
@@ -845,6 +1081,99 @@ fn parse_key_encryption_key() -> Result<Option<SecretBytes>> {
         .context("ATOM_KEY_ENCRYPTION_KEY must decode to exactly 32 bytes")
 }
 
+fn pki_ca_keys_from_env() -> Result<PkiCaKeyConfig> {
+    let default = PkiCaKeyConfig::default();
+    let key_encryption_key = parse_secret_key_env("ATOM_PKI_CA_KEY_ENCRYPTION_KEY")?;
+    let key_encryption_key_id =
+        std::env::var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID").unwrap_or(default.key_encryption_key_id);
+    if key_encryption_key.is_some() && key_encryption_key_id.trim().is_empty() {
+        anyhow::bail!("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID must not be blank when the CA KEK is set");
+    }
+    let provisioning_backend = PkiCaProvisioningBackend::from_env_value(
+        &std::env::var("ATOM_PKI_CA_KEY_BACKEND")
+            .unwrap_or_else(|_| default.provisioning_backend.as_str().to_string()),
+    )?;
+    let pkcs11_names = [
+        "ATOM_PKI_PKCS11_MODULE_PATH",
+        "ATOM_PKI_PKCS11_TOKEN_LABEL",
+        "ATOM_PKI_PKCS11_USER_PIN",
+    ];
+    let pkcs11_requested = provisioning_backend == PkiCaProvisioningBackend::Pkcs11
+        || pkcs11_names
+            .iter()
+            .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()));
+    let pkcs11 = if pkcs11_requested {
+        let required = |name: &'static str| -> Result<String> {
+            let value = std::env::var(name).with_context(|| format!("{name} must be set"))?;
+            if value.trim().is_empty() {
+                anyhow::bail!("{name} must not be blank");
+            }
+            Ok(value)
+        };
+        let operation_timeout_ms = env_parse("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS", 2_000_u64)?;
+        let mutation_hard_timeout_ms =
+            env_parse("ATOM_PKI_PKCS11_MUTATION_HARD_TIMEOUT_MS", 60_000_u64)?;
+        let max_retries = env_parse("ATOM_PKI_PKCS11_MAX_RETRIES", 1_u32)?;
+        let max_in_flight = env_parse("ATOM_PKI_PKCS11_MAX_IN_FLIGHT", 8_u32)?;
+        let circuit_failure_threshold =
+            env_parse("ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD", 3_u32)?;
+        let circuit_reset_secs = env_parse("ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS", 30_u64)?;
+        if operation_timeout_ms == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS must be greater than zero");
+        }
+        if mutation_hard_timeout_ms < operation_timeout_ms {
+            anyhow::bail!(
+                "ATOM_PKI_PKCS11_MUTATION_HARD_TIMEOUT_MS must be >= ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS"
+            );
+        }
+        if max_retries > 3 {
+            anyhow::bail!("ATOM_PKI_PKCS11_MAX_RETRIES must be at most 3");
+        }
+        if max_in_flight == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_MAX_IN_FLIGHT must be greater than zero");
+        }
+        if circuit_failure_threshold == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD must be greater than zero");
+        }
+        if circuit_reset_secs == 0 {
+            anyhow::bail!("ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS must be greater than zero");
+        }
+        Some(PkiPkcs11Config {
+            module_path: required("ATOM_PKI_PKCS11_MODULE_PATH")?,
+            token_label: required("ATOM_PKI_PKCS11_TOKEN_LABEL")?,
+            user_pin: SecretText::new(required("ATOM_PKI_PKCS11_USER_PIN")?)?,
+            operation_timeout_ms,
+            mutation_hard_timeout_ms,
+            max_retries,
+            max_in_flight,
+            circuit_failure_threshold,
+            circuit_reset_secs,
+        })
+    } else {
+        None
+    };
+    Ok(PkiCaKeyConfig {
+        key_encryption_key,
+        key_encryption_key_id,
+        provisioning_backend,
+        pkcs11,
+        artifact_base_url: None,
+    })
+}
+
+fn parse_secret_key_env(name: &str) -> Result<Option<SecretBytes>> {
+    let value = match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return Ok(None),
+    };
+    let bytes = STANDARD
+        .decode(value.trim())
+        .with_context(|| format!("{name} must be base64 encoded"))?;
+    SecretBytes::new(bytes)
+        .map(Some)
+        .with_context(|| format!("{name} must decode to exactly 32 bytes"))
+}
+
 fn audit_retention_from_env() -> Result<AuditRetentionConfig> {
     let default = AuditRetentionConfig::default();
     let cfg = AuditRetentionConfig {
@@ -892,7 +1221,7 @@ fn purge_from_env() -> Result<PurgeConfig> {
 
 fn rate_limits_from_env() -> Result<RateLimitConfig> {
     let default = RateLimitConfig::default();
-    Ok(RateLimitConfig {
+    let cfg = RateLimitConfig {
         enabled: env_bool_default("ATOM_RATE_LIMIT_ENABLED", default.enabled),
         auth_routes: rate_limit_policy_from_env(
             "ATOM_HTTP_RATE_LIMIT_AUTH_ROUTES",
@@ -903,6 +1232,11 @@ fn rate_limits_from_env() -> Result<RateLimitConfig> {
             "ATOM_HTTP_RATE_LIMIT_PUBLIC_ROUTES",
             "ATOM_HTTP_RATE_LIMIT_PUBLIC_WINDOW_SECS",
             default.public_routes,
+        )?,
+        enrollment: rate_limit_policy_from_env(
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT",
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS",
+            default.enrollment,
         )?,
         graphql: rate_limit_policy_from_env(
             "ATOM_HTTP_RATE_LIMIT_GRAPHQL",
@@ -919,8 +1253,16 @@ fn rate_limits_from_env() -> Result<RateLimitConfig> {
             "ATOM_HTTP_RATE_LIMIT_ADMIN_WINDOW_SECS",
             default.admin_routes,
         )?,
+        ipv6_prefix_len: env_parse(
+            "ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN",
+            default.ipv6_prefix_len,
+        )?,
         trusted_proxy_cidrs: trusted_proxy_cidrs_from_env()?,
-    })
+    };
+    if cfg.ipv6_prefix_len == 0 || cfg.ipv6_prefix_len > 128 {
+        anyhow::bail!("ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN must be between 1 and 128");
+    }
+    Ok(cfg)
 }
 
 fn events_from_env() -> Result<EventsConfig> {
@@ -1094,6 +1436,147 @@ fn broker_auth_from_env() -> Result<BrokerAuthConfig> {
     })
 }
 
+fn enrollment_from_env() -> Result<EnrollmentConfig> {
+    let default = EnrollmentConfig::default();
+    let enabled = env_bool_default("ATOM_PKI_ENROLLMENT_ENABLED", default.enabled);
+    let cert_path = nonempty_env("ATOM_PKI_ENROLLMENT_TLS_CERT_PATH");
+    let key_path = nonempty_env("ATOM_PKI_ENROLLMENT_TLS_KEY_PATH");
+    let tls = match (cert_path, key_path) {
+        (Some(cert_path), Some(key_path)) => Some(EnrollmentTlsConfig {
+            cert_path,
+            key_path,
+        }),
+        (None, None) => None,
+        _ => anyhow::bail!(
+            "enrollment TLS requires both ATOM_PKI_ENROLLMENT_TLS_CERT_PATH and ATOM_PKI_ENROLLMENT_TLS_KEY_PATH"
+        ),
+    };
+    if enabled && tls.is_none() {
+        anyhow::bail!(
+            "ATOM_PKI_ENROLLMENT_ENABLED requires enrollment TLS certificate and key paths"
+        );
+    }
+
+    let cfg = EnrollmentConfig {
+        enabled,
+        listen_addr: std::env::var("ATOM_PKI_ENROLLMENT_LISTEN_ADDR")
+            .unwrap_or(default.listen_addr),
+        tls,
+        entity_rate_limit: rate_limit_policy_from_env(
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_WINDOW_SECS",
+            default.entity_rate_limit,
+        )?,
+        tenant_rate_limit: rate_limit_policy_from_env(
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_WINDOW_SECS",
+            default.tenant_rate_limit,
+        )?,
+        max_csr_bytes: env_parse("ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES", default.max_csr_bytes)?,
+        max_connections: env_parse(
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
+            default.max_connections,
+        )?,
+        max_connections_per_ip: env_parse(
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP",
+            default.max_connections_per_ip,
+        )?,
+        ipv6_prefix_len: env_parse(
+            "ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN",
+            default.ipv6_prefix_len,
+        )?,
+        http_keep_alive: env_bool_default(
+            "ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE",
+            default.http_keep_alive,
+        ),
+        trust_bundle_refresh_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
+            default.trust_bundle_refresh_secs,
+        )?,
+        tls_handshake_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
+            default.tls_handshake_timeout_secs,
+        )?,
+        http_header_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS",
+            default.http_header_timeout_secs,
+        )?,
+        request_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS",
+            default.request_timeout_secs,
+        )?,
+        connection_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS",
+            default.connection_timeout_secs,
+        )?,
+        shutdown_drain_timeout_secs: env_parse(
+            "ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS",
+            default.shutdown_drain_timeout_secs,
+        )?,
+    };
+    if cfg.max_csr_bytes == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES must be greater than zero");
+    }
+    if cfg.max_connections == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS must be greater than zero");
+    }
+    if cfg.max_connections_per_ip == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP must be greater than zero");
+    }
+    if cfg.ipv6_prefix_len == 0 || cfg.ipv6_prefix_len > 128 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN must be between 1 and 128");
+    }
+    if cfg.trust_bundle_refresh_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS must be greater than zero");
+    }
+    if cfg.tls_handshake_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.http_header_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.request_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.connection_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS must be greater than zero");
+    }
+    if cfg.shutdown_drain_timeout_secs == 0 {
+        anyhow::bail!("ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS must be greater than zero");
+    }
+    Ok(cfg)
+}
+
+fn pki_lifecycle_from_env() -> Result<PkiLifecycleConfig> {
+    let default = PkiLifecycleConfig::default();
+    let cfg = PkiLifecycleConfig {
+        enabled: env_bool_default("ATOM_PKI_LIFECYCLE_ENABLED", default.enabled),
+        interval_secs: env_parse("ATOM_PKI_LIFECYCLE_INTERVAL_SECS", default.interval_secs)?,
+        batch_size: env_parse("ATOM_PKI_LIFECYCLE_BATCH_SIZE", default.batch_size)?,
+        expiry_warning_secs: env_parse(
+            "ATOM_PKI_EXPIRY_WARNING_SECS",
+            default.expiry_warning_secs,
+        )?,
+        authority_warning_secs: env_parse(
+            "ATOM_PKI_AUTHORITY_WARNING_SECS",
+            default.authority_warning_secs,
+        )?,
+    };
+    if cfg.interval_secs == 0 {
+        anyhow::bail!("ATOM_PKI_LIFECYCLE_INTERVAL_SECS must be greater than zero");
+    }
+    if !(1..=1_000).contains(&cfg.batch_size) {
+        anyhow::bail!("ATOM_PKI_LIFECYCLE_BATCH_SIZE must be between 1 and 1000");
+    }
+    if cfg.expiry_warning_secs == 0 {
+        anyhow::bail!("ATOM_PKI_EXPIRY_WARNING_SECS must be greater than zero");
+    }
+    if cfg.authority_warning_secs == 0 {
+        anyhow::bail!("ATOM_PKI_AUTHORITY_WARNING_SECS must be greater than zero");
+    }
+    Ok(cfg)
+}
+
 fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -1172,7 +1655,7 @@ fn public_url(public_base_url: &str, path: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use super::{public_url, Config, LogFormat};
+    use super::{public_url, Config, LogFormat, PkiCaProvisioningBackend};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1203,10 +1686,24 @@ mod tests {
         assert_eq!(cfg.db_pool.acquire_timeout_secs, 30);
         assert!(!cfg.signing_keys.allow_plaintext_signing_keys);
         assert!(cfg.signing_keys.key_encryption_key.is_none());
+        assert!(cfg.pki_ca_keys.key_encryption_key.is_none());
+        assert_eq!(
+            cfg.pki_ca_keys.provisioning_backend,
+            PkiCaProvisioningBackend::EncryptedDatabase
+        );
+        assert!(cfg.pki_ca_keys.pkcs11.is_none());
+        assert!(
+            cfg.pki_ca_keys.artifact_base_url.is_none(),
+            "certificate discovery URLs must not inherit the localhost UI default"
+        );
         assert!(!cfg.audit_policy.hot_path_allow_db_enabled);
         assert_eq!(cfg.audit_retention.days, 365);
         assert_eq!(cfg.login_failure_limit, 5);
         assert_eq!(cfg.login_failure_window_secs, 900);
+        assert!(
+            !cfg.pki_generated_key_issuance_enabled,
+            "managed generated-key issuance must default off"
+        );
         assert!(cfg.rate_limits.enabled);
         assert!(
             !cfg.graphql_limits.introspection_enabled,
@@ -1312,6 +1809,41 @@ mod tests {
     }
 
     #[test]
+    fn managed_generated_key_issuance_requires_explicit_opt_in() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("config");
+        assert!(!cfg.pki_generated_key_issuance_enabled);
+
+        std::env::set_var("ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED", "true");
+        let cfg = Config::from_env().expect("config");
+        assert!(cfg.pki_generated_key_issuance_enabled);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn certificate_artifact_base_url_requires_explicit_public_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert!(cfg.pki_ca_keys.artifact_base_url.is_none());
+
+        std::env::set_var("ATOM_PUBLIC_BASE_URL", "https://pki.example.test/");
+        let cfg = Config::from_env().expect("explicit public URL");
+        assert_eq!(
+            cfg.pki_ca_keys.artifact_base_url.as_deref(),
+            Some("https://pki.example.test")
+        );
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn hot_path_allow_db_audit_opts_in_via_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -1351,6 +1883,92 @@ mod tests {
     }
 
     #[test]
+    fn pki_ca_key_is_separate_and_must_be_base64_32_bytes() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var(
+            "ATOM_KEY_ENCRYPTION_KEY",
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        );
+
+        let cfg = Config::from_env().expect("config");
+        assert!(cfg.signing_keys.key_encryption_key.is_some());
+        assert!(cfg.pki_ca_keys.key_encryption_key.is_none());
+
+        std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY", "too-short");
+        let err = Config::from_env().expect_err("invalid CA key");
+        assert!(err.to_string().contains("ATOM_PKI_CA_KEY_ENCRYPTION_KEY"));
+
+        std::env::set_var(
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        );
+        let err = Config::from_env().expect_err("reused signing and CA KEK");
+        assert!(err
+            .to_string()
+            .contains("must not reuse ATOM_KEY_ENCRYPTION_KEY"));
+
+        std::env::set_var(
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
+            "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=",
+        );
+        std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID", " ");
+        let err = Config::from_env().expect_err("blank CA key id");
+        assert!(err
+            .to_string()
+            .contains("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID"));
+
+        std::env::set_var("ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID", "local-ca:v1");
+        let cfg = Config::from_env().expect("distinct CA KEK");
+        assert_ne!(
+            cfg.signing_keys
+                .key_encryption_key
+                .as_ref()
+                .expect("signing KEK")
+                .expose(),
+            cfg.pki_ca_keys
+                .key_encryption_key
+                .as_ref()
+                .expect("CA KEK")
+                .expose(),
+        );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn pkcs11_configuration_is_operator_only_and_fail_closed() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_PKI_CA_KEY_BACKEND", "pkcs11");
+
+        let err = Config::from_env().expect_err("missing PKCS#11 configuration");
+        assert!(err.to_string().contains("ATOM_PKI_PKCS11_MODULE_PATH"));
+
+        std::env::set_var("ATOM_PKI_PKCS11_MODULE_PATH", "/opt/hsm/libpkcs11.so");
+        std::env::set_var("ATOM_PKI_PKCS11_TOKEN_LABEL", "atom-production-ca");
+        std::env::set_var("ATOM_PKI_PKCS11_USER_PIN", "provider-pin");
+        let cfg = Config::from_env().expect("PKCS#11 config");
+        assert_eq!(
+            cfg.pki_ca_keys.provisioning_backend,
+            PkiCaProvisioningBackend::Pkcs11
+        );
+        let pkcs11 = cfg.pki_ca_keys.pkcs11.expect("PKCS#11 provider");
+        assert_eq!(pkcs11.token_label, "atom-production-ca");
+        assert!(!format!("{pkcs11:?}").contains("provider-pin"));
+
+        std::env::set_var("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS", "0");
+        let err = Config::from_env().expect_err("zero timeout");
+        assert!(err
+            .to_string()
+            .contains("ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn trusted_proxy_cidrs_must_be_valid() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -1359,6 +1977,114 @@ mod tests {
 
         let err = Config::from_env().expect_err("invalid trusted proxy cidr");
         assert!(err.to_string().contains("ATOM_TRUSTED_PROXY_CIDRS"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn enrollment_listener_is_opt_in_and_requires_in_process_tls() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert!(!cfg.enrollment.enabled);
+        assert!(cfg.enrollment.tls.is_none());
+        assert_eq!(cfg.enrollment.max_csr_bytes, 64 * 1024);
+        assert_eq!(cfg.enrollment.max_connections_per_ip, 8);
+        assert_eq!(cfg.enrollment.ipv6_prefix_len, 64);
+        assert!(!cfg.enrollment.http_keep_alive);
+        assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 10);
+        assert_eq!(cfg.enrollment.http_header_timeout_secs, 10);
+        assert_eq!(cfg.enrollment.request_timeout_secs, 30);
+        assert_eq!(cfg.enrollment.connection_timeout_secs, 300);
+        assert_eq!(cfg.enrollment.shutdown_drain_timeout_secs, 30);
+
+        std::env::set_var("ATOM_PKI_ENROLLMENT_ENABLED", "true");
+        let err = Config::from_env().expect_err("enabled listener without TLS");
+        assert!(err.to_string().contains("requires enrollment TLS"));
+
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_CERT_PATH", "/tls/server.pem");
+        let err = Config::from_env().expect_err("partial TLS configuration");
+        assert!(err.to_string().contains("requires both"));
+
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_KEY_PATH", "/tls/server-key.pem");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT", "7");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT", "70");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP", "3");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN", "56");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE", "true");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS", "11");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS", "12");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS", "32");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS", "301");
+        std::env::set_var("ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS", "31");
+        let cfg = Config::from_env().expect("enrollment config");
+        assert!(cfg.enrollment.enabled);
+        assert_eq!(cfg.enrollment.entity_rate_limit.max_requests, 7);
+        assert_eq!(cfg.enrollment.tenant_rate_limit.max_requests, 70);
+        assert_eq!(cfg.enrollment.max_connections_per_ip, 3);
+        assert_eq!(cfg.enrollment.ipv6_prefix_len, 56);
+        assert!(cfg.enrollment.http_keep_alive);
+        assert_eq!(cfg.enrollment.tls_handshake_timeout_secs, 11);
+        assert_eq!(cfg.enrollment.http_header_timeout_secs, 12);
+        assert_eq!(cfg.enrollment.request_timeout_secs, 32);
+        assert_eq!(cfg.enrollment.connection_timeout_secs, 301);
+        assert_eq!(cfg.enrollment.shutdown_drain_timeout_secs, 31);
+        assert_eq!(
+            cfg.enrollment
+                .tls
+                .as_ref()
+                .map(|tls| tls.cert_path.as_str()),
+            Some("/tls/server.pem")
+        );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn enrollment_ip_rate_limit_has_its_own_policy() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert_eq!(cfg.rate_limits.enrollment.max_requests, 1_000);
+        assert_eq!(cfg.rate_limits.enrollment.window_secs, 60);
+        assert_eq!(cfg.rate_limits.ipv6_prefix_len, 64);
+
+        std::env::set_var("ATOM_HTTP_RATE_LIMIT_ENROLLMENT", "321");
+        std::env::set_var("ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS", "45");
+        std::env::set_var("ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN", "56");
+        let cfg = Config::from_env().expect("custom enrollment rate limit");
+        assert_eq!(cfg.rate_limits.enrollment.max_requests, 321);
+        assert_eq!(cfg.rate_limits.enrollment.window_secs, 45);
+        assert_eq!(cfg.rate_limits.ipv6_prefix_len, 56);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn pki_lifecycle_automation_is_opt_in_and_bounded() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("default config");
+        assert!(!cfg.pki_lifecycle.enabled);
+        assert_eq!(cfg.pki_lifecycle.authority_warning_secs, 30 * 86_400);
+
+        std::env::set_var("ATOM_PKI_LIFECYCLE_ENABLED", "true");
+        std::env::set_var("ATOM_PKI_LIFECYCLE_BATCH_SIZE", "75");
+        std::env::set_var("ATOM_PKI_EXPIRY_WARNING_SECS", "3600");
+        let cfg = Config::from_env().expect("lifecycle config");
+        assert!(cfg.pki_lifecycle.enabled);
+        assert_eq!(cfg.pki_lifecycle.batch_size, 75);
+        assert_eq!(cfg.pki_lifecycle.expiry_warning_secs, 3600);
+
+        std::env::set_var("ATOM_PKI_LIFECYCLE_BATCH_SIZE", "1001");
+        let error = Config::from_env().expect_err("oversized lifecycle batch");
+        assert!(error.to_string().contains("between 1 and 1000"));
 
         clear_hardening_env();
     }
@@ -1426,6 +2152,17 @@ mod tests {
             "ATOM_KEY_ENCRYPTION_KEY",
             "ATOM_KEY_ENCRYPTION_KEY_ID",
             "ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS",
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY",
+            "ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID",
+            "ATOM_PKI_CA_KEY_BACKEND",
+            "ATOM_PKI_PKCS11_MODULE_PATH",
+            "ATOM_PKI_PKCS11_TOKEN_LABEL",
+            "ATOM_PKI_PKCS11_USER_PIN",
+            "ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS",
+            "ATOM_PKI_PKCS11_MAX_RETRIES",
+            "ATOM_PKI_PKCS11_MAX_IN_FLIGHT",
+            "ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD",
+            "ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS",
             "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
             "ATOM_AUDIT_RETENTION_DAYS",
             "ATOM_AUDIT_RETENTION_ENABLED",
@@ -1433,12 +2170,41 @@ mod tests {
             "ATOM_AUDIT_CLEANUP_BATCH_SIZE",
             "ATOM_LOGIN_FAILURE_LIMIT",
             "ATOM_LOGIN_FAILURE_WINDOW_SECS",
+            "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
+            "ATOM_PUBLIC_BASE_URL",
             "ATOM_RATE_LIMIT_ENABLED",
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT",
+            "ATOM_HTTP_RATE_LIMIT_ENROLLMENT_WINDOW_SECS",
+            "ATOM_HTTP_RATE_LIMIT_IPV6_PREFIX_LEN",
             "ATOM_TRUSTED_PROXY_CIDRS",
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
             "ATOM_GRPC_TLS_CERT_PATH",
             "ATOM_GRPC_TLS_KEY_PATH",
             "ATOM_GRPC_TLS_CLIENT_CA_PATH",
+            "ATOM_PKI_ENROLLMENT_ENABLED",
+            "ATOM_PKI_ENROLLMENT_LISTEN_ADDR",
+            "ATOM_PKI_ENROLLMENT_TLS_CERT_PATH",
+            "ATOM_PKI_ENROLLMENT_TLS_KEY_PATH",
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_ENTITY_RATE_WINDOW_SECS",
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_LIMIT",
+            "ATOM_PKI_ENROLLMENT_TENANT_RATE_WINDOW_SECS",
+            "ATOM_PKI_ENROLLMENT_MAX_CSR_BYTES",
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS",
+            "ATOM_PKI_ENROLLMENT_MAX_CONNECTIONS_PER_IP",
+            "ATOM_PKI_ENROLLMENT_IPV6_PREFIX_LEN",
+            "ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE",
+            "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
+            "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS",
+            "ATOM_PKI_LIFECYCLE_ENABLED",
+            "ATOM_PKI_LIFECYCLE_INTERVAL_SECS",
+            "ATOM_PKI_LIFECYCLE_BATCH_SIZE",
+            "ATOM_PKI_EXPIRY_WARNING_SECS",
+            "ATOM_PKI_AUTHORITY_WARNING_SECS",
             "ATOM_EMAIL_TEMPLATES_DIR",
         ] {
             std::env::remove_var(name);

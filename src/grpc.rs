@@ -25,7 +25,10 @@ use crate::{
     state::{AppState, GrpcRuntimeStatus},
 };
 
-// Generated code from proto/atom.proto
+// Generated code from proto/atom.proto. Tonic's public service trait uses
+// `tonic::Status` as its error type; it is intentionally large, and the
+// generated trait signatures cannot change it.
+#[allow(clippy::result_large_err)]
 pub mod proto {
     tonic::include_proto!("atom.v1");
 }
@@ -37,7 +40,8 @@ use proto::{
     certificate_service_server::{CertificateService, CertificateServiceServer},
     AuthenticateCredentialRequest, AuthenticateCredentialResponse, AuthenticateRequest,
     AuthenticateResponse, CheckRequest, CheckResponse, ResolveAliasRequest, ResolveAliasResponse,
-    ResolveCertificateRequest, ResolveCertificateResponse, RevokeEntityCertificatesRequest,
+    ResolveCertificateRequest, ResolveCertificateResponse, ResolveCertificateV2Request,
+    ResolveCertificateV2Response, RevokeEntityCertificatesRequest,
     RevokeEntityCertificatesResponse,
 };
 
@@ -47,7 +51,6 @@ mod callout_ops {
     pub const AUTHZ_CHECK: &str = "atom.v1.AuthzService/Check";
     pub const AUTH_AUTHENTICATE: &str = "atom.v1.AuthService/Authenticate";
     pub const AUTH_AUTHENTICATE_CREDENTIAL: &str = "atom.v1.AuthService/AuthenticateCredential";
-    pub const CERT_RESOLVE: &str = "atom.v1.CertificateService/ResolveCertificate";
     pub const CERT_REVOKE_ENTITY: &str = "atom.v1.CertificateService/RevokeEntityCertificates";
     pub const ALIAS_RESOLVE: &str = "atom.v1.AliasService/ResolveAlias";
 }
@@ -57,6 +60,9 @@ mod callout_ops {
 /// `Status::permission_denied`; on transport failure follows the per-endpoint
 /// `on_error` policy (deny by default). Also writes a `callout.deny` audit row
 /// fire-and-forget for observability.
+// Tonic service implementations must return `Status`; boxing it would change
+// the wire-facing trait contract and is not an option here.
+#[allow(clippy::result_large_err)]
 async fn callout_check_grpc(
     state: &AppState,
     auth: &AuthContext,
@@ -245,6 +251,8 @@ impl AuthzService for AtomAuthz {
 
 // ─── AuthService ──────────────────────────────────────────────────────────────
 
+// The caller is a Tonic service implementation and must propagate `Status`.
+#[allow(clippy::result_large_err)]
 async fn auth_context_from_metadata(
     state: &AppState,
     metadata: &MetadataMap,
@@ -381,6 +389,8 @@ impl AuthService for AtomAuth {
     }
 }
 
+// The caller is a Tonic service implementation and must propagate `Status`.
+#[allow(clippy::result_large_err)]
 async fn require_credential_auth_access(
     pool: &sqlx::PgPool,
     auth: &AuthContext,
@@ -413,24 +423,32 @@ struct AtomCertificates {
 impl CertificateService for AtomCertificates {
     async fn resolve_certificate(
         &self,
-        request: Request<ResolveCertificateRequest>,
+        _request: Request<ResolveCertificateRequest>,
     ) -> Result<Response<ResolveCertificateResponse>, Status> {
+        Err(Status::unimplemented(
+            "ResolveCertificate is removed; use ResolveCertificateV2",
+        ))
+    }
+
+    async fn resolve_certificate_v2(
+        &self,
+        request: Request<ResolveCertificateV2Request>,
+    ) -> Result<Response<ResolveCertificateV2Response>, Status> {
         let auth = auth_context_from_metadata(&self.state, request.metadata()).await?;
         let req = request.into_inner();
-        callout_check_grpc(
-            &self.state,
-            &auth,
-            callout_ops::CERT_RESOLVE,
-            serde_json::json!({
-                "serial_number": req.serial_number,
-                "fingerprint_sha256": req.fingerprint_sha256,
-            }),
-        )
-        .await?;
-        let identity = certs::service::resolve_certificate_identity(
+        let expected_tenant_id = parse_optional_uuid(&req.expected_tenant_id, "expected_tenant_id")
+            .map_err(Status::from)?;
+        let identity = certs::service::resolve_certificate_identity_v2(
             &self.state.pool,
-            &req.serial_number,
-            (!req.fingerprint_sha256.is_empty()).then_some(req.fingerprint_sha256.as_str()),
+            certs::service::ResolveCertificateV2 {
+                certificate_der: (!req.certificate_der.is_empty()).then_some(req.certificate_der),
+                fingerprint_sha256: (!req.fingerprint_sha256.trim().is_empty())
+                    .then_some(req.fingerprint_sha256),
+                issuer_fingerprint_sha256: (!req.issuer_fingerprint_sha256.trim().is_empty())
+                    .then_some(req.issuer_fingerprint_sha256),
+                serial_number: (!req.serial_number.trim().is_empty()).then_some(req.serial_number),
+                expected_tenant_id,
+            },
         )
         .await
         .map_err(Status::from)?;
@@ -445,14 +463,19 @@ impl CertificateService for AtomCertificates {
         .await
         .map_err(Status::from)?;
 
-        Ok(Response::new(ResolveCertificateResponse {
+        Ok(Response::new(ResolveCertificateV2Response {
             entity_id: identity.entity_id.to_string(),
             tenant_id: identity
                 .tenant_id
                 .map(|id| id.to_string())
                 .unwrap_or_default(),
             credential_id: identity.credential_id.to_string(),
+            issuer_id: identity
+                .issuer_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
             expires_at: identity.expires_at.to_rfc3339(),
+            status: identity.status,
         }))
     }
 
@@ -494,14 +517,15 @@ impl CertificateService for AtomCertificates {
             .await
             .map_err(crate::error::db_err)
             .map_err(Status::from)?;
-        let revoked = certs::service::revoke_entity_certificates_in_tx(
+        let revoked = certs::service::revoke_entity_certificates_v2_in_tx(
             &mut tx,
             entity_id,
             (!req.reason.is_empty()).then_some(req.reason),
+            Some(auth.entity_id),
         )
         .await
         .map_err(Status::from)?;
-        audit::commit_with_audit(
+        let commit = audit::commit_with_audit(
             &self.state.pool,
             tx,
             self.state.config.events.enabled(),
@@ -512,14 +536,21 @@ impl CertificateService for AtomCertificates {
                 target_id: Some(entity_id),
                 event: "certificate.revoke_entity",
                 outcome: AuditOutcome::Allow,
-                details: serde_json::json!({"count": revoked, "transport": "grpc"}),
+                details: serde_json::json!({
+                    "count": revoked.count,
+                    "credential_ids": revoked.credential_ids,
+                    "issuer_ids": revoked.issuer_ids,
+                    "reason": revoked.reason,
+                    "transport": "grpc",
+                }),
             },
         )
-        .await
-        .map_err(Status::from)?;
+        .await;
+        certs::service::record_lifecycle_commit("revocation", &commit);
+        commit.map_err(Status::from)?;
 
         Ok(Response::new(RevokeEntityCertificatesResponse {
-            revoked: revoked as u64,
+            revoked: revoked.count as u64,
         }))
     }
 }
@@ -993,7 +1024,6 @@ mod tests {
                 primary,
                 standby: None,
             },
-            None,
         )
     }
 }

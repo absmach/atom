@@ -25,6 +25,29 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
+    certs::authority::key_provider::validate_startup(&pool, &cfg.pki_ca_keys).await?;
+
+    if let Some(ref path) = cfg.pki_root_cert_path {
+        bootstrap_pki_root(&pool, path).await?;
+    }
+
+    match (
+        cfg.pki_platform_intermediate_cert_path.as_deref(),
+        cfg.pki_platform_intermediate_key_path.as_deref(),
+    ) {
+        (Some(cert_path), Some(key_path)) => {
+            bootstrap_platform_intermediate(&pool, &cfg.pki_ca_keys, cert_path, key_path).await?;
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::warn!(
+                "ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH and \
+                 ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH must be set together; \
+                 skipping platform intermediate bootstrap"
+            );
+        }
+        (None, None) => {}
+    }
+
     if let Some(ref secret) = cfg.admin_secret {
         bootstrap_admin_credentials(&pool, cfg.admin_entity_id, secret).await?;
     }
@@ -39,7 +62,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     keys::bootstrap_if_needed(&pool, &cfg.signing_keys).await?;
-    let certificate_issuer = certs::service::load_file_issuer_if_enabled(&cfg)?;
     let active_keys = keys::load_active_keys(&pool, &cfg.signing_keys).await?;
 
     let grpc_addr = cfg.grpc_addr.parse()?;
@@ -54,8 +76,8 @@ async fn main() -> anyhow::Result<()> {
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
 
-    let mut state = state::AppState::new(pool, cfg.clone(), active_keys, certificate_issuer)
-        .with_callouts(callout_service);
+    let mut state =
+        state::AppState::new(pool, cfg.clone(), active_keys).with_callouts(callout_service);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await
@@ -77,6 +99,11 @@ async fn main() -> anyhow::Result<()> {
     audit::spawn_retention_cleanup(state.clone());
     purge::spawn_purge_cleanup(state.clone());
     events::spawn_event_publisher(state.clone());
+    certs::lifecycle::spawn(state.clone());
+
+    // Enrollment is a separate public TLS surface. Prepare it before spawning
+    // any server so bad TLS material or a bad bind address fails startup.
+    let enrollment_server = certs::enrollment::tls::prepare(&state).await?;
 
     // Spawn gRPC server on a separate port; runs concurrently with HTTP. It
     // installs its own shutdown listener and drains on SIGINT/SIGTERM.
@@ -85,6 +112,15 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = grpc::serve(grpc_listener, grpc_state, grpc_tls).await {
             tracing::error!("grpc server exited: {e}");
         }
+    });
+
+    let enrollment_handle = enrollment_server.map(|server| {
+        let enrollment_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = certs::enrollment::tls::serve(server, enrollment_state).await {
+                tracing::error!(%error, "PKI enrollment server exited");
+            }
+        })
     });
 
     let app = routes::create_router(state);
@@ -104,6 +140,11 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = grpc_handle.await {
         tracing::error!("grpc task join error: {e}");
     }
+    if let Some(handle) = enrollment_handle {
+        if let Err(error) = handle.await {
+            tracing::error!(%error, "PKI enrollment task join error");
+        }
+    }
 
     Ok(())
 }
@@ -120,6 +161,85 @@ fn init_tracing(logging: &config::LoggingConfig) -> anyhow::Result<()> {
             .init(),
     }
 
+    Ok(())
+}
+
+async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<()> {
+    let pem = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("failed to read ATOM_PKI_ROOT_CERT_PATH ({path})"))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to open PKI root bootstrap transaction")?;
+    let outcome = certs::authority::provisioning::import_root_mutation_in_tx(&mut tx, &pem)
+        .await
+        .with_context(|| format!("importing PKI root from {path}"))?;
+    tx.commit()
+        .await
+        .context("failed to commit PKI root bootstrap")?;
+    let authority = &outcome.value;
+    if outcome.changed {
+        tracing::info!(
+            path = %path,
+            authority_id = %authority.id,
+            subject = %authority.subject,
+            fingerprint = authority.fingerprint_sha256.as_deref().unwrap_or(""),
+            "PKI root certificate imported at bootstrap"
+        );
+    } else {
+        tracing::info!(
+            path = %path,
+            authority_id = %authority.id,
+            "PKI root certificate already present; bootstrap is a no-op"
+        );
+    }
+    Ok(())
+}
+
+async fn bootstrap_platform_intermediate(
+    pool: &sqlx::PgPool,
+    ca_keys: &config::PkiCaKeyConfig,
+    cert_path: &str,
+    key_path: &str,
+) -> anyhow::Result<()> {
+    let cert_pem = tokio::fs::read_to_string(cert_path)
+        .await
+        .with_context(|| {
+            format!("failed to read ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH ({cert_path})")
+        })?;
+    let key_pem = tokio::fs::read_to_string(key_path).await.with_context(|| {
+        format!("failed to read ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH ({key_path})")
+    })?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to open PKI platform intermediate bootstrap transaction")?;
+    let mut outcome = certs::authority::provisioning::import_platform_intermediate_mutation_in_tx(
+        &mut tx, ca_keys, &cert_pem, &key_pem,
+    )
+    .await
+    .with_context(|| format!("importing platform intermediate from {cert_path}"))?;
+    tx.commit()
+        .await
+        .context("failed to commit PKI platform intermediate bootstrap")?;
+    let authority = outcome.value.clone();
+    if outcome.changed {
+        tracing::info!(
+            cert_path = %cert_path,
+            authority_id = %authority.id,
+            subject = %authority.subject,
+            fingerprint = authority.fingerprint_sha256.as_deref().unwrap_or(""),
+            "PKI platform intermediate imported at bootstrap"
+        );
+    } else {
+        tracing::info!(
+            cert_path = %cert_path,
+            authority_id = %authority.id,
+            "PKI platform intermediate already present; bootstrap is a no-op"
+        );
+    }
+    outcome.commit_generated_key();
     Ok(())
 }
 

@@ -8,11 +8,19 @@ RUN corepack enable
 
 FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+# BuildKit cache for pnpm's content-addressable store lets repeated builds
+# skip re-downloading every package tarball when only lockfile hashes match.
+RUN --mount=type=cache,target=/pnpm-store,sharing=locked \
+    pnpm config set store-dir /pnpm-store \
+    && pnpm install --frozen-lockfile
 
 FROM deps AS builder
 COPY . .
-RUN pnpm build
+# The Next build reads .next/cache to reuse compiled webpack modules across
+# builds. Mounting a cache there turns incremental builds into seconds.
+RUN --mount=type=cache,target=/app/.next/cache,sharing=locked \
+    --mount=type=cache,target=/root/.cache,sharing=locked \
+    pnpm build
 
 FROM node:24.15.0-bookworm-slim AS runner
 ARG ATOM_VERSION

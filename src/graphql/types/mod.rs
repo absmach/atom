@@ -3127,6 +3127,7 @@ impl From<&CredentialKind> for GqlCredentialKind {
 fn credential_status_as_str(status: &CredentialStatus) -> &'static str {
     match status {
         CredentialStatus::Active => "active",
+        CredentialStatus::RevocationPending => "revocation_pending",
         CredentialStatus::Revoked => "revoked",
     }
 }

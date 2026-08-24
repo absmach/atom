@@ -7,7 +7,12 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    build_info, keys, rate_limit,
+    build_info,
+    certs::authority::{
+        key_provider::AuthorityKeyProviderError, repo as authority_repo, AuthorityKeyBackend,
+    },
+    config::PkiCaKeyConfig,
+    keys, rate_limit,
     state::{AppState, GrpcRuntimeState},
 };
 
@@ -96,14 +101,14 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
     let database = database_check(state).await;
     let migrations = migrations_check(state).await;
     let (signing_keys, signing_key_state) = signing_keys_check(state).await;
-    let certificate_issuer = certificate_issuer_check(state);
     let grpc_ready = grpc_check(state).await;
+    let certificate_issuer = certificate_issuer_check(state).await;
     let ready = readiness_ok(
         &database,
         &migrations,
         &signing_keys,
-        &certificate_issuer,
         &grpc_ready,
+        &certificate_issuer,
     );
     let status = if ready {
         ComponentStatus::Ok
@@ -141,17 +146,17 @@ fn readiness_ok(
     database: &ComponentCheck,
     migrations: &ComponentCheck,
     signing_keys: &ComponentCheck,
-    certificate_issuer: &ComponentCheck,
     grpc_ready: &ComponentCheck,
+    certificate_issuer: &ComponentCheck,
 ) -> bool {
     matches!(&database.status, ComponentStatus::Ok)
         && matches!(&migrations.status, ComponentStatus::Ok)
         && matches!(&signing_keys.status, ComponentStatus::Ok)
+        && matches!(&grpc_ready.status, ComponentStatus::Ok)
         && matches!(
             &certificate_issuer.status,
             ComponentStatus::Ok | ComponentStatus::Disabled
         )
-        && matches!(&grpc_ready.status, ComponentStatus::Ok)
 }
 
 async fn database_check(state: &AppState) -> ComponentCheck {
@@ -237,26 +242,102 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
     }
 }
 
-fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
-    if !state.config.certs_enabled {
+/// Reports whether the providers selected by live leaf issuers are configured
+/// and were validated at startup. This endpoint is unauthenticated and called
+/// repeatedly by load balancers, so it must never open a PKCS#11 session or
+/// affect the HSM provider's circuit breaker.
+async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
+    match authority_repo::leaf_issuer_readiness(&state.pool).await {
+        Ok(readiness) if readiness.configured_count == 0 => ComponentCheck {
+            status: ComponentStatus::Disabled,
+            message: "no certificate issuers configured".to_string(),
+        },
+        Ok(readiness) if readiness.active_backends.is_empty() => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "certificate issuers are configured but none are active and eligible to issue"
+                .to_string(),
+        },
+        Ok(readiness) => certificate_issuer_config_check(
+            &state.config.pki_ca_keys,
+            &readiness.active_backends,
+            state
+                .config
+                .pki_ca_keys
+                .pkcs11
+                .as_ref()
+                .is_some_and(crate::certs::authority::key_provider::pkcs11_circuit_is_open),
+        ),
+        Err(error) => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!("certificate issuer status query failed: {error}"),
+        },
+    }
+}
+
+fn certificate_issuer_config_check(
+    ca_keys: &PkiCaKeyConfig,
+    backends: &[AuthorityKeyBackend],
+    pkcs11_circuit_open: bool,
+) -> ComponentCheck {
+    if backends.is_empty() {
         return ComponentCheck {
             status: ComponentStatus::Disabled,
-            message: "certificate issuer disabled".to_string(),
+            message: "no active certificate issuers".to_string(),
         };
     }
-    if state.certificate_issuer.is_some() {
-        ComponentCheck {
-            status: ComponentStatus::Ok,
-            message: format!(
-                "certificate issuer loaded using {}",
-                state.config.certs_ca_mode.as_str()
-            ),
-        }
-    } else {
-        ComponentCheck {
+
+    let uses_encrypted_database = backends.contains(&AuthorityKeyBackend::EncryptedDatabase);
+    let uses_pkcs11 = backends.contains(&AuthorityKeyBackend::Pkcs11);
+    let uses_kms = backends.contains(&AuthorityKeyBackend::Kms);
+    let uses_public_only = backends.contains(&AuthorityKeyBackend::PublicOnly);
+
+    if uses_kms {
+        return ComponentCheck {
             status: ComponentStatus::Error,
-            message: "certificate issuer is enabled but not loaded".to_string(),
-        }
+            message: "an active certificate issuer requires an unavailable KMS provider"
+                .to_string(),
+        };
+    }
+    if uses_public_only {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "an active certificate issuer has no signing key".to_string(),
+        };
+    }
+    if uses_encrypted_database && ca_keys.key_encryption_key.is_none() {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "an active certificate issuer requires the encrypted database CA key"
+                .to_string(),
+        };
+    }
+    if uses_pkcs11 && ca_keys.pkcs11.is_none() {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!(
+                "active PKCS#11 certificate issuer provider configuration failed: {}",
+                AuthorityKeyProviderError::Unconfigured
+            ),
+        };
+    }
+    if uses_pkcs11 && pkcs11_circuit_open {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "an active PKCS#11 certificate issuer circuit is open".to_string(),
+        };
+    }
+
+    let providers = [
+        uses_encrypted_database.then_some("encrypted database"),
+        uses_pkcs11.then_some("PKCS#11"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" and ");
+    ComponentCheck {
+        status: ComponentStatus::Ok,
+        message: format!("{providers} certificate issuer configured and verified at startup"),
     }
 }
 
@@ -317,10 +398,14 @@ async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        readiness_ok, AuditRetentionStatus, ComponentCheck, ComponentStatus, DbPoolStatus,
-        SystemStatus,
+        certificate_issuer_config_check, readiness_ok, AuditRetentionStatus, ComponentCheck,
+        ComponentStatus, DbPoolStatus, SystemStatus,
     };
-    use crate::rate_limit::RateLimitStatus;
+    use crate::{
+        certs::authority::AuthorityKeyBackend,
+        config::{Config, PkiPkcs11Config, SecretText},
+        rate_limit::RateLimitStatus,
+    };
 
     fn check(status: ComponentStatus) -> ComponentCheck {
         ComponentCheck {
@@ -340,7 +425,7 @@ mod tests {
             database: check(ComponentStatus::Ok),
             migrations: check(ComponentStatus::Ok),
             signing_keys: check(ComponentStatus::Ok),
-            certificate_issuer: check(ComponentStatus::Disabled),
+            certificate_issuer: check(ComponentStatus::Ok),
             db_pool: DbPoolStatus {
                 max_connections: 0,
                 min_connections: 0,
@@ -381,28 +466,112 @@ mod tests {
         let database = check(ComponentStatus::Ok);
         let migrations = check(ComponentStatus::Ok);
         let signing_keys = check(ComponentStatus::Ok);
-        let certificate_issuer = check(ComponentStatus::Disabled);
+        let ca = check(ComponentStatus::Ok);
 
         assert!(!readiness_ok(
             &database,
             &migrations,
             &signing_keys,
-            &certificate_issuer,
             &check(ComponentStatus::Degraded),
+            &ca,
         ));
         assert!(!readiness_ok(
             &database,
             &migrations,
             &signing_keys,
-            &certificate_issuer,
             &check(ComponentStatus::Error),
+            &ca,
         ));
         assert!(readiness_ok(
             &database,
             &migrations,
             &signing_keys,
-            &certificate_issuer,
             &check(ComponentStatus::Ok),
+            &ca,
         ));
+    }
+
+    #[test]
+    fn readiness_blocks_when_certificate_issuer_is_unavailable() {
+        let ok = check(ComponentStatus::Ok);
+        assert!(!readiness_ok(
+            &ok,
+            &ok,
+            &ok,
+            &ok,
+            &check(ComponentStatus::Error),
+        ));
+        // A deployment without PKI configured stays ready — the check
+        // reports Disabled and does not block.
+        assert!(readiness_ok(
+            &ok,
+            &ok,
+            &ok,
+            &ok,
+            &check(ComponentStatus::Disabled),
+        ));
+    }
+
+    #[test]
+    fn readiness_uses_active_issuer_backends_without_probing_the_hsm() {
+        let mut config = Config::for_tests();
+        config.pki_ca_keys.pkcs11 = Some(PkiPkcs11Config {
+            module_path: "/nonexistent/pkcs11-module.so".to_string(),
+            token_label: "missing-token".to_string(),
+            user_pin: SecretText::new("test-pin".to_string()).expect("PIN"),
+            operation_timeout_ms: 1,
+            mutation_hard_timeout_ms: 1,
+            max_retries: 0,
+            max_in_flight: 1,
+            circuit_failure_threshold: 1,
+            circuit_reset_secs: 1,
+        });
+
+        let status = certificate_issuer_config_check(
+            &config.pki_ca_keys,
+            &[AuthorityKeyBackend::Pkcs11],
+            false,
+        );
+        assert!(matches!(status.status, ComponentStatus::Ok));
+        assert!(status.message.contains("verified at startup"));
+    }
+
+    #[test]
+    fn readiness_rejects_an_active_issuer_without_its_provider_configuration() {
+        let config = Config::for_tests();
+        let status = certificate_issuer_config_check(
+            &config.pki_ca_keys,
+            &[AuthorityKeyBackend::Pkcs11],
+            false,
+        );
+        let ok = check(ComponentStatus::Ok);
+
+        assert!(matches!(status.status, ComponentStatus::Error));
+        assert!(status.message.contains("CA key provider is not configured"));
+        assert!(!readiness_ok(&ok, &ok, &ok, &ok, &status));
+    }
+
+    #[test]
+    fn readiness_rejects_an_active_issuer_with_an_open_pkcs11_circuit() {
+        let mut config = Config::for_tests();
+        config.pki_ca_keys.pkcs11 = Some(PkiPkcs11Config {
+            module_path: "/nonexistent/pkcs11-module.so".to_string(),
+            token_label: "missing-token".to_string(),
+            user_pin: SecretText::new("test-pin".to_string()).expect("PIN"),
+            operation_timeout_ms: 1,
+            mutation_hard_timeout_ms: 1,
+            max_retries: 0,
+            max_in_flight: 1,
+            circuit_failure_threshold: 1,
+            circuit_reset_secs: 1,
+        });
+
+        let status = certificate_issuer_config_check(
+            &config.pki_ca_keys,
+            &[AuthorityKeyBackend::Pkcs11],
+            true,
+        );
+        assert!(matches!(status.status, ComponentStatus::Error));
+        assert!(status.message.contains("circuit is open"));
     }
 }

@@ -47,7 +47,6 @@ async fn restore_entity_reverses_soft_delete_but_keeps_credentials_revoked() {
         .execute(&pool)
         .await
         .expect("insert credential");
-
     atom::identity::repo::delete_entity(&pool, id, None)
         .await
         .expect("soft delete entity");
@@ -273,14 +272,19 @@ async fn restore_tenant_reactivates_and_unhides_children() {
         .execute(&pool)
         .await
         .expect("insert api credential");
+    let issuer_id = common::pki::insert_bare_tenant_authority(&pool, tenant_id).await;
     let cert_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'certificate', $3, 'active')")
-        .bind(cert_id)
-        .bind(child)
-        .bind(format!("{:032x}", cert_id.as_u128()))
-        .execute(&pool)
-        .await
-        .expect("insert certificate credential");
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, identifier, issuer_id, status)
+         VALUES ($1, $2, 'certificate', $3, $4, 'active')",
+    )
+    .bind(cert_id)
+    .bind(child)
+    .bind(format!("{:032x}", cert_id.as_u128()))
+    .bind(issuer_id)
+    .execute(&pool)
+    .await
+    .expect("insert certificate credential");
 
     atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
         .await
@@ -353,6 +357,15 @@ async fn purge_entity_physically_removes_a_tombstoned_row_and_cascades() {
         .execute(&pool)
         .await
         .expect("insert credential");
+    sqlx::query(
+        "INSERT INTO pki_enrollment_rate_windows
+         (scope_kind, scope_id, window_start, request_count)
+         VALUES ('entity', $1, now(), 1)",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .expect("insert enrollment rate window");
 
     atom::identity::repo::delete_entity(&pool, id, None)
         .await
@@ -374,6 +387,20 @@ async fn purge_entity_physically_removes_a_tombstoned_row_and_cascades() {
         .await
         .expect("credential lookup");
     assert!(cred_exists.is_none(), "FK cascade must drop credentials");
+    let rate_window_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM pki_enrollment_rate_windows
+            WHERE scope_kind = 'entity' AND scope_id = $1
+         )",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("rate window lookup");
+    assert!(
+        !rate_window_exists,
+        "purge must drop the entity's durable enrollment counter"
+    );
 }
 
 #[tokio::test]
