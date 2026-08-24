@@ -90,6 +90,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
 
     let root_id = Uuid::new_v4();
     let platform_id = Uuid::new_v4();
+    let historical_leaf_id = Uuid::new_v4();
     let platform_leaf_id = Uuid::new_v4();
     insert_authority(&pool, &TestAuthority::root(root_id))
         .await
@@ -102,10 +103,76 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     .unwrap();
     insert_authority(
         &pool,
-        &TestAuthority::platform_leaf(platform_leaf_id, root_id, 1, 3),
+        &TestAuthority::platform_leaf(historical_leaf_id, root_id, 1, 3),
     )
     .await
     .unwrap();
+
+    for status in [
+        "provisioning",
+        "pending_signature",
+        "failed",
+        "retiring",
+        "retired",
+        "revoked",
+        "expired",
+    ] {
+        sqlx::query(
+            r#"UPDATE pki_authorities
+               SET status = $2,
+                   issuance_enabled = false,
+                   csr_pem = 'test-pending-csr',
+                   failure_reason = $3
+               WHERE id = $1"#,
+        )
+        .bind(historical_leaf_id)
+        .bind(status)
+        .bind((status == "failed").then_some("test provisioning failure"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
+        assert_eq!(readiness.active_count, 0, "status {status}");
+        assert!(readiness.active_backends.is_empty(), "status {status}");
+    }
+
+    insert_authority(
+        &pool,
+        &TestAuthority::platform_leaf(platform_leaf_id, root_id, 2, 4),
+    )
+    .await
+    .unwrap();
+    let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
+    assert_eq!(readiness.active_count, 1);
+    assert_eq!(readiness.active_backends, vec![AuthorityKeyBackend::Pkcs11]);
+
+    sqlx::query("UPDATE pki_authorities SET issuance_enabled = false WHERE id = $1")
+        .bind(platform_leaf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
+    assert_eq!(readiness.active_count, 1);
+    assert!(readiness.active_backends.is_empty());
+    sqlx::query("UPDATE pki_authorities SET issuance_enabled = true WHERE id = $1")
+        .bind(platform_leaf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE pki_authorities SET not_after = now() - interval '1 second' WHERE id = $1")
+        .bind(platform_leaf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
+    assert_eq!(readiness.active_count, 1);
+    assert!(readiness.active_backends.is_empty());
+    sqlx::query("UPDATE pki_authorities SET not_after = now() + interval '365 days' WHERE id = $1")
+        .bind(platform_leaf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     assert!(authority::validate_authority_shape(AuthorityKind::Root, None, None).is_ok());
     assert!(authority::validate_authority_shape(
@@ -128,7 +195,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     insert_authority(&pool, &tenant_b_v1).await.unwrap();
 
     let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
-    assert_eq!(readiness.configured_count, 3);
+    assert_eq!(readiness.active_count, 3);
     assert_eq!(readiness.active_backends, vec![AuthorityKeyBackend::Pkcs11]);
 
     let active_a = repo::active_leaf_issuer_for_scope(&pool, Some(tenant_a))
@@ -231,7 +298,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let invalid_parent_error = insert_authority(&pool, &invalid_parent).await.unwrap_err();
     assert!(is_database_code(&invalid_parent_error, "23514"));
 
-    let duplicate_global_issuer = TestAuthority::platform_leaf(Uuid::new_v4(), root_id, 2, 32);
+    let duplicate_global_issuer = TestAuthority::platform_leaf(Uuid::new_v4(), root_id, 3, 32);
     let duplicate_global_error = insert_authority(&pool, &duplicate_global_issuer)
         .await
         .unwrap_err();

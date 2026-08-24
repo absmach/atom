@@ -31,7 +31,7 @@ pub struct EncryptedKeyRequirement {
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct LeafIssuerReadiness {
-    pub configured_count: i64,
+    pub active_count: i64,
     pub active_backends: Vec<AuthorityKeyBackend>,
 }
 
@@ -214,14 +214,14 @@ where
     fetch_active_leaf_issuer_for_scope(executor, Some(tenant_id)).await
 }
 
-/// Return the configured issuer count and the key backends used by authorities
-/// that can issue leaves now. Readiness uses this single non-secret snapshot to
-/// distinguish an unused PKI deployment from one whose configured issuers are
-/// all ineligible, while avoiding a second query and a cross-query race.
+/// Return the active issuer count and the key backends used by authorities that
+/// can issue leaves now. Readiness ignores provisioning and historical rows,
+/// while an active-but-disabled or out-of-window issuer remains an error. The
+/// single non-secret snapshot avoids both a second query and a cross-query race.
 pub async fn leaf_issuer_readiness(pool: &PgPool) -> Result<LeafIssuerReadiness, AppError> {
     sqlx::query_as(
         r#"
-        SELECT COUNT(*) AS configured_count,
+        SELECT COUNT(*) FILTER (WHERE status = 'active') AS active_count,
                COALESCE(
                    ARRAY_AGG(DISTINCT key_backend ORDER BY key_backend)
                        FILTER (

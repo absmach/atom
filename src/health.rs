@@ -248,9 +248,9 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
 /// affect the HSM provider's circuit breaker.
 async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
     match authority_repo::leaf_issuer_readiness(&state.pool).await {
-        Ok(readiness) if readiness.configured_count == 0 => ComponentCheck {
+        Ok(readiness) if readiness.active_count == 0 => ComponentCheck {
             status: ComponentStatus::Disabled,
-            message: "no certificate issuers configured".to_string(),
+            message: "no active certificate issuers".to_string(),
         },
         Ok(readiness) if readiness.active_backends.is_empty() => ComponentCheck {
             status: ComponentStatus::Error,
@@ -501,8 +501,8 @@ mod tests {
             &ok,
             &check(ComponentStatus::Error),
         ));
-        // A deployment without PKI configured stays ready — the check
-        // reports Disabled and does not block.
+        // A deployment without an active PKI issuer stays ready — provisioning
+        // and historical issuer rows report Disabled and do not block.
         assert!(readiness_ok(
             &ok,
             &ok,
