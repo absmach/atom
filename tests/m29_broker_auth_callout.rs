@@ -398,9 +398,13 @@ async fn every_rejection_is_a_verdict_not_an_rpc_error() {
         .into_inner();
     assert!(!unauthenticated.authorized);
 
-    // `Action::None` is the proto's unset value.
+    // `Action::Unspecified` is the proto's unset value.
     let no_action = client
-        .authorize(authz(&device_id.to_string(), &channel_alias, Action::None))
+        .authorize(authz(
+            &device_id.to_string(),
+            &channel_alias,
+            Action::Unspecified,
+        ))
         .await
         .expect("unset action must not be an rpc error")
         .into_inner();
