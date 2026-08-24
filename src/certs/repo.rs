@@ -335,6 +335,7 @@ pub async fn runtime_certificate_by_fingerprint(
         LEFT JOIN tenants t ON t.id = e.tenant_id
         LEFT JOIN pki_authorities a ON a.id = c.issuer_id
         WHERE c.kind = 'certificate'
+          AND c.issuer_id IS NOT NULL
           AND c.metadata->>'fingerprint_sha256' = $1
         "#,
     )

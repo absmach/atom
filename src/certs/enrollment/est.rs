@@ -47,17 +47,17 @@ const CSR_PEM_HEADER: &str = "-----BEGIN CERTIFICATE REQUEST-----\n";
 const CSR_PEM_FOOTER: &str = "-----END CERTIFICATE REQUEST-----\n";
 
 /// EST simple re-enrollment authenticates the TLS peer before accepting a
-/// request body. Rejections are audited in the extractor because handlers are
-/// never invoked for an extractor failure.
+/// request body. Anonymous rejections are observed in the extractor because
+/// handlers are never invoked for an extractor failure.
 struct EstReenrollmentPeer(VerifiedPeerCertificate);
 
 #[axum::async_trait]
 impl FromRequestParts<AppState> for EstReenrollmentPeer {
-    type Rejection = AppError;
+    type Rejection = EstError;
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &AppState,
+        _state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let peer = parts
             .extensions
@@ -66,21 +66,8 @@ impl FromRequestParts<AppState> for EstReenrollmentPeer {
             .map(Self);
         let Some(peer) = peer else {
             let error = AppError::unauthorized("a verified client certificate is required");
-            audit::observe_error(
-                &state.pool,
-                state.config.events.enabled(),
-                &audit::AuditMeta {
-                    actor_entity_id: None,
-                    tenant_id: None,
-                    target_kind: "credential",
-                    target_id: None,
-                    event: "certificate.reenroll",
-                },
-                &serde_json::json!({"mode": "reenroll", "transport": "est"}),
-                &error,
-            )
-            .await;
-            return Err(error);
+            super::observe_missing_peer("est", &error);
+            return Err(error.into());
         };
         Ok(peer)
     }

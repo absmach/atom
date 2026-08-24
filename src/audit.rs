@@ -312,6 +312,27 @@ pub async fn observe_error(
     }
 }
 
+/// Emit the structured error observation without writing to either database
+/// channel. This is reserved for failures that occur before authentication on
+/// public endpoints, where allowing anonymous traffic to create durable rows
+/// would turn observability into a write-amplification path.
+pub fn observe_error_log_only(meta: &AuditMeta<'_>, details: &Value, err: &crate::error::AppError) {
+    let outcome = err.audit_outcome();
+    let mut merged = details.clone();
+    if let Value::Object(ref mut map) = merged {
+        map.insert("error".to_string(), Value::String(err.to_string()));
+    }
+    log_audit_event(&AuditEvent {
+        actor_entity_id: meta.actor_entity_id,
+        tenant_id: meta.tenant_id,
+        target_kind: Some(meta.target_kind),
+        target_id: meta.target_id,
+        event: meta.event,
+        outcome,
+        details: merged,
+    });
+}
+
 async fn insert_audit_log<'e, E>(
     executor: E,
     event: &AuditEvent<'_>,

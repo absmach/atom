@@ -29,6 +29,12 @@ pub struct EncryptedKeyRequirement {
     pub encryption_algorithm: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LeafIssuerReadiness {
+    pub configured_count: i64,
+    pub active_backends: Vec<AuthorityKeyBackend>,
+}
+
 const AUTHORITY_COLUMNS: &str = r#"
     id,
     tenant_id,
@@ -208,37 +214,24 @@ where
     fetch_active_leaf_issuer_for_scope(executor, Some(tenant_id)).await
 }
 
-/// Return the key backends used by authorities that can issue leaves now.
-/// Readiness uses this narrow, non-secret projection to validate the providers
-/// that live issuance will select, rather than the default backend used for
-/// future provisioning.
-pub async fn active_leaf_issuer_backends(
-    pool: &PgPool,
-) -> Result<Vec<AuthorityKeyBackend>, AppError> {
-    sqlx::query_scalar(
+/// Return the configured issuer count and the key backends used by authorities
+/// that can issue leaves now. Readiness uses this single non-secret snapshot to
+/// distinguish an unused PKI deployment from one whose configured issuers are
+/// all ineligible, while avoiding a second query and a cross-query race.
+pub async fn leaf_issuer_readiness(pool: &PgPool) -> Result<LeafIssuerReadiness, AppError> {
+    sqlx::query_as(
         r#"
-        SELECT DISTINCT key_backend
-        FROM pki_authorities
-        WHERE kind IN ('platform_leaf_issuer', 'tenant_intermediate')
-          AND status = 'active'
-          AND issuance_enabled = true
-          AND not_before <= now()
-          AND not_after > now()
-        ORDER BY key_backend
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
-}
-
-/// Count configured leaf issuers regardless of lifecycle eligibility. This
-/// distinguishes a deployment with no PKI from one whose issuers are all
-/// expired, disabled, or otherwise unable to sign.
-pub async fn leaf_issuer_authority_count(pool: &PgPool) -> Result<i64, AppError> {
-    sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)
+        SELECT COUNT(*) AS configured_count,
+               COALESCE(
+                   ARRAY_AGG(DISTINCT key_backend ORDER BY key_backend)
+                       FILTER (
+                           WHERE status = 'active'
+                             AND issuance_enabled = true
+                             AND not_before <= now()
+                             AND not_after > now()
+                       ),
+                   ARRAY[]::text[]
+               ) AS active_backends
         FROM pki_authorities
         WHERE kind IN ('platform_leaf_issuer', 'tenant_intermediate')
         "#,

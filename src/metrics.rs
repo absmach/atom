@@ -51,6 +51,9 @@ pub const PKI_ENROLLMENT_OPERATIONS: &str = "atom_pki_enrollment_operations_tota
 /// scope (`global` or `source`).
 pub const PKI_ENROLLMENT_CONNECTION_REJECTIONS: &str =
     "atom_pki_enrollment_connection_rejections_total";
+/// Counter of re-enrollment requests rejected before a client certificate was
+/// authenticated, labelled only by the bounded transport (`native` or `est`).
+pub const PKI_ENROLLMENT_PEER_REJECTIONS: &str = "atom_pki_enrollment_peer_rejections_total";
 /// Counter for issuance, renewal, revocation, and enrollment outcomes. Rates
 /// are derived by the metrics backend; labels are a fixed operation vocabulary.
 pub const PKI_LIFECYCLE_OPERATIONS: &str = "atom_pki_lifecycle_operations_total";
@@ -182,6 +185,10 @@ mod backend {
 
     pub fn record_pki_enrollment_connection_rejection(scope: &'static str) {
         metrics::counter!(PKI_ENROLLMENT_CONNECTION_REJECTIONS, "scope" => scope).increment(1);
+    }
+
+    pub fn record_pki_enrollment_peer_rejection(transport: &'static str) {
+        metrics::counter!(PKI_ENROLLMENT_PEER_REJECTIONS, "transport" => transport).increment(1);
     }
 
     pub fn record_pki_lifecycle_operation(operation: &'static str, outcome: &'static str) {
@@ -317,6 +324,8 @@ mod backend {
     #[inline]
     pub fn record_pki_enrollment_connection_rejection(_scope: &'static str) {}
     #[inline]
+    pub fn record_pki_enrollment_peer_rejection(_transport: &'static str) {}
+    #[inline]
     pub fn record_pki_lifecycle_operation(_operation: &'static str, _outcome: &'static str) {}
     #[inline]
     pub fn record_pki_fleet_snapshot(
@@ -336,7 +345,8 @@ mod backend {
 pub use backend::{
     enabled, init, record_audit_db_suppressed, record_audit_failure, record_callout,
     record_decision, record_outbox_exhausted, record_outbox_publish_failure, record_pki_crl,
-    record_pki_enrollment, record_pki_enrollment_connection_rejection, record_pki_fleet_snapshot,
+    record_pki_enrollment, record_pki_enrollment_connection_rejection,
+    record_pki_enrollment_peer_rejection, record_pki_fleet_snapshot,
     record_pki_key_provider_operation, record_pki_lifecycle_operation, record_rate_limit_rejection,
     render,
 };

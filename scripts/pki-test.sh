@@ -89,23 +89,15 @@ smoke_tests=(
   m41_pki_est
 )
 
-full_tests=(
-  m17_certificates
-  m29_pki_authorities
-  m30_pki_ca_provisioning
-  m31_pki_certificate_profiles
-  m32_pki_csr_issuance
-  m33_pki_generated_issuance
-  m34_pki_renewal
-  m35_pki_revocation
-  m36_pki_issuer_crls
-  m37_pki_issuer_ocsp
-  m38_pki_runtime_resolver_v2
-  m39_pki_enrollment
-  m40_pki_lifecycle_automation
-  m41_pki_est
-  m42_pki_pkcs11
-)
+full_tests=()
+for test_path in tests/m[0-9][0-9]_pki*.rs; do
+  test -e "$test_path" || continue
+  full_tests+=("$(basename "$test_path" .rs)")
+done
+test "${#full_tests[@]}" -gt 0 || {
+  echo "No PKI integration test binaries found under tests/" >&2
+  exit 1
+}
 
 reset_database() {
   psql "$PKI_TEST_MAINT_URL" -v ON_ERROR_STOP=1 \

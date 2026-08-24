@@ -40,12 +40,13 @@ This is a real integration smoke test. It does not replace the full gate.
 
 ### Full PKI integration test
 
-`scripts/pki-test.sh full` runs the legacy certificate regression binary plus
-the PR-001 through PR-015 PKI integration binaries (`m29` through `m42`). It
-requires a pre-provisioned disposable SoftHSM token and the independent EST
-client. The repository `Rust` workflow is the authoritative full run because it
-also provisions the token, proves non-exportable PKCS#11 behavior, and performs
-the populated-token backup/restore signing exercise.
+`scripts/pki-test.sh full` discovers and runs every `tests/m??_pki*.rs`
+integration binary, including the legacy-certificate migration and purge-after-
+revocation regressions. It requires a pre-provisioned disposable SoftHSM token
+and the independent EST client. The repository `Rust` workflow is the
+authoritative full run because it also provisions the token, proves non-
+exportable PKCS#11 behavior, and performs the populated-token backup/restore
+signing exercise.
 
 ## Local prerequisites
 

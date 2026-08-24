@@ -566,10 +566,12 @@ Per-entity (10/minute by default) and per-tenant (1000/minute) limits are stored
 atomically in PostgreSQL, so replicas share enforcement. The optional IP limiter
 uses its separate enrollment bucket (1000/minute by default), not the public
 CRL/OCSP bucket; it is disabled with `ATOM_RATE_LIMIT_ENABLED=false`. `429` responses include
-`Retry-After`; `atom_rate_limit_rejections_total` and
-`atom_pki_enrollment_operations_total` expose bounded operational labels. CSR
-input defaults to a 64 KiB maximum and the entire HTTP body is bounded before
-full allocation.
+`Retry-After`; `atom_rate_limit_rejections_total`,
+`atom_pki_enrollment_operations_total`, and
+`atom_pki_enrollment_peer_rejections_total` expose bounded operational labels.
+Missing peer certificates are counted and logged without creating durable
+outbox rows. CSR input defaults to a 64 KiB maximum and the entire HTTP body is
+bounded before full allocation.
 
 HTTP/1.1 keep-alive is disabled by default to bound connection reuse. Set
 `ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE=true` to enable it. Tune IPv6 aggregation

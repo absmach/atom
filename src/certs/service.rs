@@ -1327,6 +1327,11 @@ fn runtime_identity_from_row(
     record: repo::RuntimeCertificateCredential,
     expected_tenant_id: Option<Uuid>,
 ) -> Result<CertificateIdentity, AppError> {
+    if record.issuer_id.is_none() {
+        return Err(AppError::Unauthorized(
+            "certificate has no managed issuer".into(),
+        ));
+    }
     if record.credential_status != "active" {
         return Err(AppError::Unauthorized(
             "certificate credential is not active".into(),
@@ -2242,6 +2247,34 @@ pub fn unsuccessful_ocsp(status: OcspResponseStatus) -> Result<Vec<u8>, AppError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_identity_rejects_an_issuerless_legacy_certificate() {
+        let now = Utc::now();
+        let record = repo::RuntimeCertificateCredential {
+            id: Uuid::new_v4(),
+            issuer_id: None,
+            entity_id: Uuid::new_v4(),
+            tenant_id: None,
+            identifier: "01".to_string(),
+            credential_status: "active".to_string(),
+            metadata: serde_json::json!({"fingerprint_sha256": "ab".repeat(32)}),
+            expires_at: Some(now + chrono::Duration::hours(1)),
+            entity_status: "active".to_string(),
+            entity_deleted_at: None,
+            tenant_status: None,
+            tenant_deleted_at: None,
+            issuer_status: None,
+            issuer_issuance_enabled: None,
+            issuer_not_before: None,
+            issuer_not_after: None,
+        };
+
+        assert!(matches!(
+            runtime_identity_from_row(record, None),
+            Err(AppError::Unauthorized(_))
+        ));
+    }
 
     #[test]
     fn normalizes_serial_numbers() {

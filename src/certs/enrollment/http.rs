@@ -39,7 +39,7 @@ impl FromRequestParts<AppState> for ReenrollmentPeer {
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &AppState,
+        _state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let peer = parts
             .extensions
@@ -48,20 +48,7 @@ impl FromRequestParts<AppState> for ReenrollmentPeer {
             .map(Self);
         let Some(peer) = peer else {
             let error = AppError::unauthorized("a verified client certificate is required");
-            audit::observe_error(
-                &state.pool,
-                state.config.events.enabled(),
-                &audit::AuditMeta {
-                    actor_entity_id: None,
-                    tenant_id: None,
-                    target_kind: "credential",
-                    target_id: None,
-                    event: "certificate.reenroll",
-                },
-                &serde_json::json!({"mode": "reenroll", "transport": "native"}),
-                &error,
-            )
-            .await;
+            super::observe_missing_peer("native", &error);
             return Err(error);
         };
         Ok(peer)

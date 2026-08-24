@@ -127,6 +127,10 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     insert_authority(&pool, &tenant_a_v1).await.unwrap();
     insert_authority(&pool, &tenant_b_v1).await.unwrap();
 
+    let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
+    assert_eq!(readiness.configured_count, 3);
+    assert_eq!(readiness.active_backends, vec![AuthorityKeyBackend::Pkcs11]);
+
     let active_a = repo::active_leaf_issuer_for_scope(&pool, Some(tenant_a))
         .await
         .unwrap();

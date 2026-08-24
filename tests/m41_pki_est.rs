@@ -401,6 +401,15 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         413,
     )
     .await;
+    let reenrollment_events_before: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->'details'->>'transport' = 'est'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let no_peer = est_request(
         address,
         &server_cert_pem,
@@ -415,6 +424,19 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     .await
     .unwrap();
     assert_eq!(no_peer.status, 401, "{}", no_peer.body);
+    let reenrollment_events_after: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->'details'->>'transport' = 'est'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        reenrollment_events_after, reenrollment_events_before,
+        "an anonymous re-enrollment rejection must not create a durable event"
+    );
     assert!(
         no_peer
             .headers
