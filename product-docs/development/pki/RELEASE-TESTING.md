@@ -40,7 +40,7 @@ This is a real integration smoke test. It does not replace the full gate.
 
 ### Full PKI integration test
 
-`scripts/pki-test.sh full` discovers and runs every `tests/m??_pki*.rs`
+`scripts/pki-test.sh full` discovers and runs every `tests/m<digits>_pki*.rs`
 integration binary, including the legacy-certificate migration and purge-after-
 revocation regressions. It requires a pre-provisioned disposable SoftHSM token
 and the independent EST client. The repository `Rust` workflow is the
@@ -91,7 +91,7 @@ production connection strings into a shell history, CI log, issue, or PR.
    ./scripts/pki-test.sh smoke
    ```
 
-6. Inspect the output. All seven named binaries must pass; a compile-only
+6. Inspect the output. All seven selected binaries must pass; a compile-only
    result is not a smoke-test pass.
 7. In GitHub, confirm `Rust` and `API Docs` are green on the current release-PR
    commit. Open the Rust job and confirm its `Run real PKI smoke test` step

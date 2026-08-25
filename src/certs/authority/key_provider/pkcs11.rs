@@ -45,19 +45,17 @@ fn runtime_key(config: &PkiPkcs11Config) -> String {
     format!("{}\0{}", config.module_path, config.token_label)
 }
 
-/// Return the shared runtime circuit state without creating a provider,
-/// opening a PKCS#11 session, or copying the configured PIN. Readiness uses
-/// this to report a known-open signer circuit while remaining probe-safe.
-pub(crate) fn circuit_is_open(config: &PkiPkcs11Config) -> bool {
-    let Some(runtimes) = RUNTIMES.get() else {
-        return false;
-    };
+/// Return the shared runtime circuit state without creating a provider or
+/// opening a PKCS#11 session. `None` distinguishes a missing startup-validated
+/// runtime from a known-closed circuit so readiness fails closed.
+pub(crate) fn circuit_state(config: &PkiPkcs11Config) -> Option<bool> {
+    let runtimes = RUNTIMES.get()?;
     let runtimes = runtimes
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     runtimes
         .get(&runtime_key(config))
-        .is_some_and(|runtime| runtime.circuit_open(Duration::from_secs(config.circuit_reset_secs)))
+        .map(|runtime| runtime.circuit_open(Duration::from_secs(config.circuit_reset_secs)))
 }
 
 #[derive(Clone)]
@@ -887,6 +885,15 @@ mod tests {
             circuit_failure_threshold: 10,
             circuit_reset_secs: 60,
         }
+    }
+
+    #[test]
+    fn circuit_state_distinguishes_an_uninitialized_runtime() {
+        let config = executor_config("readiness-runtime-state");
+        assert_eq!(circuit_state(&config), None);
+
+        let _provider = Pkcs11KeyProvider::new(config.clone());
+        assert_eq!(circuit_state(&config), Some(false));
     }
 
     #[test]

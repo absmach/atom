@@ -79,25 +79,39 @@ if [[ "$mode" == "full" ]]; then
   }
 fi
 
-smoke_tests=(
-  m30_pki_ca_provisioning
-  m32_pki_csr_issuance
-  m35_pki_revocation
-  m36_pki_issuer_crls
-  m37_pki_issuer_ocsp
-  m38_pki_runtime_resolver_v2
-  m41_pki_est
+smoke_test_suffixes=(
+  pki_ca_provisioning
+  pki_csr_issuance
+  pki_revocation
+  pki_issuer_crls
+  pki_issuer_ocsp
+  pki_runtime_resolver_v2
+  pki_est
 )
 
 full_tests=()
-for test_path in tests/m[0-9][0-9]_pki*.rs; do
-  test -e "$test_path" || continue
-  full_tests+=("$(basename "$test_path" .rs)")
+for test_path in tests/m*_pki*.rs; do
+  test_name="$(basename "$test_path" .rs)"
+  [[ "$test_name" =~ ^m[0-9]+_pki.*$ ]] || continue
+  full_tests+=("$test_name")
 done
 test "${#full_tests[@]}" -gt 0 || {
   echo "No PKI integration test binaries found under tests/" >&2
   exit 1
 }
+
+smoke_tests=()
+for suffix in "${smoke_test_suffixes[@]}"; do
+  matches=()
+  for test_name in "${full_tests[@]}"; do
+    [[ "$test_name" =~ ^m[0-9]+_${suffix}$ ]] && matches+=("$test_name")
+  done
+  if [[ "${#matches[@]}" -ne 1 ]]; then
+    echo "Expected exactly one PKI smoke test for $suffix, found ${#matches[@]}" >&2
+    exit 1
+  fi
+  smoke_tests+=("${matches[0]}")
+done
 
 reset_database() {
   psql "$PKI_TEST_MAINT_URL" -v ON_ERROR_STOP=1 \

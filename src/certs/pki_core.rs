@@ -12,6 +12,7 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
+use p256::ecdsa::{signature::Verifier, Signature as P256Signature, VerifyingKey};
 use rcgen::{
     CertificateParams, CertificateRevocationListParams, CertificateSigningRequestParams,
     CrlDistributionPoint, CustomExtension, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -35,8 +36,8 @@ use crate::{config::PkiCaKeyConfig, error::AppError};
 
 use super::authority::{
     key_provider::{
-        AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError, ManagedAuthorityKey,
-        ManagedAuthorityKeyProvider,
+        AuthorityKeyContext, AuthorityKeyProvider, AuthorityKeyProviderError,
+        AuthoritySignatureAlgorithm, ManagedAuthorityKey, ManagedAuthorityKeyProvider,
     },
     AuthorityKeyBackend, AuthorityRecord,
 };
@@ -50,11 +51,10 @@ const AIA_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 1, 1];
 const OCSP_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 1];
 const CA_ISSUERS_ACCESS_METHOD_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 48, 2];
 
-/// Authority-key ownership has to be established against the provider, but
-/// doing that before every signature turns a public-key comparison into an
-/// HSM login (or CA-key unwrap) on every issuance and artifact request. The
-/// certificate fingerprint is part of the cache value so replacing a
-/// certificate for an authority makes the next signing path verify again.
+/// Authority-key ownership is established against the provider on first use.
+/// The fingerprint cache avoids an extra HSM login or CA-key unwrap on every
+/// request; every signature is still verified against the certificate public
+/// key before it leaves this module, so backend key drift fails closed.
 static VERIFIED_MANAGED_AUTHORITY_KEYS: OnceLock<Mutex<HashMap<uuid::Uuid, String>>> =
     OnceLock::new();
 
@@ -92,13 +92,38 @@ impl SigningKey for PkiSigningKey {
                 provider,
                 context,
                 key,
-                ..
-            } => provider
-                .sign(*context, key, message)
-                .map(|signature| signature.bytes)
-                .map_err(|_| rcgen::Error::RemoteKeyError),
+                raw_public_key,
+            } => {
+                let signature = provider
+                    .sign(*context, key, message)
+                    .map_err(|_| rcgen::Error::RemoteKeyError)?;
+                match signature.algorithm {
+                    AuthoritySignatureAlgorithm::EcdsaP256Sha256 => {
+                        verify_managed_authority_signature(
+                            raw_public_key,
+                            message,
+                            &signature.bytes,
+                        )?;
+                    }
+                }
+                Ok(signature.bytes)
+            }
         }
     }
+}
+
+fn verify_managed_authority_signature(
+    raw_public_key: &[u8],
+    message: &[u8],
+    signature_der: &[u8],
+) -> Result<(), rcgen::Error> {
+    let verifying_key =
+        VerifyingKey::from_sec1_bytes(raw_public_key).map_err(|_| rcgen::Error::RemoteKeyError)?;
+    let signature =
+        P256Signature::from_der(signature_der).map_err(|_| rcgen::Error::RemoteKeyError)?;
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|_| rcgen::Error::RemoteKeyError)
 }
 
 pub struct PkiIssuer {
@@ -1280,6 +1305,10 @@ fn core_encoding_error(error: rcgen::Error) -> AppError {
 mod tests {
     use super::*;
     use crate::certs::profile::{KeyAlgorithmRule, LeafBasicConstraints, SanPolicy};
+    use p256::{
+        ecdsa::{signature::Signer as _, SigningKey as P256SigningKey},
+        elliptic_curve::rand_core::OsRng,
+    };
 
     fn profile(ekus: Vec<ExtendedKeyUsage>) -> CertificateProfile {
         CertificateProfile {
@@ -1328,6 +1357,29 @@ mod tests {
         let mut requested = CertificateParams::default();
         requested.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         assert!(validate_requested_extensions(&profile, &requested).is_err());
+    }
+
+    #[test]
+    fn managed_authority_signatures_are_checked_against_the_certificate_key() {
+        let expected_key = P256SigningKey::random(&mut OsRng);
+        let replacement_key = P256SigningKey::random(&mut OsRng);
+        let message = b"certificate bytes to sign";
+        let expected_signature: P256Signature = expected_key.sign(message);
+        let replacement_signature: P256Signature = replacement_key.sign(message);
+        let public_key = expected_key.verifying_key().to_encoded_point(false);
+
+        assert!(verify_managed_authority_signature(
+            public_key.as_bytes(),
+            message,
+            expected_signature.to_der().as_bytes(),
+        )
+        .is_ok());
+        assert!(verify_managed_authority_signature(
+            public_key.as_bytes(),
+            message,
+            replacement_signature.to_der().as_bytes(),
+        )
+        .is_err());
     }
 
     #[test]
