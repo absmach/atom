@@ -1437,6 +1437,11 @@ fn broker_auth_from_env() -> Result<BrokerAuthConfig> {
 }
 
 fn enrollment_from_env() -> Result<EnrollmentConfig> {
+    if std::env::var_os("ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS").is_some() {
+        anyhow::bail!(
+            "ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS was renamed to ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS"
+        );
+    }
     let default = EnrollmentConfig::default();
     let enabled = env_bool_default("ATOM_PKI_ENROLLMENT_ENABLED", default.enabled);
     let cert_path = nonempty_env("ATOM_PKI_ENROLLMENT_TLS_CERT_PATH");
@@ -2043,6 +2048,21 @@ mod tests {
     }
 
     #[test]
+    fn renamed_enrollment_request_timeout_is_rejected() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        std::env::set_var("ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS", "32");
+        let error = Config::from_env().expect_err("renamed timeout must fail fast");
+        assert!(error
+            .to_string()
+            .contains("was renamed to ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn enrollment_ip_rate_limit_has_its_own_policy() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -2197,6 +2217,7 @@ mod tests {
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             "ATOM_PKI_ENROLLMENT_TLS_HANDSHAKE_TIMEOUT_SECS",
             "ATOM_PKI_ENROLLMENT_HTTP_HEADER_TIMEOUT_SECS",
+            "ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS",
             "ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS",
             "ATOM_PKI_ENROLLMENT_CONNECTION_TIMEOUT_SECS",
             "ATOM_PKI_ENROLLMENT_SHUTDOWN_DRAIN_TIMEOUT_SECS",

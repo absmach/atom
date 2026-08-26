@@ -26,7 +26,7 @@ use crate::{
 use super::{repo, AuthorityKeyBackend, AuthorityRecord};
 
 mod pkcs11;
-pub(crate) use pkcs11::circuit_is_open as pkcs11_circuit_is_open;
+pub(crate) use pkcs11::circuit_state as pkcs11_circuit_state;
 pub use pkcs11::{Pkcs11AuthorityKey, Pkcs11KeyProvider};
 
 const PROVIDER_NAME: &str = "encrypted_database";

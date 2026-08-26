@@ -248,9 +248,9 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
 /// affect the HSM provider's circuit breaker.
 async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
     match authority_repo::leaf_issuer_readiness(&state.pool).await {
-        Ok(readiness) if readiness.configured_count == 0 => ComponentCheck {
+        Ok(readiness) if readiness.active_count == 0 => ComponentCheck {
             status: ComponentStatus::Disabled,
-            message: "no certificate issuers configured".to_string(),
+            message: "no active certificate issuers".to_string(),
         },
         Ok(readiness) if readiness.active_backends.is_empty() => ComponentCheck {
             status: ComponentStatus::Error,
@@ -265,7 +265,7 @@ async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
                 .pki_ca_keys
                 .pkcs11
                 .as_ref()
-                .is_some_and(crate::certs::authority::key_provider::pkcs11_circuit_is_open),
+                .and_then(crate::certs::authority::key_provider::pkcs11_circuit_state),
         ),
         Err(error) => ComponentCheck {
             status: ComponentStatus::Error,
@@ -277,14 +277,9 @@ async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
 fn certificate_issuer_config_check(
     ca_keys: &PkiCaKeyConfig,
     backends: &[AuthorityKeyBackend],
-    pkcs11_circuit_open: bool,
+    pkcs11_circuit_open: Option<bool>,
 ) -> ComponentCheck {
-    if backends.is_empty() {
-        return ComponentCheck {
-            status: ComponentStatus::Disabled,
-            message: "no active certificate issuers".to_string(),
-        };
-    }
+    debug_assert!(!backends.is_empty());
 
     let uses_encrypted_database = backends.contains(&AuthorityKeyBackend::EncryptedDatabase);
     let uses_pkcs11 = backends.contains(&AuthorityKeyBackend::Pkcs11);
@@ -320,7 +315,13 @@ fn certificate_issuer_config_check(
             ),
         };
     }
-    if uses_pkcs11 && pkcs11_circuit_open {
+    if uses_pkcs11 && pkcs11_circuit_open.is_none() {
+        return ComponentCheck {
+            status: ComponentStatus::Error,
+            message: "an active PKCS#11 certificate issuer runtime is not initialized".to_string(),
+        };
+    }
+    if uses_pkcs11 && pkcs11_circuit_open == Some(true) {
         return ComponentCheck {
             status: ComponentStatus::Error,
             message: "an active PKCS#11 certificate issuer circuit is open".to_string(),
@@ -501,8 +502,8 @@ mod tests {
             &ok,
             &check(ComponentStatus::Error),
         ));
-        // A deployment without PKI configured stays ready — the check
-        // reports Disabled and does not block.
+        // A deployment without an active PKI issuer stays ready — provisioning
+        // and historical issuer rows report Disabled and do not block.
         assert!(readiness_ok(
             &ok,
             &ok,
@@ -530,7 +531,7 @@ mod tests {
         let status = certificate_issuer_config_check(
             &config.pki_ca_keys,
             &[AuthorityKeyBackend::Pkcs11],
-            false,
+            Some(false),
         );
         assert!(matches!(status.status, ComponentStatus::Ok));
         assert!(status.message.contains("verified at startup"));
@@ -542,13 +543,37 @@ mod tests {
         let status = certificate_issuer_config_check(
             &config.pki_ca_keys,
             &[AuthorityKeyBackend::Pkcs11],
-            false,
+            None,
         );
         let ok = check(ComponentStatus::Ok);
 
         assert!(matches!(status.status, ComponentStatus::Error));
         assert!(status.message.contains("CA key provider is not configured"));
         assert!(!readiness_ok(&ok, &ok, &ok, &ok, &status));
+    }
+
+    #[test]
+    fn readiness_rejects_an_active_issuer_without_a_validated_pkcs11_runtime() {
+        let mut config = Config::for_tests();
+        config.pki_ca_keys.pkcs11 = Some(PkiPkcs11Config {
+            module_path: "/nonexistent/pkcs11-module.so".to_string(),
+            token_label: "missing-token".to_string(),
+            user_pin: SecretText::new("test-pin".to_string()).expect("PIN"),
+            operation_timeout_ms: 1,
+            mutation_hard_timeout_ms: 1,
+            max_retries: 0,
+            max_in_flight: 1,
+            circuit_failure_threshold: 1,
+            circuit_reset_secs: 1,
+        });
+
+        let status = certificate_issuer_config_check(
+            &config.pki_ca_keys,
+            &[AuthorityKeyBackend::Pkcs11],
+            None,
+        );
+        assert!(matches!(status.status, ComponentStatus::Error));
+        assert!(status.message.contains("runtime is not initialized"));
     }
 
     #[test]
@@ -569,7 +594,7 @@ mod tests {
         let status = certificate_issuer_config_check(
             &config.pki_ca_keys,
             &[AuthorityKeyBackend::Pkcs11],
-            true,
+            Some(true),
         );
         assert!(matches!(status.status, ComponentStatus::Error));
         assert!(status.message.contains("circuit is open"));
