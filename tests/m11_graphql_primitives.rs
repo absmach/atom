@@ -44,6 +44,15 @@ fn authed(query: impl Into<String>) -> Request {
     })
 }
 
+fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
+    Request::new(query).data(AuthContext {
+        entity_id,
+        tenant_id: None,
+        session_id: None,
+        ..Default::default()
+    })
+}
+
 async fn create_human(pool: &PgPool) -> (Uuid, String) {
     let id = Uuid::new_v4();
     let name = format!("graphql-human-{id}");
@@ -155,6 +164,89 @@ async fn login_mutation_returns_token() {
         .is_some_and(|token| !token.is_empty()));
     assert!(login["sessionId"].as_str().is_some());
     assert!(login["expiresAt"].as_str().is_some());
+}
+
+#[tokio::test]
+#[ignore]
+async fn change_own_password_requires_current_password() {
+    let pool = common::pool().await;
+    let (entity_id, name) = create_human(&pool).await;
+    service::create_password(&pool, entity_id, "test-password-123")
+        .await
+        .expect("create password");
+    let schema = build_schema(state(pool).await);
+
+    let wrong_current = schema
+        .execute(authed_as(
+            entity_id,
+            r#"
+            mutation {
+              changeOwnPassword(
+                currentPassword: "wrong-password-123",
+                newPassword: "new-password-123"
+              )
+            }
+            "#,
+        ))
+        .await;
+    assert!(!wrong_current.errors.is_empty());
+    assert!(
+        wrong_current.errors[0]
+            .message
+            .contains("current password is incorrect"),
+        "{:?}",
+        wrong_current.errors
+    );
+
+    let changed = schema
+        .execute(authed_as(
+            entity_id,
+            r#"
+            mutation {
+              changeOwnPassword(
+                currentPassword: "test-password-123",
+                newPassword: "new-password-123"
+              )
+            }
+            "#,
+        ))
+        .await;
+    assert!(changed.errors.is_empty(), "{:?}", changed.errors);
+
+    let old_login = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{name}",
+                secret: "test-password-123"
+              }}) {{
+                token
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(
+        !old_login.errors.is_empty(),
+        "old password must not remain usable"
+    );
+
+    let new_login = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{name}",
+                secret: "new-password-123"
+              }}) {{
+                token
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(new_login.errors.is_empty(), "{:?}", new_login.errors);
 }
 
 #[tokio::test]

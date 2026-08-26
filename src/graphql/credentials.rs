@@ -84,6 +84,46 @@ pub struct CredentialMutation;
 
 #[Object]
 impl CredentialMutation {
+    async fn change_own_password(
+        &self,
+        ctx: &Context<'_>,
+        current_password: String,
+        new_password: String,
+    ) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let credential_id = service::change_own_password_in_tx(
+            &mut tx,
+            auth.entity_id,
+            &current_password,
+            &new_password,
+        )
+        .await
+        .map_err(gql_error)?;
+        audit::commit_with_audit(
+            &state.pool,
+            tx,
+            state.config.events.enabled(),
+            &audit::AuditEvent {
+                actor_entity_id: Some(auth.entity_id),
+                tenant_id: auth.tenant_id,
+                target_kind: Some("credential"),
+                target_id: Some(credential_id),
+                event: "credential.create",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "entity_id": auth.entity_id,
+                    "kind": "password",
+                    "self_service": true,
+                }),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(true)
+    }
+
     async fn create_password(
         &self,
         ctx: &Context<'_>,
