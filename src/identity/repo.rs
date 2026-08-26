@@ -375,14 +375,6 @@ pub async fn update_entity_with_audit(
     audit_details: Value,
 ) -> Result<Entity, AppError> {
     ensure_not_config_managed_entity(pool, id).await?;
-    let sync_email = req
-        .kind
-        .as_ref()
-        .is_some_and(|kind| kind != &EntityKind::Human)
-        || req
-            .attributes
-            .as_ref()
-            .is_some_and(|attributes| attributes.get("email").is_some());
     let attributes = req.attributes.clone().map(normalize_attributes);
     if let Some(attrs) = attributes.as_ref() {
         reject_parent_group_attribute(attrs)?;
@@ -416,8 +408,8 @@ pub async fn update_entity_with_audit(
     for tenant_id in tenant_ids {
         crate::tenants::repo::lock_active_tenant(&mut tx, tenant_id).await?;
     }
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT id FROM entities
+    let locked: Option<EntityKind> = sqlx::query_scalar(
+        r#"SELECT kind FROM entities
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
              AND deleted_at IS NULL
@@ -428,9 +420,14 @@ pub async fn update_entity_with_audit(
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    if locked.is_none() {
+    let Some(current_kind) = locked else {
         return Err(AppError::not_found(format!("entity {id} not found")));
-    }
+    };
+    let sync_email = req.kind.as_ref().is_some_and(|kind| kind != &current_kind)
+        || req
+            .attributes
+            .as_ref()
+            .is_some_and(|attributes| attributes.get("email").is_some());
     let entity = sqlx::query_as::<_, Entity>(
         r#"UPDATE entities
            SET name               = COALESCE($2, name),
@@ -928,34 +925,6 @@ async fn sync_entity_email_from_attrs_in_tx(
     Ok(())
 }
 
-async fn restore_entity_email_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    entity_id: Uuid,
-    kind: &EntityKind,
-    attributes: &Value,
-) -> Result<(), AppError> {
-    if kind != &EntityKind::Human {
-        deactivate_entity_email_in_tx(tx, entity_id).await?;
-        return Ok(());
-    }
-
-    let restored = sqlx::query(
-        "UPDATE entity_emails
-         SET deleted_at = NULL, updated_at = now()
-         WHERE entity_id = $1
-         RETURNING id",
-    )
-    .bind(entity_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(db_err)?;
-
-    if restored.is_none() {
-        sync_entity_email_from_attrs_in_tx(tx, entity_id, kind, attributes).await?;
-    }
-    Ok(())
-}
-
 async fn deactivate_entity_email_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
@@ -1212,14 +1181,6 @@ pub async fn restore_entity_with_audit(
     .execute(&mut *tx)
     .await
     .map_err(restore_conflict)?;
-
-    let (kind, attributes): (EntityKind, Value) =
-        sqlx::query_as("SELECT kind, attributes FROM entities WHERE id = $1")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(restore_conflict)?;
-    restore_entity_email_in_tx(&mut tx, id, &kind, &attributes).await?;
 
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,
