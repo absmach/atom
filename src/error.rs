@@ -174,6 +174,7 @@ pub fn db_err(e: sqlx::Error) -> AppError {
 /// the violated constraint, which is what lets a 23505 be attributed to
 /// `external_id` rather than to `name` or `alias`.
 const ENTITY_EXTERNAL_ID_INDEX: &str = "idx_entities_external_id";
+const ENTITY_EMAIL_INDEX: &str = "idx_entity_emails_email";
 
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
@@ -203,6 +204,12 @@ pub fn restore_conflict(e: sqlx::Error) -> AppError {
              deleted; clear or change that entity's externalId before restoring",
         );
     }
+    if unique_violation_constraint(&e) == Some(ENTITY_EMAIL_INDEX) {
+        return AppError::conflict(
+            "another live entity took this entity's email while it was deleted; clear or change \
+             that entity's email before restoring",
+        );
+    }
     if is_unique_violation(&e) {
         return AppError::conflict(
             "a live record already uses this name; rename the conflicting record before restoring",
@@ -220,6 +227,9 @@ pub fn restore_conflict(e: sqlx::Error) -> AppError {
 pub fn entity_write_conflict(e: sqlx::Error) -> AppError {
     if unique_violation_constraint(&e) == Some(ENTITY_EXTERNAL_ID_INDEX) {
         return AppError::conflict("externalId is already used by another entity in this tenant");
+    }
+    if unique_violation_constraint(&e) == Some(ENTITY_EMAIL_INDEX) {
+        return AppError::conflict("Email address already taken");
     }
     db_err(e)
 }

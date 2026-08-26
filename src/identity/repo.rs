@@ -175,6 +175,8 @@ pub async fn create_entity_with_audit(
     if is_human {
         add_authenticated_user_membership_in_tx(&mut tx, entity.id).await?;
     }
+    sync_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.kind, &entity.attributes)
+        .await?;
 
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,
@@ -406,8 +408,8 @@ pub async fn update_entity_with_audit(
     for tenant_id in tenant_ids {
         crate::tenants::repo::lock_active_tenant(&mut tx, tenant_id).await?;
     }
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT id FROM entities
+    let locked: Option<EntityKind> = sqlx::query_scalar(
+        r#"SELECT kind FROM entities
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
              AND deleted_at IS NULL
@@ -418,9 +420,14 @@ pub async fn update_entity_with_audit(
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    if locked.is_none() {
+    let Some(current_kind) = locked else {
         return Err(AppError::not_found(format!("entity {id} not found")));
-    }
+    };
+    let sync_email = req.kind.as_ref().is_some_and(|kind| kind != &current_kind)
+        || req
+            .attributes
+            .as_ref()
+            .is_some_and(|attributes| attributes.get("email").is_some());
     let entity = sqlx::query_as::<_, Entity>(
         r#"UPDATE entities
            SET name               = COALESCE($2, name),
@@ -456,6 +463,11 @@ pub async fn update_entity_with_audit(
         sqlx::Error::RowNotFound => AppError::not_found(format!("entity {id} not found")),
         other => entity_write_conflict(other),
     })?;
+
+    if sync_email {
+        sync_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.kind, &entity.attributes)
+            .await?;
+    }
 
     // The caller builds `audit_details` before the write, so it cannot know the
     // resulting identifier. Consumers denormalize `external_id` onto their own
@@ -843,6 +855,151 @@ fn normalize_attributes(attributes: Value) -> Value {
     }
 }
 
+async fn sync_entity_email_from_attrs_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    kind: &EntityKind,
+    attributes: &Value,
+) -> Result<(), AppError> {
+    let Some(email) = (kind == &EntityKind::Human)
+        .then(|| normalized_email_attr(attributes))
+        .flatten()
+    else {
+        deactivate_entity_email_in_tx(tx, entity_id).await?;
+        return Ok(());
+    };
+
+    let existing: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT id, email FROM entity_emails WHERE entity_id = $1 FOR UPDATE")
+            .bind(entity_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+
+    if let Some((email_id, current_email)) = existing {
+        if current_email != email {
+            invalidate_email_tokens_in_tx(tx, email_id).await?;
+            sqlx::query(
+                "UPDATE entity_emails
+                 SET email = $2, verified_at = NULL, deleted_at = NULL, updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(email_id)
+            .bind(&email)
+            .execute(&mut **tx)
+            .await
+            .map_err(entity_write_conflict)?;
+            sqlx::query(
+                "UPDATE credentials
+                 SET identifier = $2
+                 WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
+            )
+            .bind(entity_id)
+            .bind(&email)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+        } else {
+            sqlx::query(
+                "UPDATE entity_emails SET deleted_at = NULL, updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(email_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+        }
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"INSERT INTO entity_emails (id, entity_id, email)
+           VALUES ($1, $2, $3)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(entity_id)
+    .bind(email)
+    .execute(&mut **tx)
+    .await
+    .map_err(entity_write_conflict)?;
+    Ok(())
+}
+
+async fn deactivate_entity_email_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE email_verification_tokens
+         SET consumed_at = now()
+         WHERE email_id IN (SELECT id FROM entity_emails WHERE entity_id = $1)
+           AND consumed_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE password_reset_tokens
+         SET consumed_at = now()
+         WHERE email_id IN (SELECT id FROM entity_emails WHERE entity_id = $1)
+           AND consumed_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE entity_emails SET deleted_at = now(), updated_at = now()
+         WHERE entity_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+async fn invalidate_email_tokens_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    email_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE email_verification_tokens SET consumed_at = now()
+         WHERE email_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(email_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE password_reset_tokens SET consumed_at = now()
+         WHERE email_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(email_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+fn normalized_email_attr(attributes: &Value) -> Option<String> {
+    let email = attributes
+        .get("email")?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
+    let (local, domain) = email.split_once('@')?;
+    if local.is_empty()
+        || domain.is_empty()
+        || !domain.contains('.')
+        || email.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(email)
+}
+
 fn entity_kind_from_profile(kind: &str) -> Result<EntityKind, AppError> {
     match kind {
         "human" => Ok(EntityKind::Human),
@@ -938,7 +1095,8 @@ pub async fn delete_entity_with_audit(
     .map_err(db_err)?;
 
     sqlx::query(
-        "UPDATE entity_emails SET deleted_at = now(), updated_at = now()
+        "UPDATE entity_emails
+         SET deleted_at = (SELECT deleted_at FROM entities WHERE id = $1), updated_at = now()
          WHERE entity_id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -991,8 +1149,8 @@ pub async fn restore_entity_with_audit(
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
-    let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT e.tenant_id, (t.deleted_at IS NOT NULL)
+    let tenant_info: Option<(Option<Uuid>, bool, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT e.tenant_id, (t.deleted_at IS NOT NULL), e.deleted_at
          FROM entities e
          LEFT JOIN tenants t ON t.id = e.tenant_id
          WHERE e.id = $1 AND e.deleted_at IS NOT NULL",
@@ -1001,33 +1159,35 @@ pub async fn restore_entity_with_audit(
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    let (tenant_id, _is_tenant_deleted) = match tenant_info {
+    let (tenant_id, _is_tenant_deleted, entity_deleted_at) = match tenant_info {
         None => {
             return Err(AppError::not_found(format!(
                 "no soft-deleted entity {id} to restore"
             )))
         }
-        Some((_, true)) => {
+        Some((_, true, _)) => {
             return Err(AppError::conflict(
                 "the entity's tenant is soft-deleted; restore the tenant first",
             ))
         }
-        Some((t_id, false)) => (t_id, false),
+        Some((t_id, false, deleted_at)) => (t_id, false, deleted_at),
     };
 
     sqlx::query(
-        "UPDATE entities
-         SET status = 'active', deleted_at = NULL, deleted_by = NULL, updated_at = now()
-         WHERE id = $1 AND deleted_at IS NOT NULL",
+        "UPDATE entity_emails
+         SET deleted_at = NULL, updated_at = now()
+         WHERE entity_id = $1 AND deleted_at = $2",
     )
     .bind(id)
+    .bind(entity_deleted_at)
     .execute(&mut *tx)
     .await
     .map_err(restore_conflict)?;
 
     sqlx::query(
-        "UPDATE entity_emails SET deleted_at = NULL, updated_at = now()
-         WHERE entity_id = $1 AND deleted_at IS NOT NULL",
+        "UPDATE entities
+         SET status = 'active', deleted_at = NULL, deleted_by = NULL, updated_at = now()
+         WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
     .execute(&mut *tx)
