@@ -12,7 +12,7 @@ use atom::{
     config::Config,
     identity::{repo, service},
     keys,
-    models::{entity::CreateEntity, session::SignupRequest},
+    models::{entity::CreateEntity, enums::EntityKind, session::SignupRequest},
 };
 use serde_json::json;
 use sqlx::Row;
@@ -314,7 +314,7 @@ async fn admin_created_human_uses_same_unique_email_identity() {
         &pool,
         CreateEntity {
             id: None,
-            kind: None,
+            kind: Some(EntityKind::Human),
             profile_id: None,
             profile_version_id: None,
             name: format!("m15-admin-email-create-{suffix}"),
