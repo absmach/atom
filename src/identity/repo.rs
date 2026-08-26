@@ -375,6 +375,7 @@ pub async fn update_entity_with_audit(
     audit_details: Value,
 ) -> Result<Entity, AppError> {
     ensure_not_config_managed_entity(pool, id).await?;
+    let sync_email = req.kind.is_some() || req.attributes.is_some();
     let attributes = req.attributes.clone().map(normalize_attributes);
     if let Some(attrs) = attributes.as_ref() {
         reject_parent_group_attribute(attrs)?;
@@ -459,8 +460,10 @@ pub async fn update_entity_with_audit(
         other => entity_write_conflict(other),
     })?;
 
-    sync_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.kind, &entity.attributes)
-        .await?;
+    if sync_email {
+        sync_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.kind, &entity.attributes)
+            .await?;
+    }
 
     // The caller builds `audit_details` before the write, so it cannot know the
     // resulting identifier. Consumers denormalize `external_id` onto their own
@@ -858,24 +861,46 @@ async fn sync_entity_email_from_attrs_in_tx(
         .then(|| normalized_email_attr(attributes))
         .flatten()
     else {
-        sqlx::query(
-            "UPDATE entity_emails SET deleted_at = now(), updated_at = now()
-             WHERE entity_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(entity_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_err)?;
+        deactivate_entity_email_in_tx(tx, entity_id).await?;
         return Ok(());
     };
 
+    let existing: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT id, email FROM entity_emails WHERE entity_id = $1 FOR UPDATE")
+            .bind(entity_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+
+    if let Some((email_id, current_email)) = existing {
+        if current_email != email {
+            invalidate_email_tokens_in_tx(tx, email_id).await?;
+            sqlx::query(
+                "UPDATE entity_emails
+                 SET email = $2, verified_at = NULL, deleted_at = NULL, updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(email_id)
+            .bind(email)
+            .execute(&mut **tx)
+            .await
+            .map_err(entity_write_conflict)?;
+        } else {
+            sqlx::query(
+                "UPDATE entity_emails SET deleted_at = NULL, updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(email_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+        }
+        return Ok(());
+    }
+
     sqlx::query(
         r#"INSERT INTO entity_emails (id, entity_id, email)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (entity_id)
-           DO UPDATE SET email = EXCLUDED.email,
-                         deleted_at = NULL,
-                         updated_at = now()"#,
+           VALUES ($1, $2, $3)"#,
     )
     .bind(Uuid::new_v4())
     .bind(entity_id)
@@ -883,6 +908,64 @@ async fn sync_entity_email_from_attrs_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(entity_write_conflict)?;
+    Ok(())
+}
+
+async fn deactivate_entity_email_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE email_verification_tokens
+         SET consumed_at = now()
+         WHERE email_id IN (SELECT id FROM entity_emails WHERE entity_id = $1)
+           AND consumed_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE password_reset_tokens
+         SET consumed_at = now()
+         WHERE email_id IN (SELECT id FROM entity_emails WHERE entity_id = $1)
+           AND consumed_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE entity_emails SET deleted_at = now(), updated_at = now()
+         WHERE entity_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+async fn invalidate_email_tokens_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    email_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE email_verification_tokens SET consumed_at = now()
+         WHERE email_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(email_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE password_reset_tokens SET consumed_at = now()
+         WHERE email_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(email_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
     Ok(())
 }
 
