@@ -8,7 +8,7 @@
 mod common;
 
 use atom::{error::AppError, models::tenant::CreateTenantInvitation, tenants::repo as tenant_repo};
-use sqlx::PgPool;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
 async fn make_entity(pool: &PgPool, name: &str) -> Uuid {
@@ -208,6 +208,47 @@ async fn invitation_token_accept_reports_state_specific_errors() {
         tenant_repo::accept_invitation_token(&pool, &token, other).await,
         "invitation does not belong to this user",
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn email_invitation_acceptance_works_with_a_single_connection_pool() {
+    let setup_pool = common::pool().await;
+    let inviter = make_entity(
+        &setup_pool,
+        &format!("single-connection-inviter-{}", Uuid::new_v4()),
+    )
+    .await;
+    let invitee = make_entity(
+        &setup_pool,
+        &format!("single-connection-invitee-{}", Uuid::new_v4()),
+    )
+    .await;
+    let email = format!("single-connection-{}@example.test", Uuid::new_v4());
+    add_email(&setup_pool, invitee, &email).await;
+    let tenant = make_tenant(
+        &setup_pool,
+        &format!("single-connection-tenant-{}", Uuid::new_v4()),
+    )
+    .await;
+    let (_, token) = create_email_invitation(&setup_pool, tenant, inviter, &email).await;
+    drop(setup_pool);
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect single-connection pool");
+
+    let accepted_tenant = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tenant_repo::accept_invitation_token(&pool, &token, invitee),
+    )
+    .await
+    .expect("accept must not wait for a second pool connection")
+    .expect("accept email invitation");
+    assert_eq!(accepted_tenant, tenant);
 }
 
 #[tokio::test]

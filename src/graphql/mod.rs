@@ -29,7 +29,7 @@ use crate::{
     state::AppState,
 };
 
-pub use schema::{build_schema, AtomSchema};
+pub use schema::{build_schema, schema_sdl, AtomSchema};
 
 pub async fn graphql_handler(
     Extension(schema): Extension<AtomSchema>,

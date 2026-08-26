@@ -177,6 +177,39 @@ pub async fn validate_role_assignment(
     validate_assignments(pool, &assignments).await
 }
 
+/// Validate a role assignment using the caller's existing connection.
+///
+/// Transactional mutation paths must use this variant so validation cannot
+/// wait for a second pool connection while the transaction holds the first.
+pub async fn validate_role_assignment_on_connection(
+    conn: &mut sqlx::PgConnection,
+    tenant_id: Option<Uuid>,
+    subject_kind: SubjectKind,
+    subject_id: Uuid,
+    role_id: Uuid,
+) -> Result<(), AppError> {
+    let entity_kinds = subject_entity_kinds(&mut *conn, subject_kind, subject_id).await?;
+    if entity_kinds.is_empty() {
+        return Ok(());
+    }
+
+    let role_capabilities = role_permission_assignments(&mut *conn, &[role_id]).await?;
+    let assignments = entity_kinds
+        .into_iter()
+        .flat_map(|entity_kind| {
+            role_capabilities.iter().map(move |role_cap| Assignment {
+                entity_kind: entity_kind.clone(),
+                capability_name: role_cap.capability_name.clone(),
+                object_kind: role_cap.object_kind.clone(),
+                object_type: role_cap.object_type.clone(),
+                tenant_id,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    validate_assignments(&mut *conn, &assignments).await
+}
+
 pub async fn validate_composite_role_assignment_plan(
     pool: &PgPool,
     entity_ids: &[Uuid],
@@ -477,18 +510,17 @@ where
     .collect()
 }
 
-async fn subject_entity_kinds(
-    pool: &PgPool,
+async fn subject_entity_kinds<'e, E>(
+    executor: E,
     subject_kind: SubjectKind,
     subject_id: Uuid,
-) -> Result<Vec<String>, AppError> {
-    match subject_kind {
-        SubjectKind::Entity => sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
-            .bind(subject_id)
-            .fetch_all(pool)
-            .await
-            .map_err(db_err),
-        SubjectKind::Group => sqlx::query_scalar(
+) -> Result<Vec<String>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let query = match subject_kind {
+        SubjectKind::Entity => "SELECT kind FROM entities WHERE id = $1",
+        SubjectKind::Group => {
             r#"WITH RECURSIVE subject_groups(group_id) AS (
                    SELECT $1::uuid
                    UNION ALL
@@ -499,13 +531,14 @@ async fn subject_entity_kinds(
                SELECT DISTINCT e.kind
                FROM group_members gm
                JOIN entities e ON e.id = gm.entity_id
-               WHERE gm.group_id IN (SELECT group_id FROM subject_groups)"#,
-        )
+               WHERE gm.group_id IN (SELECT group_id FROM subject_groups)"#
+        }
+    };
+    sqlx::query_scalar(query)
         .bind(subject_id)
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
-        .map_err(db_err),
-    }
+        .map_err(db_err)
 }
 
 async fn capability_names<'e, E>(executor: E, ids: &[Uuid]) -> Result<Vec<String>, AppError>
@@ -542,10 +575,13 @@ struct RoleCapabilityAssignment {
     object_type: Option<String>,
 }
 
-async fn role_permission_assignments(
-    pool: &PgPool,
+async fn role_permission_assignments<'e, E>(
+    executor: E,
     role_ids: &[Uuid],
-) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
+) -> Result<Vec<RoleCapabilityAssignment>, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     if role_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -602,7 +638,7 @@ async fn role_permission_assignments(
            WHERE rpb.role_id = ANY($1::uuid[])"#,
     )
     .bind(role_ids)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(db_err)?
     .into_iter()

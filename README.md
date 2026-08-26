@@ -518,6 +518,10 @@ mount its own branding without forking or rebuilding the image. See
 [`email-templates/README.md`](email-templates/README.md) for the full
 variable reference per template.
 
+Password-reset destinations are deployment controlled. The reset request body
+contains only `email`; Atom always constructs the link from
+`ATOM_PASSWORD_RESET_REDIRECT` and rejects caller-supplied redirect fields.
+
 ### Port overrides
 
 If a host port is already occupied, override only the host-side port:
@@ -570,12 +574,12 @@ in both images' OCI labels. A release build is stricter: commit the intended
 release state, tag that exact commit, and build from a clean worktree:
 
 ```bash
-git tag v0.50.0
+git tag v1.0.0
 make release
 ```
 
-This produces `ghcr.io/absmach/atom:v0.50.0` and
-`ghcr.io/absmach/atom-ui:v0.50.0` locally, and moves the local `:latest` tags
+This produces `ghcr.io/absmach/atom:v1.0.0` and
+`ghcr.io/absmach/atom-ui:v1.0.0` locally, and moves the local `:latest` tags
 onto the same images so `make up` runs what was just released; it does not push
 anything. Pushing the tag triggers the image workflow, which runs the Rust and
 Frontend suites first and only then publishes both the versioned tags and
@@ -772,6 +776,9 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_DB_MAX_CONNECTIONS` / `ATOM_DB_MIN_CONNECTIONS`                                                                          | `20` / `0`                                           | Postgres pool size controls                                                             |
 | `ATOM_DB_ACQUIRE_TIMEOUT_SECS` / `ATOM_DB_CONNECT_TIMEOUT_SECS`                                                                | `30` / `10`                                          | Pool acquire and startup connect timeouts                                               |
 | `ATOM_DB_IDLE_TIMEOUT_SECS` / `ATOM_DB_MAX_LIFETIME_SECS`                                                                      | `600` / `1800`                                       | Pool idle and lifetime limits                                                           |
+| `ATOM_HTTP_MAX_CONNECTIONS` / `ATOM_HTTP_MAX_CONNECTIONS_PER_IP`                                                              | `1024` / `1024`                                      | Primary HTTP global and TCP-peer connection caps; lower the per-IP cap only for direct exposure |
+| `ATOM_HTTP_HEADER_TIMEOUT_SECS` / `ATOM_HTTP_REQUEST_TIMEOUT_SECS`                                                             | `10` / `30`                                          | Primary HTTP header-read and total request deadlines                                    |
+| `ATOM_HTTP_CONNECTION_TIMEOUT_SECS` / `ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS`                                                  | `300` / `30`                                         | Primary HTTP connection lifetime and graceful-shutdown drain deadline                  |
 | `ATOM_KEY_ENCRYPTION_KEY`                                                                                                      | *(required for production)*                          | Base64 32-byte AES-256-GCM key encrypting all recoverable secrets at rest: signing private keys and retrievable credential secrets (shared keys) |
 | `ATOM_KEY_ENCRYPTION_KEY_ID`                                                                                                   | `local:v1`                                           | Operator-visible signing-key encryption key id                                          |
 | `ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS`                                                                                            | `false`                                              | Development-only fallback for plaintext signing key rows                                |
@@ -1069,15 +1076,17 @@ Authorization: Bearer <token>
 ```
 
 The public HTTP routes that do not require an existing Bearer token are
-`GET /health`, `GET /.well-known/jwks.json`, `GET /certs/ca-chain`,
-`GET /certs/trust-bundle.pem`,
-`GET /certs/crl`, `POST /certs/ocsp`, `GET /auth/public-config`,
+`GET /health`, `GET /health/live`, `GET /health/ready`,
+`GET /.well-known/jwks.json`, `GET /certs/trust-bundle.pem`,
+`GET /certs/issuers/:issuer_id/crl`,
+`POST /certs/issuers/:issuer_id/ocsp`, `GET /auth/public-config`,
 `POST /auth/login`, `GET /auth/email/verify`, `POST /auth/email/resend`,
 `POST /auth/password/reset/request`, `POST /auth/password/reset`,
 `GET /auth/oauth/:provider/start`, `GET /auth/oauth/:provider/callback`,
 `POST /auth/oauth/exchange`, and `POST /auth/signup` when signup is enabled.
-Custom API endpoint execution under `/api/custom/*` follows the configured
-endpoint auth mode.
+Custom API endpoint execution under `/api/custom/*` requires a Bearer token;
+the endpoint's configured execution mode determines which GraphQL authority is
+used after caller authentication and endpoint authorization.
 
 Two token types are accepted:
 
@@ -1276,10 +1285,9 @@ GET  /health
 GET  /health/live
 GET  /health/ready
 GET  /.well-known/jwks.json
-GET  /certs/ca-chain
 GET  /certs/trust-bundle.pem
-GET  /certs/crl
-POST /certs/ocsp
+GET  /certs/issuers/:issuer_id/crl
+POST /certs/issuers/:issuer_id/ocsp
 GET  /auth/public-config
 POST /auth/login
 POST /auth/logout
@@ -1409,7 +1417,7 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-Migrations run automatically on startup via `sqlx::migrate!`. To add a migration, create `migrations/NNN_<name>.sql`.
+Migrations run automatically on startup via `sqlx::migrate!`. To add a migration, create `migrations/NNN_<name>.sql`. The v1 in-place upgrade floor is v0.50.0; released migrations are immutable. See [the v1 compatibility contract](product-docs/14-v1-compatibility.md).
 
 ---
 
@@ -1466,6 +1474,19 @@ The OpenAPI spec is hand-maintained. Validate it locally before pushing:
 ```bash
 npx @redocly/cli lint apidocs/openapi.yaml
 ```
+
+### GraphQL schema and v1 freeze
+
+The checked-in SDL is generated directly from the runtime schema:
+
+```bash
+cargo run --example export-graphql-schema -- apidocs/graphql-schema.graphql
+scripts/check-v1-contracts.sh
+```
+
+Before `v1.0.0` exists, the freeze check pins the supported v0.50.0 migration
+checksums. After the tag exists, it also rejects v1 HTTP, GraphQL, protobuf, or
+historical-migration drift.
 
 To render it as interactive docs:
 

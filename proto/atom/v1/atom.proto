@@ -18,10 +18,6 @@ service AuthService {
 // CertificateService resolves and revokes Atom certificate credentials for
 // runtime services that terminate mTLS outside Atom.
 service CertificateService {
-  // Legacy file-issuer resolver. Managed issuers must use ResolveCertificateV2.
-  rpc ResolveCertificate(ResolveCertificateRequest) returns (ResolveCertificateResponse) {
-    option deprecated = true;
-  }
   rpc ResolveCertificateV2(ResolveCertificateV2Request) returns (ResolveCertificateV2Response);
   rpc RevokeEntityCertificates(RevokeEntityCertificatesRequest) returns (RevokeEntityCertificatesResponse);
 }
@@ -91,18 +87,6 @@ message AuthenticateCredentialResponse {
   string entity_id     = 1;
   string tenant_id     = 2;
   string credential_id = 3;
-}
-
-message ResolveCertificateRequest {
-  string serial_number = 1;
-  string fingerprint_sha256 = 2;
-}
-
-message ResolveCertificateResponse {
-  string entity_id = 1;
-  string tenant_id = 2;
-  string credential_id = 3;
-  string expires_at = 4;
 }
 
 // Unambiguous runtime resolution. At least one of certificate_der,

@@ -1,0 +1,1437 @@
+type AccessToken {
+	credentialId: ID!
+	name: String!
+	description: String
+	identifier: String
+	status: String!
+	scoped: Boolean!
+	permissions: [AccessTokenPermission!]!
+	expiresAt: String
+	lastUsedAt: String
+	createdAt: String!
+	"""
+	`"config"` when the token was provisioned from the bootstrap YAML.
+	The UI uses this to render the row read-only.
+	"""
+	managedBy: String
+}
+
+type AccessTokenList {
+	items: [AccessToken!]!
+	total: Int!
+}
+
+type AccessTokenPermission {
+	actions: [String!]!
+	scopeMode: String!
+	tenantId: ID
+	objectKind: String
+	objectType: String
+	objectId: ID
+	conditions: JSON!
+}
+
+input AccessTokenPermissionInput {
+	actions: [String!]!
+	scopeMode: String!
+	tenantId: ID
+	objectKind: String
+	objectType: String
+	objectId: ID
+	conditions: JSON
+}
+
+type AccessTokenResponse {
+	credentialId: ID!
+	token: String!
+	name: String!
+	description: String
+	expiresAt: String
+}
+
+type Action {
+	id: ID!
+	name: String!
+	applicability: [ActionApplicability!]!
+	description: String
+	createdAt: String!
+	updatedAt: String
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type ActionApplicability {
+	objectKind: String!
+	objectType: String
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type ActionApplicabilityEntry {
+	id: String!
+	actionId: ID!
+	actionName: String!
+	description: String
+	objectKind: String!
+	objectType: String
+	createdAt: String!
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+input ActionApplicabilityInput {
+	objectKind: String!
+	objectType: String
+}
+
+type ActionApplicabilityList {
+	items: [ActionApplicabilityEntry!]!
+	total: Int!
+}
+
+type ActionAssignmentRule {
+	id: ID!
+	tenantId: ID
+	entityKind: EntityKind!
+	actionName: String!
+	objectKind: String!
+	objectType: String
+	decision: ActionAssignmentRuleDecision!
+	isAbsolute: Boolean!
+	createdAt: String!
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+enum ActionAssignmentRuleDecision {
+	allow
+	deny
+	require_override
+}
+
+type ActionAssignmentRuleList {
+	items: [ActionAssignmentRule!]!
+	total: Int!
+}
+
+type ActionList {
+	items: [Action!]!
+	total: Int!
+}
+
+input AddActionApplicabilityInput {
+	actionId: ID!
+	objectKind: String!
+	objectType: String
+}
+
+type ApiEndpoint {
+	id: ID!
+	tenantId: ID
+	key: String!
+	name: String!
+	description: String
+	method: String!
+	path: String!
+	operationKind: String!
+	graphql: String!
+	authMode: String!
+	serviceEntityId: ID
+	variablesMapping: JSON!
+	requestSchema: JSON!
+	responseMapping: JSON!
+	status: String!
+	createdBy: ID
+	updatedBy: ID
+	createdAt: String!
+	updatedAt: String
+}
+
+type ApiEndpointExecution {
+	id: ID!
+	endpointId: ID
+	callerEntityId: ID
+	status: String!
+	requestSummary: JSON!
+	responseSummary: JSON!
+	error: String
+	createdAt: String!
+}
+
+type ApiEndpointExecutionList {
+	items: [ApiEndpointExecution!]!
+	total: Int!
+}
+
+type ApiEndpointList {
+	items: [ApiEndpoint!]!
+	total: Int!
+}
+
+type AuditLog {
+	id: ID!
+	actorEntityId: ID
+	tenantId: ID
+	targetKind: String
+	targetId: ID
+	event: String!
+	outcome: AuditOutcome!
+	details: JSON!
+	createdAt: String!
+}
+
+type AuditLogList {
+	items: [AuditLog!]!
+	total: Int!
+}
+
+enum AuditOutcome {
+	allow
+	deny
+	error
+}
+
+type AuditRetentionStatus {
+	enabled: Boolean!
+	days: Int!
+	cleanupIntervalSecs: Int!
+	cleanupBatchSize: Int!
+	lastCleanup: JSON
+}
+
+type Authority {
+	id: ID!
+	tenantId: ID
+	parentId: ID
+	kind: String!
+	version: Int!
+	status: String!
+	issuanceEnabled: Boolean!
+	subject: String!
+	serialNumber: String
+	fingerprintSha256: String
+	subjectKeyId: String
+	authorityKeyId: String
+	certificatePem: String
+	chainPem: String
+	csrPem: String
+	keyBackend: String!
+	provisioningMode: String!
+	failureReason: String
+	notBefore: String
+	notAfter: String
+	createdAt: String!
+	activatedAt: String
+	retiringAt: String
+	retiredAt: String
+	updatedAt: String!
+	ocspUrl: String
+	caIssuersUrl: String
+	crlDistributionPointUrl: String
+}
+
+type AuthorityImportResult {
+	authority: Authority!
+	succeeded: Boolean!
+	validationError: String
+	replacedAuthorityIds: [ID!]!
+}
+
+type AuthorizedObjectIdList {
+	ids: [ID!]!
+	total: Int!
+}
+
+input AuthorizedObjectIdsInput {
+	subjectId: ID!
+	action: String!
+	objectKind: String!
+	objectType: String
+	tenantId: ID
+	q: String
+	attributesContains: JSON
+	externalId: String
+	profileId: ID
+	entityStatus: EntityStatus
+	parentGroupId: ID
+	includeDescendants: Boolean
+	limit: Int
+	offset: Int
+}
+
+input AuthzCheckInput {
+	subjectId: ID!
+	action: String!
+	resourceId: ID
+	objectKind: String
+	objectId: ID
+	context: JSON
+}
+
+type AuthzExplainResponse {
+	allowed: Boolean!
+	reason: String!
+	subject: JSON
+	resource: JSON
+	capability: JSON
+	matchedBinding: JSON
+	evaluatedBindings: JSON!
+}
+
+type AuthzResponse {
+	allowed: Boolean!
+	reason: String!
+	details: JSON
+}
+
+type BulkRevokeCertificateItem {
+	credentialId: ID!
+	issuerId: ID
+	entityId: ID!
+	tenantId: ID
+	outcome: String!
+	errorCode: String
+}
+
+input BulkRevokeCertificatesInput {
+	tenantId: ID
+	issuerId: ID
+	principalGroupId: ID
+	reason: String
+	afterCredentialId: ID
+	snapshotAt: String
+	limit: Int
+}
+
+type BulkRevokeCertificatesPayload {
+	items: [BulkRevokeCertificateItem!]!
+	snapshotAt: String!
+	nextCursor: ID
+	complete: Boolean!
+}
+
+type Certificate {
+	credentialId: ID!
+	entityId: ID!
+	issuerId: ID
+	tenantId: ID
+	serialNumber: String!
+	status: String!
+	certificatePem: String!
+	subject: JSON!
+	dnsNames: [String!]!
+	ipAddresses: [String!]!
+	fingerprintSha256: String!
+	profileId: ID
+	profileName: String
+	identityUri: String
+	renewedFromCredentialId: ID
+	renewalDueAt: String!
+	expiresAt: String
+	createdAt: String!
+	revokedAt: String
+	revocationReason: String
+}
+
+type CertificateList {
+	items: [Certificate!]!
+	total: Int!
+}
+
+type CertificateRevocation {
+	certificate: Certificate!
+	reason: String!
+	actorEntityId: ID
+	revokedAt: String!
+	idempotentReplay: Boolean!
+}
+
+type ComponentCheck {
+	status: ComponentStatus!
+	message: String!
+}
+
+enum ComponentStatus {
+	ok
+	disabled
+	degraded
+	error
+}
+
+input CreateAccessTokenInput {
+	name: String!
+	description: String
+	expiresAt: String
+	permissions: [AccessTokenPermissionInput!]!
+	"""
+	Mint the token for another subject (delegated). Omitted or equal to the
+	caller = self-service. A different subject requires an unscoped caller with
+	`manage` on the target; the ceiling is still capped by the *target's* live
+	authority at evaluation time.
+	"""
+	subjectId: ID
+	"""
+	Whether the token is capped by a permission ceiling. Defaults to `true`.
+	`false` mints an *unscoped* token that carries the owner's full live grants
+	(no ceiling) and must be sent with an empty `permissions` list. Minting an
+	unscoped token requires credential-management authority over the owner.
+	"""
+	scoped: Boolean
+}
+
+enum CreateActionAssignmentRuleDecision {
+	allow
+	deny
+}
+
+input CreateActionAssignmentRuleInput {
+	tenantId: ID
+	entityKind: EntityKind!
+	actionName: String!
+	objectKind: String!
+	objectType: String
+	decision: CreateActionAssignmentRuleDecision!
+	isAbsolute: Boolean
+}
+
+input CreateActionInput {
+	name: String!
+	description: String
+	applicability: [ActionApplicabilityInput!]
+}
+
+input CreateApiEndpointInput {
+	tenantId: ID
+	key: String!
+	name: String!
+	description: String
+	method: String!
+	path: String!
+	operationKind: String!
+	graphql: String!
+	authMode: String
+	serviceEntityId: ID
+	variablesMapping: JSON
+	requestSchema: JSON
+	responseMapping: JSON
+	status: String
+}
+
+input CreateDirectPolicyInput {
+	tenantId: ID
+	subjectKind: SubjectKind!
+	subjectId: ID!
+	permissionBlockId: ID!
+}
+
+input CreateEntityInput {
+	id: ID
+	profileId: ID
+	profileVersionId: ID
+	kind: EntityKind
+	name: String!
+	alias: String
+	"""
+	Identifier assigned outside Atom (serial number, MAC, SKU). Opaque and
+	unvalidated, case-sensitive, trimmed, unique per tenant among live
+	entities.
+	"""
+	externalId: String
+	tenantId: ID
+	attributes: JSON
+}
+
+input CreateGroupInput {
+	id: ID
+	name: String!
+	tenantId: ID
+	groupType: String
+	description: String
+	attributes: JSON
+}
+
+input CreatePermissionBlockInput {
+	tenantId: ID
+	scopeMode: String!
+	objectKind: String
+	objectType: String
+	objectId: ID
+	groupId: ID
+	effect: Effect
+	conditions: JSON
+	actionIds: [ID!]!
+}
+
+input CreateProfileInput {
+	tenantId: ID
+	objectKind: String!
+	kind: String!
+	key: String!
+	displayName: String!
+	description: String
+	status: String
+}
+
+input CreateProfileVersionInput {
+	version: Int!
+	jsonSchema: JSON
+	uiSchema: JSON
+	status: String
+}
+
+input CreateResourceInput {
+	id: ID
+	kind: String!
+	name: String
+	alias: String
+	tenantId: ID
+	ownerId: ID
+	attributes: JSON
+}
+
+input CreateRoleAssignmentInput {
+	tenantId: ID
+	subjectKind: SubjectKind!
+	subjectId: ID!
+	roleId: ID!
+}
+
+input CreateRoleInput {
+	name: String!
+	tenantId: ID
+	description: String
+}
+
+input CreateSharedKeyInput {
+	expiresAt: String
+	description: String
+	key: String
+}
+
+input CreateTenantInput {
+	id: ID
+	name: String!
+	alias: String
+	tags: [String!]
+	attributes: JSON
+}
+
+input CreateTenantInvitationInput {
+	inviteeUserId: ID
+	inviteeEmail: String
+	roleId: ID
+	resend: Boolean
+	redirectUrl: String
+}
+
+type Credential {
+	id: ID!
+	entityId: ID
+	kind: CredentialKind!
+	identifier: String
+	status: String!
+	expiresAt: String
+	createdAt: String!
+	"""
+	`"config"` when the credential was provisioned from the bootstrap YAML.
+	The UI uses this to render the row read-only.
+	"""
+	managedBy: String
+}
+
+enum CredentialKind {
+	password
+	access_token
+	certificate
+	shared_key
+}
+
+type CredentialList {
+	items: [Credential!]!
+	total: Int!
+}
+
+type DbPoolStatus {
+	maxConnections: Int!
+	minConnections: Int!
+	acquireTimeoutSecs: Int!
+	connectTimeoutSecs: Int!
+	idleTimeoutSecs: Int!
+	maxLifetimeSecs: Int!
+	size: Int!
+	idle: Int!
+}
+
+enum DeletedFilter {
+	live
+	deleted
+	all
+}
+
+type DirectPolicy {
+	id: ID!
+	tenantId: ID
+	subjectKind: SubjectKind!
+	subjectId: ID!
+	permissionBlockId: ID!
+	permissionBlock: PermissionBlock!
+	createdAt: String!
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type DirectPolicyList {
+	items: [DirectPolicy!]!
+	total: Int!
+}
+
+enum Effect {
+	allow
+	deny
+}
+
+type Entity {
+	id: ID!
+	kind: EntityKind!
+	profileId: ID
+	profileVersionId: ID
+	name: String!
+	alias: String
+	"""
+	Identifier assigned outside Atom (serial number, MAC, SKU). Returned
+	byte-identical to what was stored.
+	"""
+	externalId: String
+	tenantId: ID
+	"""
+	Every object group the entity belongs to. Membership is many-to-many, so
+	this is a set — there is no single "parent" group.
+	"""
+	objectGroupIds: [ID!]!
+	status: EntityStatus!
+	attributes: JSON!
+	deletedAt: String
+	deletedBy: ID
+	createdAt: String!
+	updatedAt: String
+	"""
+	`"config"` when the row was provisioned from the bootstrap YAML.
+	The UI uses this to disable mutation buttons on config-managed rows.
+	"""
+	managedBy: String
+}
+
+enum EntityKind {
+	human
+	device
+	service
+	workload
+	application
+}
+
+type EntityList {
+	items: [Entity!]!
+	total: Int!
+}
+
+enum EntityOrderField {
+	created_at
+	updated_at
+	name
+	kind
+	status
+}
+
+enum EntityStatus {
+	active
+	inactive
+	suspended
+}
+
+type Group {
+	id: ID!
+	name: String!
+	tenantId: ID
+	groupType: String!
+	description: String
+	parentId: ID
+	status: EntityStatus!
+	attributes: JSON!
+	deletedAt: String
+	deletedBy: ID
+	createdAt: String!
+	updatedAt: String
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type GroupList {
+	items: [Group!]!
+	total: Int!
+}
+
+enum GroupOrderField {
+	created_at
+	updated_at
+	name
+	status
+}
+
+input InvitationTokenInput {
+	token: String!
+}
+
+input IssueCertificateFromCsrV2Input {
+	entityId: ID!
+	ttlSecs: Int
+	csrPem: String!
+	idempotencyKey: String!
+}
+
+input IssueGeneratedCertificateV2Input {
+	entityId: ID!
+	ttlSecs: Int
+}
+
+type IssuedCertificate {
+	certificate: Certificate!
+	privateKeyPem: String
+	chainPem: String
+	idempotentReplay: Boolean!
+}
+
+"""
+A scalar that can represent any JSON value.
+"""
+scalar JSON
+
+input LoginInput {
+	identifier: String!
+	secret: String!
+	tenantId: ID
+	tenantAlias: String
+	kind: String! = "password"
+}
+
+type LoginResponse {
+	token: String!
+	entityId: ID!
+	sessionId: ID!
+	expiresAt: String!
+	emailVerified: Boolean
+	verificationRequired: Boolean!
+}
+
+type MutationRoot {
+	login(input: LoginInput!): LoginResponse!
+	signup(input: SignupInput!): SignupResponse!
+	logout: Boolean!
+	refreshSession: LoginResponse!
+	createTenant(input: CreateTenantInput!): Tenant!
+	updateTenant(id: ID!, input: UpdateTenantInput!): Tenant!
+	deleteTenant(id: ID!): Boolean!
+	"""
+	Restore a soft-deleted tenant within the retention window. Reactivates the
+	tenant and un-hides its children automatically; revoked sessions and
+	certificates are not reinstated, so members must re-authenticate.
+	Admin-only and audit-logged.
+	"""
+	restoreTenant(id: ID!): Tenant!
+	"""
+	Physically purge an already-soft-deleted tenant and all its data,
+	bypassing the purge retention window. Deliberate, irreversible, admin-only.
+	"""
+	purgeTenant(id: ID!): Boolean!
+	enableTenant(id: ID!): Tenant!
+	disableTenant(id: ID!): Tenant!
+	freezeTenant(id: ID!): Tenant!
+	createTenantInvitation(tenantId: ID!, input: CreateTenantInvitationInput!): TenantInvitation!
+	acceptTenantInvitation(tenantId: ID!): Boolean!
+	acceptTenantInvitationToken(input: InvitationTokenInput!): ID!
+	rejectTenantInvitation(tenantId: ID!): Boolean!
+	revokeTenantInvitation(tenantId: ID!, invitationId: ID!): Boolean!
+	removeTenantMember(tenantId: ID!, entityId: ID!): Boolean!
+	addTenantMember(tenantId: ID!, entityId: ID!, roleId: ID): Boolean!
+	createProfile(input: CreateProfileInput!): Profile!
+	createProfileVersion(profileId: ID!, input: CreateProfileVersionInput!): ProfileVersion!
+	updateProfile(id: ID!, input: UpdateProfileInput!): Profile!
+	updateProfileVersion(id: ID!, input: UpdateProfileVersionInput!): ProfileVersion!
+	createEntity(input: CreateEntityInput!): Entity!
+	updateEntity(id: ID!, input: UpdateEntityInput!): Entity!
+	deleteEntity(id: ID!): Boolean!
+	"""
+	Restore a soft-deleted entity while it is still within the purge
+	retention window. Reinstates the identity (and frees the access it
+	carried), so it is platform-admin-only and audit-logged. Revoked
+	credentials and sessions are not reinstated — the entity must
+	re-authenticate.
+	"""
+	restoreEntity(id: ID!): Boolean!
+	"""
+	Physically purge an already-soft-deleted entity, bypassing the retention
+	window. Deliberate, irreversible, platform-admin only, and audit-logged.
+	"""
+	purgeEntity(id: ID!): Boolean!
+	"""
+	Add the entity to an object group. Membership is many-to-many, so this
+	adds to the set rather than replacing it, and re-adding an existing
+	membership is an idempotent no-op.
+	"""
+	addEntityToObjectGroup(entityId: ID!, objectGroupId: ID!): Entity!
+	"""
+	Remove the entity from **one** object group; its other memberships, and
+	the grants that flow through them, are untouched.
+	"""
+	removeEntityFromObjectGroup(entityId: ID!, objectGroupId: ID!): Entity!
+	"""
+	Remove the entity from **every** object group it belongs to. Kept
+	distinct from `removeEntityFromObjectGroup` so "clear the group" can
+	never be read as either one by accident.
+	"""
+	clearEntityObjectGroups(entityId: ID!): Entity!
+	enableEntity(id: ID!): Entity!
+	disableEntity(id: ID!): Entity!
+	addOwnership(ownerId: ID!, ownedId: ID!, relation: String): Ownership!
+	removeOwnership(ownerId: ID!, ownedId: ID!): Boolean!
+	createResource(input: CreateResourceInput!): Resource!
+	updateResource(id: ID!, input: UpdateResourceInput!): Resource!
+	deleteResource(id: ID!): Boolean!
+	"""
+	Restore a soft-deleted resource within the retention window. Platform-admin
+	only and audit-logged.
+	"""
+	restoreResource(id: ID!): Boolean!
+	"""
+	Physically purge an already-soft-deleted resource, bypassing the retention
+	window. Deliberate, irreversible, platform-admin only, and audit-logged.
+	"""
+	purgeResource(id: ID!): Boolean!
+	"""
+	Add the resource to an object group. Membership is many-to-many, so this
+	adds to the set rather than replacing it, and re-adding an existing
+	membership is an idempotent no-op.
+	"""
+	addResourceToObjectGroup(resourceId: ID!, objectGroupId: ID!): Resource!
+	"""
+	Remove the resource from **one** object group; its other memberships,
+	and the grants that flow through them, are untouched.
+	"""
+	removeResourceFromObjectGroup(resourceId: ID!, objectGroupId: ID!): Resource!
+	"""
+	Remove the resource from **every** object group it belongs to. Kept
+	distinct from `removeResourceFromObjectGroup` so "clear the group" can
+	never be read as either one by accident.
+	"""
+	clearResourceObjectGroups(resourceId: ID!): Resource!
+	createApiEndpoint(input: CreateApiEndpointInput!): ApiEndpoint!
+	updateApiEndpoint(id: ID!, input: UpdateApiEndpointInput!): ApiEndpoint!
+	enableApiEndpoint(id: ID!): ApiEndpoint!
+	disableApiEndpoint(id: ID!): ApiEndpoint!
+	createGroup(input: CreateGroupInput!): Group!
+	createObjectGroup(input: CreateGroupInput!): Group!
+	createPrincipalGroup(input: CreateGroupInput!): Group!
+	updateGroup(id: ID!, input: UpdateGroupInput!): Group!
+	enableGroup(id: ID!): Group!
+	disableGroup(id: ID!): Group!
+	suspendGroup(id: ID!): Group!
+	setGroupParent(id: ID!, parentId: ID!): Group!
+	setObjectGroupParent(objectGroupId: ID!, parentGroupId: ID!): Group!
+	removeGroupParent(id: ID!): Boolean!
+	removeObjectGroupParent(objectGroupId: ID!): Boolean!
+	deleteGroup(id: ID!): Boolean!
+	"""
+	Restore a soft-deleted group within the retention window. Platform-admin
+	only and audit-logged, since restoring a group reinstates the membership
+	paths and grants that flowed through it.
+	"""
+	restoreGroup(id: ID!): Boolean!
+	"""
+	Physically purge an already-soft-deleted group, bypassing the retention
+	window. Deliberate, irreversible, platform-admin only, and audit-logged.
+	"""
+	purgeGroup(id: ID!): Boolean!
+	addGroupMember(groupId: ID!, entityId: ID!): Boolean!
+	removeGroupMember(groupId: ID!, entityId: ID!): Boolean!
+	createPassword(entityId: ID!, password: String!): Boolean!
+	createAccessToken(input: CreateAccessTokenInput!): AccessTokenResponse!
+	replaceAccessTokenPermissions(credentialId: ID!, permissions: [AccessTokenPermissionInput!]!): Boolean!
+	revokeAccessToken(credentialId: ID!): Boolean!
+	createSharedKey(entityId: ID!, input: CreateSharedKeyInput!): SharedKeyResponse!
+	revealSharedKey(entityId: ID!, credentialId: ID!): SharedKeyResponse!
+	revokeCredential(entityId: ID!, credentialId: ID!): Boolean!
+	"""
+	Managed one-time key bootstrap.
+	"""
+	issueGeneratedCertificateV2(input: IssueGeneratedCertificateV2Input!): IssuedCertificate!
+	"""
+	Managed-issuer CSR issuance.
+	"""
+	issueCertificateFromCsrV2(input: IssueCertificateFromCsrV2Input!): IssuedCertificate!
+	"""
+	Exact-credential managed renewal using a subject-owned CSR.
+	"""
+	renewCertificateFromCsrV2(input: RenewCertificateFromCsrV2Input!): IssuedCertificate!
+	"""
+	Exact-credential managed renewal with a new one-time private key.
+	"""
+	renewGeneratedCertificateV2(input: RenewGeneratedCertificateV2Input!): IssuedCertificate!
+	"""
+	Issuer-aware revocation by exact credential, fingerprint, or issuer and serial.
+	"""
+	revokeCertificateV2(input: RevokeCertificateV2Input!): CertificateRevocation!
+	revokeEntityCertificates(entityId: ID!, reason: String): Int!
+	"""
+	Bounded, UUID-cursor fleet revocation by exactly one generic selector.
+	Per-item commits make repeating the previous cursor safe after a crash.
+	"""
+	bulkRevokeCertificates(input: BulkRevokeCertificatesInput!): BulkRevokeCertificatesPayload!
+	beginTenantAuthorityProvisioning(tenantId: ID!): Authority!
+	provisionTenantAuthorityAutomatically(tenantId: ID!): AuthorityImportResult!
+	beginAuthorityRetirement(authorityId: ID!): Authority!
+	completeAuthorityRetirement(authorityId: ID!): Authority!
+	createRole(input: CreateRoleInput!): Role!
+	updateRole(id: ID!, input: UpdateRoleInput!): Role!
+	replaceRolePermissionBlocks(roleId: ID!, permissionBlockIds: [ID!]!): Boolean!
+	deleteRole(id: ID!): Boolean!
+	"""
+	Restore a soft-deleted role within the retention window. The role's
+	permission blocks survived the soft delete, so its grants resume flowing
+	through the PDP the moment it is restored — hence platform-admin only and
+	audit-logged.
+	"""
+	restoreRole(id: ID!): Boolean!
+	"""
+	Physically purge an already-soft-deleted role, bypassing the retention
+	window. GCs permission blocks left orphaned by the removal. Deliberate,
+	irreversible, platform-admin only, and audit-logged.
+	"""
+	purgeRole(id: ID!): Boolean!
+	createAction(input: CreateActionInput!): Action!
+	addActionApplicability(input: AddActionApplicabilityInput!): ActionApplicabilityEntry!
+	removeActionApplicability(input: RemoveActionApplicabilityInput!): Boolean!
+	createActionAssignmentRule(input: CreateActionAssignmentRuleInput!): ActionAssignmentRule!
+	deleteActionAssignmentRule(id: ID!): Boolean!
+	updateAction(id: ID!, input: UpdateActionInput!): Action!
+	deleteAction(id: ID!): Boolean!
+	createPermissionBlock(input: CreatePermissionBlockInput!): PermissionBlock!
+	deletePermissionBlock(id: ID!): Boolean!
+	createRoleAssignment(input: CreateRoleAssignmentInput!): RoleAssignment!
+	deleteRoleAssignment(id: ID!): Boolean!
+	createDirectPolicy(input: CreateDirectPolicyInput!): DirectPolicy!
+	deleteDirectPolicy(id: ID!): Boolean!
+	authzCheck(input: AuthzCheckInput!): AuthzResponse!
+	authzExplain(input: AuthzCheckInput!): AuthzExplainResponse!
+	authzBulkCheck(input: [AuthzCheckInput!]!): [AuthzResponse!]!
+	rotateSigningKeys: Boolean!
+}
+
+type OrphanPolicy {
+	id: ID!
+	tenantId: ID
+	sourceKind: String!
+	subjectKind: SubjectKind!
+	subjectId: ID!
+	roleId: ID
+	permissionBlockId: ID
+	orphanReason: String!
+	createdAt: String!
+}
+
+type Ownership {
+	ownerId: ID!
+	ownedId: ID!
+	relation: String!
+	createdAt: String!
+}
+
+type PermissionBlock {
+	id: ID!
+	tenantId: ID
+	scopeMode: String!
+	objectKind: String
+	objectType: String
+	objectId: ID
+	groupId: ID
+	effect: Effect!
+	conditions: JSON!
+	actions: [Action!]!
+	createdAt: String!
+	updatedAt: String!
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type PermissionBlockList {
+	items: [PermissionBlock!]!
+	total: Int!
+}
+
+type Profile {
+	id: ID!
+	tenantId: ID
+	objectKind: String!
+	kind: String!
+	key: String!
+	displayName: String!
+	description: String
+	status: String!
+	createdAt: String!
+	updatedAt: String
+}
+
+type ProfileList {
+	items: [Profile!]!
+	total: Int!
+}
+
+type ProfileVersion {
+	id: ID!
+	profileId: ID!
+	version: Int!
+	jsonSchema: JSON!
+	uiSchema: JSON!
+	status: String!
+	createdAt: String!
+}
+
+type QueryRoot {
+	health: String!
+	session(id: ID!): Session!
+	tenants(q: String, name: String, alias: String, status: TenantStatus, deleted: DeletedFilter, order: TenantOrderField, dir: SortDir, limit: Int, offset: Int): TenantList!
+	tenant(id: ID!): Tenant!
+	tenantMembers(tenantId: ID!, q: String, limit: Int, offset: Int): EntityList!
+	tenantAssignableEntities(tenantId: ID!, q: String!, limit: Int, offset: Int): EntityList!
+	tenantInvitations(tenantId: ID!, limit: Int, offset: Int): TenantInvitationList!
+	myTenantRoles(tenantId: ID!): [TenantRoleAssignment!]!
+	myTenantInvitations(limit: Int, offset: Int): TenantInvitationList!
+	profiles(objectKind: String, kind: String, tenantId: ID, status: String, limit: Int, offset: Int): ProfileList!
+	profile(id: ID!): Profile!
+	profileVersions(profileId: ID!): [ProfileVersion!]!
+	ownedEntities(ownerId: ID!): [Entity!]!
+	entity(id: ID!): Entity!
+	entities(q: String, kind: EntityKind, externalId: String, profileId: ID, tenantId: ID, attributesContains: JSON, parentGroupId: ID, includeDescendants: Boolean, status: EntityStatus, deleted: DeletedFilter, order: EntityOrderField, dir: SortDir, limit: Int, offset: Int): EntityList!
+	resourceKinds(tenantId: ID): [String!]!
+	resources(q: String, kind: String, tenantId: ID, attributesContains: JSON, parentGroupId: ID, includeDescendants: Boolean, deleted: DeletedFilter, order: ResourceOrderField, dir: SortDir, limit: Int, offset: Int): ResourceList!
+	resource(id: ID!): Resource!
+	apiEndpoints(tenantId: ID, status: String, limit: Int, offset: Int): ApiEndpointList!
+	apiEndpoint(id: ID!): ApiEndpoint!
+	apiEndpointExecutions(endpointId: ID!, limit: Int, offset: Int): ApiEndpointExecutionList!
+	groups(q: String, tenantId: ID, attributesContains: JSON, parentId: ID, status: EntityStatus, deleted: DeletedFilter, order: GroupOrderField, dir: SortDir, limit: Int, offset: Int): GroupList!
+	group(id: ID!): Group!
+	groupMembers(groupId: ID!): [Entity!]!
+	entityGroups(entityId: ID!): [ID!]!
+	childGroups(parentId: ID!, limit: Int, offset: Int): GroupList!
+	objectGroups(q: String, tenantId: ID, parentId: ID, status: EntityStatus, deleted: DeletedFilter, order: GroupOrderField, dir: SortDir, limit: Int, offset: Int): GroupList!
+	principalGroups(q: String, tenantId: ID, status: EntityStatus, deleted: DeletedFilter, order: GroupOrderField, dir: SortDir, limit: Int, offset: Int): GroupList!
+	credentials(entityId: ID!): CredentialList!
+	"""
+	The caller's own tokens by default. `subjectId` names another owner —
+	a *delegated* listing gated exactly like delegated minting (unscoped
+	caller with `manage` on the target or its tenant), so the admin who
+	provisions a service token can inspect its ceiling and usage afterwards.
+	"""
+	accessTokens(subjectId: ID, status: String, limit: Int, offset: Int): AccessTokenList!
+	certificates(entityId: ID, tenantId: ID, issuerId: ID, status: String, expiresFrom: String, expiresBefore: String, limit: Int, offset: Int): CertificateList!
+	certificate(credentialId: ID!): Certificate!
+	pkiAuthority(id: ID!): Authority!
+	pkiAuthorities(tenantId: ID): [Authority!]!
+	authorizedObjectIds(input: AuthorizedObjectIdsInput!): AuthorizedObjectIdList!
+	roles(tenantId: ID, derivedKind: String, q: String, deleted: DeletedFilter, limit: Int, offset: Int): RoleList!
+	role(id: ID!): Role!
+	actions(objectKind: String, objectType: String, tenantId: ID, limit: Int! = 50, offset: Int! = 0): ActionList!
+	actionApplicability(tenantId: ID, actionName: String, objectKind: String, objectType: String, limit: Int! = 50, offset: Int! = 0): ActionApplicabilityList!
+	actionAssignmentRules(tenantId: ID, entityKind: EntityKind, actionName: String, objectKind: String, objectType: String, decision: ActionAssignmentRuleDecision, limit: Int! = 50, offset: Int! = 0): ActionAssignmentRuleList!
+	action(id: ID!): Action!
+	permissionBlocks(tenantId: ID, scopeMode: String, limit: Int, offset: Int): PermissionBlockList!
+	permissionBlock(id: ID!): PermissionBlock!
+	roleAssignments(tenantId: ID, subjectKind: SubjectKind, subjectId: ID, roleId: ID, limit: Int, offset: Int): RoleAssignmentList!
+	"""
+	Direct policies, filtered forward by subject and/or backward by object.
+	
+	`objectId` returns every direct policy whose permission block **names**
+	the object: `object` (direct), `group` (the object *is* the named
+	group), `group_direct_objects`/`group_descendant_objects` (object is a
+	member/descendant-member of the block's group), or
+	`group_child_groups`/`group_descendant_groups` (object is a group
+	covered by the block's hierarchy scope).
+	
+	This is a policy lookup, not effective access. Blocks that reach the
+	object without naming it (`platform`, `tenant`, `object_kind`,
+	`object_type`) are excluded — this answers "who is this object shared
+	with", not "who can see it".
+	
+	`objectKind`/`objectType` are co-filters that disambiguate an id across
+	kinds; they require `objectId`. Omitting `objectId` is unchanged from
+	today's subject-only listing.
+	"""
+	directPolicies(tenantId: ID, subjectKind: SubjectKind, subjectId: ID, permissionBlockId: ID, objectId: ID, objectKind: String, objectType: String, limit: Int, offset: Int): DirectPolicyList!
+	auditLogs(actorEntityId: ID, tenantId: ID, targetKind: String, targetId: ID, event: String, outcome: AuditOutcome, from: String, to: String, limit: Int, offset: Int): AuditLogList!
+	entityAuditLogs(entityId: ID!): AuditLogList!
+	orphanPolicies(limit: Int, offset: Int): [OrphanPolicy!]!
+	expiringCredentials(days: Int, entityId: ID, kind: CredentialKind, limit: Int, offset: Int): [Credential!]!
+	systemStatus: SystemStatus!
+	signingKeys: [SigningKey!]!
+}
+
+type RateLimitPolicyStatus {
+	category: String!
+	maxRequests: Int!
+	windowSecs: Int!
+}
+
+type RateLimitStatus {
+	enabled: Boolean!
+	policies: [RateLimitPolicyStatus!]!
+	trustedProxyCidrs: [String!]!
+}
+
+input RemoveActionApplicabilityInput {
+	actionId: ID!
+	objectKind: String!
+	objectType: String
+}
+
+input RenewCertificateFromCsrV2Input {
+	credentialId: ID!
+	ttlSecs: Int
+	csrPem: String!
+	revokeOld: Boolean
+	idempotencyKey: String!
+}
+
+input RenewGeneratedCertificateV2Input {
+	credentialId: ID!
+	ttlSecs: Int
+	revokeOld: Boolean
+	idempotencyKey: String!
+}
+
+type Resource {
+	id: ID!
+	kind: String!
+	name: String
+	alias: String
+	tenantId: ID
+	ownerId: ID
+	"""
+	Every object group the resource belongs to. Membership is many-to-many,
+	so this is a set — there is no single "parent" group.
+	"""
+	objectGroupIds: [ID!]!
+	attributes: JSON!
+	deletedAt: String
+	deletedBy: ID
+	createdAt: String!
+	updatedAt: String
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type ResourceList {
+	items: [Resource!]!
+	total: Int!
+}
+
+enum ResourceOrderField {
+	created_at
+	updated_at
+	name
+	kind
+}
+
+input RevokeCertificateV2Input {
+	credentialId: ID
+	fingerprintSha256: String
+	issuerId: ID
+	serialNumber: String
+	reason: String
+}
+
+type Role {
+	id: ID!
+	name: String!
+	tenantId: ID
+	description: String
+	derivedKind: String!
+	permissionBlocks: [PermissionBlock!]!
+	deletedAt: String
+	deletedBy: ID
+	createdAt: String!
+	updatedAt: String
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type RoleAssignment {
+	id: ID!
+	tenantId: ID
+	subjectKind: SubjectKind!
+	subjectId: ID!
+	roleId: ID!
+	role: Role!
+	createdAt: String!
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type RoleAssignmentList {
+	items: [RoleAssignment!]!
+	total: Int!
+}
+
+type RoleList {
+	items: [Role!]!
+	total: Int!
+}
+
+type Session {
+	id: ID!
+	entityId: ID!
+	expiresAt: String!
+	revokedAt: String
+	createdAt: String!
+}
+
+type SharedKeyResponse {
+	credentialId: ID!
+	key: String!
+	expiresAt: String
+}
+
+type SigningKey {
+	kid: String!
+	status: String!
+	algorithm: String!
+	createdAt: String!
+	storageMode: SigningKeyStorageMode!
+	keyEncryptionKeyId: String
+}
+
+type SigningKeyState {
+	configuredKeyId: String!
+	encryptedCount: Int!
+	plaintextCount: Int!
+	totalCount: Int!
+	plaintextAllowed: Boolean!
+}
+
+enum SigningKeyStorageMode {
+	encrypted
+	plaintext
+}
+
+input SignupInput {
+	name: String!
+	email: String!
+	password: String!
+	attributes: JSON! = "null"
+}
+
+type SignupResponse {
+	entityId: ID!
+	email: String!
+	verificationRequired: Boolean!
+}
+
+enum SortDir {
+	asc
+	desc
+}
+
+enum SubjectKind {
+	entity
+	group
+}
+
+type SystemStatus {
+	version: String!
+	revision: String!
+	status: ComponentStatus!
+	httpReady: ComponentCheck!
+	grpcReady: ComponentCheck!
+	database: ComponentCheck!
+	migrations: ComponentCheck!
+	signingKeys: ComponentCheck!
+	certificateIssuer: ComponentCheck!
+	dbPool: DbPoolStatus!
+	signingKeyState: SigningKeyState
+	auditRetention: AuditRetentionStatus!
+	rateLimits: RateLimitStatus!
+}
+
+type Tenant {
+	id: ID!
+	name: String!
+	alias: String
+	status: TenantStatus!
+	tags: [String!]!
+	attributes: JSON!
+	createdBy: ID
+	updatedBy: ID
+	deletedAt: String
+	deletedBy: ID
+	createdAt: String!
+	updatedAt: String
+	"""
+	`"config"` when provisioned from the bootstrap YAML.
+	"""
+	managedBy: String
+}
+
+type TenantInvitation {
+	id: ID!
+	tenantId: ID!
+	inviteeUserId: ID
+	inviteeName: String
+	inviteeEmail: String
+	invitedBy: ID!
+	roleId: ID
+	roleName: String
+	acceptedAt: String
+	rejectedAt: String
+	revokedAt: String
+	createdAt: String!
+	updatedAt: String
+}
+
+type TenantInvitationList {
+	items: [TenantInvitation!]!
+	total: Int!
+}
+
+type TenantList {
+	items: [Tenant!]!
+	total: Int!
+}
+
+enum TenantOrderField {
+	created_at
+	updated_at
+	name
+	alias
+	status
+}
+
+type TenantRoleAssignment {
+	roleId: ID!
+	roleName: String!
+	"""
+	Actions defined by the role's permission blocks. This is role metadata,
+	not a claim that every action is currently authorized.
+	"""
+	actions: [String!]!
+	assignmentPaths: [String!]!
+}
+
+enum TenantStatus {
+	active
+	inactive
+	frozen
+	deleted
+}
+
+input UpdateActionInput {
+	name: String
+	description: String
+	applicability: [ActionApplicabilityInput!]
+}
+
+input UpdateApiEndpointInput {
+	key: String
+	name: String
+	description: String
+	method: String
+	path: String
+	operationKind: String
+	graphql: String
+	authMode: String
+	serviceEntityId: ID
+	variablesMapping: JSON
+	requestSchema: JSON
+	responseMapping: JSON
+	status: String
+}
+
+input UpdateEntityInput {
+	name: String
+	kind: EntityKind
+	alias: String
+	"""
+	Omit to leave unchanged, or pass `null` to clear.
+	"""
+	externalId: String
+	tenantId: ID
+	profileId: ID
+	profileVersionId: ID
+	status: EntityStatus
+	attributes: JSON
+}
+
+input UpdateGroupInput {
+	name: String
+	description: String
+	status: EntityStatus
+	attributes: JSON
+}
+
+input UpdateProfileInput {
+	displayName: String
+	description: String
+	status: String
+}
+
+input UpdateProfileVersionInput {
+	status: String
+}
+
+input UpdateResourceInput {
+	name: String
+	alias: String
+	attributes: JSON
+}
+
+input UpdateRoleInput {
+	name: String
+	description: String
+}
+
+input UpdateTenantInput {
+	name: String
+	alias: String
+	tags: [String!]
+	attributes: JSON
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: QueryRoot
+	mutation: MutationRoot
+}
+

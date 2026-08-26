@@ -6,6 +6,12 @@ on:
     paths:
       - "proto/**"
       - "apidocs/**"
+      - "api/v1/**"
+      - "examples/export-graphql-schema.rs"
+      - "scripts/check-v1-contracts.sh"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "buf.yaml"
       - "buf.gen.yaml"
       - ".github/workflows/apidocs.yml"
@@ -19,6 +25,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install buf
         uses: bufbuild/buf-action@v1
@@ -55,9 +63,38 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Redocly CLI
         run: npm install -g @redocly/cli@latest
 
       - name: Validate openapi.yaml
         run: redocly lint apidocs/openapi.yaml
+
+  frozen-contracts:
+    name: Check GraphQL, migrations, and v1 freeze
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install buf
+        uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Check generated GraphQL SDL
+        run: |
+          schema_file="$(mktemp)"
+          cargo run --locked --quiet --example export-graphql-schema -- "$schema_file"
+          diff -u apidocs/graphql-schema.graphql "$schema_file"
+
+      - name: Check v1 API and migration contracts
+        run: bash scripts/check-v1-contracts.sh

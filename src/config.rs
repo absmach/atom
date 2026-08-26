@@ -18,6 +18,7 @@ pub struct Config {
     pub db_pool: DbPoolConfig,
     pub logging: LoggingConfig,
     pub listen_addr: String,
+    pub http_server: HttpServerConfig,
     pub grpc_addr: String,
     /// In-process TLS for the gRPC server. `None` = plaintext (the transport
     /// must then be secured by the deployment: private network / service mesh).
@@ -439,6 +440,32 @@ pub struct RateLimitPolicyConfig {
     pub window_secs: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpServerConfig {
+    pub max_connections: usize,
+    pub max_connections_per_ip: usize,
+    pub http_header_timeout_secs: u64,
+    pub request_timeout_secs: u64,
+    pub connection_timeout_secs: u64,
+    pub shutdown_drain_timeout_secs: u64,
+}
+
+impl Default for HttpServerConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 1_024,
+            // Keep the topology-safe default equal to the global cap: a
+            // reverse proxy may legitimately be the TCP peer for every user.
+            // Directly exposed deployments can lower this independently.
+            max_connections_per_ip: 1_024,
+            http_header_timeout_secs: 10,
+            request_timeout_secs: 30,
+            connection_timeout_secs: 300,
+            shutdown_drain_timeout_secs: 30,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrollmentTlsConfig {
     pub cert_path: String,
@@ -794,6 +821,7 @@ impl Config {
             logging: LoggingConfig::from_env()?,
             listen_addr: std::env::var("LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            http_server: http_server_from_env()?,
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             grpc_tls: grpc_tls_from_env()?,
             enrollment: enrollment_from_env()?,
@@ -886,6 +914,7 @@ impl Config {
             db_pool: DbPoolConfig::default(),
             logging: LoggingConfig::default(),
             listen_addr: "127.0.0.1:0".into(),
+            http_server: HttpServerConfig::default(),
             grpc_addr: "127.0.0.1:0".into(),
             grpc_tls: None,
             enrollment: EnrollmentConfig::default(),
@@ -1051,6 +1080,61 @@ fn db_pool_from_env() -> Result<DbPoolConfig> {
     }
     if cfg.min_connections > cfg.max_connections {
         anyhow::bail!("ATOM_DB_MIN_CONNECTIONS cannot exceed ATOM_DB_MAX_CONNECTIONS");
+    }
+    Ok(cfg)
+}
+
+fn http_server_from_env() -> Result<HttpServerConfig> {
+    let default = HttpServerConfig::default();
+    let cfg = HttpServerConfig {
+        max_connections: env_parse("ATOM_HTTP_MAX_CONNECTIONS", default.max_connections)?,
+        max_connections_per_ip: env_parse(
+            "ATOM_HTTP_MAX_CONNECTIONS_PER_IP",
+            default.max_connections_per_ip,
+        )?,
+        http_header_timeout_secs: env_parse(
+            "ATOM_HTTP_HEADER_TIMEOUT_SECS",
+            default.http_header_timeout_secs,
+        )?,
+        request_timeout_secs: env_parse(
+            "ATOM_HTTP_REQUEST_TIMEOUT_SECS",
+            default.request_timeout_secs,
+        )?,
+        connection_timeout_secs: env_parse(
+            "ATOM_HTTP_CONNECTION_TIMEOUT_SECS",
+            default.connection_timeout_secs,
+        )?,
+        shutdown_drain_timeout_secs: env_parse(
+            "ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS",
+            default.shutdown_drain_timeout_secs,
+        )?,
+    };
+    for (name, value) in [
+        ("ATOM_HTTP_MAX_CONNECTIONS", cfg.max_connections as u64),
+        (
+            "ATOM_HTTP_MAX_CONNECTIONS_PER_IP",
+            cfg.max_connections_per_ip as u64,
+        ),
+        (
+            "ATOM_HTTP_HEADER_TIMEOUT_SECS",
+            cfg.http_header_timeout_secs,
+        ),
+        ("ATOM_HTTP_REQUEST_TIMEOUT_SECS", cfg.request_timeout_secs),
+        (
+            "ATOM_HTTP_CONNECTION_TIMEOUT_SECS",
+            cfg.connection_timeout_secs,
+        ),
+        (
+            "ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS",
+            cfg.shutdown_drain_timeout_secs,
+        ),
+    ] {
+        if value == 0 {
+            anyhow::bail!("{name} must be greater than zero");
+        }
+    }
+    if cfg.max_connections_per_ip > cfg.max_connections {
+        anyhow::bail!("ATOM_HTTP_MAX_CONNECTIONS_PER_IP cannot exceed ATOM_HTTP_MAX_CONNECTIONS");
     }
     Ok(cfg)
 }
@@ -1689,6 +1773,12 @@ mod tests {
         assert_eq!(cfg.logging.format, LogFormat::Text);
         assert_eq!(cfg.db_pool.max_connections, 20);
         assert_eq!(cfg.db_pool.acquire_timeout_secs, 30);
+        assert_eq!(cfg.http_server.max_connections, 1_024);
+        assert_eq!(cfg.http_server.max_connections_per_ip, 1_024);
+        assert_eq!(cfg.http_server.http_header_timeout_secs, 10);
+        assert_eq!(cfg.http_server.request_timeout_secs, 30);
+        assert_eq!(cfg.http_server.connection_timeout_secs, 300);
+        assert_eq!(cfg.http_server.shutdown_drain_timeout_secs, 30);
         assert!(!cfg.signing_keys.allow_plaintext_signing_keys);
         assert!(cfg.signing_keys.key_encryption_key.is_none());
         assert!(cfg.pki_ca_keys.key_encryption_key.is_none());
@@ -1714,6 +1804,33 @@ mod tests {
             !cfg.graphql_limits.introspection_enabled,
             "GraphQL introspection must default off"
         );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn primary_http_transport_limits_are_configurable_and_bounded() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        std::env::set_var("ATOM_HTTP_MAX_CONNECTIONS", "200");
+        std::env::set_var("ATOM_HTTP_MAX_CONNECTIONS_PER_IP", "20");
+        std::env::set_var("ATOM_HTTP_HEADER_TIMEOUT_SECS", "11");
+        std::env::set_var("ATOM_HTTP_REQUEST_TIMEOUT_SECS", "31");
+        std::env::set_var("ATOM_HTTP_CONNECTION_TIMEOUT_SECS", "301");
+        std::env::set_var("ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS", "32");
+        let cfg = Config::from_env().expect("custom HTTP server config");
+        assert_eq!(cfg.http_server.max_connections, 200);
+        assert_eq!(cfg.http_server.max_connections_per_ip, 20);
+        assert_eq!(cfg.http_server.http_header_timeout_secs, 11);
+        assert_eq!(cfg.http_server.request_timeout_secs, 31);
+        assert_eq!(cfg.http_server.connection_timeout_secs, 301);
+        assert_eq!(cfg.http_server.shutdown_drain_timeout_secs, 32);
+
+        std::env::set_var("ATOM_HTTP_MAX_CONNECTIONS_PER_IP", "201");
+        let error = Config::from_env().expect_err("per-IP cap above global cap");
+        assert!(error.to_string().contains("cannot exceed"));
 
         clear_hardening_env();
     }
@@ -2169,6 +2286,12 @@ mod tests {
             "ATOM_DB_CONNECT_TIMEOUT_SECS",
             "ATOM_DB_IDLE_TIMEOUT_SECS",
             "ATOM_DB_MAX_LIFETIME_SECS",
+            "ATOM_HTTP_MAX_CONNECTIONS",
+            "ATOM_HTTP_MAX_CONNECTIONS_PER_IP",
+            "ATOM_HTTP_HEADER_TIMEOUT_SECS",
+            "ATOM_HTTP_REQUEST_TIMEOUT_SECS",
+            "ATOM_HTTP_CONNECTION_TIMEOUT_SECS",
+            "ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS",
             "ATOM_KEY_ENCRYPTION_KEY",
             "ATOM_KEY_ENCRYPTION_KEY_ID",
             "ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS",

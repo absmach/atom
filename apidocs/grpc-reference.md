@@ -13,8 +13,6 @@
     - [CheckResponse](#atom-v1-CheckResponse)
     - [ResolveAliasRequest](#atom-v1-ResolveAliasRequest)
     - [ResolveAliasResponse](#atom-v1-ResolveAliasResponse)
-    - [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest)
-    - [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse)
     - [ResolveCertificateV2Request](#atom-v1-ResolveCertificateV2Request)
     - [ResolveCertificateV2Response](#atom-v1-ResolveCertificateV2Response)
     - [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest)
@@ -200,40 +198,6 @@
 
 
 
-<a name="atom-v1-ResolveCertificateRequest"></a>
-
-### ResolveCertificateRequest
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| serial_number | [string](#string) |  |  |
-| fingerprint_sha256 | [string](#string) |  |  |
-
-
-
-
-
-
-<a name="atom-v1-ResolveCertificateResponse"></a>
-
-### ResolveCertificateResponse
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| entity_id | [string](#string) |  |  |
-| tenant_id | [string](#string) |  |  |
-| credential_id | [string](#string) |  |  |
-| expires_at | [string](#string) |  |  |
-
-
-
-
-
-
 <a name="atom-v1-ResolveCertificateV2Request"></a>
 
 ### ResolveCertificateV2Request
@@ -357,7 +321,6 @@ runtime services that terminate mTLS outside Atom.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| ResolveCertificate | [ResolveCertificateRequest](#atom-v1-ResolveCertificateRequest) | [ResolveCertificateResponse](#atom-v1-ResolveCertificateResponse) | Legacy file-issuer resolver. Managed issuers must use ResolveCertificateV2. |
 | ResolveCertificateV2 | [ResolveCertificateV2Request](#atom-v1-ResolveCertificateV2Request) | [ResolveCertificateV2Response](#atom-v1-ResolveCertificateV2Response) |  |
 | RevokeEntityCertificates | [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest) | [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse) |  |
 

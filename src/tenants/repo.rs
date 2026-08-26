@@ -1324,7 +1324,6 @@ pub async fn add_tenant_member_with_audit(
     let mut role_assigned = false;
     if let Some(role_id) = role_id {
         role_assigned = crate::authz::repo::create_role_assignment_if_missing_in_tx(
-            pool,
             &mut tx,
             &CreateRoleAssignment {
                 tenant_id: Some(tenant_id),
@@ -1429,7 +1428,7 @@ pub async fn accept_invitation(
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let role_id = accept_invitation_row(&mut tx, tenant_id, invitee_user_id).await?;
-    grant_invitation_role(&mut tx, pool, tenant_id, invitee_user_id, role_id).await?;
+    grant_invitation_role(&mut tx, tenant_id, invitee_user_id, role_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
 }
@@ -1477,7 +1476,7 @@ pub async fn accept_invitation_token(
         .try_get::<Option<String>, _>("invitee_email")
         .unwrap_or(None)
     {
-        if !entity_has_email(pool, actor_id, &email).await? {
+        if !entity_has_email(&mut tx, actor_id, &email).await? {
             return Err(invitation_wrong_user());
         }
     }
@@ -1500,7 +1499,7 @@ pub async fn accept_invitation_token(
     .await
     .map_err(db_err)?;
 
-    grant_invitation_role(&mut tx, pool, tenant_id, actor_id, role_id).await?;
+    grant_invitation_role(&mut tx, tenant_id, actor_id, role_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(tenant_id)
 }
@@ -1536,7 +1535,6 @@ async fn accept_invitation_row(
 
 async fn grant_invitation_role(
     tx: &mut Transaction<'_, Postgres>,
-    pool: &PgPool,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
     role_id: Option<Uuid>,
@@ -1561,7 +1559,6 @@ async fn grant_invitation_role(
     };
 
     crate::authz::repo::create_role_assignment_if_missing_in_tx(
-        pool,
         tx,
         &CreateRoleAssignment {
             tenant_id: Some(tenant_id),
@@ -1746,7 +1743,11 @@ async fn email_by_entity_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<Str
     .map_err(db_err)
 }
 
-async fn entity_has_email(pool: &PgPool, entity_id: Uuid, email: &str) -> Result<bool, AppError> {
+async fn entity_has_email(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    email: &str,
+) -> Result<bool, AppError> {
     sqlx::query_scalar(
         r#"SELECT EXISTS (
                SELECT 1 FROM entity_emails
@@ -1755,7 +1756,7 @@ async fn entity_has_email(pool: &PgPool, entity_id: Uuid, email: &str) -> Result
     )
     .bind(entity_id)
     .bind(email)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_err(db_err)
 }

@@ -3,11 +3,13 @@ use axum::{
     http::{header, HeaderValue, Method},
     middleware,
     response::IntoResponse,
-    routing::{any, get, post},
+    routing::{get, post},
     Extension, Router,
 };
+use std::time::Duration;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
+    timeout::TimeoutLayer,
     trace::TraceLayer,
 };
 
@@ -50,6 +52,7 @@ pub fn create_router(state: AppState) -> Router {
     let auth_body_limit = state.config.body_limits.auth_bytes;
     let graphql_body_limit = state.config.body_limits.graphql_bytes;
     let custom_body_limit = state.config.body_limits.custom_endpoint_bytes;
+    let request_timeout = Duration::from_secs(state.config.http_server.request_timeout_secs);
     let rate_limit_state = state.clone();
 
     let app = Router::new()
@@ -82,7 +85,12 @@ pub fn create_router(state: AppState) -> Router {
         // Custom API endpoint executor
         .route(
             "/api/custom/*path",
-            any(api_endpoints::custom_endpoint).layer(DefaultBodyLimit::max(custom_body_limit)),
+            get(api_endpoints::custom_endpoint)
+                .post(api_endpoints::custom_endpoint)
+                .put(api_endpoints::custom_endpoint)
+                .patch(api_endpoints::custom_endpoint)
+                .delete(api_endpoints::custom_endpoint)
+                .layer(DefaultBodyLimit::max(custom_body_limit)),
         )
         // Auth
         .route("/auth/public-config", get(identity::public_auth_config))
@@ -148,6 +156,7 @@ pub fn create_router(state: AppState) -> Router {
             rate_limit::middleware,
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::new(request_timeout))
         .layer(cors)
 }
 
@@ -230,6 +239,45 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn custom_endpoints_reject_methods_outside_the_v1_contract() {
+        let app = create_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("TRACE")
+                    .uri("/api/custom/example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn password_reset_request_rejects_a_caller_controlled_redirect() {
+        let app = create_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/password/reset/request")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"email":"alice@example.test","redirect_url":"https://attacker.example/reset"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

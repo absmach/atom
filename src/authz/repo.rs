@@ -4211,7 +4211,7 @@ pub async fn create_role_assignment_with_audit(
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_live_subject(&mut tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     lock_role(&mut tx, req.role_id).await?;
-    validate_role_assignment(pool, &req).await?;
+    validate_role_assignment_in_tx(&mut tx, &req).await?;
     let assignment = sqlx::query_as::<_, RoleAssignment>(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
@@ -4294,13 +4294,12 @@ pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppEr
 /// can tell a real state change from an idempotent no-op and decide whether the
 /// operation is worth publishing as a domain event.
 pub(crate) async fn create_role_assignment_if_missing_in_tx(
-    pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateRoleAssignment,
 ) -> Result<bool, AppError> {
     lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     lock_role(tx, req.role_id).await?;
-    validate_role_assignment_in_tx(pool, tx, req).await?;
+    validate_role_assignment_in_tx(tx, req).await?;
     let inserted = sqlx::query(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
@@ -4718,35 +4717,7 @@ pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppErro
     delete_direct_policy_with_audit(pool, false, None, id).await
 }
 
-async fn validate_role_assignment(
-    pool: &PgPool,
-    req: &CreateRoleAssignment,
-) -> Result<(), AppError> {
-    let role_tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
-            .bind(req.role_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::bad_request("role assignment references unknown role"))?;
-    if role_tenant_id != req.tenant_id {
-        return Err(AppError::bad_request(
-            "role assignment tenantId must match role tenantId",
-        ));
-    }
-    validate_subject_boundary(pool, req.tenant_id, &req.subject_kind, req.subject_id).await?;
-    crate::guardrails::validate_role_assignment(
-        pool,
-        req.tenant_id,
-        req.subject_kind.clone(),
-        req.subject_id,
-        req.role_id,
-    )
-    .await
-}
-
 async fn validate_role_assignment_in_tx(
-    pool: &PgPool,
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateRoleAssignment,
 ) -> Result<(), AppError> {
@@ -4763,8 +4734,8 @@ async fn validate_role_assignment_in_tx(
         ));
     }
     validate_subject_boundary_in_tx(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
-    crate::guardrails::validate_role_assignment(
-        pool,
+    crate::guardrails::validate_role_assignment_on_connection(
+        tx,
         req.tenant_id,
         req.subject_kind.clone(),
         req.subject_id,

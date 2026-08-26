@@ -74,9 +74,9 @@ pub struct ResendVerificationRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PasswordResetRequest {
     pub email: String,
-    pub redirect_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,4 +109,30 @@ fn default_kind() -> CredentialKind {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PasswordResetRequest;
+
+    #[test]
+    fn password_reset_request_rejects_client_redirects() {
+        let error = serde_json::from_value::<PasswordResetRequest>(serde_json::json!({
+            "email": "alice@example.test",
+            "redirect_url": "https://attacker.example/reset"
+        }))
+        .expect_err("redirect_url must not be part of the public request DTO");
+
+        assert!(error.to_string().contains("unknown field `redirect_url`"));
+    }
+
+    #[test]
+    fn password_reset_request_accepts_email_only() {
+        let request = serde_json::from_value::<PasswordResetRequest>(serde_json::json!({
+            "email": "alice@example.test"
+        }))
+        .expect("email-only password reset request");
+
+        assert_eq!(request.email, "alice@example.test");
+    }
 }

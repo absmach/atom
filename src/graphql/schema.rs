@@ -10,6 +10,14 @@ use super::{
 
 pub type AtomSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
+/// Deterministic GraphQL type-system contract used by the checked-in v1 SDL.
+/// Runtime-only limits and extensions do not affect the schema shape.
+pub fn schema_sdl() -> String {
+    Schema::build(QueryRoot::default(), mutation_root(), EmptySubscription)
+        .finish()
+        .sdl()
+}
+
 pub fn build_schema(state: AppState) -> AtomSchema {
     let limits = state.config.graphql_limits;
     let builder = Schema::build(QueryRoot::default(), mutation_root(), EmptySubscription)
@@ -38,7 +46,17 @@ mod tests {
         state::AppState,
     };
 
-    use super::build_schema;
+    use super::{build_schema, schema_sdl};
+
+    #[test]
+    fn checked_in_graphql_schema_matches_runtime_types() {
+        assert_eq!(
+            format!("{}\n", schema_sdl()),
+            include_str!("../../apidocs/graphql-schema.graphql"),
+            "GraphQL schema drifted; run `cargo run --example export-graphql-schema -- \
+             apidocs/graphql-schema.graphql` and review the API change"
+        );
+    }
 
     #[tokio::test]
     async fn health_query_returns_ok() {
