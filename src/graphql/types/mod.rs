@@ -70,6 +70,10 @@ pub enum GqlEntityOrderField {
     CreatedAt,
     UpdatedAt,
     Name,
+    Username,
+    FirstName,
+    LastName,
+    Email,
     Kind,
     Status,
 }
@@ -2912,6 +2916,10 @@ impl From<GqlEntityOrderField> for EntityOrderField {
             GqlEntityOrderField::CreatedAt => EntityOrderField::CreatedAt,
             GqlEntityOrderField::UpdatedAt => EntityOrderField::UpdatedAt,
             GqlEntityOrderField::Name => EntityOrderField::Name,
+            GqlEntityOrderField::Username => EntityOrderField::Username,
+            GqlEntityOrderField::FirstName => EntityOrderField::FirstName,
+            GqlEntityOrderField::LastName => EntityOrderField::LastName,
+            GqlEntityOrderField::Email => EntityOrderField::Email,
             GqlEntityOrderField::Kind => EntityOrderField::Kind,
             GqlEntityOrderField::Status => EntityOrderField::Status,
         }

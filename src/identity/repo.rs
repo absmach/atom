@@ -26,6 +26,26 @@ fn entity_order_by(order: EntityOrderField, dir: SortDir) -> &'static str {
         (EntityOrderField::UpdatedAt, SortDir::Desc) => "e.updated_at DESC NULLS LAST, e.id ASC",
         (EntityOrderField::Name, SortDir::Asc) => "lower(e.name) ASC, e.id ASC",
         (EntityOrderField::Name, SortDir::Desc) => "lower(e.name) DESC, e.id ASC",
+        (EntityOrderField::Username, SortDir::Asc) => "lower(e.name) ASC, e.id ASC",
+        (EntityOrderField::Username, SortDir::Desc) => "lower(e.name) DESC, e.id ASC",
+        (EntityOrderField::FirstName, SortDir::Asc) => {
+            "lower(COALESCE(e.attributes->>'first_name', '')) ASC, e.id ASC"
+        }
+        (EntityOrderField::FirstName, SortDir::Desc) => {
+            "lower(COALESCE(e.attributes->>'first_name', '')) DESC, e.id ASC"
+        }
+        (EntityOrderField::LastName, SortDir::Asc) => {
+            "lower(COALESCE(e.attributes->>'last_name', '')) ASC, e.id ASC"
+        }
+        (EntityOrderField::LastName, SortDir::Desc) => {
+            "lower(COALESCE(e.attributes->>'last_name', '')) DESC, e.id ASC"
+        }
+        (EntityOrderField::Email, SortDir::Asc) => {
+            "lower(COALESCE(e.attributes->>'email', '')) ASC, e.id ASC"
+        }
+        (EntityOrderField::Email, SortDir::Desc) => {
+            "lower(COALESCE(e.attributes->>'email', '')) DESC, e.id ASC"
+        }
         (EntityOrderField::Kind, SortDir::Asc) => "e.kind ASC, e.id ASC",
         (EntityOrderField::Kind, SortDir::Desc) => "e.kind DESC, e.id ASC",
         (EntityOrderField::Status, SortDir::Asc) => "e.status ASC, e.id ASC",

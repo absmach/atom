@@ -206,6 +206,10 @@ pub enum EntityOrderField {
     CreatedAt,
     UpdatedAt,
     Name,
+    Username,
+    FirstName,
+    LastName,
+    Email,
     Kind,
     Status,
 }
