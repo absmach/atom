@@ -394,6 +394,7 @@ async fn tenant_lists_apply_order_before_pagination() {
     let tenants = atom::tenants::repo::list_tenants(
         &pool,
         ListTenants {
+            id: None,
             q: Some(prefix.clone()),
             name: None,
             alias: None,

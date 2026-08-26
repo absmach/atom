@@ -1914,6 +1914,7 @@ mod tests {
         let active = list_tenants(
             &pool,
             ListTenants {
+                id: None,
                 q: None,
                 name: None,
                 alias: None,

@@ -515,6 +515,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
     let live_tenants = atom::tenants::repo::list_tenants(
         &pool,
         ListTenants {
+            id: None,
             q: Some(tenant_name.clone()),
             name: None,
             alias: None,
@@ -535,6 +536,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
     let deleted_tenants = atom::tenants::repo::list_tenants(
         &pool,
         ListTenants {
+            id: None,
             q: Some(tenant_name),
             name: None,
             alias: None,
