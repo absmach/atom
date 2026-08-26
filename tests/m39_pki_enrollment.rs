@@ -281,9 +281,20 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     .await
     .unwrap();
     assert_eq!(injected.status, 401, "{}", injected.body);
-    // Missing peer certificates are rejected by the extractor before an
-    // authenticated handler exists, so this security-sensitive failure is
-    // intentionally log-only and does not create an outbox row.
+    // Missing-peer failures happen before authentication on this public
+    // endpoint. They are observable through metrics and tracing, but must not
+    // let anonymous traffic amplify durable outbox writes.
+    let native_denials: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->>'outcome' = 'deny'
+             AND payload->'details'->>'transport' = 'native'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(native_denials, 0);
 
     // A certificate asserted in the TLS handshake but signed outside Atom's
     // trust bundle is rejected during the in-process handshake.
