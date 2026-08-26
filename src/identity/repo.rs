@@ -1095,7 +1095,8 @@ pub async fn delete_entity_with_audit(
     .map_err(db_err)?;
 
     sqlx::query(
-        "UPDATE entity_emails SET deleted_at = now(), updated_at = now()
+        "UPDATE entity_emails
+         SET deleted_at = (SELECT deleted_at FROM entities WHERE id = $1), updated_at = now()
          WHERE entity_id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -1148,8 +1149,8 @@ pub async fn restore_entity_with_audit(
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
 
-    let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT e.tenant_id, (t.deleted_at IS NOT NULL)
+    let tenant_info: Option<(Option<Uuid>, bool, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT e.tenant_id, (t.deleted_at IS NOT NULL), e.deleted_at
          FROM entities e
          LEFT JOIN tenants t ON t.id = e.tenant_id
          WHERE e.id = $1 AND e.deleted_at IS NOT NULL",
@@ -1158,19 +1159,30 @@ pub async fn restore_entity_with_audit(
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    let (tenant_id, _is_tenant_deleted) = match tenant_info {
+    let (tenant_id, _is_tenant_deleted, entity_deleted_at) = match tenant_info {
         None => {
             return Err(AppError::not_found(format!(
                 "no soft-deleted entity {id} to restore"
             )))
         }
-        Some((_, true)) => {
+        Some((_, true, _)) => {
             return Err(AppError::conflict(
                 "the entity's tenant is soft-deleted; restore the tenant first",
             ))
         }
-        Some((t_id, false)) => (t_id, false),
+        Some((t_id, false, deleted_at)) => (t_id, false, deleted_at),
     };
+
+    sqlx::query(
+        "UPDATE entity_emails
+         SET deleted_at = NULL, updated_at = now()
+         WHERE entity_id = $1 AND deleted_at = $2",
+    )
+    .bind(id)
+    .bind(entity_deleted_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(restore_conflict)?;
 
     sqlx::query(
         "UPDATE entities

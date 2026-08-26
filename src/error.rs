@@ -204,6 +204,12 @@ pub fn restore_conflict(e: sqlx::Error) -> AppError {
              deleted; clear or change that entity's externalId before restoring",
         );
     }
+    if unique_violation_constraint(&e) == Some(ENTITY_EMAIL_INDEX) {
+        return AppError::conflict(
+            "another live entity took this entity's email while it was deleted; clear or change \
+             that entity's email before restoring",
+        );
+    }
     if is_unique_violation(&e) {
         return AppError::conflict(
             "a live record already uses this name; rename the conflicting record before restoring",
