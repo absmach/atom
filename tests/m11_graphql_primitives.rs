@@ -174,7 +174,30 @@ async fn change_own_password_requires_current_password() {
     service::create_password(&pool, entity_id, "test-password-123")
         .await
         .expect("create password");
-    let schema = build_schema(state(pool).await);
+    let mut app_state = state(pool.clone()).await;
+    app_state.config.events.amqp_url = Some("amqp://test.invalid".into());
+    let schema = build_schema(app_state);
+
+    let scoped = schema
+        .execute(
+            Request::new(
+                r#"
+                mutation {
+                  changeOwnPassword(
+                    currentPassword: "test-password-123",
+                    newPassword: "new-password-123"
+                  )
+                }
+                "#,
+            )
+            .data(AuthContext {
+                entity_id,
+                scoped: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+    assert!(scoped.errors.iter().any(|err| err.message == "forbidden"));
 
     let wrong_current = schema
         .execute(authed_as(
@@ -196,6 +219,20 @@ async fn change_own_password_requires_current_password() {
             .contains("current password is incorrect"),
         "{:?}",
         wrong_current.errors
+    );
+    let failure_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_outbox
+         WHERE event = 'credential.create'
+           AND payload->>'outcome' = 'deny'
+           AND payload->'details'->>'entity_id' = $1",
+    )
+    .bind(entity_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("password failure outbox event");
+    assert!(
+        failure_count >= 1,
+        "wrong password failure must be observed"
     );
 
     let changed = schema
@@ -247,6 +284,44 @@ async fn change_own_password_requires_current_password() {
         )))
         .await;
     assert!(new_login.errors.is_empty(), "{:?}", new_login.errors);
+}
+
+#[tokio::test]
+#[ignore]
+async fn change_own_password_preserves_config_managed_password() {
+    let pool = common::pool().await;
+    let (entity_id, _) = create_human(&pool).await;
+    let managed_password = "managed-password-123";
+    let managed_hash = service::hash_secret(managed_password.as_bytes()).expect("hash password");
+    let managed_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
+         VALUES ($1, $2, 'password', $3, 'config')",
+    )
+    .bind(managed_id)
+    .bind(entity_id)
+    .bind(managed_hash)
+    .execute(&pool)
+    .await
+    .expect("insert managed password");
+
+    let mut tx = pool.begin().await.expect("begin transaction");
+    service::change_own_password_in_tx(
+        &mut tx,
+        entity_id,
+        managed_password,
+        "replacement-password-123",
+    )
+    .await
+    .expect("change password");
+    tx.commit().await.expect("commit password change");
+
+    let status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+        .bind(managed_id)
+        .fetch_one(&pool)
+        .await
+        .expect("managed password status");
+    assert_eq!(status, "active");
 }
 
 #[tokio::test]

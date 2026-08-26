@@ -2033,7 +2033,7 @@ pub async fn change_own_password_in_tx(
     validate_password_for_kind(&kind, new_password)?;
 
     let rows = sqlx::query(
-        r#"SELECT secret_hash
+        r#"SELECT secret_hash, managed_by
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
@@ -2070,7 +2070,10 @@ pub async fn change_own_password_in_tx(
     sqlx::query(
         r#"UPDATE credentials
            SET status = $3
-           WHERE entity_id = $1 AND kind = $2 AND status = $4"#,
+           WHERE entity_id = $1
+             AND kind = $2
+             AND status = $4
+             AND managed_by IS DISTINCT FROM 'config'"#,
     )
     .bind(entity_id)
     .bind(CredentialKind::Password)

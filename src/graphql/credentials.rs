@@ -4,7 +4,7 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::{has_capability_in_scope, Scope},
-    error::db_err,
+    error::{db_err, AppError},
     identity::service,
     models::{enums::AuditOutcome, token as token_model},
     state::AppState,
@@ -92,36 +92,60 @@ impl CredentialMutation {
     ) -> Result<bool> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
-        let credential_id = service::change_own_password_in_tx(
-            &mut tx,
-            auth.entity_id,
-            &current_password,
-            &new_password,
-        )
-        .await
-        .map_err(gql_error)?;
-        audit::commit_with_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: auth.tenant_id,
-                target_kind: Some("credential"),
-                target_id: Some(credential_id),
-                event: "credential.create",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({
-                    "entity_id": auth.entity_id,
-                    "kind": "password",
-                    "self_service": true,
-                }),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
-        Ok(true)
+        let meta = audit::AuditMeta {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: auth.tenant_id,
+            target_kind: "credential",
+            target_id: None,
+            event: "credential.create",
+        };
+        let details = serde_json::json!({
+            "entity_id": auth.entity_id,
+            "kind": "password",
+            "self_service": true,
+        });
+
+        let result: std::result::Result<bool, AppError> = async {
+            auth.reject_scoped_credential_management()?;
+            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let credential_id = service::change_own_password_in_tx(
+                &mut tx,
+                auth.entity_id,
+                &current_password,
+                &new_password,
+            )
+            .await?;
+            audit::commit_with_audit(
+                &state.pool,
+                tx,
+                state.config.events.enabled(),
+                &audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: auth.tenant_id,
+                    target_kind: Some("credential"),
+                    target_id: Some(credential_id),
+                    event: "credential.create",
+                    outcome: AuditOutcome::Allow,
+                    details: details.clone(),
+                },
+            )
+            .await?;
+            Ok(true)
+        }
+        .await;
+
+        if let Err(ref err) = result {
+            audit::observe_error(
+                &state.pool,
+                state.config.events.enabled(),
+                &meta,
+                &details,
+                err,
+            )
+            .await;
+        }
+
+        result.map_err(gql_error)
     }
 
     async fn create_password(
