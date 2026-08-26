@@ -1,0 +1,4 @@
+interface:
+  display_name: "ATOM PR Review For V1.0 Release"
+  short_description: "Review Atom v1.0 API, architecture, and models"
+  default_prompt: "Use $atom-pr-review-for-v1-release to re-review an Atom PR for prior findings and verified v1.0 API, architecture, and model blockers, surface human replies, and approve and notify Slack if the head is ready."
