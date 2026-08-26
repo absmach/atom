@@ -44,6 +44,15 @@ fn authed(query: impl Into<String>) -> Request {
     })
 }
 
+fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
+    Request::new(query).data(AuthContext {
+        entity_id,
+        tenant_id: None,
+        session_id: None,
+        ..Default::default()
+    })
+}
+
 async fn create_human(pool: &PgPool) -> (Uuid, String) {
     let id = Uuid::new_v4();
     let name = format!("graphql-human-{id}");
@@ -155,6 +164,164 @@ async fn login_mutation_returns_token() {
         .is_some_and(|token| !token.is_empty()));
     assert!(login["sessionId"].as_str().is_some());
     assert!(login["expiresAt"].as_str().is_some());
+}
+
+#[tokio::test]
+#[ignore]
+async fn change_own_password_requires_current_password() {
+    let pool = common::pool().await;
+    let (entity_id, name) = create_human(&pool).await;
+    service::create_password(&pool, entity_id, "test-password-123")
+        .await
+        .expect("create password");
+    let mut app_state = state(pool.clone()).await;
+    app_state.config.events.amqp_url = Some("amqp://test.invalid".into());
+    let schema = build_schema(app_state);
+
+    let scoped = schema
+        .execute(
+            Request::new(
+                r#"
+                mutation {
+                  changeOwnPassword(
+                    currentPassword: "test-password-123",
+                    newPassword: "new-password-123"
+                  )
+                }
+                "#,
+            )
+            .data(AuthContext {
+                entity_id,
+                scoped: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+    assert!(scoped.errors.iter().any(|err| err.message == "forbidden"));
+
+    let wrong_current = schema
+        .execute(authed_as(
+            entity_id,
+            r#"
+            mutation {
+              changeOwnPassword(
+                currentPassword: "wrong-password-123",
+                newPassword: "new-password-123"
+              )
+            }
+            "#,
+        ))
+        .await;
+    assert!(!wrong_current.errors.is_empty());
+    assert!(
+        wrong_current.errors[0]
+            .message
+            .contains("current password is incorrect"),
+        "{:?}",
+        wrong_current.errors
+    );
+    let failure_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_outbox
+         WHERE event = 'credential.create'
+           AND payload->>'outcome' = 'deny'
+           AND payload->'details'->>'entity_id' = $1",
+    )
+    .bind(entity_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("password failure outbox event");
+    assert!(
+        failure_count >= 1,
+        "wrong password failure must be observed"
+    );
+
+    let changed = schema
+        .execute(authed_as(
+            entity_id,
+            r#"
+            mutation {
+              changeOwnPassword(
+                currentPassword: "test-password-123",
+                newPassword: "new-password-123"
+              )
+            }
+            "#,
+        ))
+        .await;
+    assert!(changed.errors.is_empty(), "{:?}", changed.errors);
+
+    let old_login = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{name}",
+                secret: "test-password-123"
+              }}) {{
+                token
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(
+        !old_login.errors.is_empty(),
+        "old password must not remain usable"
+    );
+
+    let new_login = schema
+        .execute(Request::new(format!(
+            r#"
+            mutation {{
+              login(input: {{
+                identifier: "{name}",
+                secret: "new-password-123"
+              }}) {{
+                token
+              }}
+            }}
+            "#
+        )))
+        .await;
+    assert!(new_login.errors.is_empty(), "{:?}", new_login.errors);
+}
+
+#[tokio::test]
+#[ignore]
+async fn change_own_password_preserves_config_managed_password() {
+    let pool = common::pool().await;
+    let (entity_id, _) = create_human(&pool).await;
+    let managed_password = "managed-password-123";
+    let managed_hash = service::hash_secret(managed_password.as_bytes()).expect("hash password");
+    let managed_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
+         VALUES ($1, $2, 'password', $3, 'config')",
+    )
+    .bind(managed_id)
+    .bind(entity_id)
+    .bind(managed_hash)
+    .execute(&pool)
+    .await
+    .expect("insert managed password");
+
+    let mut tx = pool.begin().await.expect("begin transaction");
+    service::change_own_password_in_tx(
+        &mut tx,
+        entity_id,
+        managed_password,
+        "replacement-password-123",
+    )
+    .await
+    .expect("change password");
+    tx.commit().await.expect("commit password change");
+
+    let status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+        .bind(managed_id)
+        .fetch_one(&pool)
+        .await
+        .expect("managed password status");
+    assert_eq!(status, "active");
 }
 
 #[tokio::test]

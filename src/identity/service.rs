@@ -10,7 +10,7 @@ use openidconnect::{
 };
 use rand::RngCore;
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use url::Url;
 use uuid::Uuid;
 
@@ -2016,6 +2016,88 @@ pub async fn create_password_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
+    Ok(id)
+}
+
+pub async fn change_own_password_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    current_password: &str,
+    new_password: &str,
+) -> Result<Uuid, AppError> {
+    let Some((kind, _)) = super::repo::lock_active_entity(tx, entity_id).await? else {
+        return Err(AppError::not_found(format!(
+            "active entity {entity_id} not found"
+        )));
+    };
+    validate_password_for_kind(&kind, new_password)?;
+
+    let rows = sqlx::query(
+        r#"SELECT secret_hash, managed_by
+           FROM credentials
+           WHERE entity_id = $1
+             AND kind = $2
+             AND status = $3"#,
+    )
+    .bind(entity_id)
+    .bind(CredentialKind::Password)
+    .bind(CredentialStatus::Active)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    let current_matches = rows.iter().any(|row| {
+        row.try_get::<String, _>("secret_hash")
+            .map(|hash| verify_secret(current_password.as_bytes(), &hash))
+            .unwrap_or(false)
+    });
+    if !current_matches {
+        return Err(AppError::unauthorized("current password is incorrect"));
+    }
+
+    let identifier: Option<String> = sqlx::query_scalar(
+        r#"SELECT email
+           FROM entity_emails
+           WHERE entity_id = $1 AND deleted_at IS NULL
+           ORDER BY verified_at DESC NULLS LAST, created_at DESC
+           LIMIT 1"#,
+    )
+    .bind(entity_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    sqlx::query(
+        r#"UPDATE credentials
+           SET status = $3
+           WHERE entity_id = $1
+             AND kind = $2
+             AND status = $4
+             AND managed_by IS DISTINCT FROM 'config'"#,
+    )
+    .bind(entity_id)
+    .bind(CredentialKind::Password)
+    .bind(CredentialStatus::Revoked)
+    .bind(CredentialStatus::Active)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    let hash = hash_secret(new_password.as_bytes())?;
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
+           VALUES ($1, $2, $3, $4, $5)"#,
+    )
+    .bind(id)
+    .bind(entity_id)
+    .bind(CredentialKind::Password)
+    .bind(identifier)
+    .bind(hash)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
     Ok(id)
 }
 
