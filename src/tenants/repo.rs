@@ -328,6 +328,7 @@ pub async fn get_tenant(pool: &PgPool, id: Uuid) -> Result<Tenant, AppError> {
 pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
+    let id = params.id;
     let name = params.name;
     let alias = params.alias;
     let status = params.status;
@@ -337,16 +338,18 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants
-           WHERE ($1::text IS NULL OR name = $1)
-             AND ($2::text IS NULL OR lower(alias) = lower($2))
-             AND ($3::text IS NULL OR status = $3)
-             AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)
-             AND ($7::text = 'all'
-                  OR ($7::text = 'live' AND deleted_at IS NULL)
-                  OR ($7::text = 'deleted' AND deleted_at IS NOT NULL))
-           ORDER BY {order_by}
-           LIMIT $5 OFFSET $6"#,
+           WHERE ($1::uuid IS NULL OR id = $1)
+             AND ($2::text IS NULL OR name = $2)
+             AND ($3::text IS NULL OR lower(alias) = lower($3))
+             AND ($4::text IS NULL OR status = $4)
+             AND ($5::text IS NULL OR name ILIKE $5 OR alias ILIKE $5 OR array_to_string(tags, ',') ILIKE $5 OR attributes::text ILIKE $5)
+             AND ($8::text = 'all'
+                  OR ($8::text = 'live' AND deleted_at IS NULL)
+                  OR ($8::text = 'deleted' AND deleted_at IS NOT NULL))
+             ORDER BY {order_by}
+           LIMIT $6 OFFSET $7"#,
     ))
+    .bind(id)
     .bind(name.clone())
     .bind(alias.clone())
     .bind(status.clone())
@@ -360,14 +363,16 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM tenants
-           WHERE ($1::text IS NULL OR name = $1)
-             AND ($2::text IS NULL OR lower(alias) = lower($2))
-             AND ($3::text IS NULL OR status = $3)
-             AND ($4::text IS NULL OR name ILIKE $4 OR alias ILIKE $4 OR array_to_string(tags, ',') ILIKE $4 OR attributes::text ILIKE $4)
-             AND ($5::text = 'all'
-                  OR ($5::text = 'live' AND deleted_at IS NULL)
-                  OR ($5::text = 'deleted' AND deleted_at IS NOT NULL))"#,
+           WHERE ($1::uuid IS NULL OR id = $1)
+             AND ($2::text IS NULL OR name = $2)
+             AND ($3::text IS NULL OR lower(alias) = lower($3))
+             AND ($4::text IS NULL OR status = $4)
+             AND ($5::text IS NULL OR name ILIKE $5 OR alias ILIKE $5 OR array_to_string(tags, ',') ILIKE $5 OR attributes::text ILIKE $5)
+             AND ($6::text = 'all'
+                  OR ($6::text = 'live' AND deleted_at IS NULL)
+                  OR ($6::text = 'deleted' AND deleted_at IS NOT NULL))"#,
     )
+    .bind(id)
     .bind(name)
     .bind(alias)
     .bind(status)

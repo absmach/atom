@@ -44,6 +44,7 @@ impl TenantQuery {
     async fn tenants(
         &self,
         ctx: &Context<'_>,
+        id: Option<ID>,
         q: Option<String>,
         name: Option<String>,
         alias: Option<String>,
@@ -58,6 +59,7 @@ impl TenantQuery {
         let state = ctx.data::<AppState>()?;
         let deleted = parse_deleted_filter(deleted);
         let params = ListTenants {
+            id: parse_optional_id(id, "id")?,
             q,
             name,
             alias,
