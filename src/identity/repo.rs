@@ -375,7 +375,14 @@ pub async fn update_entity_with_audit(
     audit_details: Value,
 ) -> Result<Entity, AppError> {
     ensure_not_config_managed_entity(pool, id).await?;
-    let sync_email = req.kind.is_some() || req.attributes.is_some();
+    let sync_email = req
+        .kind
+        .as_ref()
+        .is_some_and(|kind| kind != &EntityKind::Human)
+        || req
+            .attributes
+            .as_ref()
+            .is_some_and(|attributes| attributes.get("email").is_some());
     let attributes = req.attributes.clone().map(normalize_attributes);
     if let Some(attrs) = attributes.as_ref() {
         reject_parent_group_attribute(attrs)?;
@@ -881,10 +888,20 @@ async fn sync_entity_email_from_attrs_in_tx(
                  WHERE id = $1",
             )
             .bind(email_id)
-            .bind(email)
+            .bind(&email)
             .execute(&mut **tx)
             .await
             .map_err(entity_write_conflict)?;
+            sqlx::query(
+                "UPDATE credentials
+                 SET identifier = $2
+                 WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
+            )
+            .bind(entity_id)
+            .bind(&email)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
         } else {
             sqlx::query(
                 "UPDATE entity_emails SET deleted_at = NULL, updated_at = now()
@@ -908,6 +925,34 @@ async fn sync_entity_email_from_attrs_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(entity_write_conflict)?;
+    Ok(())
+}
+
+async fn restore_entity_email_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    kind: &EntityKind,
+    attributes: &Value,
+) -> Result<(), AppError> {
+    if kind != &EntityKind::Human {
+        deactivate_entity_email_in_tx(tx, entity_id).await?;
+        return Ok(());
+    }
+
+    let restored = sqlx::query(
+        "UPDATE entity_emails
+         SET deleted_at = NULL, updated_at = now()
+         WHERE entity_id = $1
+         RETURNING id",
+    )
+    .bind(entity_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    if restored.is_none() {
+        sync_entity_email_from_attrs_in_tx(tx, entity_id, kind, attributes).await?;
+    }
     Ok(())
 }
 
@@ -1174,7 +1219,7 @@ pub async fn restore_entity_with_audit(
             .fetch_one(&mut *tx)
             .await
             .map_err(restore_conflict)?;
-    sync_entity_email_from_attrs_in_tx(&mut tx, id, &kind, &attributes).await?;
+    restore_entity_email_in_tx(&mut tx, id, &kind, &attributes).await?;
 
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,

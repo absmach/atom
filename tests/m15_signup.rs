@@ -404,7 +404,7 @@ async fn admin_email_identity_tracks_updates_and_kind_changes() {
             profile_id: None,
             profile_version_id: None,
             status: None,
-            attributes: Some(json!({})),
+            attributes: Some(json!({ "email": null })),
         },
     )
     .await
