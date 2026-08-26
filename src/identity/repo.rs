@@ -174,8 +174,9 @@ pub async fn create_entity_with_audit(
 
     if is_human {
         add_authenticated_user_membership_in_tx(&mut tx, entity.id).await?;
-        upsert_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.attributes).await?;
     }
+    sync_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.kind, &entity.attributes)
+        .await?;
 
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,
@@ -458,9 +459,8 @@ pub async fn update_entity_with_audit(
         other => entity_write_conflict(other),
     })?;
 
-    if entity.kind == EntityKind::Human {
-        upsert_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.attributes).await?;
-    }
+    sync_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.kind, &entity.attributes)
+        .await?;
 
     // The caller builds `audit_details` before the write, so it cannot know the
     // resulting identifier. Consumers denormalize `external_id` onto their own
@@ -848,12 +848,24 @@ fn normalize_attributes(attributes: Value) -> Value {
     }
 }
 
-async fn upsert_entity_email_from_attrs_in_tx(
+async fn sync_entity_email_from_attrs_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
+    kind: &EntityKind,
     attributes: &Value,
 ) -> Result<(), AppError> {
-    let Some(email) = normalized_email_attr(attributes) else {
+    let Some(email) = (kind == &EntityKind::Human)
+        .then(|| normalized_email_attr(attributes))
+        .flatten()
+    else {
+        sqlx::query(
+            "UPDATE entity_emails SET deleted_at = now(), updated_at = now()
+             WHERE entity_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(entity_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
         return Ok(());
     };
 
@@ -870,7 +882,7 @@ async fn upsert_entity_email_from_attrs_in_tx(
     .bind(email)
     .execute(&mut **tx)
     .await
-    .map_err(db_err)?;
+    .map_err(entity_write_conflict)?;
     Ok(())
 }
 
@@ -1073,14 +1085,13 @@ pub async fn restore_entity_with_audit(
     .await
     .map_err(restore_conflict)?;
 
-    sqlx::query(
-        "UPDATE entity_emails SET deleted_at = NULL, updated_at = now()
-         WHERE entity_id = $1 AND deleted_at IS NOT NULL",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await
-    .map_err(restore_conflict)?;
+    let (kind, attributes): (EntityKind, Value) =
+        sqlx::query_as("SELECT kind, attributes FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(restore_conflict)?;
+    sync_entity_email_from_attrs_in_tx(&mut tx, id, &kind, &attributes).await?;
 
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,

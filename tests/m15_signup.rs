@@ -12,7 +12,11 @@ use atom::{
     config::Config,
     identity::{repo, service},
     keys,
-    models::{entity::CreateEntity, enums::EntityKind, session::SignupRequest},
+    models::{
+        entity::{CreateEntity, UpdateEntity},
+        enums::EntityKind,
+        session::SignupRequest,
+    },
 };
 use serde_json::json;
 use sqlx::Row;
@@ -331,6 +335,132 @@ async fn admin_created_human_uses_same_unique_email_identity() {
         AppError::Conflict(message) => assert_eq!(message, "Email address already taken"),
         other => panic!("expected email conflict, got {other:?}"),
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn admin_email_identity_tracks_updates_and_kind_changes() {
+    let pool = common::pool().await;
+    let cfg = config(true);
+    let suffix = Uuid::new_v4();
+    let first_email = format!("m15-update-email-first-{suffix}@example.test");
+    let second_email = format!("m15-update-email-second-{suffix}@example.test");
+
+    let first = service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name: format!("m15-update-email-first-{suffix}"),
+            email: first_email.clone(),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("first signup");
+    let second = service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name: format!("m15-update-email-second-{suffix}"),
+            email: second_email.clone(),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("second signup");
+
+    let duplicate = repo::update_entity(
+        &pool,
+        second.entity_id,
+        UpdateEntity {
+            name: None,
+            kind: None,
+            alias: None,
+            external_id: None,
+            tenant_id: None,
+            profile_id: None,
+            profile_version_id: None,
+            status: None,
+            attributes: Some(json!({ "email": first_email })),
+        },
+    )
+    .await
+    .expect_err("duplicate admin email must be rejected");
+    assert!(
+        matches!(duplicate, AppError::Conflict(message) if message == "Email address already taken")
+    );
+
+    repo::update_entity(
+        &pool,
+        second.entity_id,
+        UpdateEntity {
+            name: None,
+            kind: None,
+            alias: None,
+            external_id: None,
+            tenant_id: None,
+            profile_id: None,
+            profile_version_id: None,
+            status: None,
+            attributes: Some(json!({})),
+        },
+    )
+    .await
+    .expect("clearing email");
+
+    repo::create_entity(
+        &pool,
+        CreateEntity {
+            id: None,
+            kind: Some(EntityKind::Human),
+            profile_id: None,
+            profile_version_id: None,
+            name: format!("m15-update-email-reuse-{suffix}"),
+            alias: None,
+            external_id: None,
+            tenant_id: None,
+            attributes: json!({ "email": second_email }),
+        },
+    )
+    .await
+    .expect("cleared email should be reusable");
+
+    repo::update_entity(
+        &pool,
+        first.entity_id,
+        UpdateEntity {
+            name: None,
+            kind: Some(EntityKind::Device),
+            alias: None,
+            external_id: None,
+            tenant_id: None,
+            profile_id: None,
+            profile_version_id: None,
+            status: None,
+            attributes: None,
+        },
+    )
+    .await
+    .expect("changing kind");
+
+    repo::create_entity(
+        &pool,
+        CreateEntity {
+            id: None,
+            kind: Some(EntityKind::Human),
+            profile_id: None,
+            profile_version_id: None,
+            name: format!("m15-update-email-kind-reuse-{suffix}"),
+            alias: None,
+            external_id: None,
+            tenant_id: None,
+            attributes: json!({ "email": first_email }),
+        },
+    )
+    .await
+    .expect("non-human email should be reusable");
 }
 
 /// Sending the verification email must happen *after* the signup transaction
