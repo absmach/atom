@@ -2,3 +2,16 @@ interface:
   display_name: "ATOM PR Review For V1.0 Release"
   short_description: "Review Atom v1.0 API, architecture, and models"
   default_prompt: "Use $atom-pr-review-for-v1-release to re-review an Atom PR for prior findings and verified v1.0 API, architecture, and model blockers, surface human replies, and approve and notify Slack if the head is ready."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "github"
+      description: "GitHub MCP server for pull request review and approval"
+      transport: "streamable_http"
+      url: "https://api.githubcopilot.com/mcp/"
+    - type: "mcp"
+      value: "slack"
+      description: "Slack MCP server for review notifications"
+      transport: "streamable_http"
+      url: "https://mcp.slack.com/mcp"
