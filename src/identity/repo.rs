@@ -174,6 +174,7 @@ pub async fn create_entity_with_audit(
 
     if is_human {
         add_authenticated_user_membership_in_tx(&mut tx, entity.id).await?;
+        upsert_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.attributes).await?;
     }
 
     let event = crate::audit::AuditEvent {
@@ -456,6 +457,10 @@ pub async fn update_entity_with_audit(
         sqlx::Error::RowNotFound => AppError::not_found(format!("entity {id} not found")),
         other => entity_write_conflict(other),
     })?;
+
+    if entity.kind == EntityKind::Human {
+        upsert_entity_email_from_attrs_in_tx(&mut tx, entity.id, &entity.attributes).await?;
+    }
 
     // The caller builds `audit_details` before the write, so it cannot know the
     // resulting identifier. Consumers denormalize `external_id` onto their own
@@ -841,6 +846,49 @@ fn normalize_attributes(attributes: Value) -> Value {
     } else {
         attributes
     }
+}
+
+async fn upsert_entity_email_from_attrs_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    attributes: &Value,
+) -> Result<(), AppError> {
+    let Some(email) = normalized_email_attr(attributes) else {
+        return Ok(());
+    };
+
+    sqlx::query(
+        r#"INSERT INTO entity_emails (id, entity_id, email)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (entity_id)
+           DO UPDATE SET email = EXCLUDED.email,
+                         deleted_at = NULL,
+                         updated_at = now()"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(entity_id)
+    .bind(email)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+fn normalized_email_attr(attributes: &Value) -> Option<String> {
+    let email = attributes
+        .get("email")?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
+    let (local, domain) = email.split_once('@')?;
+    if local.is_empty()
+        || domain.is_empty()
+        || !domain.contains('.')
+        || email.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(email)
 }
 
 fn entity_kind_from_profile(kind: &str) -> Result<EntityKind, AppError> {

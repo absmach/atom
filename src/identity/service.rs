@@ -523,7 +523,7 @@ async fn write_signup_human(
     .bind(&prepared.attributes)
     .execute(&mut **tx)
     .await
-    .map_err(db_err)?;
+    .map_err(|err| signup_conflict(err, "Username already taken"))?;
 
     super::repo::add_authenticated_user_membership_in_tx(tx, prepared.entity_id).await?;
 
@@ -536,7 +536,7 @@ async fn write_signup_human(
     .bind(&prepared.email)
     .execute(&mut **tx)
     .await
-    .map_err(db_err)?;
+    .map_err(|err| signup_conflict(err, "Email address already taken"))?;
 
     sqlx::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
@@ -560,6 +560,16 @@ async fn write_signup_human(
         prepared.expires_at,
     )
     .await
+}
+
+fn signup_conflict(err: sqlx::Error, message: &str) -> AppError {
+    if matches!(
+        err,
+        sqlx::Error::Database(ref db) if db.code().as_deref() == Some("23505")
+    ) {
+        return AppError::conflict(message);
+    }
+    db_err(err)
 }
 
 pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {

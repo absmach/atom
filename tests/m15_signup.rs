@@ -7,7 +7,13 @@
 
 mod common;
 
-use atom::{config::Config, identity::service, keys, models::session::SignupRequest};
+use atom::error::AppError;
+use atom::{
+    config::Config,
+    identity::{repo, service},
+    keys,
+    models::{entity::CreateEntity, session::SignupRequest},
+};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -179,6 +185,152 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     )
     .await;
     assert!(suspended_login.is_err());
+}
+
+#[tokio::test]
+#[ignore]
+async fn signup_rejects_duplicate_email_even_with_distinct_name() {
+    let pool = common::pool().await;
+    let cfg = config(true);
+
+    let suffix = Uuid::new_v4();
+    let email = format!("m15-dup-email-{suffix}@example.test");
+    let first_name = format!("m15-dup-email-a-{suffix}");
+    let second_name = format!("m15-dup-email-b-{suffix}");
+
+    service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name: first_name,
+            email: email.clone(),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("first signup");
+
+    let err = service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name: second_name.clone(),
+            email: email.to_uppercase(),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect_err("duplicate email must be rejected");
+
+    match err {
+        AppError::Conflict(message) => assert_eq!(message, "Email address already taken"),
+        other => panic!("expected email conflict, got {other:?}"),
+    }
+
+    let email_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM entity_emails WHERE lower(email) = lower($1) AND deleted_at IS NULL",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("email count");
+    assert_eq!(email_count, 1);
+
+    let second_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM entities WHERE name = $1)")
+            .bind(second_name)
+            .fetch_one(&pool)
+            .await
+            .expect("second entity existence");
+    assert!(!second_exists);
+}
+
+#[tokio::test]
+#[ignore]
+async fn signup_rejects_duplicate_name_with_username_conflict() {
+    let pool = common::pool().await;
+    let cfg = config(true);
+
+    let suffix = Uuid::new_v4();
+    let name = format!("m15-dup-name-{suffix}");
+
+    service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name: name.clone(),
+            email: format!("{name}-first@example.test"),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("first signup");
+
+    let err = service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name,
+            email: format!("m15-dup-name-{suffix}-second@example.test"),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect_err("duplicate username must be rejected");
+
+    match err {
+        AppError::Conflict(message) => assert_eq!(message, "Username already taken"),
+        other => panic!("expected username conflict, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn admin_created_human_uses_same_unique_email_identity() {
+    let pool = common::pool().await;
+    let cfg = config(true);
+
+    let suffix = Uuid::new_v4();
+    let email = format!("m15-admin-email-{suffix}@example.test");
+
+    service::signup_human(
+        &pool,
+        &cfg,
+        SignupRequest {
+            name: format!("m15-admin-email-signup-{suffix}"),
+            email: email.clone(),
+            password: "test-password-123".into(),
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("signup");
+
+    let err = repo::create_entity(
+        &pool,
+        CreateEntity {
+            id: None,
+            kind: None,
+            profile_id: None,
+            profile_version_id: None,
+            name: format!("m15-admin-email-create-{suffix}"),
+            alias: None,
+            external_id: None,
+            tenant_id: None,
+            attributes: json!({ "email": email.to_uppercase() }),
+        },
+    )
+    .await
+    .expect_err("admin-created duplicate email must be rejected");
+
+    match err {
+        AppError::Conflict(message) => assert_eq!(message, "Email address already taken"),
+        other => panic!("expected email conflict, got {other:?}"),
+    }
 }
 
 /// Sending the verification email must happen *after* the signup transaction
