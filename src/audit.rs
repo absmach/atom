@@ -254,6 +254,22 @@ pub async fn commit_with_observation(
     Ok(())
 }
 
+/// Completes an observation mutation whose success event was already enqueued
+/// by an `_in_tx` repository function. The helper owns the remaining commit
+/// and cache-barrier release so cache-aware callers cannot split those steps
+/// around resolver/service code.
+pub(crate) async fn commit_observed_with_cache<T>(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    cache: &crate::cache::CacheClient,
+    category: crate::cache::CacheCategory,
+    keys: &[String],
+    value: T,
+) -> Result<T, crate::error::AppError> {
+    let commit_result = tx.commit().await.map_err(crate::error::AppError::Database);
+    cache.end(category, keys).await;
+    commit_result.map(|_| value)
+}
+
 /// Emits an audit log tracing line for a successful non-audited operation (observe path)
 /// after its database transaction has successfully committed.
 pub(crate) fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {

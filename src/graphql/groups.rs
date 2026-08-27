@@ -549,7 +549,7 @@ impl GroupMutation {
                 )
                 .await;
             };
-            crate::cache::invalidate::guarded_tx_mutation(
+            let group = crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
                 &state.pool,
@@ -573,21 +573,17 @@ impl GroupMutation {
                 },
             )
             .await?;
-            // Only needed on this locked path — the cache-disabled branch
-            // above already gets it from `set_group_parent_with_audit`
-            // itself.
-            repo::get_group(&state.pool, id).await.inspect(|group| {
-                audit::log_observe_allow(
-                    &audit::AuditMeta {
-                        actor_entity_id: Some(auth.entity_id),
-                        tenant_id: group.tenant_id,
-                        target_kind: "group",
-                        target_id: Some(id),
-                        event: "group.parent.set",
-                    },
-                    &serde_json::json!({ "parent_id": parent_id }),
-                );
-            })
+            audit::log_observe_allow(
+                &audit::AuditMeta {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: group.tenant_id,
+                    target_kind: "group",
+                    target_id: Some(id),
+                    event: "group.parent.set",
+                },
+                &serde_json::json!({ "parent_id": parent_id }),
+            );
+            Ok(group)
         }
         .await;
         if let Err(ref err) = result {

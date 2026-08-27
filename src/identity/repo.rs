@@ -1865,9 +1865,9 @@ pub async fn set_group_parent_with_audit(
     parent_id: Uuid,
 ) -> Result<Group, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    set_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id, parent_id).await?;
+    let group =
+        set_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id, parent_id).await?;
     tx.commit().await.map_err(db_err)?;
-    let group = get_group(pool, child_id).await?;
     crate::audit::log_observe_allow(
         &crate::audit::AuditMeta {
             actor_entity_id: actor_id,
@@ -1894,7 +1894,10 @@ pub(crate) async fn set_group_parent_in_tx(
     actor_id: Option<Uuid>,
     child_id: Uuid,
     parent_id: Uuid,
-) -> Result<(), AppError> {
+) -> Result<Group, AppError> {
+    // Keep hierarchy writes serialized with recursive closure enumeration.
+    crate::authz::repo::lock_group_hierarchy(tx).await?;
+
     if child_id == parent_id {
         return Err(AppError::bad_request("group cannot be its own parent"));
     }
@@ -2046,7 +2049,7 @@ pub(crate) async fn set_group_parent_in_tx(
     };
     let details = serde_json::json!({ "parent_id": parent_id });
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    fetch_group(&mut **tx, child_id).await
 }
 
 pub async fn remove_group_parent(pool: &PgPool, child_id: Uuid) -> Result<(), AppError> {
@@ -2084,6 +2087,8 @@ pub(crate) async fn remove_group_parent_in_tx(
     actor_id: Option<Uuid>,
     child_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
+    crate::authz::repo::lock_group_hierarchy(tx).await?;
+
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
             .bind(child_id)

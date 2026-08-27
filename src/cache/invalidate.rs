@@ -84,10 +84,14 @@ where
     cache.begin(category, &keys).await?;
     let outcome = mutate(&mut tx).await;
     let outcome = match outcome {
-        Ok(value) => tx.commit().await.map_err(db_err).map(|_| value),
-        Err(err) => Err(err),
+        Ok(value) => {
+            crate::audit::commit_observed_with_cache(tx, cache, category, &keys, value).await
+        }
+        Err(err) => {
+            cache.end(category, &keys).await;
+            Err(err)
+        }
     };
-    cache.end(category, &keys).await;
     outcome
 }
 

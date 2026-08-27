@@ -6381,17 +6381,6 @@ pub async fn effective_grants_for_subject(
 /// (including its own cache invalidation) before the other's enumeration or
 /// commit proceeds.
 ///
-/// # What this does *not* cover
-///
-/// The closure itself (`root_group_ids` plus descendants) is computed with
-/// one unlocked read before any row is locked, so a concurrent *reparent*
-/// that brings a brand-new subgroup into range between that read and the
-/// lock isn't covered by this function — an accepted, documented residual
-/// gap (bounded by the grants TTL, exactly as every enumeration-based
-/// invalidation was before this fix). Closing that would mean locking
-/// hierarchy structure itself for every membership mutation everywhere, a
-/// far larger scope than the membership-add race this closes.
-///
 /// # Contract for callers
 ///
 /// The returned ids are only exhaustive as long as the lock stays held: the
@@ -6407,6 +6396,13 @@ pub async fn lock_group_closures_and_collect_member_ids(
     if root_group_ids.is_empty() {
         return Ok(Vec::new());
     }
+
+    // Hierarchy rows can be inserted or removed without an existing row lock
+    // to wait on. Serialize closure enumeration with every hierarchy mutation
+    // so a newly attached subtree cannot enter the graph between enumeration
+    // and the locks below.
+    lock_group_hierarchy(tx).await?;
+
     let mut closure: Vec<Uuid> = sqlx::query_scalar(
         r#"WITH RECURSIVE target_groups(id) AS (
                SELECT id FROM UNNEST($1::uuid[]) AS root(id)
@@ -6437,6 +6433,18 @@ pub async fn lock_group_closures_and_collect_member_ids(
         .fetch_all(&mut **tx)
         .await
         .map_err(db_err)
+}
+
+/// Serializes recursive group-closure reads with hierarchy mutations. A
+/// transaction-scoped advisory lock is used because an attach/detach may
+/// create or delete the hierarchy row, leaving no row lock for a reader to
+/// wait on.
+pub async fn lock_group_hierarchy(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))")
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    Ok(())
 }
 
 /// [`lock_group_closures_and_collect_member_ids`], mapped straight to
