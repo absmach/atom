@@ -519,6 +519,8 @@ fn credential_cache_entry(snapshot: &CredentialSnapshot) -> CredentialCacheEntry
 /// cached entities it touches — it is never split into per-field queries.
 async fn load_credential_row(pool: &PgPool, cred_id: Uuid) -> Result<CredentialSnapshot, AppError> {
     use sqlx::Row;
+    // Only access-token credentials enter this cache. Password credentials
+    // remain uncached and are verified through the normal password path.
     let row = sqlx::query(
         r#"SELECT c.entity_id,
                   c.secret_hash,
