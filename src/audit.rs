@@ -270,6 +270,58 @@ pub(crate) async fn commit_observed_with_cache<T>(
     commit_result.map(|_| value)
 }
 
+/// Commits a mutation whose observation event was already enqueued by its
+/// transaction-local repository function, then releases every cache barrier
+/// and emits the success log. Multi-category cache mutations use this helper
+/// instead of coordinating those steps in a resolver or service.
+pub(crate) async fn commit_observed_with_cache_groups<T>(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    cache: &crate::cache::CacheClient,
+    groups: &[(crate::cache::CacheCategory, &[String])],
+    value: T,
+    meta: &AuditMeta<'_>,
+    details: &Value,
+) -> Result<T, crate::error::AppError> {
+    let commit_result = tx.commit().await.map_err(crate::error::AppError::Database);
+    crate::cache::invalidate::end_all(cache, groups).await;
+    if commit_result.is_ok() {
+        log_observe_allow(meta, details);
+    }
+    commit_result.map(|_| value)
+}
+
+/// Completes a cache-aware mutation that also has a compliance audit event.
+/// The repository has already enqueued the observation in `tx`; this helper
+/// owns the remaining commit, audit write, and barrier release as one unit.
+pub(crate) async fn commit_observed_with_cache_and_audit<T>(
+    pool: &PgPool,
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    cache: &crate::cache::CacheClient,
+    groups: &[(crate::cache::CacheCategory, &[String])],
+    value: T,
+    event: AuditEvent<'_>,
+) -> Result<T, crate::error::AppError> {
+    let commit_result = tx.commit().await.map_err(crate::error::AppError::Database);
+    crate::cache::invalidate::end_all(cache, groups).await;
+    if commit_result.is_ok() {
+        write(
+            pool,
+            false,
+            AuditEvent {
+                actor_entity_id: event.actor_entity_id,
+                tenant_id: event.tenant_id,
+                target_kind: event.target_kind,
+                target_id: event.target_id,
+                event: event.event,
+                outcome: event.outcome,
+                details: event.details,
+            },
+        )
+        .await;
+    }
+    commit_result.map(|_| value)
+}
+
 /// Emits an audit log tracing line for a successful non-audited operation (observe path)
 /// after its database transaction has successfully committed.
 pub(crate) fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {

@@ -68,16 +68,18 @@ where
 /// Callers hold the `None` cache case themselves, since the uncached
 /// fallback is a different repo function per call site rather than the same
 /// one — usually the non-`_in_tx` variant that opens its own transaction.
-pub async fn guarded_tx_mutation<T, K, M>(
+pub async fn guarded_tx_mutation<T, K, M, S>(
     cache: &CacheClient,
     category: CacheCategory,
     pool: &PgPool,
     collect_keys: K,
     mutate: M,
+    on_success: S,
 ) -> Result<T, AppError>
 where
     K: for<'a> FnOnce(&'a mut Transaction<'static, Postgres>) -> TxFuture<'a, Vec<String>>,
     M: for<'a> FnOnce(&'a mut Transaction<'static, Postgres>) -> TxFuture<'a, T>,
+    S: FnOnce(&T),
 {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let keys = collect_keys(&mut tx).await?;
@@ -85,7 +87,12 @@ where
     let outcome = mutate(&mut tx).await;
     let outcome = match outcome {
         Ok(value) => {
-            crate::audit::commit_observed_with_cache(tx, cache, category, &keys, value).await
+            let result =
+                crate::audit::commit_observed_with_cache(tx, cache, category, &keys, value).await;
+            if let Ok(ref value) = result {
+                on_success(value);
+            }
+            result
         }
         Err(err) => {
             cache.end(category, &keys).await;

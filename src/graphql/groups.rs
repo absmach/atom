@@ -466,23 +466,20 @@ impl GroupMutation {
                             .await
                         })
                     },
+                    |group| {
+                        audit::log_observe_allow(
+                            &audit::AuditMeta {
+                                actor_entity_id: Some(auth.entity_id),
+                                tenant_id: group.tenant_id,
+                                target_kind: "group",
+                                target_id: Some(id),
+                                event: "group.update",
+                            },
+                            &details,
+                        );
+                    },
                 )
                 .await
-                .inspect(|group| {
-                    // Only needed on this locked path — the non-status-change
-                    // branch below already gets it from
-                    // `update_group_with_audit` itself.
-                    audit::log_observe_allow(
-                        &audit::AuditMeta {
-                            actor_entity_id: Some(auth.entity_id),
-                            tenant_id: group.tenant_id,
-                            target_kind: "group",
-                            target_id: Some(id),
-                            event: "group.update",
-                        },
-                        &details,
-                    );
-                })
             } else {
                 repo::update_group_with_audit(
                     &state.pool,
@@ -571,18 +568,20 @@ impl GroupMutation {
                         .await
                     })
                 },
+                |group| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: group.tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event: "group.parent.set",
+                        },
+                        &serde_json::json!({ "parent_id": parent_id }),
+                    );
+                },
             )
             .await?;
-            audit::log_observe_allow(
-                &audit::AuditMeta {
-                    actor_entity_id: Some(auth.entity_id),
-                    tenant_id: group.tenant_id,
-                    target_kind: "group",
-                    target_id: Some(id),
-                    event: "group.parent.set",
-                },
-                &serde_json::json!({ "parent_id": parent_id }),
-            );
             Ok(group)
         }
         .await;
@@ -657,21 +656,20 @@ impl GroupMutation {
                         .await
                     })
                 },
+                |_| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event: "group.parent.remove",
+                        },
+                        &serde_json::json!({}),
+                    );
+                },
             )
             .await?;
-            // Only needed on this locked path — the cache-disabled branch
-            // above already gets it from `remove_group_parent_with_audit`
-            // itself.
-            audit::log_observe_allow(
-                &audit::AuditMeta {
-                    actor_entity_id: Some(auth.entity_id),
-                    tenant_id,
-                    target_kind: "group",
-                    target_id: Some(id),
-                    event: "group.parent.remove",
-                },
-                &serde_json::json!({}),
-            );
             Ok(tenant_id)
         }
         .await;
@@ -756,20 +754,20 @@ impl GroupMutation {
                         .await
                     })
                 },
+                |_| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event: "group.delete",
+                        },
+                        &details,
+                    );
+                },
             )
             .await?;
-            // Only needed on this locked path — the cache-disabled branch
-            // above already gets it from `delete_group_with_audit` itself.
-            audit::log_observe_allow(
-                &audit::AuditMeta {
-                    actor_entity_id: Some(auth.entity_id),
-                    tenant_id,
-                    target_kind: "group",
-                    target_id: Some(id),
-                    event: "group.delete",
-                },
-                &details,
-            );
             Ok(tenant_id)
         }
         .await;
@@ -839,6 +837,7 @@ impl GroupMutation {
                         .await
                     })
                 },
+                |_| {},
             )
             .await?;
             // Mirrors `restore_group_with_audit`'s own post-commit audit
@@ -1109,22 +1108,20 @@ impl GroupMutation {
                         .await
                     })
                 },
+                |group| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: group.tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event,
+                        },
+                        &details,
+                    );
+                },
             )
             .await
-            .inspect(|group| {
-                // Only needed on this locked path — the cache-disabled branch
-                // above already gets it from `update_group_with_audit` itself.
-                audit::log_observe_allow(
-                    &audit::AuditMeta {
-                        actor_entity_id: Some(auth.entity_id),
-                        tenant_id: group.tenant_id,
-                        target_kind: "group",
-                        target_id: Some(id),
-                        event,
-                    },
-                    &details,
-                );
-            })
         }
         .await;
         if let Err(ref err) = result {

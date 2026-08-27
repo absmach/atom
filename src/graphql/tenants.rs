@@ -460,20 +460,17 @@ impl TenantMutation {
                 tenant_id,
             )
             .await;
-            let outcome = match outcome {
-                Ok(_tenant) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            crate::cache::invalidate::end_all(cache, &groups).await;
-            // `deactivate_and_finish_tenant_soft_delete_in_tx` already
-            // enqueued the outbox row before returning — this is the
-            // post-commit stdout observability log. Only needed on this
-            // locked path; the cache-disabled branch above already gets it
-            // from `soft_delete_tenant_with_audit` itself.
-            if outcome.is_ok() {
-                audit::log_observe_allow(&meta, &details);
+            match outcome {
+                Ok(tenant) => audit::commit_observed_with_cache_groups(
+                    tx, cache, &groups, tenant, &meta, &details,
+                )
+                .await
+                .map(|_| ()),
+                Err(err) => {
+                    crate::cache::invalidate::end_all(cache, &groups).await;
+                    Err(err)
+                }
             }
-            outcome
         }
         .await;
 
@@ -558,12 +555,23 @@ impl TenantMutation {
                 tenant_id,
             )
             .await;
-            let outcome = match outcome {
-                Ok(()) => tx.commit().await.map_err(crate::error::db_err),
-                Err(err) => Err(err),
-            };
-            crate::cache::invalidate::end_all(cache, &groups).await;
-            outcome?;
+            match outcome {
+                Ok(()) => {
+                    audit::commit_observed_with_cache_groups(
+                        tx,
+                        cache,
+                        &groups,
+                        (),
+                        &meta,
+                        &details,
+                    )
+                    .await?
+                }
+                Err(err) => {
+                    crate::cache::invalidate::end_all(cache, &groups).await;
+                    return Err(err);
+                }
+            }
             // Mirrors `restore_tenant_with_audit`'s own post-commit audit
             // write (fire-and-forget, after the mutation durably commits) —
             // see `audit::commit_with_audit`'s doc comment. Only needed on
@@ -976,30 +984,29 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
             event,
         )
         .await;
-        let outcome = match outcome {
-            Ok(tenant) => tx
-                .commit()
+        match outcome {
+            Ok(tenant) => {
+                audit::commit_observed_with_cache_groups(
+                    tx,
+                    cache,
+                    &groups,
+                    tenant,
+                    &audit::AuditMeta {
+                        actor_entity_id: Some(auth.entity_id),
+                        tenant_id: Some(tenant_id),
+                        target_kind: "tenant",
+                        target_id: Some(tenant_id),
+                        event,
+                    },
+                    &serde_json::json!({ "status": status_detail.clone() }),
+                )
                 .await
-                .map_err(crate::error::db_err)
-                .map(|_| tenant),
-            Err(err) => Err(err),
-        };
-        crate::cache::invalidate::end_all(cache, &groups).await;
-        let tenant = outcome?;
-        // Only needed on this locked path — the `Active` branch above and
-        // the cache-disabled fallback both already get it from
-        // `change_tenant_status_with_audit` itself.
-        audit::log_observe_allow(
-            &audit::AuditMeta {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: Some(tenant_id),
-                target_kind: "tenant",
-                target_id: Some(tenant_id),
-                event,
-            },
-            &serde_json::json!({ "status": status_detail.clone() }),
-        );
-        Ok(tenant)
+            }
+            Err(err) => {
+                crate::cache::invalidate::end_all(cache, &groups).await;
+                Err(err)
+            }
+        }
     }
     .await;
     if let Err(ref err) = result {

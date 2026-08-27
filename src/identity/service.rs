@@ -2454,38 +2454,31 @@ pub async fn delete_entity(
         id,
     )
     .await;
-    let outcome = match outcome {
-        Ok((tenant_id, details)) => tx
-            .commit()
+    match outcome {
+        Ok((tenant_id, details)) => {
+            crate::audit::commit_observed_with_cache_and_audit(
+                pool,
+                tx,
+                cache,
+                &groups,
+                (),
+                crate::audit::AuditEvent {
+                    actor_entity_id: deleted_by,
+                    tenant_id,
+                    target_kind: Some("entity"),
+                    target_id: Some(id),
+                    event: "entity.delete",
+                    outcome: crate::models::enums::AuditOutcome::Allow,
+                    details,
+                },
+            )
             .await
-            .map_err(db_err)
-            .map(|_| (tenant_id, details)),
-        Err(err) => Err(err),
-    };
-    crate::cache::invalidate::end_all(cache, &groups).await;
-    let (tenant_id, details) = outcome?;
-    // Mirrors `delete_entity_with_audit`'s own post-commit audit write
-    // (fire-and-forget, after the mutation durably commits) — see
-    // `audit::commit_with_audit`'s doc comment. Only needed on this locked
-    // path; the cache-disabled fallback above already gets it from
-    // `delete_entity_with_audit` itself. `tenant_id` comes from the captured
-    // value inside the transaction — a post-commit `get_entity` would always
-    // miss the now-deleted row.
-    crate::audit::write(
-        pool,
-        false,
-        crate::audit::AuditEvent {
-            actor_entity_id: deleted_by,
-            tenant_id,
-            target_kind: Some("entity"),
-            target_id: Some(id),
-            event: "entity.delete",
-            outcome: crate::models::enums::AuditOutcome::Allow,
-            details,
-        },
-    )
-    .await;
-    Ok(())
+        }
+        Err(err) => {
+            crate::cache::invalidate::end_all(cache, &groups).await;
+            Err(err)
+        }
+    }
 }
 
 pub async fn revoke_credential(
