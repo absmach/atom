@@ -1016,7 +1016,7 @@ type ProfileVersion {
 type QueryRoot {
 	health: String!
 	session(id: ID!): Session!
-	tenants(id: ID, q: String, name: String, alias: String, status: TenantStatus, deleted: DeletedFilter, order: TenantOrderField, dir: SortDir, limit: Int, offset: Int): TenantList!
+	tenants(id: String, q: String, name: String, alias: String, tags: String, status: TenantStatus, deleted: DeletedFilter, order: TenantOrderField, dir: SortDir, limit: Int, offset: Int): TenantList!
 	tenant(id: ID!): Tenant!
 	tenantMembers(tenantId: ID!, q: String, limit: Int, offset: Int): EntityList!
 	tenantAssignableEntities(tenantId: ID!, q: String!, limit: Int, offset: Int): EntityList!
@@ -1028,7 +1028,7 @@ type QueryRoot {
 	profileVersions(profileId: ID!): [ProfileVersion!]!
 	ownedEntities(ownerId: ID!): [Entity!]!
 	entity(id: ID!): Entity!
-	entities(q: String, kind: EntityKind, externalId: String, profileId: ID, tenantId: ID, attributesContains: JSON, parentGroupId: ID, includeDescendants: Boolean, status: EntityStatus, deleted: DeletedFilter, order: EntityOrderField, dir: SortDir, limit: Int, offset: Int): EntityList!
+	entities(id: String, q: String, kind: EntityKind, externalId: String, profileId: ID, tenantId: ID, attributesContains: JSON, parentGroupId: ID, includeDescendants: Boolean, status: EntityStatus, deleted: DeletedFilter, order: EntityOrderField, dir: SortDir, limit: Int, offset: Int): EntityList!
 	resourceKinds(tenantId: ID): [String!]!
 	resources(q: String, kind: String, tenantId: ID, attributesContains: JSON, parentGroupId: ID, includeDescendants: Boolean, deleted: DeletedFilter, order: ResourceOrderField, dir: SortDir, limit: Int, offset: Int): ResourceList!
 	resource(id: ID!): Resource!
@@ -1439,4 +1439,3 @@ schema {
 	query: QueryRoot
 	mutation: MutationRoot
 }
-

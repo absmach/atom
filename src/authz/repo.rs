@@ -5158,6 +5158,7 @@ async fn authorized_entity_ids(
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
+    let id = search_pattern(params.id);
     let q = search_pattern(params.q);
     let external_id = crate::models::external_id::normalize_external_id(params.external_id);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
@@ -5201,6 +5202,7 @@ async fn authorized_entity_ids(
                                AND gep.group_id IN (SELECT id FROM target_groups)))
                      AND ($13::jsonb IS NULL OR e.attributes @> $13::jsonb)
                      AND ($14::text IS NULL OR e.external_id = $14)
+                     AND ($15::text IS NULL OR e.id::text ILIKE $15)
                ),
                candidate_ancestors(object_id, ancestor_id) AS (
                    SELECT c.id, gh.parent_id
@@ -5285,6 +5287,7 @@ async fn authorized_entity_ids(
         .bind(ceiling_credential_id)
         .bind(attributes_contains)
         .bind(external_id)
+        .bind(id)
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -5343,6 +5346,7 @@ pub async fn authorized_resource_kinds_with_ceiling(
             object_kind: "resource".to_string(),
             object_type: None,
             tenant_id,
+            id: None,
             q: None,
             attributes_contains: None,
             external_id: None,

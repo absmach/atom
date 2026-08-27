@@ -94,6 +94,7 @@ pub struct AuthorizedObjectIdsQuery {
     pub object_kind: String,
     pub object_type: Option<String>,
     pub tenant_id: Option<Uuid>,
+    pub id: Option<String>,
     pub q: Option<String>,
     pub attributes_contains: Option<Value>,
     /// Only used when `object_kind == "entity"`: exact-match filter on

@@ -72,6 +72,7 @@ pub struct UpdateEntity {
 
 #[derive(Debug, Deserialize)]
 pub struct ListEntities {
+    pub id: Option<String>,
     pub q: Option<String>,
     pub kind: Option<EntityKind>,
     /// Exact-match filter (case-sensitive, trimmed). Not part of the `q`

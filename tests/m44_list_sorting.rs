@@ -132,6 +132,7 @@ async fn direct_lists_apply_order_before_pagination() {
     let entities = atom::identity::repo::list_entities(
         &pool,
         ListEntities {
+            id: None,
             q: Some(prefix.clone()),
             kind: None,
             external_id: None,
@@ -264,6 +265,7 @@ async fn authorized_entity_order_survives_id_refetch_and_paginates() {
             object_kind: "entity".to_string(),
             object_type: Some("entity:device".to_string()),
             tenant_id: Some(tenant_id),
+            id: None,
             q: Some(prefix.clone()),
             attributes_contains: None,
             external_id: None,
@@ -313,6 +315,7 @@ async fn descending_nullable_sorts_put_nulls_last() {
     let entities = atom::identity::repo::list_entities(
         &pool,
         ListEntities {
+            id: None,
             q: Some(prefix.clone()),
             kind: None,
             external_id: None,
@@ -395,6 +398,7 @@ async fn tenant_lists_apply_order_before_pagination() {
         &pool,
         ListTenants {
             id: None,
+            tags: None,
             q: Some(prefix.clone()),
             name: None,
             alias: None,

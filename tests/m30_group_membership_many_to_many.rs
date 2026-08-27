@@ -231,6 +231,7 @@ async fn authorized(
             object_kind: object_kind.to_string(),
             object_type: Some(object_type.to_string()),
             tenant_id: Some(tenant_id),
+            id: None,
             q: None,
             attributes_contains: None,
             external_id: None,
@@ -286,6 +287,7 @@ async fn entity_belongs_to_every_group_it_is_added_to() {
         let listed = atom::identity::repo::list_entities(
             &pool,
             ListEntities {
+                id: None,
                 q: None,
                 kind: Some(EntityKind::Device),
                 external_id: None,
@@ -402,6 +404,7 @@ async fn multi_group_membership_does_not_duplicate_listings_or_inflate_total() {
                 object_kind: "entity".to_string(),
                 object_type: Some("entity:device".to_string()),
                 tenant_id: Some(tenant_id),
+                id: None,
                 q: None,
                 attributes_contains: None,
                 external_id: None,

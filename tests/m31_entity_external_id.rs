@@ -596,6 +596,7 @@ async fn list_by_external_id(pool: &PgPool, external_id: &str) -> Vec<Uuid> {
             object_kind: "entity".to_string(),
             object_type: None,
             tenant_id: None,
+            id: None,
             q: None,
             attributes_contains: None,
             external_id: Some(external_id.to_string()),
@@ -647,6 +648,7 @@ async fn the_external_id_filter_matches_exactly_and_scopes_to_tenant() {
             object_kind: "entity".to_string(),
             object_type: None,
             tenant_id: Some(tenant_a),
+            id: None,
             q: None,
             attributes_contains: None,
             external_id: Some(serial.clone()),
@@ -700,6 +702,7 @@ async fn the_admin_deleted_listing_filters_by_external_id_too() {
     let list = identity_repo::list_entities(
         &p,
         ListEntities {
+            id: None,
             q: None,
             kind: None,
             external_id: Some(format!(" {serial} ")),
@@ -736,6 +739,7 @@ async fn a_blank_external_id_filter_matches_nothing_via_list_entities() {
     let list = identity_repo::list_entities(
         &p,
         ListEntities {
+            id: None,
             q: None,
             kind: None,
             external_id: Some("   ".to_string()),

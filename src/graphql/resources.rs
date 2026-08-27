@@ -111,6 +111,7 @@ impl ResourceQuery {
                 object_kind: "resource".to_string(),
                 object_type,
                 tenant_id,
+                id: None,
                 q,
                 attributes_contains,
                 external_id: None,

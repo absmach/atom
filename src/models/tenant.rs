@@ -51,10 +51,11 @@ pub struct UpdateTenant {
 
 #[derive(Debug, Deserialize)]
 pub struct ListTenants {
-    pub id: Option<Uuid>,
+    pub id: Option<String>,
     pub q: Option<String>,
     pub name: Option<String>,
     pub alias: Option<String>,
+    pub tags: Option<String>,
     pub status: Option<TenantStatus>,
     #[serde(default)]
     pub deleted: DeletedFilter,
