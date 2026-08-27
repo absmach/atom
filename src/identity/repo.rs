@@ -1259,6 +1259,7 @@ pub async fn delete_entity_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    ensure_not_config_managed_entity(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
     let (tenant_id, details) = deactivate_and_finish_entity_deletion_in_tx(

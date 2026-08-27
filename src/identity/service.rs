@@ -2404,6 +2404,7 @@ pub async fn delete_entity(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    super::repo::ensure_not_config_managed_entity(pool, id).await?;
     let Some(cache) = cache else {
         return super::repo::delete_entity_with_audit(
             pool,
