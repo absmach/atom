@@ -44,10 +44,11 @@ impl TenantQuery {
     async fn tenants(
         &self,
         ctx: &Context<'_>,
-        id: Option<ID>,
+        id: Option<String>,
         q: Option<String>,
         name: Option<String>,
         alias: Option<String>,
+        tags: Option<String>,
         status: Option<GqlTenantStatus>,
         deleted: Option<GqlDeletedFilter>,
         order: Option<GqlTenantOrderField>,
@@ -59,10 +60,11 @@ impl TenantQuery {
         let state = ctx.data::<AppState>()?;
         let deleted = parse_deleted_filter(deleted);
         let params = ListTenants {
-            id: parse_optional_id(id, "id")?,
+            id,
             q,
             name,
             alias,
+            tags,
             status: parse_optional_tenant_status(status),
             deleted,
             limit: limit.map(i64::from).unwrap_or(20),
@@ -795,6 +797,12 @@ async fn require_tenant_read_access(
     auth: &AuthContext,
     tenant_id: uuid::Uuid,
 ) -> Result<()> {
+    if can_list_all_tenants(&state.pool, auth).await?
+        || has_inactive_tenant_read_role(&state.pool, auth.entity_id, tenant_id).await?
+    {
+        return Ok(());
+    }
+
     if engine::allows_any(
         &state.pool,
         auth,
@@ -810,6 +818,21 @@ async fn require_tenant_read_access(
     } else {
         Err(gql_error(AppError::Forbidden))
     }
+}
+
+async fn has_inactive_tenant_read_role(
+    pool: &sqlx::PgPool,
+    entity_id: uuid::Uuid,
+    tenant_id: uuid::Uuid,
+) -> Result<bool> {
+    let roles = tenant_repo::list_tenant_role_assignments(pool, tenant_id, entity_id)
+        .await
+        .map_err(gql_error)?;
+    Ok(roles.iter().any(|role| {
+        role.actions
+            .iter()
+            .any(|action| action == "read" || action == "manage")
+    }))
 }
 
 async fn can_list_all_tenants(pool: &sqlx::PgPool, auth: &AuthContext) -> Result<bool> {

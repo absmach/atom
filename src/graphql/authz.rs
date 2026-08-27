@@ -56,6 +56,7 @@ impl AuthzQuery {
                 object_kind: input.object_kind,
                 object_type: input.object_type,
                 tenant_id,
+                id: None,
                 q: input.q,
                 attributes_contains: input.attributes_contains,
                 external_id: input.external_id,

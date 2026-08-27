@@ -516,6 +516,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         &pool,
         ListTenants {
             id: None,
+            tags: None,
             q: Some(tenant_name.clone()),
             name: None,
             alias: None,
@@ -537,6 +538,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         &pool,
         ListTenants {
             id: None,
+            tags: None,
             q: Some(tenant_name),
             name: None,
             alias: None,
@@ -563,6 +565,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
     let live_entities = atom::identity::repo::list_entities(
         &pool,
         ListEntities {
+            id: None,
             q: Some(entity_name.clone()),
             kind: None,
             external_id: None,
@@ -588,6 +591,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
     let deleted_entities = atom::identity::repo::list_entities(
         &pool,
         ListEntities {
+            id: None,
             q: Some(entity_name),
             kind: None,
             external_id: None,
@@ -1553,6 +1557,7 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
                 object_kind: "entity".to_string(),
                 object_type: None,
                 tenant_id: None,
+                id: None,
                 q: None,
                 attributes_contains: None,
                 external_id: None,
@@ -1648,6 +1653,7 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
                 object_kind: "entity".to_string(),
                 object_type: None,
                 tenant_id: None,
+                id: None,
                 q: None,
                 attributes_contains: None,
                 external_id: None,

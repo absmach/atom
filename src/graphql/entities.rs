@@ -76,6 +76,7 @@ impl EntityQuery {
     async fn entities(
         &self,
         ctx: &Context<'_>,
+        id: Option<String>,
         q: Option<String>,
         kind: Option<GqlEntityKind>,
         external_id: Option<String>,
@@ -109,6 +110,7 @@ impl EntityQuery {
             let list = repo::list_entities(
                 &state.pool,
                 entity_model::ListEntities {
+                    id,
                     q,
                     kind: parsed_kind,
                     external_id,
@@ -142,6 +144,7 @@ impl EntityQuery {
                 object_kind: "entity".to_string(),
                 object_type: parsed_kind.as_ref().map(entity_object_type),
                 tenant_id,
+                id,
                 q,
                 attributes_contains,
                 external_id,

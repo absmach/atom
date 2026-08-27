@@ -669,6 +669,7 @@ async fn list_entities_without_attributes_contains_is_unfiltered() {
     let list = atom::identity::repo::list_entities(
         &pool,
         atom::models::entity::ListEntities {
+            id: None,
             q: None,
             kind: None,
             external_id: None,

@@ -290,6 +290,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     let parent_group_id = params.parent_group_id;
     let include_descendants = params.include_descendants;
     let deleted = params.deleted.as_str();
+    let id = search_pattern(params.id);
     let q = search_pattern(params.q);
     let external_id = crate::models::external_id::normalize_external_id(params.external_id);
     let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
@@ -322,6 +323,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
                   OR ($10::text = 'live' AND e.deleted_at IS NULL)
                   OR ($10::text = 'deleted' AND e.deleted_at IS NOT NULL))
              AND ($12::text IS NULL OR e.external_id = $12)
+             AND ($13::text IS NULL OR e.id::text ILIKE $13)
            ORDER BY {order_by}
            LIMIT $8 OFFSET $9"#,
     );
@@ -338,6 +340,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
         .bind(deleted)
         .bind(attributes_contains.clone())
         .bind(external_id.clone())
+        .bind(id.clone())
         .fetch_all(pool)
         .await
         .map_err(db_err)?;
@@ -366,7 +369,8 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
              AND ($8::text = 'all'
                   OR ($8::text = 'live' AND e.deleted_at IS NULL)
                   OR ($8::text = 'deleted' AND e.deleted_at IS NOT NULL))
-             AND ($10::text IS NULL OR e.external_id = $10)"#,
+             AND ($10::text IS NULL OR e.external_id = $10)
+             AND ($11::text IS NULL OR e.id::text ILIKE $11)"#,
     )
     .bind(kind)
     .bind(profile_id)
@@ -378,6 +382,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
     .bind(deleted)
     .bind(attributes_contains)
     .bind(external_id)
+    .bind(id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;

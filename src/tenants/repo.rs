@@ -328,9 +328,10 @@ pub async fn get_tenant(pool: &PgPool, id: Uuid) -> Result<Tenant, AppError> {
 pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let id = params.id;
-    let name = params.name;
-    let alias = params.alias;
+    let id = search_pattern(params.id);
+    let name = search_pattern(params.name);
+    let alias = search_pattern(params.alias);
+    let tags = search_pattern(params.tags);
     let status = params.status;
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
@@ -338,22 +339,24 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants
-           WHERE ($1::uuid IS NULL OR id = $1)
-             AND ($2::text IS NULL OR name = $2)
-             AND ($3::text IS NULL OR lower(alias) = lower($3))
+           WHERE ($2::text IS NULL OR name ILIKE $2)
+             AND ($3::text IS NULL OR alias ILIKE $3)
              AND ($4::text IS NULL OR status = $4)
              AND ($5::text IS NULL OR name ILIKE $5 OR alias ILIKE $5 OR array_to_string(tags, ',') ILIKE $5 OR attributes::text ILIKE $5)
-             AND ($8::text = 'all'
-                  OR ($8::text = 'live' AND deleted_at IS NULL)
-                  OR ($8::text = 'deleted' AND deleted_at IS NOT NULL))
+             AND ($6::text IS NULL OR array_to_string(tags, ',') ILIKE $6)
+             AND ($9::text = 'all'
+                  OR ($9::text = 'live' AND deleted_at IS NULL)
+                  OR ($9::text = 'deleted' AND deleted_at IS NOT NULL))
+             AND ($1::text IS NULL OR id::text ILIKE $1)
              ORDER BY {order_by}
-           LIMIT $6 OFFSET $7"#,
+           LIMIT $7 OFFSET $8"#,
     ))
-    .bind(id)
+    .bind(id.clone())
     .bind(name.clone())
     .bind(alias.clone())
     .bind(status.clone())
     .bind(q.clone())
+    .bind(tags.clone())
     .bind(limit)
     .bind(offset)
     .bind(deleted)
@@ -363,20 +366,22 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM tenants
-           WHERE ($1::uuid IS NULL OR id = $1)
-             AND ($2::text IS NULL OR name = $2)
-             AND ($3::text IS NULL OR lower(alias) = lower($3))
+           WHERE ($2::text IS NULL OR name ILIKE $2)
+             AND ($3::text IS NULL OR alias ILIKE $3)
              AND ($4::text IS NULL OR status = $4)
              AND ($5::text IS NULL OR name ILIKE $5 OR alias ILIKE $5 OR array_to_string(tags, ',') ILIKE $5 OR attributes::text ILIKE $5)
-             AND ($6::text = 'all'
-                  OR ($6::text = 'live' AND deleted_at IS NULL)
-                  OR ($6::text = 'deleted' AND deleted_at IS NOT NULL))"#,
+             AND ($6::text IS NULL OR array_to_string(tags, ',') ILIKE $6)
+             AND ($7::text = 'all'
+                  OR ($7::text = 'live' AND deleted_at IS NULL)
+                  OR ($7::text = 'deleted' AND deleted_at IS NOT NULL))
+             AND ($1::text IS NULL OR id::text ILIKE $1)"#,
     )
     .bind(id)
     .bind(name)
     .bind(alias)
     .bind(status)
     .bind(q)
+    .bind(tags)
     .bind(deleted)
     .fetch_one(pool)
     .await
@@ -409,8 +414,10 @@ pub async fn list_tenants_for_entity_with_ceiling(
 ) -> Result<TenantList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let name = params.name;
-    let alias = params.alias;
+    let id = search_pattern(params.id);
+    let name = search_pattern(params.name);
+    let alias = search_pattern(params.alias);
+    let tags = search_pattern(params.tags);
     let status = params.status;
     let deleted = params.deleted.as_str();
     let q = search_pattern(params.q);
@@ -480,13 +487,15 @@ pub async fn list_tenants_for_entity_with_ceiling(
     // tombstone guard so it does not depend on that coupling.
     let base_filter = r#"t.status = 'active'
              AND t.deleted_at IS NULL
-             AND ($2::text IS NULL OR t.name = $2)
-             AND ($3::text IS NULL OR lower(t.alias) = lower($3))
+             AND ($2::text IS NULL OR t.name ILIKE $2)
+             AND ($3::text IS NULL OR t.alias ILIKE $3)
              AND ($4::text IS NULL OR t.status = $4)
              AND ($5::text IS NULL OR t.name ILIKE $5 OR t.alias ILIKE $5 OR array_to_string(t.tags, ',') ILIKE $5 OR t.attributes::text ILIKE $5)
+             AND ($11::text IS NULL OR array_to_string(t.tags, ',') ILIKE $11)
              AND ($9::text = 'all'
                   OR ($9::text = 'live' AND t.deleted_at IS NULL)
-                  OR ($9::text = 'deleted' AND t.deleted_at IS NOT NULL))"#;
+                  OR ($9::text = 'deleted' AND t.deleted_at IS NOT NULL))
+             AND ($12::text IS NULL OR t.id::text ILIKE $12)"#;
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         "{ctes} SELECT {TENANT_COLS} FROM tenants t \
@@ -502,6 +511,8 @@ pub async fn list_tenants_for_entity_with_ceiling(
     .bind(offset)
     .bind(deleted)
     .bind(ceiling_credential_id)
+    .bind(tags.clone())
+    .bind(id.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -519,6 +530,8 @@ pub async fn list_tenants_for_entity_with_ceiling(
     .bind(0_i64)
     .bind(deleted)
     .bind(ceiling_credential_id)
+    .bind(tags)
+    .bind(id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -1916,6 +1929,7 @@ mod tests {
             &pool,
             ListTenants {
                 id: None,
+                tags: None,
                 q: None,
                 name: None,
                 alias: None,

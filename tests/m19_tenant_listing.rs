@@ -134,6 +134,7 @@ async fn visible_tenant_ids(pool: &sqlx::PgPool, entity_id: Uuid) -> Vec<Uuid> {
         None,
         ListTenants {
             id: None,
+            tags: None,
             q: None,
             name: None,
             alias: None,
@@ -625,6 +626,7 @@ async fn ceiling_visible_tenant_ids(
         Some(credential_id),
         ListTenants {
             id: None,
+            tags: None,
             q: None,
             name: None,
             alias: None,

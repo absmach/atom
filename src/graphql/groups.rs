@@ -285,6 +285,7 @@ async fn authorized_group_list(
             object_kind: "group".to_string(),
             object_type: None,
             tenant_id,
+            id: None,
             q,
             attributes_contains,
             external_id: None,
