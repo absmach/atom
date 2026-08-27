@@ -275,9 +275,7 @@ CREATE TABLE entity_emails (
 
 -- Partial unique index so an email frees on soft delete (re-registration / OAuth
 -- re-onboarding with the same address). Mirrors the name/alias partial indexes.
-CREATE UNIQUE INDEX idx_entity_emails_email
-    ON entity_emails (lower(email))
-    WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX idx_entity_emails_email ON entity_emails(email) WHERE deleted_at IS NULL;
 CREATE INDEX idx_entity_emails_entity ON entity_emails(entity_id);
 CREATE INDEX idx_entity_emails_verified ON entity_emails(verified_at);
 
