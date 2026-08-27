@@ -328,10 +328,13 @@ impl CacheClient {
 
     pub async fn ping(&self) -> Result<(), CacheError> {
         let mut conn = self.get_conn().await?;
-        redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-            .map_err(CacheError::from)?;
+        tokio::time::timeout(
+            self.op_timeout,
+            redis::cmd("PING").query_async::<String>(&mut conn),
+        )
+        .await
+        .map_err(|_| CacheError::Timeout)?
+        .map_err(CacheError::from)?;
         Ok(())
     }
 
