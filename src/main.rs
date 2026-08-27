@@ -55,9 +55,30 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_password_credentials(&pool, cfg.service_entity_id, secret, "service").await?;
     }
 
+    let cache = init_cache(&cfg.cache).await?;
+
     if let Some(ref path) = cfg.bootstrap_file {
         let bootstrap_cfg = bootstrap::load(std::path::Path::new(path))?;
-        bootstrap::apply(&pool, &cfg.signing_keys, &bootstrap_cfg).await?;
+        if let Some(cache) = cache.as_ref() {
+            let mut entity_ids: Vec<Uuid> =
+                sqlx::query_scalar("SELECT id FROM entities WHERE deleted_at IS NULL")
+                    .fetch_all(&pool)
+                    .await?;
+            entity_ids.extend(bootstrap_cfg.entities.iter().map(|entity| entity.id));
+            entity_ids.sort_unstable();
+            entity_ids.dedup();
+            let grants_keys: Vec<String> =
+                entity_ids.into_iter().map(cache::keys::grants).collect();
+            cache
+                .begin(cache::CacheCategory::Grants, &grants_keys)
+                .await
+                .map_err(|err| anyhow::anyhow!("bootstrap cache barrier failed: {err}"))?;
+            let result = bootstrap::apply(&pool, &cfg.signing_keys, &bootstrap_cfg).await;
+            cache.end(cache::CacheCategory::Grants, &grants_keys).await;
+            result?;
+        } else {
+            bootstrap::apply(&pool, &cfg.signing_keys, &bootstrap_cfg).await?;
+        }
         tracing::info!("bootstrap file applied: {path}");
     }
 
@@ -75,8 +96,6 @@ async fn main() -> anyhow::Result<()> {
 
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
-    let cache = init_cache(&cfg.cache).await?;
-
     let mut state =
         state::AppState::new(pool, cfg.clone(), active_keys, cache).with_callouts(callout_service);
     if cfg.events.enabled() {

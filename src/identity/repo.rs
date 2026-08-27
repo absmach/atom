@@ -1153,7 +1153,7 @@ pub async fn deactivate_and_finish_entity_deletion_in_tx(
     actor_id: Option<Uuid>,
     deleted_by: Option<Uuid>,
     id: Uuid,
-) -> Result<Option<Uuid>, AppError> {
+) -> Result<(Option<Uuid>, Value), AppError> {
     let tenant_id: Option<Uuid> = sqlx::query_scalar(
         "UPDATE entities
          SET status = 'inactive', deleted_at = now(), deleted_by = $2, updated_at = now()
@@ -1230,7 +1230,7 @@ pub async fn deactivate_and_finish_entity_deletion_in_tx(
         }
     });
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    Ok(tenant_id)
+    Ok((tenant_id, details))
 }
 
 pub async fn delete_entity(
@@ -1261,7 +1261,7 @@ pub async fn delete_entity_with_audit(
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
-    let tenant_id = deactivate_and_finish_entity_deletion_in_tx(
+    let (tenant_id, details) = deactivate_and_finish_entity_deletion_in_tx(
         &mut tx,
         events_enabled,
         actor_id,
@@ -1286,7 +1286,7 @@ pub async fn delete_entity_with_audit(
             target_id: Some(id),
             event: "entity.delete",
             outcome: crate::models::enums::AuditOutcome::Allow,
-            details: serde_json::json!({}),
+            details,
         },
     )
     .await;

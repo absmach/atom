@@ -2455,11 +2455,15 @@ pub async fn delete_entity(
     )
     .await;
     let outcome = match outcome {
-        Ok(tenant_id) => tx.commit().await.map_err(db_err).map(|_| tenant_id),
+        Ok((tenant_id, details)) => tx
+            .commit()
+            .await
+            .map_err(db_err)
+            .map(|_| (tenant_id, details)),
         Err(err) => Err(err),
     };
     crate::cache::invalidate::end_all(cache, &groups).await;
-    let tenant_id = outcome?;
+    let (tenant_id, details) = outcome?;
     // Mirrors `delete_entity_with_audit`'s own post-commit audit write
     // (fire-and-forget, after the mutation durably commits) — see
     // `audit::commit_with_audit`'s doc comment. Only needed on this locked
@@ -2477,7 +2481,7 @@ pub async fn delete_entity(
             target_id: Some(id),
             event: "entity.delete",
             outcome: crate::models::enums::AuditOutcome::Allow,
-            details: serde_json::json!({}),
+            details,
         },
     )
     .await;
