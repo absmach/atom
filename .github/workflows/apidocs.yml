@@ -85,6 +85,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Install buf
         uses: bufbuild/buf-action@v1
         with:
