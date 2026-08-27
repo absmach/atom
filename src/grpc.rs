@@ -40,8 +40,7 @@ use proto::{
     certificate_service_server::{CertificateService, CertificateServiceServer},
     AuthenticateCredentialRequest, AuthenticateCredentialResponse, AuthenticateRequest,
     AuthenticateResponse, CheckRequest, CheckResponse, ResolveAliasRequest, ResolveAliasResponse,
-    ResolveCertificateRequest, ResolveCertificateResponse, ResolveCertificateV2Request,
-    ResolveCertificateV2Response, RevokeEntityCertificatesRequest,
+    ResolveCertificateV2Request, ResolveCertificateV2Response, RevokeEntityCertificatesRequest,
     RevokeEntityCertificatesResponse,
 };
 
@@ -421,15 +420,6 @@ struct AtomCertificates {
 
 #[tonic::async_trait]
 impl CertificateService for AtomCertificates {
-    async fn resolve_certificate(
-        &self,
-        _request: Request<ResolveCertificateRequest>,
-    ) -> Result<Response<ResolveCertificateResponse>, Status> {
-        Err(Status::unimplemented(
-            "ResolveCertificate is removed; use ResolveCertificateV2",
-        ))
-    }
-
     async fn resolve_certificate_v2(
         &self,
         request: Request<ResolveCertificateV2Request>,

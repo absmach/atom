@@ -14,6 +14,7 @@ use atom::{
     config::Config,
     graphql::build_schema,
     keys::{ActiveKeys, LoadedKey},
+    models::{enums::SubjectKind, policy::CreateRoleAssignment},
     state::AppState,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -1196,6 +1197,48 @@ async fn deleting_role_assignment_works_with_a_single_connection_pool() {
     .await
     .expect("delete must not wait for a second pool connection")
     .expect("delete role assignment");
+}
+
+#[tokio::test]
+#[ignore]
+async fn creating_role_assignment_works_with_a_single_connection_pool() {
+    let setup_pool = common::pool().await;
+    let tenant_id = tenant(&setup_pool).await;
+    let subject_id = tenant_entity(&setup_pool, tenant_id, "human").await;
+    let role_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(role_id)
+        .bind(format!("single-connection-role-{role_id}"))
+        .bind(tenant_id)
+        .execute(&setup_pool)
+        .await
+        .expect("insert role");
+    drop(setup_pool);
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect single-connection pool");
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        authz_repo::create_role_assignment_with_audit(
+            &pool,
+            false,
+            Some(common::admin_id()),
+            CreateRoleAssignment {
+                tenant_id: Some(tenant_id),
+                subject_kind: SubjectKind::Entity,
+                subject_id,
+                role_id,
+            },
+        ),
+    )
+    .await
+    .expect("create must not wait for a second pool connection")
+    .expect("create role assignment");
 }
 
 /// Through an actual GraphQL resolver, an exact-object read deny must override a

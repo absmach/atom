@@ -1,2721 +1,1087 @@
 openapi: 3.0.3
 
 info:
-  title: Atom
-  version: 0.1.0
+  title: Atom HTTP API
+  version: 1.0.0
   description: |
-    Identity and Authorization service for IoT and cloud-native systems.
+    Frozen v1 HTTP transport contract for Atom.
 
-    All endpoints except `GET /health`, `POST /auth/login`, and
-    `GET /.well-known/jwks.json` require a Bearer token:
+    Administrative and domain operations are exposed through `POST /graphql`;
+    the remaining HTTP routes are limited to authentication, health, JWKS,
+    public PKI artifacts, and configured custom endpoint execution. Atom also
+    exposes a separately versioned gRPC API described by
+    `proto/atom/v1/atom.proto`.
 
-    ```
-    Authorization: Bearer <token>
-    ```
-
-    Two token types are accepted:
-    - **JWT** (`eyJ...`) — returned by `/auth/login`, short-lived (default 1 h)
-    - **API key** (`atom_...`) — long-lived, created per entity
-
-    Endpoints marked **RequireManage** additionally require the caller to hold an
-    `allow` + `scope=all` policy binding covering the `manage` capability.
+    Authenticated requests accept an ES256 JWT or Atom access token in the
+    `Authorization: Bearer <token>` header. The GraphQL and session routes also
+    accept the `atom_token` HttpOnly cookie. Cookie-authenticated unsafe
+    requests require a trusted Origin or Referer.
   license:
     name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
 
 servers:
-  - url: http://localhost:8080
-    description: Local development
+  - url: /
+    description: The Atom deployment origin
+
+tags:
+  - name: Health
+    description: Process liveness, dependency readiness, and metrics
+  - name: Authentication
+    description: Identity bootstrap, login, OAuth, sessions, and signing keys
+  - name: GraphQL
+    description: Domain and administrative GraphQL operations
+  - name: PKI artifacts
+    description: Public trust, CRL, and OCSP publication endpoints
+  - name: Custom endpoints
+    description: Operator-configured REST projections over GraphQL
+
+security: []
 
-security:
-  - BearerAuth: []
-
-# ---------------------------------------------------------------------------
-# Reusable components
-# ---------------------------------------------------------------------------
-components:
-
-  securitySchemes:
-    BearerAuth:
-      type: http
-      scheme: bearer
-      description: JWT (`eyJ...`) or API key (`atom_<id>_<secret>`)
-
-  # ── Schemas ──────────────────────────────────────────────────────────────
-
-  schemas:
-
-    # Enumerations
-    EntityKind:
-      type: string
-      enum: [human, device, service, workload, application]
-
-    EntityStatus:
-      type: string
-      enum: [active, inactive, suspended]
-      default: active
-
-    ProfileStatus:
-      type: string
-      enum: [active, deprecated, disabled]
-      default: active
-
-    ProfileVersionStatus:
-      type: string
-      enum: [draft, active, deprecated, disabled]
-      default: active
-
-    CredentialKind:
-      type: string
-      enum: [password, api_key, certificate]
-
-    CredentialStatus:
-      type: string
-      enum: [active, revoked]
-
-    SubjectKind:
-      type: string
-      enum: [entity, group]
-
-    GrantKind:
-      type: string
-      enum: [capability, role]
-
-    ScopeKind:
-      type: string
-      enum: [all, resource_kind, resource]
-      description: |
-        - `all` — applies to every resource
-        - `resource_kind` — applies to all resources of a given kind (`scope_ref` = kind name)
-        - `resource` — applies to one specific resource (`scope_ref` = resource UUID)
-
-    Effect:
-      type: string
-      enum: [allow, deny]
-      default: allow
-
-    # Shared error envelope
-    Error:
-      type: object
-      required: [error]
-      properties:
-        error:
-          type: string
-          example: not found
-
-    # ── Auth ───────────────────────────────────────────────────────────────
-
-    LoginRequest:
-      type: object
-      required: [identifier, secret]
-      properties:
-        identifier:
-          type: string
-          example: alice
-        secret:
-          type: string
-          format: password
-        kind:
-          $ref: '#/components/schemas/CredentialKind'
-          default: password
-
-    LoginResponse:
-      type: object
-      required: [token, entity_id, session_id, expires_at]
-      properties:
-        token:
-          type: string
-          description: ES256-signed JWT
-        entity_id:
-          type: string
-          format: uuid
-        session_id:
-          type: string
-          format: uuid
-        expires_at:
-          type: string
-          format: date-time
-
-    Session:
-      type: object
-      required: [id, entity_id, expires_at, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        entity_id:
-          type: string
-          format: uuid
-        expires_at:
-          type: string
-          format: date-time
-        revoked_at:
-          type: string
-          format: date-time
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    Jwk:
-      type: object
-      required: [kty, crv, x, y, kid, use, alg]
-      properties:
-        kty:
-          type: string
-          example: EC
-        crv:
-          type: string
-          example: P-256
-        x:
-          type: string
-          description: Base64url-encoded x coordinate
-        y:
-          type: string
-          description: Base64url-encoded y coordinate
-        kid:
-          type: string
-          description: Key ID — matches the `kid` header in signed JWTs
-        use:
-          type: string
-          example: sig
-        alg:
-          type: string
-          example: ES256
-
-    JwksResponse:
-      type: object
-      required: [keys]
-      properties:
-        keys:
-          type: array
-          items:
-            $ref: '#/components/schemas/Jwk'
-          description: Primary key first, standby key second (if present)
-
-    # ── Entities ───────────────────────────────────────────────────────────
-
-    Entity:
-      type: object
-      required: [id, kind, name, status, attributes, created_at, updated_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        kind:
-          $ref: '#/components/schemas/EntityKind'
-        name:
-          type: string
-        alias:
-          type: string
-          nullable: true
-        tenant_id:
-          type: string
-          format: uuid
-          nullable: true
-        profile_id:
-          type: string
-          format: uuid
-          nullable: true
-          description: User/domain profile. Authorization still uses `kind`.
-        profile_version_id:
-          type: string
-          format: uuid
-          nullable: true
-          description: Profile version used to validate `attributes`.
-        status:
-          $ref: '#/components/schemas/EntityStatus'
-        attributes:
-          type: object
-          description: Arbitrary JSONB metadata, usable in ABAC conditions
-          example: {"department": "engineering", "env": "prod"}
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    CreateEntity:
-      type: object
-      required: [name]
-      description: >
-        Provide either `kind` for legacy/internal creation, or `profile_id` to derive
-        the internal Atom kind from an active entity profile. `profile_version_id`
-        is optional when `profile_id` is present; Atom uses the active version
-        when omitted.
-      properties:
-        kind:
-          $ref: '#/components/schemas/EntityKind'
-        profile_id:
-          type: string
-          format: uuid
-        profile_version_id:
-          type: string
-          format: uuid
-        name:
-          type: string
-          example: sensor-01
-        alias:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-        attributes:
-          type: object
-
-    UpdateEntity:
-      type: object
-      properties:
-        name:
-          type: string
-        alias:
-          type: string
-          nullable: true
-        status:
-          $ref: '#/components/schemas/EntityStatus'
-        attributes:
-          type: object
-          description: Replaces all existing attributes when provided
-
-    EntityList:
-      type: object
-      required: [items, total]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Entity'
-        total:
-          type: integer
-          description: Total count across all pages
-
-    # ── Profiles ───────────────────────────────────────────────────────────
-
-    Profile:
-      type: object
-      required: [id, object_kind, kind, key, display_name, status, created_at, updated_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        tenant_id:
-          type: string
-          format: uuid
-          nullable: true
-        object_kind:
-          type: string
-          enum: [entity, resource, group, tenant, credential]
-        kind:
-          type: string
-          description: Internal object kind value. Entity profiles must use an EntityKind.
-          example: device
-        key:
-          type: string
-          description: User/domain subtype key.
-          example: client
-        display_name:
-          type: string
-          example: Client
-        description:
-          type: string
-          nullable: true
-        status:
-          $ref: '#/components/schemas/ProfileStatus'
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    CreateProfile:
-      type: object
-      required: [object_kind, kind, key, display_name]
-      properties:
-        tenant_id:
-          type: string
-          format: uuid
-        object_kind:
-          type: string
-          enum: [entity, resource, group, tenant, credential]
-        kind:
-          type: string
-          example: device
-        key:
-          type: string
-          example: client
-        display_name:
-          type: string
-          example: Client
-        description:
-          type: string
-        status:
-          $ref: '#/components/schemas/ProfileStatus'
-
-    ProfileVersion:
-      type: object
-      required: [id, profile_id, version, json_schema, ui_schema, status, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        profile_id:
-          type: string
-          format: uuid
-        version:
-          type: integer
-        json_schema:
-          type: object
-          default: {}
-        ui_schema:
-          type: object
-          default: {}
-        status:
-          $ref: '#/components/schemas/ProfileVersionStatus'
-        created_at:
-          type: string
-          format: date-time
-
-    CreateProfileVersion:
-      type: object
-      required: [version]
-      properties:
-        version:
-          type: integer
-        json_schema:
-          type: object
-          default: {}
-        ui_schema:
-          type: object
-          default: {}
-        status:
-          $ref: '#/components/schemas/ProfileVersionStatus'
-
-    ProfileList:
-      type: object
-      required: [items, total]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Profile'
-        total:
-          type: integer
-
-    ProfileVersionList:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/ProfileVersion'
-
-    # ── Credentials ────────────────────────────────────────────────────────
-
-    Credential:
-      type: object
-      required: [id, kind, status, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        kind:
-          $ref: '#/components/schemas/CredentialKind'
-        identifier:
-          type: string
-          nullable: true
-          description: Username (password cred) or key prefix (API key)
-        status:
-          $ref: '#/components/schemas/CredentialStatus'
-        expires_at:
-          type: string
-          format: date-time
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    CredentialList:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Credential'
-
-    CreateApiKey:
-      type: object
-      properties:
-        expires_at:
-          type: string
-          format: date-time
-          description: Omit for no expiry
-        description:
-          type: string
-          example: device-01 production key
-
-    ApiKeyResponse:
-      type: object
-      required: [credential_id, key]
-      properties:
-        credential_id:
-          type: string
-          format: uuid
-        key:
-          type: string
-          description: >
-            Full API key — format `atom_<32-hex-id>_<64-hex-secret>`.
-            Shown exactly once. Store securely.
-          example: atom_0a1b2c3d...
-        expires_at:
-          type: string
-          format: date-time
-          nullable: true
-
-    # ── Groups ─────────────────────────────────────────────────────────────
-
-    Group:
-      type: object
-      required: [id, name, created_at, updated_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-          nullable: true
-        description:
-          type: string
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    CreateGroup:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-          example: floor-sensors
-        tenant_id:
-          type: string
-          format: uuid
-        description:
-          type: string
-
-    GroupList:
-      type: object
-      required: [items, total]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Group'
-        total:
-          type: integer
-
-    AddMember:
-      type: object
-      required: [entity_id]
-      properties:
-        entity_id:
-          type: string
-          format: uuid
-
-    MemberList:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Entity'
-
-    GroupIdList:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          items:
-            type: string
-            format: uuid
-
-    # ── Ownerships ─────────────────────────────────────────────────────────
-
-    Ownership:
-      type: object
-      required: [owner_id, owned_id, relation, created_at]
-      properties:
-        owner_id:
-          type: string
-          format: uuid
-        owned_id:
-          type: string
-          format: uuid
-        relation:
-          type: string
-          default: owner
-        created_at:
-          type: string
-          format: date-time
-
-    CreateOwnership:
-      type: object
-      required: [owned_id]
-      properties:
-        owned_id:
-          type: string
-          format: uuid
-        relation:
-          type: string
-          default: owner
-
-    OwnedList:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Entity'
-
-    # ── Resources ──────────────────────────────────────────────────────────
-
-    Resource:
-      type: object
-      required: [id, kind, attributes, created_at, updated_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        kind:
-          type: string
-          example: channel
-          description: Free-form kind string — e.g. channel, device, workspace
-        name:
-          type: string
-          nullable: true
-        alias:
-          type: string
-          nullable: true
-        tenant_id:
-          type: string
-          format: uuid
-          nullable: true
-        owner_id:
-          type: string
-          format: uuid
-          nullable: true
-        attributes:
-          type: object
-          description: Arbitrary JSONB metadata, usable in ABAC conditions
-          example: {"env": "prod", "classification": "confidential"}
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    CreateResource:
-      type: object
-      required: [kind]
-      properties:
-        kind:
-          type: string
-          example: channel
-        name:
-          type: string
-        alias:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-        owner_id:
-          type: string
-          format: uuid
-        attributes:
-          type: object
-
-    UpdateResource:
-      type: object
-      properties:
-        name:
-          type: string
-        alias:
-          type: string
-          nullable: true
-        attributes:
-          type: object
-
-    ResourceList:
-      type: object
-      required: [items, total]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Resource'
-        total:
-          type: integer
-
-    # ── Roles ──────────────────────────────────────────────────────────────
-
-    Role:
-      type: object
-      required: [id, name, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-          nullable: true
-        description:
-          type: string
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    CreateRole:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-          example: channel-publisher
-        tenant_id:
-          type: string
-          format: uuid
-        description:
-          type: string
-
-    RoleList:
-      type: object
-      required: [items, total]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Role'
-        total:
-          type: integer
-
-    AddRoleCapability:
-      type: object
-      required: [capability_id]
-      properties:
-        capability_id:
-          type: string
-          format: uuid
-
-    # ── Capabilities ───────────────────────────────────────────────────────
-
-    Capability:
-      type: object
-      required: [id, name]
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-          example: publish
-        resource_kind:
-          type: string
-          nullable: true
-          description: >
-            Scopes this capability to a specific resource kind.
-            `null` means the capability applies to all resource kinds.
-        description:
-          type: string
-          nullable: true
-
-    CreateCapability:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-        resource_kind:
-          type: string
-          description: Omit to create a capability that applies to all resource kinds
-        description:
-          type: string
-
-    CapabilityList:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Capability'
-
-    # ── Policy bindings ────────────────────────────────────────────────────
-
-    PolicyBinding:
-      type: object
-      required: [id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, effect, conditions, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        subject_kind:
-          $ref: '#/components/schemas/SubjectKind'
-        subject_id:
-          type: string
-          format: uuid
-        grant_kind:
-          $ref: '#/components/schemas/GrantKind'
-        grant_id:
-          type: string
-          format: uuid
-        scope_kind:
-          $ref: '#/components/schemas/ScopeKind'
-        scope_ref:
-          type: string
-          nullable: true
-          description: Kind name or resource UUID depending on `scope_kind`
-        effect:
-          $ref: '#/components/schemas/Effect'
-        conditions:
-          type: object
-          description: >
-            Flat dot-path ABAC conditions. All entries must match (AND logic).
-            Keys: `entity.attributes.<k>`, `resource.attributes.<k>`, `context.<k>`.
-            Empty object `{}` means no conditions.
-          example: {"resource.attributes.env": "prod", "context.ip_trusted": "true"}
-        created_at:
-          type: string
-          format: date-time
-
-    CreatePolicyBinding:
-      type: object
-      required: [subject_kind, subject_id, grant_kind, grant_id, scope_kind]
-      properties:
-        subject_kind:
-          $ref: '#/components/schemas/SubjectKind'
-        subject_id:
-          type: string
-          format: uuid
-        grant_kind:
-          $ref: '#/components/schemas/GrantKind'
-        grant_id:
-          type: string
-          format: uuid
-        scope_kind:
-          $ref: '#/components/schemas/ScopeKind'
-        scope_ref:
-          type: string
-          description: >
-            For `scope_kind=resource`: resource UUID.
-            For `scope_kind=resource_kind`: kind name string.
-            For `scope_kind=all`: omit.
-        effect:
-          $ref: '#/components/schemas/Effect'
-        conditions:
-          type: object
-          example: {}
-
-    PolicyList:
-      type: object
-      required: [items, total]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/PolicyBinding'
-        total:
-          type: integer
-
-    # ── Authorization check ────────────────────────────────────────────────
-
-    AuthzRequest:
-      type: object
-      required: [subject_id, action]
-      description: |
-        At least one of `resource_id` or (`object_kind` + `object_id`) must
-        be supplied. When both are present, the explicit object form wins.
-      properties:
-        subject_id:
-          type: string
-          format: uuid
-        action:
-          type: string
-          description: Capability name to check
-          example: publish
-        resource_id:
-          type: string
-          format: uuid
-          description: Legacy form. Resolves the protected object from `resources`.
-        object_kind:
-          type: string
-          enum: [resource, tenant]
-          description: |
-            Explicit form. `resource` resolves from the `resources` table
-            (same as `resource_id`); `tenant` resolves from the `tenants`
-            table with kind = `"tenant"`.
-        object_id:
-          type: string
-          format: uuid
-          description: UUID of the protected object identified by `object_kind`.
-        context:
-          type: object
-          description: >
-            Optional extra fields injected into the ABAC evaluation context
-            under the `context` key. Values can be any JSON type.
-          example: {"ip_trusted": "true"}
-
-    AuthzResponse:
-      type: object
-      required: [allowed, reason]
-      properties:
-        allowed:
-          type: boolean
-        reason:
-          type: string
-          enum:
-            - allowed
-            - no matching allow policy
-            - subject not found
-            - subject is not active
-            - resource not found
-            - tenant not found
-            - "unknown action '<name>'"
-            - "explicitly denied by policy <id>"
-
-    # ── Tenants ───────────────────────────────────────────────────────────
-
-    TenantStatus:
-      type: string
-      enum: [active, inactive, frozen, deleted]
-      default: active
-
-    Tenant:
-      type: object
-      required: [id, name, status, tags, attributes, created_at, updated_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        alias:
-          type: string
-          nullable: true
-        status:
-          $ref: '#/components/schemas/TenantStatus'
-        tags:
-          type: array
-          items:
-            type: string
-        attributes:
-          type: object
-          description: Arbitrary JSONB metadata; reusable for Magistrala domain metadata.
-        created_by:
-          type: string
-          format: uuid
-          nullable: true
-        updated_by:
-          type: string
-          format: uuid
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    CreateTenant:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-          example: factory-1
-        alias:
-          type: string
-          nullable: true
-        tags:
-          type: array
-          items:
-            type: string
-        attributes:
-          type: object
-
-    UpdateTenant:
-      type: object
-      properties:
-        name:
-          type: string
-        alias:
-          type: string
-          nullable: true
-        tags:
-          type: array
-          items:
-            type: string
-        attributes:
-          type: object
-          description: Replaces all existing attributes when provided
-
-    TenantList:
-      type: object
-      required: [items, total]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Tenant'
-        total:
-          type: integer
-
-  # ── Reusable responses ───────────────────────────────────────────────────
-
-  responses:
-    Unauthorized:
-      description: Missing or invalid token
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: missing Authorization header
-
-    Forbidden:
-      description: Caller lacks `manage` scope=all
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: forbidden
-
-    NotFound:
-      description: Resource not found
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: not found
-
-    Conflict:
-      description: Already exists (unique constraint)
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
-          example:
-            error: already exists
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 paths:
-
-  # ── Health ─────────────────────────────────────────────────────────────
-
   /health:
     get:
-      operationId: getHealth
-      summary: Health check
       tags: [Health]
-      security: []
+      operationId: legacyHealth
+      summary: Readiness-compatible legacy health endpoint
       responses:
         "200":
-          description: Service is healthy and database is reachable
+          description: Atom is ready
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ok
+                $ref: "#/components/schemas/SystemStatus"
+        "503":
+          description: At least one required component is not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemStatus"
 
-  # ── JWKS ───────────────────────────────────────────────────────────────
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: live
+      summary: Process liveness
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveStatus"
+
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: ready
+      summary: Dependency readiness
+      responses:
+        "200":
+          description: Atom is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemStatus"
+        "503":
+          description: At least one required component is not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemStatus"
+
+  /metrics:
+    get:
+      tags: [Health]
+      operationId: metrics
+      summary: Prometheus metrics when metrics are enabled
+      description: This optional unauthenticated route must be network-restricted.
+      responses:
+        "200":
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Metrics are disabled or unavailable in this build
 
   /.well-known/jwks.json:
     get:
-      operationId: getJwks
-      summary: JWKS public keys
-      description: >
-        Returns the active ES256 public keys for external JWT verification.
-        Always includes the primary key and the standby key (if present).
-        Cache with a short TTL; re-fetch on unknown `kid`.
-      tags: [Auth]
-      security: []
+      tags: [Authentication]
+      operationId: jwks
+      summary: Active ES256 verification keys
       responses:
         "200":
-          description: JWKS
+          description: JSON Web Key Set
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/JwksResponse'
+                $ref: "#/components/schemas/Jwks"
 
-  # ── Auth ───────────────────────────────────────────────────────────────
+  /auth/public-config:
+    get:
+      tags: [Authentication]
+      operationId: publicAuthConfig
+      summary: Public authentication configuration
+      responses:
+        "200":
+          description: Public configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicAuthConfig"
 
-  /auth/login:
+  /auth/signup:
     post:
-      operationId: login
-      summary: Authenticate with a password and receive a JWT
-      tags: [Auth]
-      security: []
+      tags: [Authentication]
+      operationId: signup
+      summary: Register a human identity when self-registration is enabled
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/LoginRequest'
-            example:
-              identifier: alice
-              secret: s3cr3t
+              $ref: "#/components/schemas/SignupRequest"
       responses:
-        "200":
-          description: Authenticated
+        "202":
+          description: Signup accepted
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LoginResponse'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
+                $ref: "#/components/schemas/SignupResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
-  /auth/logout:
+  /auth/login:
     post:
-      operationId: logout
-      summary: Revoke the current session
-      description: Immediately invalidates the JWT associated with the current session.
-      tags: [Auth]
+      tags: [Authentication]
+      operationId: login
+      summary: Authenticate with a password or shared key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
       responses:
-        "204":
-          description: Session revoked
+        "200":
+          description: Authenticated; also sets the `atom_token` HttpOnly cookie
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
-          $ref: '#/components/responses/Unauthorized'
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
-  /auth/sessions/{id}:
+  /auth/email/verify:
     get:
-      operationId: getSession
-      summary: Get session details
-      tags: [Auth]
+      tags: [Authentication]
+      operationId: verifyEmail
+      summary: Consume an email-verification token
       parameters:
-        - name: id
-          in: path
+        - name: token
+          in: query
           required: true
           schema:
             type: string
-            format: uuid
+      responses:
+        "200":
+          description: Email verified
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [verified]
+                properties:
+                  verified:
+                    type: boolean
+                    enum: [true]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/email/resend:
+    post:
+      tags: [Authentication]
+      operationId: resendVerification
+      summary: Request another verification email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailRequest"
+      responses:
+        "202":
+          description: Request accepted whether or not the email exists
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/password/reset/request:
+    post:
+      tags: [Authentication]
+      operationId: requestPasswordReset
+      summary: Request a password-reset email
+      description: |
+        The body contains only the account email. Atom always builds the reset
+        link from `ATOM_PASSWORD_RESET_REDIRECT`; caller-controlled redirect
+        fields are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequest"
+      responses:
+        "202":
+          description: Request accepted whether or not the email exists
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/password/reset:
+    post:
+      tags: [Authentication]
+      operationId: resetPassword
+      summary: Consume a reset token and replace the password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetConfirmRequest"
+      responses:
+        "204":
+          description: Password reset; existing sessions and credentials are revoked
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/oauth/{provider}/start:
+    get:
+      tags: [Authentication]
+      operationId: oauthStart
+      summary: Start an enabled OIDC authorization flow
+      parameters:
+        - $ref: "#/components/parameters/OauthProvider"
+        - name: return_to
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "307":
+          description: Redirect to the provider authorization endpoint
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/oauth/{provider}/callback:
+    get:
+      tags: [Authentication]
+      operationId: oauthCallback
+      summary: Complete an OIDC provider callback
+      parameters:
+        - $ref: "#/components/parameters/OauthProvider"
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: error
+          in: query
+          schema:
+            type: string
+      responses:
+        "307":
+          description: Redirect to the configured success or error callback
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+
+  /auth/oauth/exchange:
+    post:
+      tags: [Authentication]
+      operationId: oauthExchange
+      summary: Exchange a one-time OAuth result code for an Atom session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthExchangeRequest"
+      responses:
+        "200":
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logout
+      summary: Revoke the current session and clear the auth cookie
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Logged out
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [authenticated]
+                properties:
+                  authenticated:
+                    type: boolean
+                    enum: [false]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /auth/introspect:
+    get:
+      tags: [Authentication]
+      operationId: introspect
+      summary: Return the authenticated token identity
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Active authenticated identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntrospectionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/session:
+    get:
+      tags: [Authentication]
+      operationId: currentSession
+      summary: Return the current authentication session
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Current session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CurrentSessionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/sessions/{id}:
+    get:
+      tags: [Authentication]
+      operationId: getSession
+      summary: Read a session visible to the caller
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UuidId"
       responses:
         "200":
           description: Session
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Session'
+                $ref: "#/components/schemas/Session"
         "401":
-          $ref: '#/components/responses/Unauthorized'
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: '#/components/responses/NotFound'
+          $ref: "#/components/responses/NotFound"
 
   /auth/keys/rotate:
     post:
-      operationId: rotateKeys
+      tags: [Authentication]
+      operationId: rotateSigningKeys
       summary: Rotate ES256 signing keys
-      description: >
-        **RequireManage.** Generates a new primary key, demotes the current primary to standby,
-        and retires the previous standby — all in a single transaction.
-        Outstanding tokens remain valid under the standby key until they expire.
-        The in-process key store is updated immediately; no restart required.
-      tags: [Auth]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
       responses:
         "204":
           description: Keys rotated
         "401":
-          $ref: '#/components/responses/Unauthorized'
+          $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: '#/components/responses/Forbidden'
+          $ref: "#/components/responses/Forbidden"
 
-  # ── Entities ───────────────────────────────────────────────────────────
-
-  /entities:
-    get:
-      operationId: listEntities
-      summary: List entities
-      tags: [Entities]
-      parameters:
-        - name: kind
-          in: query
-          schema:
-            $ref: '#/components/schemas/EntityKind'
-        - name: profile_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: tenant_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: status
-          in: query
-          schema:
-            $ref: '#/components/schemas/EntityStatus'
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-            minimum: 1
-            maximum: 100
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Paginated entity list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/EntityList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
+  /graphql:
     post:
-      operationId: createEntity
-      summary: Create an entity
-      tags: [Entities]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateEntity'
-            example:
-              kind: device
-              profile_id: null
-              name: sensor-01
-              attributes:
-                firmware: "2.1.0"
-      responses:
-        "201":
-          description: Entity created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Entity'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "409":
-          $ref: '#/components/responses/Conflict'
-
-  /entities/{id}:
-    get:
-      operationId: getEntity
-      summary: Get an entity
-      tags: [Entities]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Entity
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Entity'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    put:
-      operationId: updateEntity
-      summary: Update an entity
-      description: All fields are optional; only provided fields are updated (COALESCE semantics).
-      tags: [Entities]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateEntity'
-      responses:
-        "200":
-          description: Updated entity
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Entity'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: deleteEntity
-      summary: Delete an entity
-      description: >
-        An entity may always delete itself.
-        Deleting any other entity requires `manage` scope=all (**RequireManage**).
-      tags: [Entities]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Deleted
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  # ── Profiles ───────────────────────────────────────────────────────────
-
-  /profiles:
-    get:
-      operationId: listProfiles
-      summary: List profiles
-      tags: [Profiles]
-      parameters:
-        - name: object_kind
-          in: query
-          schema:
-            type: string
-            enum: [entity, resource, group, tenant, credential]
-        - name: kind
-          in: query
-          schema:
-            type: string
-        - name: key
-          in: query
-          schema:
-            type: string
-        - name: tenant_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: status
-          in: query
-          schema:
-            $ref: '#/components/schemas/ProfileStatus'
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-            minimum: 1
-            maximum: 100
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Paginated profile list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProfileList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: createProfile
-      summary: Create a profile
-      description: "**RequireManage.** Entity profiles derive `entities.kind`; authorization still uses that internal kind."
-      tags: [Profiles]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateProfile'
-            example:
-              object_kind: entity
-              kind: device
-              key: client
-              display_name: Client
-      responses:
-        "201":
-          description: Profile created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Profile'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "409":
-          $ref: '#/components/responses/Conflict'
-
-  /profiles/{id}:
-    get:
-      operationId: getProfile
-      summary: Get a profile
-      tags: [Profiles]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Profile
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Profile'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /profiles/{id}/versions:
-    get:
-      operationId: listProfileVersions
-      summary: List profile versions
-      tags: [Profiles]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Profile versions
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProfileVersionList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    post:
-      operationId: createProfileVersion
-      summary: Create a profile version
-      description: "**RequireManage.** Creating a version does not mutate older versions."
-      tags: [Profiles]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateProfileVersion'
-            example:
-              version: 1
-              json_schema: {}
-              ui_schema: {}
-      responses:
-        "201":
-          description: Profile version created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProfileVersion'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-        "409":
-          $ref: '#/components/responses/Conflict'
-
-  # ── Credentials ────────────────────────────────────────────────────────
-
-  /entities/{id}/credentials/password:
-    post:
-      operationId: createPassword
-      summary: Set a password credential
-      description: Hashed with argon2. An entity may have multiple password credentials.
-      tags: [Credentials]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [password]
-              properties:
-                password:
-                  type: string
-                  format: password
-      responses:
-        "204":
-          description: Password set
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /entities/{id}/credentials/api-keys:
-    post:
-      operationId: createApiKey
-      summary: Create an API key
-      description: >
-        The full key (`atom_<id>_<secret>`) is returned exactly once and never
-        stored in plaintext. Store it securely immediately.
-      tags: [Credentials]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateApiKey'
-      responses:
-        "201":
-          description: API key created — store the `key` value immediately
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiKeyResponse'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /entities/{id}/credentials:
-    get:
-      operationId: listCredentials
-      summary: List credentials for an entity
-      description: Returns metadata only — no secret hashes or plaintext secrets.
-      tags: [Credentials]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Credential list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CredentialList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-  /entities/{entity_id}/credentials/{cred_id}:
-    delete:
-      operationId: revokeCredential
-      summary: Revoke a credential
-      description: Sets status to `revoked`. Takes effect on the next use of that credential.
-      tags: [Credentials]
-      parameters:
-        - name: entity_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: cred_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Credential revoked
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  # ── Groups ─────────────────────────────────────────────────────────────
-
-  /groups:
-    get:
-      operationId: listGroups
-      summary: List groups
-      tags: [Groups]
-      parameters:
-        - name: tenant_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Group list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GroupList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: createGroup
-      summary: Create a group
-      tags: [Groups]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateGroup'
-      responses:
-        "201":
-          description: Group created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Group'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "409":
-          $ref: '#/components/responses/Conflict'
-
-  /groups/{id}:
-    get:
-      operationId: getGroup
-      summary: Get a group
-      tags: [Groups]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Group
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Group'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: deleteGroup
-      summary: Delete a group
-      tags: [Groups]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Deleted
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /groups/{id}/members:
-    get:
-      operationId: listGroupMembers
-      summary: List group members
-      tags: [Groups]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Member entities
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MemberList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: addGroupMember
-      summary: Add an entity to a group
-      tags: [Groups]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AddMember'
-      responses:
-        "204":
-          description: Member added
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /groups/{group_id}/members/{entity_id}:
-    delete:
-      operationId: removeGroupMember
-      summary: Remove an entity from a group
-      tags: [Groups]
-      parameters:
-        - name: group_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: entity_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Member removed
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-  /entities/{id}/groups:
-    get:
-      operationId: getEntityGroups
-      summary: List groups an entity belongs to
-      tags: [Groups]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Group IDs
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GroupIdList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-  # ── Ownerships ─────────────────────────────────────────────────────────
-
-  /entities/{id}/owned:
-    get:
-      operationId: listOwned
-      summary: List entities owned by this entity
-      tags: [Ownerships]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Owned entities
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OwnedList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: addOwnership
-      summary: Establish an ownership relationship
-      tags: [Ownerships]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateOwnership'
-      responses:
-        "201":
-          description: Ownership created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Ownership'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-  /entities/{owner_id}/owned/{owned_id}:
-    delete:
-      operationId: removeOwnership
-      summary: Remove an ownership relationship
-      tags: [Ownerships]
-      parameters:
-        - name: owner_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: owned_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Removed
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-  # ── Resources ──────────────────────────────────────────────────────────
-
-  /resources:
-    get:
-      operationId: listResources
-      summary: List resources
-      tags: [Resources]
-      parameters:
-        - name: kind
-          in: query
-          schema:
-            type: string
-        - name: tenant_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Resource list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ResourceList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: createResource
-      summary: Register a resource
-      tags: [Resources]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateResource'
-            example:
-              kind: channel
-              name: telemetry
-              attributes:
-                env: prod
-      responses:
-        "201":
-          description: Resource created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Resource'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-  /resources/{id}:
-    get:
-      operationId: getResource
-      summary: Get a resource
-      tags: [Resources]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Resource
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Resource'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    put:
-      operationId: updateResource
-      summary: Update a resource
-      tags: [Resources]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateResource'
-      responses:
-        "200":
-          description: Updated resource
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Resource'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: deleteResource
-      summary: Delete a resource
-      tags: [Resources]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Deleted
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  # ── Roles ──────────────────────────────────────────────────────────────
-
-  /roles:
-    get:
-      operationId: listRoles
-      summary: List roles
-      tags: [Roles]
-      parameters:
-        - name: tenant_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Role list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RoleList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: createRole
-      summary: Create a role
-      tags: [Roles]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateRole'
-      responses:
-        "201":
-          description: Role created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Role'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "409":
-          $ref: '#/components/responses/Conflict'
-
-  /roles/{id}:
-    get:
-      operationId: getRole
-      summary: Get a role
-      tags: [Roles]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Role
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Role'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: deleteRole
-      summary: Delete a role
-      tags: [Roles]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Deleted
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /roles/{id}/capabilities:
-    get:
-      operationId: getRoleCapabilities
-      summary: List capabilities in a role
-      tags: [Roles]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Capability list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CapabilityList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: addRoleCapability
-      summary: Add a capability to a role
-      tags: [Roles]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AddRoleCapability'
-      responses:
-        "204":
-          description: Added
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /roles/{role_id}/capabilities/{cap_id}:
-    delete:
-      operationId: removeRoleCapability
-      summary: Remove a capability from a role
-      tags: [Roles]
-      parameters:
-        - name: role_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - name: cap_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Removed
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-  # ── Capabilities ───────────────────────────────────────────────────────
-
-  /capabilities:
-    get:
-      operationId: listCapabilities
-      summary: List capabilities
-      description: Passing `resource_kind` returns capabilities for that kind plus universal ones (`resource_kind=null`).
-      tags: [Capabilities]
-      parameters:
-        - name: resource_kind
-          in: query
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Capability list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CapabilityList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: createCapability
-      summary: Create a capability
-      description: "**RequireManage.**"
-      tags: [Capabilities]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateCapability'
-      responses:
-        "201":
-          description: Capability created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Capability'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "409":
-          $ref: '#/components/responses/Conflict'
-
-  /capabilities/{id}:
-    get:
-      operationId: getCapability
-      summary: Get a capability
-      tags: [Capabilities]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Capability
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Capability'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: deleteCapability
-      summary: Delete a capability
-      description: "**RequireManage.**"
-      tags: [Capabilities]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Deleted
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  # ── Policy bindings ────────────────────────────────────────────────────
-
-  /policies:
-    get:
-      operationId: listPolicies
-      summary: List policy bindings
-      tags: [Policies]
-      parameters:
-        - name: subject_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: subject_kind
-          in: query
-          schema:
-            $ref: '#/components/schemas/SubjectKind'
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Policy binding list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PolicyList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: createPolicy
-      summary: Create a policy binding
-      description: "**RequireManage.**"
-      tags: [Policies]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreatePolicyBinding'
-            examples:
-              rbac:
-                summary: Role grant over a resource kind
-                value:
-                  subject_kind: entity
-                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
-                  grant_kind: role
-                  grant_id: "7c4b7f1e-0000-0000-0000-000000000001"
-                  scope_kind: resource_kind
-                  scope_ref: channel
-                  effect: allow
-              abac:
-                summary: Capability with ABAC condition
-                value:
-                  subject_kind: entity
-                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
-                  grant_kind: capability
-                  grant_id: "7c4b7f1e-0000-0000-0000-000000000002"
-                  scope_kind: resource_kind
-                  scope_ref: secret
-                  effect: allow
-                  conditions:
-                    "resource.attributes.env": "prod"
-              deny:
-                summary: Explicit deny for a specific entity
-                value:
-                  subject_kind: entity
-                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
-                  grant_kind: role
-                  grant_id: "7c4b7f1e-0000-0000-0000-000000000001"
-                  scope_kind: all
-                  effect: deny
-      responses:
-        "201":
-          description: Policy binding created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PolicyBinding'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-
-  /policies/{id}:
-    get:
-      operationId: getPolicy
-      summary: Get a policy binding
-      tags: [Policies]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Policy binding
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PolicyBinding'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: deletePolicy
-      summary: Delete a policy binding
-      description: "**RequireManage.**"
-      tags: [Policies]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Deleted
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  # ── Tenants ────────────────────────────────────────────────────────────
-
-  /tenants:
-    get:
-      operationId: listTenants
-      summary: List tenants
-      tags: [Tenants]
-      parameters:
-        - name: name
-          in: query
-          schema:
-            type: string
-        - name: alias
-          in: query
-          schema:
-            type: string
-        - name: status
-          in: query
-          schema:
-            $ref: '#/components/schemas/TenantStatus'
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Tenant list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TenantList'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: createTenant
-      summary: Create a tenant
-      description: "**RequireManage.** A tenant is an isolation boundary, not a principal."
-      tags: [Tenants]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateTenant'
-            example:
-              name: factory-1
-              alias: factory-1
-              tags: [pilot]
-              attributes:
-                magistrala:
-                  region: eu
-      responses:
-        "201":
-          description: Tenant created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Tenant'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "409":
-          $ref: '#/components/responses/Conflict'
-
-  /tenants/{id}:
-    get:
-      operationId: getTenant
-      summary: Get a tenant
-      tags: [Tenants]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Tenant
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Tenant'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    put:
-      operationId: updateTenant
-      summary: Update a tenant
-      description: "**RequireManage.**"
-      tags: [Tenants]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateTenant'
-      responses:
-        "200":
-          description: Updated tenant
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Tenant'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: deleteTenant
-      summary: Soft-delete a tenant (status = deleted)
-      description: "**RequireManage.** Sets status = `deleted`; the row is retained."
-      tags: [Tenants]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "204":
-          description: Deleted
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /tenants/{id}/enable:
-    post:
-      operationId: enableTenant
-      summary: Set tenant status to active
-      description: "**RequireManage.**"
-      tags: [Tenants]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Updated tenant
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Tenant'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /tenants/{id}/disable:
-    post:
-      operationId: disableTenant
-      summary: Set tenant status to inactive
-      description: "**RequireManage.**"
-      tags: [Tenants]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Updated tenant
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Tenant'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  /tenants/{id}/freeze:
-    post:
-      operationId: freezeTenant
-      summary: Set tenant status to frozen
-      description: "**RequireManage.**"
-      tags: [Tenants]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Updated tenant
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Tenant'
-        "401":
-          $ref: '#/components/responses/Unauthorized'
-        "403":
-          $ref: '#/components/responses/Forbidden'
-        "404":
-          $ref: '#/components/responses/NotFound'
-
-  # ── Authorization check ────────────────────────────────────────────────
-
-  /authz/check:
-    post:
-      operationId: authzCheck
-      summary: Authorization decision (PDP)
+      tags: [GraphQL]
+      operationId: graphql
+      summary: Execute a GraphQL operation
       description: |
-        The primary endpoint for downstream services. Call it on every protected operation.
-
-        **Algorithm (in order):**
-        1. Load entity — must exist and be `active`
-        2. Load resource — must exist
-        3. Resolve capability by `action` name
-        4. Load all policy bindings for the entity (direct + via group membership)
-        5. Batch-load role capabilities for all role-grant bindings
-        6. For each binding: check scope → check grant → evaluate ABAC conditions
-        7. First `deny` match → immediately return `allowed: false`
-        8. Any `allow` match → `allowed: true`; otherwise → `allowed: false`
-      tags: [Authorization]
+        Authentication is optional at the transport boundary because a small
+        set of GraphQL fields is public. Protected fields enforce authorization
+        in their resolvers. The frozen GraphQL type-system contract is committed
+        separately as `apidocs/graphql-schema.graphql`.
+      security:
+        - {}
+        - bearerAuth: []
+        - cookieAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AuthzRequest'
-            examples:
-              simple:
-                summary: RBAC check — device publishing to a channel
-                value:
-                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
-                  action: publish
-                  resource_id: "7c4b7f1e-4b9e-4b7f-8b4b-7f1e4b9e4b7f"
-              withContext:
-                summary: ABAC check — context carries runtime attributes
-                value:
-                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
-                  action: read
-                  resource_id: "7c4b7f1e-4b9e-4b7f-8b4b-7f1e4b9e4b7f"
-                  context:
-                    ip_trusted: "true"
-              tenantObject:
-                summary: Authorize against a tenant (object_kind form)
-                value:
-                  subject_id: "550e8400-e29b-41d4-a716-446655440000"
-                  action: manage
-                  object_kind: tenant
-                  object_id: "11111111-1111-1111-1111-111111111111"
+              $ref: "#/components/schemas/GraphQLRequest"
       responses:
         "200":
-          description: Authorization decision — always 200, check `allowed` field
+          description: GraphQL response; resolver failures appear in `errors`
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthzResponse'
-              examples:
-                allowed:
-                  value:
-                    allowed: true
-                    reason: allowed
-                noPolicy:
-                  value:
-                    allowed: false
-                    reason: no matching allow policy
-                explicitDeny:
-                  value:
-                    allowed: false
-                    reason: "explicitly denied by policy 550e8400-e29b-41d4-a716-446655440000"
-        "401":
-          $ref: '#/components/responses/Unauthorized'
+                $ref: "#/components/schemas/GraphQLResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
-# ---------------------------------------------------------------------------
-# Tags
-# ---------------------------------------------------------------------------
-tags:
-  - name: Health
-    description: Service liveness
-  - name: Auth
-    description: Login, logout, session management, JWKS, and key rotation
-  - name: Entities
-    description: Principal management — humans, devices, services, workloads, applications
-  - name: Credentials
-    description: Password and API key credential lifecycle
-  - name: Groups
-    description: Named collections of entities used as policy subjects
-  - name: Ownerships
-    description: Parent–child relationships between entities
-  - name: Resources
-    description: Protected resources registered for authorization decisions
-  - name: Tenants
-    description: First-class tenant boundaries — Magistrala domains map here
-  - name: Roles
-    description: Named capability bundles for RBAC
-  - name: Capabilities
-    description: Atomic permissions — seeded defaults plus custom additions
-  - name: Policies
-    description: Policy bindings — the core authorization primitive (RBAC + ABAC)
-  - name: Authorization
-    description: Runtime authorization decisions from the PDP
+  /certs/trust-bundle.pem:
+    get:
+      tags: [PKI artifacts]
+      operationId: trustBundle
+      summary: Active and retained CA trust bundle
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: PEM trust bundle
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/x-pem-file:
+              schema:
+                type: string
+        "304":
+          description: Cached representation remains current
+
+  /certs/issuers/{issuer_id}/crl:
+    get:
+      tags: [PKI artifacts]
+      operationId: issuerCrl
+      summary: Issuer-specific X.509 certificate revocation list
+      parameters:
+        - $ref: "#/components/parameters/IssuerId"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200":
+          description: DER-encoded CRL
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/pkix-crl:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: Cached representation remains current
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /certs/issuers/{issuer_id}/ocsp:
+    post:
+      tags: [PKI artifacts]
+      operationId: issuerOcsp
+      summary: Issuer-specific OCSP responder
+      parameters:
+        - $ref: "#/components/parameters/IssuerId"
+      requestBody:
+        required: true
+        content:
+          application/ocsp-request:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: DER-encoded OCSP response, including protocol-level error responses
+          content:
+            application/ocsp-response:
+              schema:
+                type: string
+                format: binary
+
+  /api/custom/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        description: Configured custom endpoint path, including nested segments
+        schema:
+          type: string
+    get:
+      tags: [Custom endpoints]
+      operationId: executeCustomEndpointGet
+      summary: Execute a configured GET custom endpoint
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/CustomEndpointResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [Custom endpoints]
+      operationId: executeCustomEndpointPost
+      summary: Execute a configured POST custom endpoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/CustomEndpointBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/CustomEndpointResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Custom endpoints]
+      operationId: executeCustomEndpointPut
+      summary: Execute a configured PUT custom endpoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/CustomEndpointBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/CustomEndpointResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Custom endpoints]
+      operationId: executeCustomEndpointPatch
+      summary: Execute a configured PATCH custom endpoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/CustomEndpointBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/CustomEndpointResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Custom endpoints]
+      operationId: executeCustomEndpointDelete
+      summary: Execute a configured DELETE custom endpoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/CustomEndpointBody"
+      responses:
+        "200":
+          $ref: "#/components/responses/CustomEndpointResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT or atom access token
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: atom_token
+
+  parameters:
+    UuidId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IssuerId:
+      name: issuer_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OauthProvider:
+      name: provider
+      in: path
+      required: true
+      schema:
+        type: string
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated caller lacks permission
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Object not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Request conflicts with current state
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PayloadTooLarge:
+      description: Request exceeds the configured body limit
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnprocessableEntity:
+      description: JSON body does not match the frozen request DTO
+      content:
+        text/plain:
+          schema:
+            type: string
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    CustomEndpointResponse:
+      description: Configured JSON response
+      content:
+        application/json:
+          schema: {}
+
+  requestBodies:
+    CustomEndpointBody:
+      required: false
+      content:
+        application/json:
+          schema: {}
+
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    LiveStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ComponentStatus:
+      type: string
+      enum: [ok, disabled, degraded, error]
+
+    ComponentCheck:
+      type: object
+      additionalProperties: false
+      required: [status, message]
+      properties:
+        status:
+          $ref: "#/components/schemas/ComponentStatus"
+        message:
+          type: string
+
+    DbPoolStatus:
+      type: object
+      additionalProperties: false
+      required: [max_connections, min_connections, acquire_timeout_secs, connect_timeout_secs, idle_timeout_secs, max_lifetime_secs, size, idle]
+      properties:
+        max_connections: { type: integer, minimum: 0 }
+        min_connections: { type: integer, minimum: 0 }
+        acquire_timeout_secs: { type: integer, minimum: 0 }
+        connect_timeout_secs: { type: integer, minimum: 0 }
+        idle_timeout_secs: { type: integer, minimum: 0 }
+        max_lifetime_secs: { type: integer, minimum: 0 }
+        size: { type: integer, minimum: 0 }
+        idle: { type: integer, minimum: 0 }
+
+    SigningKeyStatus:
+      type: object
+      additionalProperties: false
+      required: [configured_key_id, encrypted_count, plaintext_count, total_count, plaintext_allowed]
+      properties:
+        configured_key_id: { type: string }
+        encrypted_count: { type: integer }
+        plaintext_count: { type: integer }
+        total_count: { type: integer }
+        plaintext_allowed: { type: boolean }
+
+    AuditRetentionStatus:
+      type: object
+      additionalProperties: false
+      required: [enabled, days, cleanup_interval_secs, cleanup_batch_size, last_cleanup]
+      properties:
+        enabled: { type: boolean }
+        days: { type: integer }
+        cleanup_interval_secs: { type: integer, minimum: 0 }
+        cleanup_batch_size: { type: integer }
+        last_cleanup:
+          type: object
+          nullable: true
+
+    RateLimitPolicyStatus:
+      type: object
+      additionalProperties: false
+      required: [category, max_requests, window_secs]
+      properties:
+        category:
+          type: string
+          enum: [auth_routes, public_routes, enrollment, graphql, custom_endpoints, admin_routes]
+        max_requests: { type: integer, minimum: 0 }
+        window_secs: { type: integer, minimum: 0 }
+
+    RateLimitStatus:
+      type: object
+      additionalProperties: false
+      required: [enabled, policies, trusted_proxy_cidrs]
+      properties:
+        enabled: { type: boolean }
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/RateLimitPolicyStatus"
+        trusted_proxy_cidrs:
+          type: array
+          items: { type: string }
+
+    SystemStatus:
+      type: object
+      additionalProperties: false
+      required: [status, http_ready, grpc_ready, database, migrations, signing_keys, certificate_issuer, db_pool, signing_key_state, audit_retention, rate_limits]
+      properties:
+        status:
+          $ref: "#/components/schemas/ComponentStatus"
+        http_ready:
+          $ref: "#/components/schemas/ComponentCheck"
+        grpc_ready:
+          $ref: "#/components/schemas/ComponentCheck"
+        database:
+          $ref: "#/components/schemas/ComponentCheck"
+        migrations:
+          $ref: "#/components/schemas/ComponentCheck"
+        signing_keys:
+          $ref: "#/components/schemas/ComponentCheck"
+        certificate_issuer:
+          $ref: "#/components/schemas/ComponentCheck"
+        db_pool:
+          $ref: "#/components/schemas/DbPoolStatus"
+        signing_key_state:
+          type: object
+          allOf:
+            - $ref: "#/components/schemas/SigningKeyStatus"
+          nullable: true
+        audit_retention:
+          $ref: "#/components/schemas/AuditRetentionStatus"
+        rate_limits:
+          $ref: "#/components/schemas/RateLimitStatus"
+
+    Jwks:
+      type: object
+      additionalProperties: false
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/Jwk"
+
+    Jwk:
+      type: object
+      additionalProperties: false
+      required: [kty, crv, x, y, kid, use, alg]
+      properties:
+        kty: { type: string, enum: [EC] }
+        crv: { type: string, enum: [P-256] }
+        x: { type: string }
+        y: { type: string }
+        kid: { type: string }
+        use: { type: string, enum: [sig] }
+        alg: { type: string, enum: [ES256] }
+
+    PublicAuthConfig:
+      type: object
+      additionalProperties: false
+      required: [signup_enabled, self_registration_enabled, oauth_providers, email_verification_required, dev_allow_unverified_email_login]
+      properties:
+        signup_enabled: { type: boolean }
+        self_registration_enabled: { type: boolean }
+        oauth_providers:
+          type: array
+          items: { type: string }
+        email_verification_required: { type: boolean }
+        dev_allow_unverified_email_login: { type: boolean }
+
+    LoginRequest:
+      type: object
+      required: [identifier, secret]
+      properties:
+        identifier: { type: string }
+        secret: { type: string, format: password }
+        tenant_id: { type: string, format: uuid, nullable: true }
+        tenant_alias: { type: string, nullable: true }
+        kind:
+          type: string
+          enum: [password, shared_key]
+          default: password
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [token, entity_id, session_id, expires_at, verification_required]
+      properties:
+        token: { type: string }
+        entity_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        email_verified: { type: boolean }
+        verification_required: { type: boolean }
+
+    SignupRequest:
+      type: object
+      additionalProperties: false
+      required: [name, email, password]
+      properties:
+        name: { type: string }
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+        attributes:
+          type: object
+          default: {}
+
+    SignupResponse:
+      type: object
+      additionalProperties: false
+      required: [entity_id, email, verification_required]
+      properties:
+        entity_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        verification_required: { type: boolean }
+
+    EmailRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+
+    PasswordResetConfirmRequest:
+      type: object
+      required: [token, password]
+      properties:
+        token: { type: string }
+        password: { type: string, format: password }
+        confirm_password: { type: string, format: password, nullable: true }
+
+    OAuthExchangeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+
+    IntrospectionResponse:
+      type: object
+      additionalProperties: false
+      required: [active, entity_id, tenant_id, session_id]
+      properties:
+        active: { type: boolean, enum: [true] }
+        entity_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid, nullable: true }
+        session_id: { type: string, format: uuid, nullable: true }
+
+    CurrentSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [authenticated, session]
+      properties:
+        authenticated: { type: boolean, enum: [true] }
+        session:
+          type: object
+          additionalProperties: false
+          required: [entityId, tenantId, sessionId, expiresAt]
+          properties:
+            entityId: { type: string, format: uuid }
+            tenantId: { type: string, format: uuid, nullable: true }
+            sessionId: { type: string, format: uuid, nullable: true }
+            expiresAt: { type: string, format: date-time, nullable: true }
+
+    Session:
+      type: object
+      additionalProperties: false
+      required: [id, entity_id, expires_at, revoked_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        entity_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    GraphQLRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        operationName: { type: string, nullable: true }
+        variables:
+          type: object
+          nullable: true
+
+    GraphQLResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          nullable: true
+        errors:
+          type: array
+          items:
+            type: object
+            required: [message]
+            properties:
+              message: { type: string }
+              locations:
+                type: array
+                items:
+                  type: object
+              path:
+                type: array
+                items: {}
+              extensions:
+                type: object

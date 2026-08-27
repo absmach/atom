@@ -725,11 +725,9 @@ pub async fn request_password_reset(
     .await
     .map_err(db_err)?;
 
-    let redirect = req
-        .redirect_url
-        .filter(|url| !url.trim().is_empty())
-        .unwrap_or_else(|| cfg.password_reset_redirect.clone());
-    if let Err(err) = send_password_reset_email(cfg, &email, &redirect, &token).await {
+    if let Err(err) =
+        send_password_reset_email(cfg, &email, &cfg.password_reset_redirect, &token).await
+    {
         tracing::warn!("password reset email send failed: {err}");
     }
     Ok(())

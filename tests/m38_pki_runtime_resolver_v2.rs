@@ -5,10 +5,6 @@
 //! DATABASE_URL=postgres://... cargo test --test m38_pki_runtime_resolver_v2 -- --ignored
 //! ```
 
-// Deliberately invokes the removed v1 protobuf method to assert it returns
-// Unimplemented.
-#![allow(deprecated)]
-
 mod common;
 
 use async_graphql::{Request as GraphqlRequest, Variables};
@@ -20,8 +16,7 @@ use atom::{
     grpc::{
         self,
         proto::{
-            certificate_service_client::CertificateServiceClient, ResolveCertificateRequest,
-            ResolveCertificateV2Request,
+            certificate_service_client::CertificateServiceClient, ResolveCertificateV2Request,
         },
     },
     identity::repo as identity_repo,
@@ -466,16 +461,6 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     assert!(global_response.tenant_id.is_empty());
     assert_eq!(global_response.issuer_id, global_issuer.id.to_string());
 
-    // v1 ResolveCertificate is removed; the wire method now returns
-    // Unimplemented so callers get a clean deprecation signal.
-    let removed_response = client
-        .resolve_certificate(authed_request(
-            &admin_token,
-            ResolveCertificateRequest::default(),
-        ))
-        .await
-        .expect_err("v1 ResolveCertificate must return Unimplemented");
-    assert_eq!(removed_response.code(), Code::Unimplemented);
     server.abort();
 }
 

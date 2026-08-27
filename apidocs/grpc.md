@@ -263,54 +263,6 @@ grpcurl -plaintext \
   atom:8081 atom.v1.CertificateService/ResolveCertificateV2
 ```
 
-#### `ResolveCertificate`
-
-```text
-rpc ResolveCertificate(ResolveCertificateRequest) returns (ResolveCertificateResponse)
-```
-
-Deprecated compatibility API for the legacy file issuer only. It resolves by serial inside the separately unique `issuer_id IS NULL` namespace and optionally corroborates the SHA-256 certificate fingerprint. Managed credentials are never returned; new consumers must use `ResolveCertificateV2`.
-
-Requires `authorization: Bearer <token>` metadata. The caller must have `authz.check` permission for the resolved certificate tenant or platform.
-
-**Request: `ResolveCertificateRequest`**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `serial_number` | `string` | yes | Normalized certificate serial number. |
-| `fingerprint_sha256` | `string` | no | SHA-256 fingerprint over certificate DER. When provided, it must match the stored certificate fingerprint. |
-
-**Response: `ResolveCertificateResponse`**
-
-| Field | Type | Description |
-|---|---|---|
-| `entity_id` | `string` UUID | Entity that owns the certificate. |
-| `tenant_id` | `string` UUID | Owning tenant; empty string if none. |
-| `credential_id` | `string` UUID | Certificate credential id. |
-| `expires_at` | `string` RFC3339 | Certificate expiry. |
-
-**gRPC status codes**
-
-| Code | Condition |
-|---|---|
-| `OK` | Certificate resolved and caller is authorized. |
-| `UNAUTHENTICATED` | Authorization metadata is invalid, the credential is inactive/expired, its owner scope is inactive, or the fingerprint does not match. |
-| `PERMISSION_DENIED` | Caller lacks `authz.check` authority for the resolved tenant or platform. |
-| `NOT_FOUND` | The legacy serial is unknown. |
-| `INTERNAL` | Database or internal error. |
-
-**Example**
-
-```bash
-grpcurl -plaintext \
-  -H 'authorization: Bearer '"$ATOM_TOKEN" \
-  -d '{
-    "serial_number": "01af23",
-    "fingerprint_sha256": "0f2d..."
-  }' \
-  atom:8081 atom.v1.CertificateService/ResolveCertificate
-```
-
 #### Cache invalidation events
 
 When event publishing is configured, the existing `certificate.issue`, `certificate.renew`, `certificate.revoke`, and `certificate.revoke_entity` outbox events are the resolver cache-invalidation contract. Resolver caches should store the returned `credential_id`, `issuer_id`, and tenant alongside their lookup key so these exact lifecycle events can evict entries. Entity, tenant, and authority lifecycle events must also invalidate entries for their affected scope. Event delivery is at least once; consumers must make invalidation idempotent.

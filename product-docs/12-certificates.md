@@ -3,7 +3,7 @@
 ## Status: Active v2 (managed multi-tenant PKI)
 ## Date: 2026-08-14
 
-Atom owns the certificate authority registry, per-tenant issuance, revocation state, publication artifacts, subject enrollment (native + RFC 7030 EST), and runtime resolution. The legacy v1 "file issuer" mode has been removed — there is no `ATOM_CERTS_*` env, no `ca_chain` GraphQL query, no `/certs/ca-chain` route, no `/certs/crl` / `/certs/ocsp` global endpoints, no `issueCertificate` / `renewCertificate` / `revokeCertificate` v1 mutations, and no `ResolveCertificate` v1 gRPC method (the wire method is retained returning `unimplemented` for a clean deprecation error).
+Atom owns the certificate authority registry, per-tenant issuance, revocation state, publication artifacts, subject enrollment (native + RFC 7030 EST), and runtime resolution. The legacy v1 "file issuer" mode has been removed — there is no `ATOM_CERTS_*` env, no `ca_chain` GraphQL query, no `/certs/ca-chain` route, no `/certs/crl` / `/certs/ocsp` global endpoints, no `issueCertificate` / `renewCertificate` / `revokeCertificate` v1 mutations, and no `ResolveCertificate` v1 gRPC method.
 
 Every CA in an Atom deployment lives in the `pki_authorities` table and is managed through the same lifecycle mutations.
 
@@ -215,7 +215,6 @@ The URLs above are what Atom embeds in every issued leaf's AIA / CRL-distributio
 
 - `CertificateService.ResolveCertificateV2` — the v2 resolver. Accepts leaf DER, fingerprint, or `(issuer fingerprint, serial)`. Returns entity, tenant, credential ID, issuer, expiry.
 - `CertificateService.RevokeEntityCertificates`
-- `CertificateService.ResolveCertificate` — **removed**. The wire method returns `unimplemented`; callers must migrate to V2.
 
 ---
 
@@ -275,7 +274,6 @@ Tenant admins can manage certificates only for tenant-owned entities in their te
 - `CertsCaMode` enum, `CertificateIssuer` struct, `load_file_issuer_if_enabled`, in-process global CA state.
 - GraphQL: `caChain`, `issueCertificate`, `issueCertificateFromCsr`, `renewCertificate`, `revokeCertificate` — replaced by the `*V2` set above.
 - HTTP: `GET /certs/ca-chain`, `GET /certs/crl`, `POST /certs/ocsp` — replaced by `/certs/trust-bundle.pem` and the per-issuer `/certs/issuers/:id/{crl,ocsp}` routes.
-- gRPC: `ResolveCertificate` — the wire method returns `unimplemented`; callers must use `ResolveCertificateV2`.
 - Test binary `m17_certificates` (v1 file-issuer coverage).
 - Health status field `certificate_issuer` (there is no single global issuer to report on).
 

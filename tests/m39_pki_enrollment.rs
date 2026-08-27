@@ -265,6 +265,16 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     assert_eq!(replay["idempotent_replay"], true);
 
     // Headers never substitute for the connection-bound extension.
+    let native_denials_before: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->>'outcome' = 'deny'
+             AND payload->'details'->>'transport' = 'native'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let injected = native_request(
         address,
         &server_cert_pem,
@@ -284,7 +294,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     // Missing-peer failures happen before authentication on this public
     // endpoint. They are observable through metrics and tracing, but must not
     // let anonymous traffic amplify durable outbox writes.
-    let native_denials: i64 = sqlx::query_scalar(
+    let native_denials_after: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -294,7 +304,10 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(native_denials, 0);
+    assert_eq!(
+        native_denials_after, native_denials_before,
+        "anonymous native rejection must not create a durable outbox event"
+    );
 
     // A certificate asserted in the TLS handshake but signed outside Atom's
     // trust bundle is rejected during the in-process handshake.

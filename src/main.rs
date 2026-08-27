@@ -1,7 +1,7 @@
 use anyhow::Context;
 use atom::{
-    audit, bootstrap, callout, certs, config, db, events, grpc, identity, keys, metrics, purge,
-    routes,
+    audit, bootstrap, callout, certs, config, db, events, grpc, http_server, identity, keys,
+    metrics, purge, routes,
     state::{self, GrpcRuntimeStatus},
 };
 use tracing_subscriber::EnvFilter;
@@ -127,11 +127,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;
     tracing::info!("atom listening on {}", cfg.listen_addr);
 
-    axum::serve(
+    http_server::serve(
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app,
+        cfg.http_server,
+        cfg.rate_limits.ipv6_prefix_len,
     )
-    .with_graceful_shutdown(atom::shutdown::shutdown_signal())
     .await?;
 
     // HTTP has drained; wait for the gRPC task to finish draining too so the
