@@ -7,6 +7,7 @@ on:
       - "proto/**"
       - "apidocs/**"
       - "api/v1/**"
+      - "migrations/**"
       - "examples/export-graphql-schema.rs"
       - "scripts/check-v1-contracts.sh"
       - "src/**"

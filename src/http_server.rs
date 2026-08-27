@@ -79,7 +79,11 @@ pub async fn serve(
             let _permit = permit;
             let _ip_connection = ip_connection;
             let service = TowerToHyperService::new(connection_router);
-            let mut builder = Builder::new(TokioExecutor::new());
+            // HTTP/2 does not expose an equivalent to the HTTP/1 header read
+            // timeout below. Restrict this listener to HTTP/1 so an incomplete
+            // HTTP/2 preface or HEADERS frame cannot hold a connection permit
+            // until the overall connection deadline.
+            let mut builder = Builder::new(TokioExecutor::new()).http1_only();
             builder
                 .http1()
                 .timer(TokioTimer::new())
