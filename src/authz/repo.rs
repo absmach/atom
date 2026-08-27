@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -944,7 +945,7 @@ fn reject_parent_group_attribute(attrs: &Value) -> Result<(), AppError> {
 ///
 /// This is the single canonical grant representation consumed by the PDP and
 /// (incrementally) the other authorization readers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectiveGrant {
     /// The assignment that confers this grant: the `direct_policies.id` or the
     /// `role_assignments.id` row. With shared blocks this is what identifies
@@ -979,7 +980,7 @@ pub struct EffectiveGrant {
 /// `scoped` records intent independently of `entries`: a scoped token whose limit
 /// rows were deleted yields `entries = []` and must fail closed (deny everything),
 /// never silently widen to the owner's full authority.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialCeiling {
     pub entries: Vec<EffectiveGrant>,
 }
@@ -1111,8 +1112,9 @@ pub async fn create_role_with_assignments(
 
     ensure_entities_exist(pool, member_entity_ids).await?;
     if child_role_ids.is_empty() {
+        let mut conn = pool.acquire().await.map_err(db_err)?;
         crate::guardrails::validate_role_assignment_plan(
-            pool,
+            &mut conn,
             member_entity_ids,
             capability_ids,
             req.tenant_id,
@@ -1122,8 +1124,9 @@ pub async fn create_role_with_assignments(
         .await?;
     } else {
         validate_composite_children(pool, id, req.tenant_id, child_role_ids).await?;
+        let mut conn = pool.acquire().await.map_err(db_err)?;
         crate::guardrails::validate_composite_role_assignment_plan(
-            pool,
+            &mut conn,
             member_entity_ids,
             child_role_ids,
             req.tenant_id,
@@ -1344,10 +1347,56 @@ pub async fn replace_role_permission_block_links_with_audit(
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id = replace_role_permission_block_links_in_tx(
+        &mut tx,
+        events_enabled,
+        actor_id,
+        role_id,
+        permission_block_ids,
+    )
+    .await?;
+    tx.commit().await.map_err(db_err)?;
+    // `_in_tx` already enqueued the outbox row via `observe_in_tx` before
+    // returning — this is the post-commit stdout observability log
+    // `commit_with_observation` would otherwise provide.
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "role",
+            target_id: Some(role_id),
+            event: "role.permission_blocks.replace",
+        },
+        &serde_json::json!({ "permission_block_ids": permission_block_ids }),
+    );
+    Ok(())
+}
+
+/// Body of [`replace_role_permission_block_links`]; caller contract per
+/// [`create_role_assignment_in_tx`]. The resolver must already hold the role
+/// lock via [`lock_role_and_collect_grants_keys`] on this `tx` — `lock_role`
+/// below just re-acquires it (same-transaction no-op).
+///
+/// Every read runs on `tx`, never on a pooled connection: the validation
+/// below is only meaningful under the role lock this transaction holds, and a
+/// second connection acquired mid-transaction is a pool-exhaustion deadlock
+/// under concurrency.
+/// Returns the role's `tenant_id`, captured here rather than left for the
+/// caller to re-derive post-commit — cheaper than an extra query, and safe
+/// for any future case where the role itself stops existing by the time the
+/// caller wants to log.
+pub(crate) async fn replace_role_permission_block_links_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    role_id: Uuid,
+    permission_block_ids: &[Uuid],
+) -> Result<Option<Uuid>, AppError> {
     let role_tenant_id: Option<Uuid> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(role_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?
             .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))?;
@@ -1365,7 +1414,7 @@ pub async fn replace_role_permission_block_links_with_audit(
         )
         .bind(&unique_block_ids)
         .bind(role_tenant_id)
-        .fetch_one(pool)
+        .fetch_one(&mut **tx)
         .await
         .map_err(db_err)?;
         if count != unique_block_ids.len() as i64 {
@@ -1374,18 +1423,17 @@ pub async fn replace_role_permission_block_links_with_audit(
             ));
         }
     }
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    lock_role(&mut tx, role_id).await?;
+    lock_role(tx, role_id).await?;
     // Validate under the role lock so a concurrent role assignment cannot commit
     // a prohibited combination against stale state: any other role-link or
     // assignment mutator blocks on this lock and re-validates against our result.
     // Runs on this transaction's own connection — borrowing a second one from
     // the pool here would deadlock a saturated pool.
-    crate::guardrails::validate_role_permission_block_links(&mut tx, role_id, &unique_block_ids)
+    crate::guardrails::validate_role_permission_block_links(&mut *tx, role_id, &unique_block_ids)
         .await?;
     sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
         .bind(role_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_err)?;
 
@@ -1397,12 +1445,12 @@ pub async fn replace_role_permission_block_links_with_audit(
         )
         .bind(role_id)
         .bind(permission_block_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(db_err)?;
     }
 
-    crate::audit::commit_with_observation(
+    crate::audit::observe_in_tx(
         tx,
         events_enabled,
         &crate::audit::AuditMeta {
@@ -1414,7 +1462,8 @@ pub async fn replace_role_permission_block_links_with_audit(
         },
         &serde_json::json!({ "permission_block_ids": unique_block_ids }),
     )
-    .await
+    .await?;
+    Ok(role_tenant_id)
 }
 
 async fn insert_role_permission_block(
@@ -2917,10 +2966,38 @@ pub async fn delete_role_with_audit(
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id = delete_role_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "role",
+            target_id: Some(id),
+            event: "role.delete",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
+}
+
+/// Body of [`delete_role`]; caller contract per
+/// [`create_role_assignment_in_tx`] — the resolver must already hold the
+/// role lock via [`lock_role_and_collect_grants_keys`] on this `tx`. Returns
+/// the role's `tenant_id`, captured here rather than left for the caller to
+/// re-derive post-commit — a re-read after this commits would always miss
+/// the now-deleted row.
+pub(crate) async fn delete_role_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -2932,7 +3009,7 @@ pub async fn delete_role_with_audit(
     )
     .bind(id)
     .bind(deleted_by)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -2946,8 +3023,8 @@ pub async fn delete_role_with_audit(
         event: "role.delete",
     };
     let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
+    Ok(tenant_id)
 }
 
 pub async fn delete_role(
@@ -2966,9 +3043,42 @@ pub async fn restore_role_with_audit(
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
-    let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    restore_role_in_tx(&mut tx, events_enabled, actor_id, id, restored_by).await?;
+    tx.commit().await.map_err(db_err)?;
+    // The audit_logs row is deliberately written after commit (fire-and-forget,
+    // never blocks an already-valid restore) — see `audit::commit_with_audit`'s
+    // doc comment. The outbox row, by contrast, went in atomically with the
+    // mutation inside `restore_role_in_tx` via `observe_in_tx`.
+    let tenant_id = get_role(pool, id).await.ok().and_then(|r| r.tenant_id);
+    crate::audit::write(
+        pool,
+        false,
+        crate::audit::AuditEvent {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: Some("role"),
+            target_id: Some(id),
+            event: "role.restore",
+            outcome: crate::models::enums::AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        },
+    )
+    .await;
+    Ok(())
+}
 
+/// Body of [`restore_role`]; caller contract per
+/// [`create_role_assignment_in_tx`] — the resolver must already hold the
+/// role lock via [`lock_role_and_collect_grants_keys`] on this `tx`.
+pub(crate) async fn restore_role_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    restored_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let _ = restored_by;
     let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
         "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
          FROM roles r
@@ -2976,7 +3086,7 @@ pub async fn restore_role_with_audit(
          WHERE r.id = $1 AND r.deleted_at IS NOT NULL",
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     let (tenant_id, _is_tenant_deleted) = match tenant_info {
@@ -2998,20 +3108,18 @@ pub async fn restore_role_with_audit(
          WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(restore_conflict)?;
 
-    let event = crate::audit::AuditEvent {
+    let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
         tenant_id,
-        target_kind: Some("role"),
+        target_kind: "role",
         target_id: Some(id),
         event: "role.restore",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
     };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &serde_json::json!({})).await?;
     Ok(())
 }
 
@@ -3099,7 +3207,9 @@ pub async fn add_role_capability(
     let scope_ref = role.tenant_id.map(|tenant_id| tenant_id.to_string());
     validate_capabilities_against_role_scope(pool, &scope_kind, scope_ref.as_deref(), &[cap_id])
         .await?;
-    crate::guardrails::validate_role_capability(pool, role_id, cap_id).await?;
+    let mut conn = pool.acquire().await.map_err(db_err)?;
+    crate::guardrails::validate_role_capability(&mut conn, role_id, cap_id).await?;
+    drop(conn);
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, role_id).await?;
     insert_role_capability_as_permission_block(
@@ -4072,7 +4182,9 @@ pub async fn create_policy(
     pool: &PgPool,
     req: CreatePolicyBinding,
 ) -> Result<PolicyBinding, AppError> {
-    crate::guardrails::validate_policy(pool, &req).await?;
+    let mut conn = pool.acquire().await.map_err(db_err)?;
+    crate::guardrails::validate_policy(&mut conn, &req).await?;
+    drop(conn);
     let id = Uuid::new_v4();
     let membership_tenant_id = req.tenant_id;
     let membership_entity_id = req.subject_id;
@@ -4209,9 +4321,44 @@ pub async fn create_role_assignment_with_audit(
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    lock_live_subject(&mut tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
-    lock_role(&mut tx, req.role_id).await?;
-    validate_role_assignment_in_tx(&mut tx, &req).await?;
+    let assignment = create_role_assignment_in_tx(&mut tx, events_enabled, actor_id, req).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: assignment.tenant_id,
+            target_kind: "role_assignment",
+            target_id: Some(assignment.id),
+            event: "role_assignment.create",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(assignment)
+}
+
+/// Body of [`create_role_assignment`], callable directly against a caller-held
+/// `tx` (not committed here). For a group subject, the caller must already
+/// have run [`lock_group_closures_and_collect_grants_keys`] on this same `tx`
+/// and called `cache.begin()` on the result — `lock_role`/`lock_live_subject`
+/// below then just re-acquire those same locks (safe, same-transaction no-op).
+/// Every other `_in_tx` twin in this module and `identity::repo` follows this
+/// same convention: caller locks + begins the cache barrier first, this kind
+/// of function re-acquires (never re-validates) those locks, and the caller
+/// commits.
+pub(crate) async fn create_role_assignment_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreateRoleAssignment,
+) -> Result<RoleAssignment, AppError> {
+    lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
+    // Lock the role and validate under the lock so a concurrent block-link
+    // mutation cannot add a prohibited block against stale state: it blocks on
+    // this same lock and re-validates against the assignment we are inserting.
+    // Validation must run on `tx` for that to hold at all — the pool variant
+    // would neither see the locked state nor respect the locks.
+    lock_role(tx, req.role_id).await?;
+    validate_role_assignment_in_tx(tx, &req).await?;
     let assignment = sqlx::query_as::<_, RoleAssignment>(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
@@ -4222,7 +4369,7 @@ pub async fn create_role_assignment_with_audit(
     .bind(req.subject_kind)
     .bind(req.subject_id)
     .bind(req.role_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(db_err)?;
 
@@ -4234,7 +4381,7 @@ pub async fn create_role_assignment_with_audit(
         event: "role_assignment.create",
     };
     let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
     Ok(assignment)
 }
 
@@ -4243,51 +4390,6 @@ pub async fn create_role_assignment(
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
     create_role_assignment_with_audit(pool, false, None, req).await
-}
-
-pub async fn delete_role_assignment_with_audit(
-    pool: &PgPool,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "role_assignments", id).await?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let assignment_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_err)?;
-    let Some(tenant_id) = assignment_tenant_id else {
-        return Err(AppError::not_found(format!(
-            "role assignment {id} not found"
-        )));
-    };
-    let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::not_found(format!(
-            "role assignment {id} not found"
-        )));
-    }
-    let meta = crate::audit::AuditMeta {
-        actor_entity_id: actor_id,
-        tenant_id,
-        target_kind: "role_assignment",
-        target_id: Some(id),
-        event: "role_assignment.delete",
-    };
-    let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    Ok(())
-}
-
-pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    delete_role_assignment_with_audit(pool, false, None, id).await
 }
 
 /// Returns `true` when a new assignment row was actually inserted, so callers
@@ -4401,20 +4503,116 @@ pub async fn get_role_assignment(pool: &PgPool, id: Uuid) -> Result<RoleAssignme
     })
 }
 
+pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+    delete_role_assignment_with_audit(pool, false, None, id).await
+}
+
+pub async fn delete_role_assignment_with_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id = delete_role_assignment_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "role_assignment",
+            target_id: Some(id),
+            event: "role_assignment.delete",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
+}
+
+/// Body of [`delete_role_assignment`]; caller contract per
+/// [`create_role_assignment_in_tx`] — the group-subject resolver path must
+/// already hold the subject's group closure lock on this `tx`. Returns the
+/// assignment's `tenant_id`, captured here rather than left for the caller
+/// to re-derive post-commit — the row is gone by then.
+pub(crate) async fn delete_role_assignment_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!(
+            "role assignment {id} not found"
+        )));
+    };
+    // A role assignment is a 'policy' protected object; the policy-object cleanup trigger
+    // sweeps the permission blocks targeting it when this row is deleted.
+    let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found(format!(
+            "role assignment {id} not found"
+        )));
+    }
+    let meta = crate::audit::AuditMeta {
+        actor_entity_id: actor_id,
+        tenant_id,
+        target_kind: "role_assignment",
+        target_id: Some(id),
+        event: "role_assignment.delete",
+    };
+    let details = serde_json::json!({});
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
+    Ok(tenant_id)
+}
+
 pub async fn create_direct_policy_with_audit(
     pool: &PgPool,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateDirectPolicy,
 ) -> Result<DirectPolicy, AppError> {
-    validate_direct_policy(pool, &req).await?;
-    crate::guardrails::validate_direct_policy(pool, &req).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
-    lock_live_subject(&mut tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
+    let policy = create_direct_policy_in_tx(&mut tx, events_enabled, actor_id, req).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: policy.tenant_id,
+            target_kind: "direct_policy",
+            target_id: Some(policy.id),
+            event: "direct_policy.create",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(policy)
+}
+
+/// Body of [`create_direct_policy`]; caller contract per
+/// [`create_role_assignment_in_tx`]. Validates on `tx` rather than a pooled
+/// connection — see [`replace_role_permission_block_links_in_tx`].
+pub(crate) async fn create_direct_policy_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    req: CreateDirectPolicy,
+) -> Result<DirectPolicy, AppError> {
+    validate_direct_policy_in_tx(tx, &req).await?;
+    crate::guardrails::validate_direct_policy(tx, &req).await?;
+    lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     let block_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
             .bind(req.permission_block_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?;
     if block_tenant_id != Some(req.tenant_id) {
@@ -4432,7 +4630,7 @@ pub async fn create_direct_policy_with_audit(
     .bind(req.subject_kind)
     .bind(req.subject_id)
     .bind(req.permission_block_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(db_err)?;
 
@@ -4444,7 +4642,7 @@ pub async fn create_direct_policy_with_audit(
         event: "direct_policy.create",
     };
     let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
     Ok(policy)
 }
 
@@ -4680,10 +4878,35 @@ pub async fn delete_direct_policy_with_audit(
 ) -> Result<(), AppError> {
     crate::managed_by::ensure_not_config_managed(pool, "direct_policies", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id = delete_direct_policy_in_tx(&mut tx, events_enabled, actor_id, id).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id,
+            target_kind: "direct_policy",
+            target_id: Some(id),
+            event: "direct_policy.delete",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(())
+}
+
+/// Body of [`delete_direct_policy`]; caller contract per
+/// [`create_role_assignment_in_tx`]. Returns the policy's `tenant_id`,
+/// captured here rather than left for the caller to re-derive post-commit —
+/// the row is gone by then.
+pub(crate) async fn delete_direct_policy_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
     let policy_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = policy_tenant_id else {
@@ -4693,13 +4916,16 @@ pub async fn delete_direct_policy_with_audit(
         "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     let Some(block_id) = block_id else {
         return Err(AppError::not_found(format!("direct policy {id} not found")));
     };
-    delete_orphaned_blocks(&mut tx, &[block_id]).await?;
+    // The block is shared: GC it only if removing this policy left it
+    // unreferenced (mirrors delete_policy). Blocks targeting this policy *as an
+    // object* are swept by the policy-object cleanup trigger on the delete above.
+    delete_orphaned_blocks(tx, &[block_id]).await?;
 
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
@@ -4709,8 +4935,8 @@ pub async fn delete_direct_policy_with_audit(
         event: "direct_policy.delete",
     };
     let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    Ok(())
+    crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
+    Ok(tenant_id)
 }
 
 pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
@@ -4744,11 +4970,14 @@ async fn validate_role_assignment_in_tx(
     .await
 }
 
-async fn validate_direct_policy(pool: &PgPool, req: &CreateDirectPolicy) -> Result<(), AppError> {
+async fn validate_direct_policy_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateDirectPolicy,
+) -> Result<(), AppError> {
     let block_tenant_id: Option<Uuid> =
         sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
             .bind(req.permission_block_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?
             .ok_or_else(|| {
@@ -4759,7 +4988,7 @@ async fn validate_direct_policy(pool: &PgPool, req: &CreateDirectPolicy) -> Resu
             "direct policy tenantId must match permission block tenantId",
         ));
     }
-    validate_subject_boundary(pool, req.tenant_id, &req.subject_kind, req.subject_id).await
+    validate_subject_boundary_in_tx(tx, req.tenant_id, &req.subject_kind, req.subject_id).await
 }
 
 async fn validate_subject_boundary_in_tx(
@@ -4807,66 +5036,6 @@ async fn validate_subject_boundary_in_tx(
             )
             .bind(subject_id)
             .fetch_optional(&mut **tx)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| {
-                AppError::bad_request("assignment references unknown principal group")
-            })?;
-            if group_tenant_id != tenant_id {
-                return Err(AppError::bad_request(
-                    "assignment subject principal group must be in the same tenant",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn validate_subject_boundary(
-    pool: &PgPool,
-    tenant_id: Option<Uuid>,
-    subject_kind: &SubjectKind,
-    subject_id: Uuid,
-) -> Result<(), AppError> {
-    match subject_kind {
-        SubjectKind::Entity => {
-            let entity_tenant_id: Option<Uuid> = sqlx::query_scalar(
-                "SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(subject_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
-            if let Some(tenant_id) = tenant_id {
-                let member: bool = sqlx::query_scalar(
-                    r#"SELECT EXISTS (
-                         SELECT 1 FROM tenant_memberships
-                         WHERE tenant_id = $1 AND entity_id = $2 AND status = 'active'
-                       )"#,
-                )
-                .bind(tenant_id)
-                .bind(subject_id)
-                .fetch_one(pool)
-                .await
-                .map_err(db_err)?;
-                if entity_tenant_id != Some(tenant_id) && !member {
-                    return Err(AppError::bad_request(
-                        "tenant assignment subject entity must belong to the tenant",
-                    ));
-                }
-            } else if entity_tenant_id.is_some() {
-                return Err(AppError::bad_request(
-                    "platform assignment cannot target tenant-owned entity",
-                ));
-            }
-        }
-        SubjectKind::Group => {
-            let group_tenant_id: Option<Uuid> = sqlx::query_scalar(
-                "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(subject_id)
-            .fetch_optional(pool)
             .await
             .map_err(db_err)?
             .ok_or_else(|| {
@@ -6187,6 +6356,194 @@ pub async fn effective_grants_for_subject(
             })
         })
         .collect()
+}
+
+/// Locks every group in the closure rooted at `root_group_ids` (each root
+/// plus every descendant subgroup, via a `group_hierarchy` descent) `FOR
+/// UPDATE` in `principal_groups` — in a stable, id-sorted order, so this can
+/// never deadlock against another
+/// call to this same function locking an overlapping closure — then returns
+/// the member entity ids across that (now-locked) closure.
+///
+/// # Why this exists
+///
+/// A plain "enumerate current members, then invalidate" has a real race: a
+/// group-subject mutation (direct policy / role assignment / role
+/// block-links / group status-or-hierarchy change) can enumerate members at
+/// one instant, while `identity::repo::add_group_member` concurrently
+/// commits a *new* member in between that enumeration and the mutation's own
+/// commit. That new member's `grants` key is never in the enumerated set, so
+/// it never gets invalidated — a stale cached grant (or a stale cached
+/// *lack* of one) can then survive until the grants TTL. (Reported by
+/// external review, 2026-07-29.)
+///
+/// `add_group_member`/`remove_group_member` already lock the group's row in
+/// `principal_groups` `FOR UPDATE` before changing membership. Locking that
+/// same row here — and holding it for the caller's entire transaction,
+/// through commit — closes the race: neither side's transaction can commit
+/// while the other holds the lock, so whichever runs first is fully visible
+/// (including its own cache invalidation) before the other's enumeration or
+/// commit proceeds.
+///
+/// # Contract for callers
+///
+/// The returned ids are only exhaustive as long as the lock stays held: the
+/// caller must keep `tx` open (no commit) from this call through the end of
+/// its own mutation's commit, and should call `cache.begin()` on the
+/// resulting keys *before* that commit — mirroring `guarded_mutation`'s
+/// begin/mutate/end shape, just with `mutate` running against this
+/// already-open, already-locked `tx` instead of opening its own.
+pub async fn lock_group_closures_and_collect_member_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    root_group_ids: &[Uuid],
+) -> Result<Vec<Uuid>, AppError> {
+    if root_group_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Hierarchy rows can be inserted or removed without an existing row lock
+    // to wait on. Serialize closure enumeration with every hierarchy mutation
+    // so a newly attached subtree cannot enter the graph between enumeration
+    // and the locks below.
+    lock_group_hierarchy(tx).await?;
+
+    let mut closure: Vec<Uuid> = sqlx::query_scalar(
+        r#"WITH RECURSIVE target_groups(id) AS (
+               SELECT id FROM UNNEST($1::uuid[]) AS root(id)
+               UNION
+               SELECT gh.child_id
+               FROM group_hierarchy gh
+               JOIN target_groups tg ON tg.id = gh.parent_id
+           )
+           SELECT id FROM target_groups"#,
+    )
+    .bind(root_group_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    closure.sort_unstable();
+    closure.dedup();
+
+    // Locks whichever of these ids are principal groups (object groups have
+    // no members and simply won't match here — harmless, not an error).
+    sqlx::query("SELECT id FROM principal_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+        .bind(&closure)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db_err)?;
+
+    sqlx::query_scalar("SELECT DISTINCT entity_id FROM group_members WHERE group_id = ANY($1)")
+        .bind(&closure)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db_err)
+}
+
+/// Serializes recursive group-closure reads with hierarchy mutations. A
+/// transaction-scoped advisory lock is used because an attach/detach may
+/// create or delete the hierarchy row, leaving no row lock for a reader to
+/// wait on.
+pub async fn lock_group_hierarchy(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))")
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
+/// [`lock_group_closures_and_collect_member_ids`], mapped straight to
+/// `atom:v1:grants:*` cache keys — the form every locked group-subject
+/// mutation call site actually wants.
+pub async fn lock_group_closures_and_collect_grants_keys(
+    tx: &mut Transaction<'_, Postgres>,
+    root_group_ids: &[Uuid],
+) -> Result<Vec<String>, AppError> {
+    Ok(
+        lock_group_closures_and_collect_member_ids(tx, root_group_ids)
+            .await?
+            .into_iter()
+            .map(crate::cache::keys::grants)
+            .collect(),
+    )
+}
+
+/// Like [`lock_group_closures_and_collect_grants_keys`], for a role: locks
+/// the role row itself plus every group in the closure of every group
+/// directly assigned this role, and returns the combined set of affected
+/// `atom:v1:grants:*` keys (entity-direct assignees plus every locked
+/// group's members). Entity-direct assignees need no lock of their own —
+/// the affected key is exactly their `subject_id`, deterministic and
+/// race-free.
+///
+/// Locks the role row directly (`SELECT ... FOR UPDATE`, no `deleted_at`
+/// filter) rather than going through the private, alive-only `lock_role` —
+/// `restore_role` is a caller here and operates on an *already*
+/// soft-deleted role, so requiring "alive" would always fail for it. Each
+/// caller's own mutation separately validates/enforces whatever alive-ness
+/// it needs; this only needs the lock (for closure consistency) and the
+/// current assignee set (which was never conditioned on the role's own
+/// status either, before this fix).
+pub async fn lock_role_and_collect_grants_keys(
+    tx: &mut Transaction<'_, Postgres>,
+    role_id: Uuid,
+) -> Result<Vec<String>, AppError> {
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        .bind(role_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    let entity_subject_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT subject_id FROM role_assignments WHERE role_id = $1 AND subject_kind = 'entity'",
+    )
+    .bind(role_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let group_subject_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT subject_id FROM role_assignments WHERE role_id = $1 AND subject_kind = 'group'",
+    )
+    .bind(role_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let mut member_ids = lock_group_closures_and_collect_member_ids(tx, &group_subject_ids).await?;
+    member_ids.extend(entity_subject_ids);
+    member_ids.sort_unstable();
+    member_ids.dedup();
+    Ok(member_ids
+        .into_iter()
+        .map(crate::cache::keys::grants)
+        .collect())
+}
+
+/// Locks a role and a group (in that order) for the one mutation that needs
+/// both in the same transaction: creating a role assignment for a group
+/// subject. **Lock order matters here**: [`lock_role_and_collect_grants_keys`]
+/// (used by `replaceRolePermissionBlocks`/`deleteRole`/`restoreRole`) always
+/// locks the role first, then the closures of every group assigned it. If
+/// `createRoleAssignment` locked the *subject group* first and only reached
+/// the role lock afterward (inside `create_role_assignment_in_tx`'s own
+/// `lock_role` call — which is exactly what the original code did), a
+/// concurrent pair of requests could deadlock: one holding the descendant
+/// group's row while waiting on the role, the other holding the role while
+/// waiting on that same descendant group (reached via an ancestor group
+/// already assigned the role). Postgres detects the cycle and aborts one
+/// side. (Reported by external review, 2026-07-29.)
+///
+/// Locking the role first here — before the group closure — makes
+/// `createRoleAssignment`'s lock order match every role-mutation path
+/// exactly, closing the inversion. `create_role_assignment_in_tx`'s own
+/// `lock_role`/`lock_live_subject` calls afterward re-acquire the same locks
+/// (a same-transaction no-op) — kept as-is since that function is also used,
+/// unlocked, by the entity-subject path, which has no group lock to order
+/// against.
+pub async fn lock_role_then_group_closure_and_collect_grants_keys(
+    tx: &mut Transaction<'_, Postgres>,
+    role_id: Uuid,
+    subject_group_id: Uuid,
+) -> Result<Vec<String>, AppError> {
+    lock_role(tx, role_id).await?;
+    lock_group_closures_and_collect_grants_keys(tx, &[subject_group_id]).await
 }
 
 pub async fn find_capability_ids_by_name(

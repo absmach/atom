@@ -186,6 +186,7 @@ fn graphql_state(pool: PgPool) -> AppState {
             primary,
             standby: None,
         },
+        None,
     )
 }
 

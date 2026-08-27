@@ -56,6 +56,7 @@ pub fn graphql_state(pool: PgPool, config: Config) -> AppState {
             primary,
             standby: None,
         },
+        None,
     )
 }
 

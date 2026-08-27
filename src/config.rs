@@ -95,6 +95,7 @@ pub struct Config {
     /// Path to a PEM-encoded platform intermediate CA private key (PKCS#8).
     /// Atom wraps the key with the CA KEK before persisting.
     pub pki_platform_intermediate_key_path: Option<String>,
+    pub cache: CacheConfig,
     pub broker_auth: BrokerAuthConfig,
 }
 
@@ -213,6 +214,69 @@ impl Default for DbPoolConfig {
             connect_timeout_secs: 10,
             idle_timeout_secs: 600,
             max_lifetime_secs: 1800,
+        }
+    }
+}
+
+/// Upper bound on any single `ATOM_CACHE_TTL_*` value, enforced by
+/// [`cache_from_env`].
+const MAX_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// Per-category TTLs, applied to cached entries as a defense-in-depth safety
+/// net (not the primary invalidation mechanism — see `src/cache/mod.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheTtlConfig {
+    pub session_secs: u64,
+    pub entity_status_secs: u64,
+    pub tenant_status_secs: u64,
+    pub credential_secs: u64,
+    pub credential_ceiling_secs: u64,
+    pub grants_secs: u64,
+}
+
+impl Default for CacheTtlConfig {
+    fn default() -> Self {
+        Self {
+            session_secs: 60,
+            entity_status_secs: 60,
+            tenant_status_secs: 60,
+            credential_secs: 60,
+            credential_ceiling_secs: 60,
+            grants_secs: 60,
+        }
+    }
+}
+
+/// Redis-backed cache for AuthN/AuthZ decision inputs. Off by default — this
+/// is a pure performance optimization; every check works correctly with it
+/// disabled, since Postgres remains authoritative. See `src/cache/mod.rs` for
+/// the consistency model this configures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub redis_url: String,
+    pub pool_max_size: u32,
+    pub connect_timeout_ms: u64,
+    pub op_timeout_ms: u64,
+    /// When `enabled` and Redis is unreachable at startup: abort like an
+    /// unreachable Postgres would (`true`), or log and continue with caching
+    /// disabled (`false`, the recommended default — Redis is not a
+    /// correctness dependency for reads, only, while enabled, a write-path
+    /// dependency for security-sensitive mutations; see `src/cache/mod.rs`).
+    pub fail_fast_on_startup: bool,
+    pub ttl: CacheTtlConfig,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            redis_url: String::new(),
+            pool_max_size: 20,
+            connect_timeout_ms: 2_000,
+            op_timeout_ms: 50,
+            fail_fast_on_startup: false,
+            ttl: CacheTtlConfig::default(),
         }
     }
 }
@@ -902,6 +966,7 @@ impl Config {
             pki_platform_intermediate_key_path: nonempty_env(
                 "ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH",
             ),
+            cache: cache_from_env()?,
             broker_auth: broker_auth_from_env()?,
             public_base_url,
         })
@@ -974,6 +1039,7 @@ impl Config {
             pki_root_cert_path: None,
             pki_platform_intermediate_cert_path: None,
             pki_platform_intermediate_key_path: None,
+            cache: CacheConfig::default(),
             broker_auth: BrokerAuthConfig::default(),
         }
     }
@@ -1135,6 +1201,78 @@ fn http_server_from_env() -> Result<HttpServerConfig> {
     }
     if cfg.max_connections_per_ip > cfg.max_connections {
         anyhow::bail!("ATOM_HTTP_MAX_CONNECTIONS_PER_IP cannot exceed ATOM_HTTP_MAX_CONNECTIONS");
+    }
+    Ok(cfg)
+}
+
+fn cache_from_env() -> Result<CacheConfig> {
+    let default = CacheConfig::default();
+    let default_ttl = CacheTtlConfig::default();
+    let cfg = CacheConfig {
+        enabled: env_bool_default("ATOM_CACHE_ENABLED", default.enabled),
+        redis_url: std::env::var("ATOM_CACHE_REDIS_URL").unwrap_or_default(),
+        pool_max_size: env_parse("ATOM_CACHE_POOL_MAX_SIZE", default.pool_max_size)?,
+        connect_timeout_ms: env_parse("ATOM_CACHE_CONNECT_TIMEOUT_MS", default.connect_timeout_ms)?,
+        op_timeout_ms: env_parse("ATOM_CACHE_OP_TIMEOUT_MS", default.op_timeout_ms)?,
+        fail_fast_on_startup: env_bool_default(
+            "ATOM_CACHE_FAIL_FAST_ON_STARTUP",
+            default.fail_fast_on_startup,
+        ),
+        ttl: CacheTtlConfig {
+            session_secs: env_parse("ATOM_CACHE_TTL_SESSION_SECS", default_ttl.session_secs)?,
+            entity_status_secs: env_parse(
+                "ATOM_CACHE_TTL_ENTITY_STATUS_SECS",
+                default_ttl.entity_status_secs,
+            )?,
+            tenant_status_secs: env_parse(
+                "ATOM_CACHE_TTL_TENANT_STATUS_SECS",
+                default_ttl.tenant_status_secs,
+            )?,
+            credential_secs: env_parse(
+                "ATOM_CACHE_TTL_CREDENTIAL_SECS",
+                default_ttl.credential_secs,
+            )?,
+            credential_ceiling_secs: env_parse(
+                "ATOM_CACHE_TTL_CREDENTIAL_CEILING_SECS",
+                default_ttl.credential_ceiling_secs,
+            )?,
+            grants_secs: env_parse("ATOM_CACHE_TTL_GRANTS_SECS", default_ttl.grants_secs)?,
+        },
+    };
+    if cfg.enabled {
+        if cfg.redis_url.trim().is_empty() {
+            anyhow::bail!("ATOM_CACHE_REDIS_URL must be set when ATOM_CACHE_ENABLED=true");
+        }
+        if cfg.pool_max_size == 0 {
+            anyhow::bail!("ATOM_CACHE_POOL_MAX_SIZE must be greater than zero");
+        }
+        if cfg.connect_timeout_ms == 0 {
+            anyhow::bail!("ATOM_CACHE_CONNECT_TIMEOUT_MS must be greater than zero");
+        }
+        if cfg.op_timeout_ms == 0 {
+            anyhow::bail!("ATOM_CACHE_OP_TIMEOUT_MS must be greater than zero");
+        }
+        let ttl = &cfg.ttl;
+        let ttls = [
+            ttl.session_secs,
+            ttl.entity_status_secs,
+            ttl.tenant_status_secs,
+            ttl.credential_secs,
+            ttl.credential_ceiling_secs,
+            ttl.grants_secs,
+        ];
+        if ttls.contains(&0) {
+            anyhow::bail!("ATOM_CACHE_TTL_* values must all be greater than zero");
+        }
+        // Bounded at startup rather than left to fail on the mutation path:
+        // `cache::barrier_ttl` scales these by 5, and the resulting `Duration`
+        // has to stay representable. A day is already far beyond any sane
+        // staleness window for auth/authz state.
+        if ttls.iter().any(|secs| *secs > MAX_CACHE_TTL_SECS) {
+            anyhow::bail!(
+                "ATOM_CACHE_TTL_* values must not exceed {MAX_CACHE_TTL_SECS} seconds (24h)"
+            );
+        }
     }
     Ok(cfg)
 }
@@ -1947,6 +2085,19 @@ mod tests {
     }
 
     #[test]
+    fn cache_is_disabled_by_default() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("config");
+        assert!(!cfg.cache.enabled, "caching must default off");
+        assert!(!cfg.cache.fail_fast_on_startup);
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn certificate_artifact_base_url_requires_explicit_public_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -1961,6 +2112,63 @@ mod tests {
             cfg.pki_ca_keys.artifact_base_url.as_deref(),
             Some("https://pki.example.test")
         );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn cache_enabled_without_redis_url_fails_config() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_CACHE_ENABLED", "true");
+
+        let err = Config::from_env().expect_err("cache enabled without a redis url");
+        assert!(err.to_string().contains("ATOM_CACHE_REDIS_URL"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn cache_enabled_with_zero_ttl_fails_config() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_CACHE_ENABLED", "true");
+        std::env::set_var("ATOM_CACHE_REDIS_URL", "redis://localhost:6379/0");
+        std::env::set_var("ATOM_CACHE_TTL_GRANTS_SECS", "0");
+
+        let err = Config::from_env().expect_err("zero grants ttl");
+        assert!(err.to_string().contains("ATOM_CACHE_TTL"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn cache_enabled_with_zero_pool_size_fails_config() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_CACHE_ENABLED", "true");
+        std::env::set_var("ATOM_CACHE_REDIS_URL", "redis://localhost:6379/0");
+        std::env::set_var("ATOM_CACHE_POOL_MAX_SIZE", "0");
+
+        let err = Config::from_env().expect_err("zero pool size");
+        assert!(err.to_string().contains("ATOM_CACHE_POOL_MAX_SIZE"));
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn cache_disabled_ignores_missing_redis_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        // ATOM_CACHE_ENABLED left unset (false) — an absent/invalid redis url
+        // must not fail config parsing when caching is off.
+        let cfg = Config::from_env().expect("config");
+        assert!(!cfg.cache.enabled);
+        assert!(cfg.cache.redis_url.is_empty());
 
         clear_hardening_env();
     }
@@ -2350,6 +2558,18 @@ mod tests {
             "ATOM_PKI_EXPIRY_WARNING_SECS",
             "ATOM_PKI_AUTHORITY_WARNING_SECS",
             "ATOM_EMAIL_TEMPLATES_DIR",
+            "ATOM_CACHE_ENABLED",
+            "ATOM_CACHE_REDIS_URL",
+            "ATOM_CACHE_POOL_MAX_SIZE",
+            "ATOM_CACHE_CONNECT_TIMEOUT_MS",
+            "ATOM_CACHE_OP_TIMEOUT_MS",
+            "ATOM_CACHE_FAIL_FAST_ON_STARTUP",
+            "ATOM_CACHE_TTL_SESSION_SECS",
+            "ATOM_CACHE_TTL_ENTITY_STATUS_SECS",
+            "ATOM_CACHE_TTL_TENANT_STATUS_SECS",
+            "ATOM_CACHE_TTL_CREDENTIAL_SECS",
+            "ATOM_CACHE_TTL_CREDENTIAL_CEILING_SECS",
+            "ATOM_CACHE_TTL_GRANTS_SECS",
         ] {
             std::env::remove_var(name);
         }

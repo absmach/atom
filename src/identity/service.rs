@@ -735,6 +735,7 @@ pub async fn request_password_reset(
 
 pub async fn reset_password(
     pool: &PgPool,
+    cache: Option<&crate::cache::CacheClient>,
     req: PasswordResetConfirmRequest,
 ) -> Result<(), AppError> {
     if let Some(confirm_password) = req.confirm_password.as_deref() {
@@ -788,11 +789,56 @@ pub async fn reset_password(
     {
         return Err(AppError::bad_request("invalid password reset token"));
     }
+
+    // Every active session is about to be bulk-revoked below — enumerated
+    // *inside* the transaction, right after the entity lock: `create_session`
+    // takes that same lock, so a concurrently created session either
+    // committed before we acquired it (visible here) or is blocked until we
+    // finish. A pre-transaction pool query could miss one, leaving its cache
+    // entry uninvalidated indefinitely. See `src/cache/mod.rs`'s consistency
+    // model.
+    let session_keys: Vec<String> = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(entity_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .map(crate::cache::keys::session)
+    .collect();
+
+    if let Some(cache) = cache {
+        cache
+            .begin(crate::cache::CacheCategory::Session, &session_keys)
+            .await?;
+    }
+    let outcome =
+        finish_password_reset_in_tx(&mut tx, token_id, entity_id, &email, password_hash).await;
+    let outcome = match outcome {
+        Ok(()) => tx.commit().await.map_err(db_err),
+        Err(err) => Err(err),
+    };
+    if let Some(cache) = cache {
+        cache
+            .end(crate::cache::CacheCategory::Session, &session_keys)
+            .await;
+    }
+    outcome
+}
+
+async fn finish_password_reset_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    token_id: Uuid,
+    entity_id: Uuid,
+    email: &str,
+    password_hash: String,
+) -> Result<(), AppError> {
     let updated = sqlx::query(
         "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(token_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     if updated.rows_affected() == 0 {
@@ -804,7 +850,7 @@ pub async fn reset_password(
            WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#,
     )
     .bind(entity_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     sqlx::query(
@@ -816,17 +862,16 @@ pub async fn reset_password(
     .bind(CredentialKind::Password)
     .bind(email)
     .bind(password_hash)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
     sqlx::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(entity_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
@@ -1000,7 +1045,7 @@ pub async fn oauth_exchange(
 pub async fn refresh_session(
     pool: &PgPool,
     cfg: &Config,
-    primary_key: &LoadedKey,
+    signer: &crate::auth::JwtSigner,
     entity_id: Uuid,
     session_id: Uuid,
 ) -> Result<LoginResponse, AppError> {
@@ -1012,11 +1057,11 @@ pub async fn refresh_session(
     let session =
         super::repo::refresh_session_in_tx(&mut tx, session_id, entity_id, cfg.jwt_expiry_secs)
             .await?;
-    let token = encode_jwt(
+    let token = crate::auth::encode_jwt_with(
         entity_id,
         session.id,
         tenant_id,
-        primary_key,
+        signer,
         cfg.jwt_expiry_secs,
         &cfg.jwt_issuer,
         &cfg.jwt_audience,
@@ -2338,6 +2383,103 @@ fn make_shared_key(cred_id: Uuid) -> String {
         hex::encode(cred_id.as_bytes()),
         hex::encode(secret_bytes)
     )
+}
+
+/// Soft-deletes an entity with a cache barrier spanning the whole
+/// transaction. The one entry point for entity deletion on every caller
+/// (REST and GraphQL alike), so no caller can under-invalidate.
+///
+/// `entity_status` invalidation alone is *not* sufficient: this also revokes
+/// the entity's sessions and access-token credentials, which
+/// [`super::repo::restore_entity`] deliberately never reinstates. Without their own
+/// invalidation, a stale cached session or credential becomes a full hit
+/// again the moment a later restore repopulates `entity_status` as active —
+/// despite staying revoked in Postgres. See
+/// [`super::repo::lock_entity_and_collect_revocation_ids_in_tx`] for why the
+/// ids are enumerated inside the same locked transaction.
+pub async fn delete_entity(
+    pool: &PgPool,
+    cache: Option<&crate::cache::CacheClient>,
+    events_enabled: bool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<(), AppError> {
+    super::repo::ensure_not_config_managed_entity(pool, id).await?;
+    let Some(cache) = cache else {
+        return super::repo::delete_entity_with_audit(
+            pool,
+            events_enabled,
+            deleted_by,
+            id,
+            deleted_by,
+        )
+        .await;
+    };
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    // Lock and enumerate *before* establishing the barrier: the entity is
+    // still fully active at this point, so a concurrent cache read has
+    // nothing dirty to react to yet. Only once the barrier below is up does
+    // a concurrent read stop trusting the (about-to-be-stale) cache entries
+    // and fall through to Postgres — flipping status first would leave a
+    // window where a concurrent request keeps taking full cache hits on the
+    // pre-delete entity/session/credential entries and runs past the point
+    // this delete commits.
+    let (session_ids, credential_ids) =
+        super::repo::lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
+    let session_keys: Vec<String> = session_ids
+        .iter()
+        .copied()
+        .map(crate::cache::keys::session)
+        .collect();
+    let credential_keys: Vec<String> = credential_ids
+        .iter()
+        .copied()
+        .map(crate::cache::keys::credential)
+        .collect();
+    let entity_status_keys = [crate::cache::keys::entity_status(id)];
+    let groups: [(crate::cache::CacheCategory, &[String]); 3] = [
+        (
+            crate::cache::CacheCategory::EntityStatus,
+            &entity_status_keys,
+        ),
+        (crate::cache::CacheCategory::Session, &session_keys),
+        (crate::cache::CacheCategory::Credential, &credential_keys),
+    ];
+    crate::cache::invalidate::begin_all(cache, &groups).await?;
+    let outcome = super::repo::deactivate_and_finish_entity_deletion_in_tx(
+        &mut tx,
+        events_enabled,
+        deleted_by,
+        deleted_by,
+        id,
+    )
+    .await;
+    match outcome {
+        Ok((tenant_id, details)) => {
+            crate::audit::commit_observed_with_cache_and_audit(
+                pool,
+                tx,
+                cache,
+                &groups,
+                (),
+                crate::audit::AuditEvent {
+                    actor_entity_id: deleted_by,
+                    tenant_id,
+                    target_kind: Some("entity"),
+                    target_id: Some(id),
+                    event: "entity.delete",
+                    outcome: crate::models::enums::AuditOutcome::Allow,
+                    details,
+                },
+            )
+            .await
+        }
+        Err(err) => {
+            crate::cache::invalidate::end_all(cache, &groups).await;
+            Err(err)
+        }
+    }
 }
 
 pub async fn revoke_credential(

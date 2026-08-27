@@ -12,6 +12,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
+    cache::{
+        entries::{
+            CredentialCacheEntry, EntityStatusCacheEntry, SessionCacheEntry, TenantStatusCacheEntry,
+        },
+        keys as cache_keys, CacheCategory, Lookup,
+    },
     error::{db_err, AppError},
     keys::{ActiveKeys, LoadedKey},
     models::enums::{
@@ -55,6 +61,14 @@ pub struct AuthContext {
     /// The loaded permission ceiling for a scoped access token; `None` for
     /// unscoped tokens and JWT/session auth (no cap).
     pub ceiling: Option<std::sync::Arc<crate::authz::repo::CredentialCeiling>>,
+    /// The cache backing this request's grant-expansion lookups (see
+    /// `src/cache/mod.rs`). Carried here — rather than threaded as an extra
+    /// parameter through every capability gate (`has_capability_in_scope`,
+    /// `require_any_capability`, ...) and through `authz::engine::evaluate`/
+    /// `explain` — because those have dozens of call sites across the
+    /// codebase, while `AuthContext` is constructed in exactly a few places.
+    /// `None` reproduces pre-caching behavior exactly.
+    pub cache: Option<std::sync::Arc<crate::cache::CacheClient>>,
 }
 
 /// Extractor that requires the authenticated entity to hold a `manage` policy
@@ -63,6 +77,28 @@ pub struct AuthContext {
 pub struct RequireManage(pub AuthContext);
 
 // ─── JWT ──────────────────────────────────────────────────────────────────────
+
+/// The parsed form of a primary key, ready to sign with. Derived from a
+/// [`LoadedKey`] via [`JwtSigner::from_key`].
+///
+/// Exists so a caller holding the `ActiveKeys` read guard can take what it
+/// needs and release the guard before doing I/O, without cloning `LoadedKey`
+/// — which would duplicate the raw PKCS8 private-key PEM on the heap for the
+/// duration. This holds only the parsed key that signing requires anyway.
+pub struct JwtSigner {
+    kid: String,
+    key: EncodingKey,
+}
+
+impl JwtSigner {
+    pub fn from_key(primary: &LoadedKey) -> Result<Self, AppError> {
+        Ok(Self {
+            kid: primary.kid.clone(),
+            key: EncodingKey::from_ec_pem(primary.private_key_pem.as_bytes())
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))?,
+        })
+    }
+}
 
 pub fn encode_jwt(
     entity_id: Uuid,
@@ -73,9 +109,29 @@ pub fn encode_jwt(
     issuer: &str,
     audience: &str,
 ) -> Result<String, AppError> {
+    encode_jwt_with(
+        entity_id,
+        session_id,
+        tenant_id,
+        &JwtSigner::from_key(primary)?,
+        expiry_secs,
+        issuer,
+        audience,
+    )
+}
+
+pub fn encode_jwt_with(
+    entity_id: Uuid,
+    session_id: Uuid,
+    tenant_id: Option<Uuid>,
+    signer: &JwtSigner,
+    expiry_secs: u64,
+    issuer: &str,
+    audience: &str,
+) -> Result<String, AppError> {
     let header = Header {
         alg: Algorithm::ES256,
-        kid: Some(primary.kid.clone()),
+        kid: Some(signer.kid.clone()),
         ..Header::default()
     };
 
@@ -90,10 +146,7 @@ pub fn encode_jwt(
         exp: now + expiry_secs as usize,
     };
 
-    let encoding_key = EncodingKey::from_ec_pem(primary.private_key_pem.as_bytes())
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))?;
-
-    encode(&header, &claims, &encoding_key)
+    encode(&header, &claims, &signer.key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encode jwt: {e}")))
 }
 
@@ -163,6 +216,119 @@ async fn auth_from_token(state: &AppState, token: &str) -> Result<AuthContext, A
     auth_from_jwt(state, token).await
 }
 
+/// A snapshot of the fields `auth_from_jwt` needs, regardless of whether they
+/// came from a cache hit or a fresh Postgres load — one canonical check
+/// function (`check_session_entity_tenant`) validates either shape
+/// identically, so the deny logic can never drift between the cached and
+/// uncached paths.
+struct SessionEntityTenantSnapshot {
+    session_entity_id: Uuid,
+    revoked_at: Option<chrono::DateTime<Utc>>,
+    expires_at: chrono::DateTime<Utc>,
+    entity_tenant_id: Option<Uuid>,
+    entity_status: EntityStatus,
+    tenant_status: Option<TenantStatus>,
+}
+
+/// The existing session/entity/tenant join, unchanged from before caching was
+/// introduced. This remains the single cache-miss loader — it is never split
+/// into per-field queries.
+async fn load_session_entity_tenant(
+    pool: &PgPool,
+    session_id: Uuid,
+    entity_id: Uuid,
+) -> Result<SessionEntityTenantSnapshot, AppError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        r#"SELECT s.revoked_at,
+                  s.expires_at,
+                  e.tenant_id,
+                  e.status AS entity_status,
+                  t.status AS tenant_status
+           FROM sessions s
+           JOIN entities e ON e.id = s.entity_id
+           LEFT JOIN tenants t ON t.id = e.tenant_id
+           WHERE s.id = $1 AND s.entity_id = $2
+             AND e.deleted_at IS NULL
+             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
+    )
+    .bind(session_id)
+    .bind(entity_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::unauthorized("session not found"),
+        other => AppError::Database(other),
+    })?;
+
+    let revoked_at: Option<chrono::DateTime<Utc>> = row.try_get("revoked_at").unwrap_or(None);
+    let expires_at: chrono::DateTime<Utc> = row
+        .try_get("expires_at")
+        .map_err(|_| AppError::unauthorized("corrupt session"))?;
+    let entity_status: EntityStatus = row
+        .try_get("entity_status")
+        .map_err(|_| AppError::unauthorized("corrupt entity"))?;
+    let entity_tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
+    let tenant_status: Option<TenantStatus> = row
+        .try_get::<Option<TenantStatus>, _>("tenant_status")
+        .unwrap_or(None);
+
+    Ok(SessionEntityTenantSnapshot {
+        session_entity_id: entity_id,
+        revoked_at,
+        expires_at,
+        entity_tenant_id,
+        entity_status,
+        tenant_status,
+    })
+}
+
+/// The one canonical set of deny checks for JWT/session authentication —
+/// consumed identically whether `snapshot` came from a cache hit or a fresh
+/// Postgres load.
+fn check_session_entity_tenant(
+    snapshot: &SessionEntityTenantSnapshot,
+    expected_entity_id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    if snapshot.session_entity_id != expected_entity_id {
+        return Err(AppError::unauthorized("session not found"));
+    }
+    if snapshot.revoked_at.is_some() {
+        return Err(AppError::unauthorized("session revoked"));
+    }
+    if snapshot.expires_at < Utc::now() {
+        return Err(AppError::unauthorized("session expired"));
+    }
+    if snapshot.entity_status != EntityStatus::Active {
+        return Err(AppError::unauthorized("entity is not active"));
+    }
+    if expected_tenant_id != snapshot.entity_tenant_id {
+        return Err(AppError::unauthorized("token tenant does not match entity"));
+    }
+    if let Some(tenant_status) = &snapshot.tenant_status {
+        if *tenant_status != TenantStatus::Active {
+            return Err(AppError::unauthorized("tenant is not active"));
+        }
+    }
+    Ok(())
+}
+
+fn jwt_auth_context(
+    state: &AppState,
+    entity_id: Uuid,
+    session_id: Uuid,
+    snapshot: &SessionEntityTenantSnapshot,
+) -> AuthContext {
+    AuthContext {
+        entity_id,
+        tenant_id: snapshot.entity_tenant_id,
+        session_id: Some(session_id),
+        cache: state.cache.clone(),
+        ..Default::default()
+    }
+}
+
 async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, AppError> {
     let keys = state.keys.read().await;
     let claims = decode_jwt(
@@ -188,75 +354,173 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
         .transpose()
         .map_err(|_| AppError::unauthorized("invalid tenant id in token"))?;
 
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"SELECT s.revoked_at,
-                  s.expires_at,
-                  e.tenant_id,
-                  e.status AS entity_status,
-                  t.status AS tenant_status
-           FROM sessions s
-           JOIN entities e ON e.id = s.entity_id
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE s.id = $1 AND s.entity_id = $2
-             AND e.deleted_at IS NULL
-             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
-    )
-    .bind(session_id)
-    .bind(entity_id)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::unauthorized("session not found"),
-        other => AppError::Database(other),
-    })?;
+    let Some(cache) = &state.cache else {
+        let snapshot = load_session_entity_tenant(&state.pool, session_id, entity_id).await?;
+        check_session_entity_tenant(&snapshot, entity_id, tenant_id)?;
+        return Ok(jwt_auth_context(state, entity_id, session_id, &snapshot));
+    };
 
-    let revoked_at: Option<chrono::DateTime<Utc>> = row.try_get("revoked_at").unwrap_or(None);
-    let expires_at: chrono::DateTime<Utc> = row
-        .try_get("expires_at")
-        .map_err(|_| AppError::unauthorized("corrupt session"))?;
+    let session_key = cache_keys::session(session_id);
+    let entity_key = cache_keys::entity_status(entity_id);
+    let tenant_key = tenant_id.map(cache_keys::tenant_status);
 
-    if revoked_at.is_some() {
-        return Err(AppError::unauthorized("session revoked"));
+    // All three keys are known up front — the tenant key comes from the `tid`
+    // claim, not from the entity entry as it does in `auth_from_api_key` — so
+    // they are read in one pipelined round trip rather than three serial ones
+    // on three separate pooled connections, before any request work starts.
+    let mut batch_keys: Vec<&str> = vec![&session_key, &entity_key];
+    if let Some(key) = &tenant_key {
+        batch_keys.push(key);
     }
-    if expires_at < Utc::now() {
-        return Err(AppError::unauthorized("session expired"));
-    }
+    let mut raw = cache.lookup_many(&batch_keys).await.into_iter();
+    let session_raw = raw.next().unwrap_or_default();
+    let entity_raw = raw.next().unwrap_or_default();
+    let tenant_raw = raw.next();
 
-    let entity_status: EntityStatus = row
-        .try_get("entity_status")
-        .map_err(|_| AppError::unauthorized("corrupt entity"))?;
-    if entity_status != EntityStatus::Active {
-        return Err(AppError::unauthorized("entity is not active"));
-    }
+    let session_lookup = cache
+        .decode::<SessionCacheEntry>(CacheCategory::Session, &session_key, session_raw)
+        .await;
+    let entity_lookup = cache
+        .decode::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key, entity_raw)
+        .await;
+    let tenant_lookup = match (&tenant_key, tenant_raw) {
+        (Some(key), Some(raw)) => Some(
+            cache
+                .decode::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, key, raw)
+                .await,
+        ),
+        _ => None,
+    };
 
-    let entity_tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
-    if tenant_id != entity_tenant_id {
-        return Err(AppError::unauthorized("token tenant does not match entity"));
-    }
-    if let Some(tenant_status) = row
-        .try_get::<Option<TenantStatus>, _>("tenant_status")
-        .unwrap_or(None)
-    {
-        if tenant_status != TenantStatus::Active {
-            return Err(AppError::unauthorized("tenant is not active"));
+    // Full cache hit across every key this token needs: validate entirely in
+    // memory, no Postgres round trip.
+    if let (Lookup::Hit(session), Lookup::Hit(entity)) = (&session_lookup, &entity_lookup) {
+        let tenant_hit = match (&tenant_key, &tenant_lookup) {
+            (None, _) => Some(None),
+            (Some(_), Some(Lookup::Hit(tenant))) => Some(Some(tenant)),
+            _ => None,
+        };
+        if let Some(tenant_opt) = tenant_hit {
+            let snapshot = SessionEntityTenantSnapshot {
+                session_entity_id: session.entity_id,
+                revoked_at: session.revoked_at,
+                expires_at: session.expires_at,
+                entity_tenant_id: entity.tenant_id,
+                entity_status: entity.status.clone(),
+                tenant_status: tenant_opt.map(|t| t.status.clone()),
+            };
+            check_session_entity_tenant(&snapshot, entity_id, tenant_id)?;
+            return Ok(jwt_auth_context(state, entity_id, session_id, &snapshot));
         }
     }
 
-    Ok(AuthContext {
-        entity_id,
-        tenant_id: entity_tenant_id,
-        session_id: Some(session_id),
-        ..Default::default()
-    })
+    // Any miss/dirty/unavailable key: fall back to the existing combined
+    // query, unchanged, then best-effort populate whichever entries missed.
+    let snapshot = load_session_entity_tenant(&state.pool, session_id, entity_id).await?;
+
+    if let Lookup::Miss { version } = session_lookup {
+        let entry = SessionCacheEntry {
+            entity_id,
+            revoked_at: snapshot.revoked_at,
+            expires_at: snapshot.expires_at,
+        };
+        cache
+            .try_populate(CacheCategory::Session, &session_key, version, &entry)
+            .await;
+    }
+    if let Lookup::Miss { version } = entity_lookup {
+        let entry = EntityStatusCacheEntry {
+            status: snapshot.entity_status.clone(),
+            tenant_id: snapshot.entity_tenant_id,
+        };
+        cache
+            .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
+            .await;
+    }
+    // `tenant_key` is derived from the token's `tid` claim, but
+    // `load_session_entity_tenant` joins tenants through `e.tenant_id` — so
+    // `snapshot.tenant_status` describes the *entity's current* tenant. The
+    // two differ whenever a token outlives a tenant move, and populating the
+    // claim's key with the current tenant's payload would write one tenant's
+    // status under another tenant's key (e.g. marking a suspended tenant
+    // active for everyone, off a request that `check_session_entity_tenant`
+    // is about to reject anyway). Only populate when the version we observed
+    // belongs to the key the payload actually describes.
+    if let (Some(tenant_key), Some(Lookup::Miss { version })) = (&tenant_key, tenant_lookup) {
+        if let (Some(entity_tenant_id), Some(tenant_status)) =
+            (snapshot.entity_tenant_id, &snapshot.tenant_status)
+        {
+            if *tenant_key == cache_keys::tenant_status(entity_tenant_id) {
+                let entry = TenantStatusCacheEntry {
+                    status: tenant_status.clone(),
+                };
+                cache
+                    .try_populate(CacheCategory::TenantStatus, tenant_key, version, &entry)
+                    .await;
+            }
+        }
+    }
+
+    check_session_entity_tenant(&snapshot, entity_id, tenant_id)?;
+    Ok(jwt_auth_context(state, entity_id, session_id, &snapshot))
 }
 
-async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, AppError> {
-    let (cred_id, secret_bytes) =
-        parse_api_key(key).ok_or_else(|| AppError::unauthorized("malformed api key"))?;
+/// A snapshot of every field `auth_from_api_key` needs, regardless of whether
+/// it came from cache hits or a fresh Postgres load — one canonical function
+/// (`verify_api_key_snapshot`) validates either shape identically.
+struct CredentialSnapshot {
+    entity_id: Uuid,
+    tenant_id: Option<Uuid>,
+    secret_hash: Option<String>,
+    secret_lookup_hash: Option<Vec<u8>>,
+    status: CredentialStatus,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    scoped: bool,
+    entity_status: EntityStatus,
+    tenant_status: Option<TenantStatus>,
+}
 
+impl CredentialSnapshot {
+    fn from_cache_entries(
+        cred: &CredentialCacheEntry,
+        entity: &EntityStatusCacheEntry,
+        tenant: Option<&TenantStatusCacheEntry>,
+    ) -> Self {
+        Self {
+            entity_id: cred.entity_id,
+            // From the entity entry, not `cred` — see `CredentialCacheEntry`'s
+            // doc comment for why the credential entry carries no tenant_id
+            // of its own.
+            tenant_id: entity.tenant_id,
+            secret_hash: cred.secret_hash.clone(),
+            secret_lookup_hash: cred.secret_lookup_hash.clone(),
+            status: cred.status.clone(),
+            expires_at: cred.expires_at,
+            scoped: cred.scoped,
+            entity_status: entity.status.clone(),
+            tenant_status: tenant.map(|t| t.status.clone()),
+        }
+    }
+}
+
+fn credential_cache_entry(snapshot: &CredentialSnapshot) -> CredentialCacheEntry {
+    CredentialCacheEntry {
+        entity_id: snapshot.entity_id,
+        status: snapshot.status.clone(),
+        secret_hash: snapshot.secret_hash.clone(),
+        secret_lookup_hash: snapshot.secret_lookup_hash.clone(),
+        expires_at: snapshot.expires_at,
+        scoped: snapshot.scoped,
+    }
+}
+
+/// The existing credential/entity/tenant join, unchanged from before caching
+/// was introduced. This remains the single cache-miss loader for all three
+/// cached entities it touches — it is never split into per-field queries.
+async fn load_credential_row(pool: &PgPool, cred_id: Uuid) -> Result<CredentialSnapshot, AppError> {
     use sqlx::Row;
-
+    // Only access-token credentials enter this cache. Password credentials
+    // remain uncached and are verified through the normal password path.
     let row = sqlx::query(
         r#"SELECT c.entity_id,
                   c.secret_hash,
@@ -276,94 +540,125 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     )
     .bind(cred_id)
     .bind(CredentialKind::AccessToken)
-    .fetch_one(&state.pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::unauthorized("api key not found"),
         other => AppError::Database(other),
     })?;
 
-    // Verify the secret before any state checks, so a caller holding only a
-    // credential ID cannot learn the token's revoked/expired status.
-    //
-    // Verifier: keyed HMAC digest when present (tokens minted with a KEK);
-    // argon2 hash otherwise. See create_access_token for the rationale.
-    let lookup_hash: Option<Vec<u8>> = row.try_get("secret_lookup_hash").unwrap_or(None);
-    let had_lookup_hash = lookup_hash.is_some();
-    let verified = match lookup_hash {
+    Ok(CredentialSnapshot {
+        entity_id: row.try_get("entity_id").map_err(db_err)?,
+        tenant_id: row.try_get("tenant_id").unwrap_or(None),
+        secret_hash: row.try_get("secret_hash").unwrap_or(None),
+        secret_lookup_hash: row.try_get("secret_lookup_hash").unwrap_or(None),
+        status: row.try_get("status").map_err(db_err)?,
+        expires_at: row.try_get("expires_at").unwrap_or(None),
+        scoped: row.try_get("scoped").unwrap_or(false),
+        entity_status: row
+            .try_get("entity_status")
+            .map_err(|_| AppError::unauthorized("corrupt entity"))?,
+        tenant_status: row
+            .try_get::<Option<TenantStatus>, _>("tenant_status")
+            .unwrap_or(None),
+    })
+}
+
+/// The one canonical set of deny checks for API-key authentication —
+/// consumed identically whether `snapshot` came from cache hits or a fresh
+/// Postgres load. Secret verification runs before any state check, so a
+/// caller holding only a credential ID cannot learn the token's
+/// revoked/expired status — caching the row does not change this order.
+fn verify_api_key_snapshot(
+    snapshot: &CredentialSnapshot,
+    secret_bytes: &[u8],
+    kek: Option<&crate::config::SecretBytes>,
+) -> Result<(), AppError> {
+    let verified = match &snapshot.secret_lookup_hash {
         Some(stored) => {
-            let kek = state
-                .config
-                .signing_keys
-                .key_encryption_key
-                .as_ref()
-                .ok_or_else(|| AppError::unauthorized("invalid api key"))?;
-            crate::crypto::hmac_sha256_verify(kek.expose(), &secret_bytes, &stored)
+            let kek = kek.ok_or_else(|| AppError::unauthorized("invalid api key"))?;
+            crate::crypto::hmac_sha256_verify(kek.expose(), secret_bytes, stored)
         }
         None => {
-            let hash: Option<String> = row.try_get("secret_hash").unwrap_or(None);
-            let hash = hash.ok_or_else(|| AppError::unauthorized("invalid credential"))?;
+            let hash = snapshot
+                .secret_hash
+                .as_deref()
+                .ok_or_else(|| AppError::unauthorized("invalid credential"))?;
             use argon2::{
                 password_hash::{PasswordHash, PasswordVerifier},
                 Argon2,
             };
-            let parsed = PasswordHash::new(&hash)
+            let parsed = PasswordHash::new(hash)
                 .map_err(|_| AppError::unauthorized("invalid credential"))?;
             Argon2::default()
-                .verify_password(&secret_bytes, &parsed)
+                .verify_password(secret_bytes, &parsed)
                 .is_ok()
         }
     };
     if !verified {
         return Err(AppError::unauthorized("invalid api key"));
     }
-
-    let status: CredentialStatus = row.try_get("status").map_err(db_err)?;
-    if status != CredentialStatus::Active {
+    if snapshot.status != CredentialStatus::Active {
         return Err(AppError::unauthorized("api key revoked"));
     }
-
-    let expires_at: Option<chrono::DateTime<Utc>> = row.try_get("expires_at").unwrap_or(None);
-    if let Some(exp) = expires_at {
+    if let Some(exp) = snapshot.expires_at {
         if exp < Utc::now() {
             return Err(AppError::unauthorized("api key expired"));
         }
     }
-
-    let entity_status: EntityStatus = row
-        .try_get("entity_status")
-        .map_err(|_| AppError::unauthorized("corrupt entity"))?;
-    if entity_status != EntityStatus::Active {
+    if snapshot.entity_status != EntityStatus::Active {
         return Err(AppError::unauthorized("entity is not active"));
     }
-    if let Some(tenant_status) = row
-        .try_get::<Option<TenantStatus>, _>("tenant_status")
-        .unwrap_or(None)
-    {
-        if tenant_status != TenantStatus::Active {
+    if let Some(tenant_status) = &snapshot.tenant_status {
+        if *tenant_status != TenantStatus::Active {
             return Err(AppError::unauthorized("tenant is not active"));
         }
     }
+    Ok(())
+}
 
-    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
-
-    let tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
+/// Runs the shared post-verification steps (opportunistic verifier upgrade,
+/// usage stamp, scoped-ceiling load) and builds the `AuthContext`. Shared by
+/// every `auth_from_api_key` path (cached or not) so these never drift.
+async fn finish_api_key_auth(
+    state: &AppState,
+    cred_id: Uuid,
+    secret_bytes: &[u8],
+    snapshot: &CredentialSnapshot,
+) -> Result<AuthContext, AppError> {
+    verify_api_key_snapshot(
+        snapshot,
+        secret_bytes,
+        state.config.signing_keys.key_encryption_key.as_ref(),
+    )?;
 
     // Opportunistic verifier upgrade: a token minted without a KEK verifies via
     // argon2, paying the KDF on every request. Once a KEK is configured, swap to
     // the keyed digest on first successful use. Best-effort — a failed upgrade
-    // must never fail an otherwise-valid authentication.
-    if !had_lookup_hash {
+    // must never fail an otherwise-valid authentication. Guarded by the cache
+    // barrier (not a bare DEL) so a concurrent reader can't repopulate the
+    // credential cache entry with the stale verifier after this commits.
+    if snapshot.secret_lookup_hash.is_none() {
         if let Some(kek) = state.config.signing_keys.key_encryption_key.as_ref() {
-            let digest = crate::crypto::hmac_sha256(kek.expose(), &secret_bytes);
-            if let Err(err) = sqlx::query(
-                "UPDATE credentials SET secret_lookup_hash = $1, secret_hash = NULL WHERE id = $2",
+            let digest = crate::crypto::hmac_sha256(kek.expose(), secret_bytes);
+            let credential_key = cache_keys::credential(cred_id);
+            let result = crate::cache::invalidate::guarded_mutation(
+                state.cache.as_deref(),
+                CacheCategory::Credential,
+                std::slice::from_ref(&credential_key),
+                || async {
+                    sqlx::query(
+                        "UPDATE credentials SET secret_lookup_hash = $1, secret_hash = NULL WHERE id = $2",
+                    )
+                    .bind(digest)
+                    .bind(cred_id)
+                    .execute(&state.pool)
+                    .await
+                    .map_err(AppError::Database)
+                },
             )
-            .bind(digest)
-            .bind(cred_id)
-            .execute(&state.pool)
-            .await
-            {
+            .await;
+            if let Err(err) = result {
                 tracing::warn!(
                     credential_id = %cred_id,
                     error = %err,
@@ -376,6 +671,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     // Usage stamp for the token listing ("revoke unused tokens"), throttled to
     // one write per credential per five minutes so the auth hot path stays
     // read-mostly. Best-effort: a failed stamp never fails authentication.
+    // Not cached data, so no invalidation is needed.
     if let Err(err) = sqlx::query(
         r#"UPDATE credentials
            SET last_used_at = now()
@@ -393,39 +689,196 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         );
     }
 
-    // Scoped access tokens carry a permission ceiling loaded here once per request
-    // and intersected with the owner's live grants at every authorization point.
-    let scoped: bool = row.try_get("scoped").unwrap_or(false);
-    let ceiling = if scoped {
-        Some(std::sync::Arc::new(
-            crate::authz::repo::load_credential_ceiling(&state.pool, cred_id).await?,
-        ))
+    // Scoped access tokens carry a permission ceiling loaded here once per
+    // request and intersected with the owner's live grants at every
+    // authorization point.
+    let ceiling = if snapshot.scoped {
+        let ceiling: crate::authz::repo::CredentialCeiling = crate::cache::cached_or_load(
+            state.cache.as_deref(),
+            CacheCategory::CredentialCeiling,
+            &cache_keys::cred_ceiling(cred_id),
+            || crate::authz::repo::load_credential_ceiling(&state.pool, cred_id),
+        )
+        .await?;
+        Some(std::sync::Arc::new(ceiling))
     } else {
         None
     };
 
     Ok(AuthContext {
-        entity_id,
-        tenant_id,
+        entity_id: snapshot.entity_id,
+        tenant_id: snapshot.tenant_id,
         session_id: None,
         credential_id: Some(cred_id),
-        scoped,
+        scoped: snapshot.scoped,
         ceiling,
+        cache: state.cache.clone(),
     })
+}
+
+async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, AppError> {
+    let (cred_id, secret_bytes) =
+        parse_api_key(key).ok_or_else(|| AppError::unauthorized("malformed api key"))?;
+
+    let Some(cache) = &state.cache else {
+        let row = load_credential_row(&state.pool, cred_id).await?;
+        return finish_api_key_auth(state, cred_id, &secret_bytes, &row).await;
+    };
+
+    let credential_key = cache_keys::credential(cred_id);
+    let credential_lookup = cache
+        .lookup::<CredentialCacheEntry>(CacheCategory::Credential, &credential_key)
+        .await;
+
+    if let Lookup::Hit(cred_entry) = &credential_lookup {
+        let entity_key = cache_keys::entity_status(cred_entry.entity_id);
+        let entity_lookup = cache
+            .lookup::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key)
+            .await;
+
+        // Tenant context is derived from the entity's own (freshly
+        // invalidated) cache entry, never from the credential entry: a
+        // tenant move invalidates `entity_status` but not `credential`, so a
+        // stale `cred_entry` would otherwise check the entity's *former*
+        // tenant's status and hand the request an `AuthContext.tenant_id`
+        // for a tenant the entity no longer belongs to.
+        if let Lookup::Hit(entity_entry) = &entity_lookup {
+            let tenant_key = entity_entry.tenant_id.map(cache_keys::tenant_status);
+            let tenant_lookup = match &tenant_key {
+                Some(k) => Some(
+                    cache
+                        .lookup::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, k)
+                        .await,
+                ),
+                None => None,
+            };
+            let tenant_hit = match (&tenant_key, &tenant_lookup) {
+                (None, _) => Some(None),
+                (Some(_), Some(Lookup::Hit(t))) => Some(Some(t)),
+                _ => None,
+            };
+            if let Some(tenant_opt) = tenant_hit {
+                let snapshot =
+                    CredentialSnapshot::from_cache_entries(cred_entry, entity_entry, tenant_opt);
+                return finish_api_key_auth(state, cred_id, &secret_bytes, &snapshot).await;
+            }
+        }
+
+        // Credential hit but entity/tenant status missed (or the entity's
+        // current tenant's status wasn't cached): reuse the same combined
+        // query the cold-start path uses below, and best-effort populate
+        // whichever entries missed — always keyed off `row`'s freshly
+        // joined entity_id/tenant_id, mirroring the cold-start path exactly,
+        // never off the credential entry's stale copy.
+        let row = load_credential_row(&state.pool, cred_id).await?;
+        // `entity_key` (and the version observed for it) came from
+        // `cred_entry.entity_id`, which is the credential entry's own,
+        // possibly stale copy; the payload below comes from `row`. Populate
+        // only when the two agree, so entity A's key can never be given
+        // entity B's status and tenant.
+        if let Lookup::Miss { version } = entity_lookup {
+            if entity_key == cache_keys::entity_status(row.entity_id) {
+                let entry = EntityStatusCacheEntry {
+                    status: row.entity_status.clone(),
+                    tenant_id: row.tenant_id,
+                };
+                cache
+                    .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
+                    .await;
+            }
+        }
+        if let (Some(tenant_id), Some(tenant_status)) = (row.tenant_id, &row.tenant_status) {
+            let tenant_key = cache_keys::tenant_status(tenant_id);
+            if let Lookup::Miss { version } = cache
+                .lookup::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, &tenant_key)
+                .await
+            {
+                let entry = TenantStatusCacheEntry {
+                    status: tenant_status.clone(),
+                };
+                cache
+                    .try_populate(CacheCategory::TenantStatus, &tenant_key, version, &entry)
+                    .await;
+            }
+        }
+        return finish_api_key_auth(state, cred_id, &secret_bytes, &row).await;
+    }
+
+    // Credential missed (or dirty/unavailable): one combined query loads
+    // everything; populate the credential entry and, best-effort, the
+    // entity/tenant entries too (each with its own freshly-observed version).
+    let row = load_credential_row(&state.pool, cred_id).await?;
+
+    if let Lookup::Miss { version } = credential_lookup {
+        let entry = credential_cache_entry(&row);
+        cache
+            .try_populate(CacheCategory::Credential, &credential_key, version, &entry)
+            .await;
+    }
+    // Both keys are already known from `row`, so their version reads go out
+    // in one pipelined round trip instead of two serial ones.
+    let entity_key = cache_keys::entity_status(row.entity_id);
+    let tenant_key = row.tenant_id.map(cache_keys::tenant_status);
+    let mut batch_keys: Vec<&str> = vec![&entity_key];
+    if let Some(key) = &tenant_key {
+        batch_keys.push(key);
+    }
+    let mut raw = cache.lookup_many(&batch_keys).await.into_iter();
+    let entity_raw = raw.next().unwrap_or_default();
+    let tenant_raw = raw.next();
+
+    if let Lookup::Miss { version } = cache
+        .decode::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key, entity_raw)
+        .await
+    {
+        let entry = EntityStatusCacheEntry {
+            status: row.entity_status.clone(),
+            tenant_id: row.tenant_id,
+        };
+        cache
+            .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
+            .await;
+    }
+    if let (Some(tenant_key), Some(tenant_raw), Some(tenant_status)) =
+        (&tenant_key, tenant_raw, &row.tenant_status)
+    {
+        if let Lookup::Miss { version } = cache
+            .decode::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, tenant_key, tenant_raw)
+            .await
+        {
+            let entry = TenantStatusCacheEntry {
+                status: tenant_status.clone(),
+            };
+            cache
+                .try_populate(CacheCategory::TenantStatus, tenant_key, version, &entry)
+                .await;
+        }
+    }
+
+    finish_api_key_auth(state, cred_id, &secret_bytes, &row).await
 }
 
 impl AuthContext {
     /// Load the authenticated entity's canonical grant expansion for one
-    /// authorization decision. This deliberately hits the DB on each gate/PDP
-    /// entry so policy writes take effect for the next check, even inside a
-    /// multi-field GraphQL request.
+    /// authorization decision. This deliberately hits the DB (or, when
+    /// caching is enabled, the cache-aside path backed by `self.cache`) on
+    /// each gate/PDP entry so policy writes take effect for the next check,
+    /// even inside a multi-field GraphQL request. This is the single
+    /// canonical cache-aware grants loader; `authz::engine`'s delegated
+    /// (non-self-check) path shares the same cache category via
+    /// `load_decision_context`, keyed the same way.
     pub async fn effective_grants(
         &self,
         pool: &PgPool,
     ) -> Result<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>, AppError> {
-        crate::authz::repo::effective_grants_for_subject(pool, self.entity_id)
-            .await
-            .map(std::sync::Arc::new)
+        crate::cache::cached_or_load(
+            self.cache.as_deref(),
+            CacheCategory::Grants,
+            &cache_keys::grants(self.entity_id),
+            || crate::authz::repo::effective_grants_for_subject(pool, self.entity_id),
+        )
+        .await
+        .map(std::sync::Arc::new)
     }
 
     /// The permission ceiling to apply when `subject_id` is the token owner

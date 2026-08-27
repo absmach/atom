@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 fn state(pool: PgPool, keys: ActiveKeys) -> AppState {
     let config = Config::for_tests();
-    AppState::new(pool, config, keys)
+    AppState::new(pool, config, keys, None)
 }
 
 async fn active_keys(pool: &PgPool) -> ActiveKeys {

@@ -394,7 +394,7 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     // Exercise the actual versioned gRPC contract and its deprecated sibling.
     let active_keys = active_keys(&pool, &config).await;
     let admin_token = token_for(&pool, &config, &active_keys, common::admin_id()).await;
-    let state = AppState::new(pool.clone(), config.clone(), active_keys);
+    let state = AppState::new(pool.clone(), config.clone(), active_keys, None);
     let listener = grpc::bind_listener("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();

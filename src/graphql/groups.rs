@@ -410,24 +410,89 @@ impl GroupMutation {
             event: "group.update",
         };
         let details = serde_json::json!({});
+        let status: Option<EntityStatus> = input.status.map(Into::into);
+        let status_changing = status.is_some();
         let result = async {
             let existing = repo::get_group(&state.pool, id).await?;
             require_group_manage_app(&state.pool, &auth, id, existing.tenant_id).await?;
-            repo::update_group_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                UpdateGroup {
-                    name: input.name,
-                    description: input.description,
-                    status: input.status.map(Into::into),
-                    attributes: input.attributes,
-                },
-                "group.update",
-                details.clone(),
-            )
-            .await
+            let update = UpdateGroup {
+                name: input.name,
+                description: input.description,
+                status,
+                attributes: input.attributes,
+            };
+            // `subject_effective_grants`'s `subject_groups` CTE requires
+            // `status = 'active'` at every hop, so any status change (not
+            // just a move off "active") changes the recursive grant set for
+            // every member of this group's subtree.
+            if status_changing {
+                // Locked (not just enumerated) — see
+                // `authz::repo::lock_group_closures_and_collect_member_ids`
+                // for why a concurrent `add_group_member` needs this to be
+                // safe, not just a plain cache barrier.
+                let Some(cache) = state.cache.as_deref() else {
+                    return repo::update_group_with_audit(
+                        &state.pool,
+                        state.config.events.enabled(),
+                        Some(auth.entity_id),
+                        id,
+                        update,
+                        "group.update",
+                        details.clone(),
+                    )
+                    .await;
+                };
+                crate::cache::invalidate::guarded_tx_mutation(
+                    cache,
+                    crate::cache::CacheCategory::Grants,
+                    &state.pool,
+                    |tx| {
+                        Box::pin(async move {
+                            authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                        })
+                    },
+                    |tx| {
+                        let events_enabled = state.config.events.enabled();
+                        let details = details.clone();
+                        Box::pin(async move {
+                            repo::update_group_in_tx(
+                                tx,
+                                events_enabled,
+                                Some(auth.entity_id),
+                                id,
+                                update,
+                                "group.update",
+                                details,
+                            )
+                            .await
+                        })
+                    },
+                    |group| {
+                        audit::log_observe_allow(
+                            &audit::AuditMeta {
+                                actor_entity_id: Some(auth.entity_id),
+                                tenant_id: group.tenant_id,
+                                target_kind: "group",
+                                target_id: Some(id),
+                                event: "group.update",
+                            },
+                            &details,
+                        );
+                    },
+                )
+                .await
+            } else {
+                repo::update_group_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    update,
+                    "group.update",
+                    details.clone(),
+                )
+                .await
+            }
         }
         .await;
         if let Err(ref err) = result {
@@ -466,14 +531,59 @@ impl GroupMutation {
         let result = async {
             let group = repo::get_group(&state.pool, id).await?;
             require_group_manage_app(&state.pool, &auth, id, group.tenant_id).await?;
-            repo::set_group_parent_with_audit(
+            // Reparenting `id` only changes what `id` and its descendants
+            // inherit from above — it never changes `group_hierarchy` rows
+            // below `id`, so `id`'s subtree is exactly what this mutation
+            // can affect. Locked (not just enumerated) — see
+            // `authz::repo::lock_group_closures_and_collect_member_ids` for
+            // why a concurrent `add_group_member` needs this to be safe.
+            let Some(cache) = state.cache.as_deref() else {
+                return repo::set_group_parent_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    parent_id,
+                )
+                .await;
+            };
+            let group = crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                parent_id,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::set_group_parent_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            parent_id,
+                        )
+                        .await
+                    })
+                },
+                |group| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: group.tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event: "group.parent.set",
+                        },
+                        &serde_json::json!({ "parent_id": parent_id }),
+                    );
+                },
             )
-            .await
+            .await?;
+            Ok(group)
         }
         .await;
         if let Err(ref err) = result {
@@ -515,11 +625,50 @@ impl GroupMutation {
             let group = repo::get_group(&state.pool, id).await?;
             let tenant_id = group.tenant_id;
             require_group_manage_app(&state.pool, &auth, id, tenant_id).await?;
-            repo::remove_group_parent_with_audit(
+            // Locked, not just enumerated — see `set_group_parent` above.
+            let Some(cache) = state.cache.as_deref() else {
+                repo::remove_group_parent_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                )
+                .await?;
+                return Ok(tenant_id);
+            };
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::remove_group_parent_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                        )
+                        .await
+                    })
+                },
+                |_| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event: "group.parent.remove",
+                        },
+                        &serde_json::json!({}),
+                    );
+                },
             )
             .await?;
             Ok(tenant_id)
@@ -570,12 +719,54 @@ impl GroupMutation {
             let existing = repo::get_group(&state.pool, id).await?;
             let tenant_id = existing.tenant_id;
             require_group_manage_app(&state.pool, &auth, id, tenant_id).await?;
-            repo::delete_group_with_audit(
+            // `group_hierarchy` rows aren't touched by a soft delete (only
+            // `deleted_at` is set), so enumeration is unaffected by timing.
+            // Locked, not just enumerated — see `set_group_parent` above.
+            let Some(cache) = state.cache.as_deref() else {
+                repo::delete_group_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    Some(auth.entity_id),
+                )
+                .await?;
+                return Ok(tenant_id);
+            };
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::delete_group_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
+                |_| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event: "group.delete",
+                        },
+                        &details,
+                    );
+                },
             )
             .await?;
             Ok(tenant_id)
@@ -612,14 +803,68 @@ impl GroupMutation {
         let result = async {
             crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
                 .await?;
-            repo::restore_group_with_audit(
+            // Locked, not just enumerated — see `set_group_parent` above (the
+            // lock works regardless of the group's own `deleted_at` status,
+            // so it applies here unchanged).
+            let Some(cache) = state.cache.as_deref() else {
+                return repo::restore_group_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    Some(auth.entity_id),
+                )
+                .await;
+            };
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        repo::restore_group_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
+                |_| {},
             )
-            .await
+            .await?;
+            // Mirrors `restore_group_with_audit`'s own post-commit audit
+            // write (fire-and-forget, after the mutation durably commits) —
+            // see `audit::commit_with_audit`'s doc comment. Only needed on
+            // this locked path; the cache-disabled fallback above already
+            // gets it from `restore_group_with_audit` itself.
+            let tenant_id = repo::get_group(&state.pool, id)
+                .await
+                .ok()
+                .and_then(|g| g.tenant_id);
+            audit::write(
+                &state.pool,
+                false,
+                audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: Some("group"),
+                    target_id: Some(id),
+                    event: "group.restore",
+                    outcome: crate::models::enums::AuditOutcome::Allow,
+                    details: serde_json::json!({}),
+                },
+            )
+            .await;
+            Ok(())
         }
         .await;
         if let Err(ref err) = result {
@@ -696,12 +941,19 @@ impl GroupMutation {
                 ],
             )
             .await?;
-            repo::add_group_member_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                group_id,
-                entity_id,
+            crate::cache::invalidate::guarded_mutation(
+                state.cache.as_deref(),
+                crate::cache::CacheCategory::Grants,
+                std::slice::from_ref(&crate::cache::keys::grants(entity_id)),
+                || {
+                    repo::add_group_member_with_audit(
+                        &state.pool,
+                        state.config.events.enabled(),
+                        Some(auth.entity_id),
+                        group_id,
+                        entity_id,
+                    )
+                },
             )
             .await?;
             Ok(tenant_id)
@@ -750,12 +1002,19 @@ impl GroupMutation {
                 ],
             )
             .await?;
-            repo::remove_group_member_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                group_id,
-                entity_id,
+            crate::cache::invalidate::guarded_mutation(
+                state.cache.as_deref(),
+                crate::cache::CacheCategory::Grants,
+                std::slice::from_ref(&crate::cache::keys::grants(entity_id)),
+                || {
+                    repo::remove_group_member_with_audit(
+                        &state.pool,
+                        state.config.events.enabled(),
+                        Some(auth.entity_id),
+                        group_id,
+                        entity_id,
+                    )
+                },
             )
             .await?;
             Ok(tenant_id)
@@ -806,19 +1065,62 @@ impl GroupMutation {
         let result = async {
             let group = repo::get_group(&state.pool, id).await?;
             require_group_manage_app(&state.pool, &auth, id, group.tenant_id).await?;
-            repo::update_group_with_audit(
+            let update = UpdateGroup {
+                name: None,
+                description: None,
+                status: Some(status),
+                attributes: None,
+            };
+            // Locked, not just enumerated — see `update_group` above.
+            let Some(cache) = state.cache.as_deref() else {
+                return repo::update_group_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    update,
+                    event,
+                    details.clone(),
+                )
+                .await;
+            };
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                UpdateGroup {
-                    name: None,
-                    description: None,
-                    status: Some(status),
-                    attributes: None,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                    })
                 },
-                event,
-                details.clone(),
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    let details = details.clone();
+                    Box::pin(async move {
+                        repo::update_group_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            update,
+                            event,
+                            details,
+                        )
+                        .await
+                    })
+                },
+                |group| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: group.tenant_id,
+                            target_kind: "group",
+                            target_id: Some(id),
+                            event,
+                        },
+                        &details,
+                    );
+                },
             )
             .await
         }

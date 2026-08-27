@@ -280,7 +280,7 @@ async fn credential_authentication_rejects_inactive_or_deleted_principals() {
 async fn grpc_authenticate_credential_requires_service_auth_and_returns_identity() {
     let pool = common::pool().await;
     let keys = active_keys(&pool).await;
-    let state = AppState::new(pool.clone(), Config::for_tests(), keys.clone());
+    let state = AppState::new(pool.clone(), Config::for_tests(), keys.clone(), None);
     let listener = grpc::bind_listener("127.0.0.1:0".parse().expect("addr"))
         .await
         .expect("bind grpc");

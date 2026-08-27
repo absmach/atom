@@ -26,6 +26,8 @@ pub enum AppError {
         message: String,
         retry_after_secs: u64,
     },
+    #[error("{0}")]
+    ServiceUnavailable(String),
     #[error("database error")]
     Database(#[from] sqlx::Error),
     #[error("internal error")]
@@ -65,6 +67,9 @@ impl AppError {
             retry_after_secs,
         }
     }
+    pub fn service_unavailable(msg: impl Into<String>) -> Self {
+        AppError::ServiceUnavailable(msg.into())
+    }
 }
 
 impl IntoResponse for AppError {
@@ -90,6 +95,7 @@ impl IntoResponse for AppError {
                 }
                 return response;
             }
+            AppError::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             AppError::Database(e) => {
                 if let sqlx::Error::Database(db) = e {
                     match db.code().as_deref() {
@@ -150,6 +156,7 @@ impl From<AppError> for tonic::Status {
             AppError::Conflict(msg) => tonic::Status::already_exists(msg),
             AppError::PayloadTooLarge(msg) => tonic::Status::invalid_argument(msg),
             AppError::RateLimited { message, .. } => tonic::Status::resource_exhausted(message),
+            AppError::ServiceUnavailable(msg) => tonic::Status::unavailable(msg),
             AppError::Database(e) => {
                 tracing::error!("db error: {e}");
                 tonic::Status::internal("database error")

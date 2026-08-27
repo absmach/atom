@@ -112,7 +112,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     let active_keys = keys::load_active_keys(&pool, &config.signing_keys)
         .await
         .unwrap();
-    let state = AppState::new(pool.clone(), config.clone(), active_keys);
+    let state = AppState::new(pool.clone(), config.clone(), active_keys, None);
     let prepared = enrollment_tls::prepare(&state)
         .await
         .unwrap()

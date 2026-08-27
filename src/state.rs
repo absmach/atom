@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    callout::CalloutService, config::Config, events::publisher::EventPublisher, keys::ActiveKeys,
-    rate_limit::RateLimiter,
+    cache::CacheClient, callout::CalloutService, config::Config, events::publisher::EventPublisher,
+    keys::ActiveKeys, rate_limit::RateLimiter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +65,21 @@ pub struct AppState {
     /// policy endpoints. When callouts are disabled or unconfigured, this is
     /// a cheap no-op ([`CalloutService::disabled`]).
     pub callouts: CalloutService,
+    /// `None` when caching is disabled or unconfigured — every call site
+    /// checks this and falls through to Postgres, so the service runs
+    /// cache-free with zero behavior change (this is what keeps `cargo test`
+    /// and local dev working without Redis).
+    pub cache: Option<Arc<CacheClient>>,
     grpc_status: Arc<RwLock<GrpcRuntimeStatus>>,
 }
 
 impl AppState {
-    pub fn new(pool: sqlx::PgPool, config: Config, keys: ActiveKeys) -> Self {
+    pub fn new(
+        pool: sqlx::PgPool,
+        config: Config,
+        keys: ActiveKeys,
+        cache: Option<CacheClient>,
+    ) -> Self {
         let grpc_status = GrpcRuntimeStatus::starting(config.grpc_addr.clone());
         AppState {
             pool,
@@ -78,6 +88,7 @@ impl AppState {
             rate_limiter: Arc::new(RateLimiter::default()),
             event_publisher: None,
             callouts: CalloutService::disabled(),
+            cache: cache.map(Arc::new),
             grpc_status: Arc::new(RwLock::new(grpc_status)),
         }
     }

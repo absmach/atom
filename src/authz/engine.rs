@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     authz::conditions::conditions_match,
+    cache::{CacheCategory, CacheClient},
     error::AppError,
     models::{
         access::{
@@ -266,6 +267,7 @@ async fn load_decision_context(
     pool: &PgPool,
     req: &AuthzRequest,
     cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
+    cache: Option<&CacheClient>,
 ) -> Result<DecisionContext, AppError> {
     let Some(entity) = repo::load_authz_subject(pool, req.subject_id).await? else {
         return Ok(denied(AuthzResponse::deny("subject not found"), None, None));
@@ -348,12 +350,21 @@ async fn load_decision_context(
     // group membership already resolved recursively, each grant carrying its own
     // scope/effect/conditions. One match loop replaces the direct/role split.
     // Reuse the caller's freshly loaded grants when supplied so one PDP
-    // evaluation does not expand the same self-subject twice.
+    // evaluation does not expand the same self-subject twice. Otherwise (a
+    // delegated check about a subject other than the caller) this is the
+    // canonical cache-aware grants loader shared with `AuthContext::
+    // effective_grants` — see `src/cache/mod.rs` for the consistency model.
     let grants = match cached_grants {
         Some(grants) => grants,
-        None => {
-            std::sync::Arc::new(repo::effective_grants_for_subject(pool, req.subject_id).await?)
-        }
+        None => std::sync::Arc::new(
+            crate::cache::cached_or_load(
+                cache,
+                CacheCategory::Grants,
+                &crate::cache::keys::grants(req.subject_id),
+                || repo::effective_grants_for_subject(pool, req.subject_id),
+            )
+            .await?,
+        ),
     };
 
     Ok(DecisionContext::Ready(Box::new(ReadyContext {
@@ -388,28 +399,43 @@ fn scope_target<'a>(
 /// here from the caller's `AuthContext` (`ceiling_for`), never passed by hand, so
 /// a call site cannot forget to apply it. The caller's freshly loaded grants are
 /// reused when the checked subject is the caller itself.
+///
+/// The caller's `AuthContext` carries the cache handle backing the
+/// Redis-backed grant-expansion cache (see `src/cache/mod.rs`) — a `None`
+/// cache (caching disabled, or `AuthContext::default()` in tests) reproduces
+/// pre-caching behavior exactly.
 pub async fn evaluate(
     pool: &PgPool,
     req: &AuthzRequest,
     auth: &crate::auth::AuthContext,
 ) -> Result<AuthzResponse, AppError> {
+    let cache = auth.cache.as_deref();
     let cached_grants = if req.subject_id == auth.entity_id {
         Some(auth.effective_grants(pool).await?)
     } else {
         None
     };
-    evaluate_prepared(pool, req, auth.ceiling_for(req.subject_id), cached_grants).await
+    evaluate_prepared(
+        pool,
+        req,
+        auth.ceiling_for(req.subject_id),
+        cached_grants,
+        cache,
+    )
+    .await
 }
 
 /// Low-level PDP entry taking an explicit ceiling. For unit/parity tests and the
 /// engine's own internals; production code must call [`evaluate`], which derives
-/// the ceiling from the authenticated context.
+/// the ceiling from the authenticated context. Always uncached — tests exercise
+/// the PDP's decision logic directly; cache behavior has its own dedicated test
+/// suite against the real `evaluate`/`explain` entry points.
 pub async fn evaluate_with_ceiling(
     pool: &PgPool,
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
 ) -> Result<AuthzResponse, AppError> {
-    evaluate_prepared(pool, req, ceiling, None).await
+    evaluate_prepared(pool, req, ceiling, None, None).await
 }
 
 async fn evaluate_prepared(
@@ -417,9 +443,10 @@ async fn evaluate_prepared(
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
     cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
+    cache: Option<&CacheClient>,
 ) -> Result<AuthzResponse, AppError> {
     let start = std::time::Instant::now();
-    let result = evaluate_inner(pool, req, ceiling, cached_grants).await;
+    let result = evaluate_inner(pool, req, ceiling, cached_grants, cache).await;
     if let Ok(response) = &result {
         crate::metrics::record_decision(start.elapsed(), response.allowed);
     }
@@ -431,8 +458,9 @@ async fn evaluate_inner(
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
     cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
+    cache: Option<&CacheClient>,
 ) -> Result<AuthzResponse, AppError> {
-    let ctx = match load_decision_context(pool, req, cached_grants).await? {
+    let ctx = match load_decision_context(pool, req, cached_grants, cache).await? {
         DecisionContext::Denied(denied) => return Ok(denied.response),
         DecisionContext::Ready(ctx) => ctx,
     };
@@ -558,13 +586,14 @@ pub async fn explain(
     req: &AuthzRequest,
     auth: &crate::auth::AuthContext,
 ) -> Result<AuthzExplainResponse, AppError> {
+    let cache = auth.cache.as_deref();
     let cached_grants = if req.subject_id == auth.entity_id {
         Some(auth.effective_grants(pool).await?)
     } else {
         None
     };
     let ceiling = auth.ceiling_for(req.subject_id);
-    let ctx = match load_decision_context(pool, req, cached_grants).await? {
+    let ctx = match load_decision_context(pool, req, cached_grants, cache).await? {
         DecisionContext::Denied(denied) => {
             return Ok(AuthzExplainResponse {
                 allowed: false,

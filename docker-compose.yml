@@ -20,6 +20,20 @@ services:
       timeout: 5s
       retries: 5
 
+  # Redis-backed AuthN/AuthZ cache (see src/cache/mod.rs). Off by default
+  # (ATOM_CACHE_ENABLED=false) — a pure performance optimization, Postgres
+  # remains authoritative. Pure cache, no persistence needed.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${ATOM_CACHE_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   atom:
     image: ${ATOM_IMAGE:-ghcr.io/absmach/atom:latest}
     build:
@@ -136,6 +150,20 @@ services:
       ATOM_BOOTSTRAP_FILE: /etc/atom/bootstrap.yaml
       ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
       ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
+      # Off by default. Set ATOM_CACHE_ENABLED=true (and add `redis` to
+      # depends_on below) once Redis is provisioned — see .env.example.
+      ATOM_CACHE_ENABLED: ${ATOM_CACHE_ENABLED:-false}
+      ATOM_CACHE_REDIS_URL: ${ATOM_CACHE_REDIS_URL:-redis://redis:6379/0}
+      ATOM_CACHE_POOL_MAX_SIZE: ${ATOM_CACHE_POOL_MAX_SIZE:-20}
+      ATOM_CACHE_CONNECT_TIMEOUT_MS: ${ATOM_CACHE_CONNECT_TIMEOUT_MS:-2000}
+      ATOM_CACHE_OP_TIMEOUT_MS: ${ATOM_CACHE_OP_TIMEOUT_MS:-50}
+      ATOM_CACHE_FAIL_FAST_ON_STARTUP: ${ATOM_CACHE_FAIL_FAST_ON_STARTUP:-false}
+      ATOM_CACHE_TTL_SESSION_SECS: ${ATOM_CACHE_TTL_SESSION_SECS:-60}
+      ATOM_CACHE_TTL_ENTITY_STATUS_SECS: ${ATOM_CACHE_TTL_ENTITY_STATUS_SECS:-60}
+      ATOM_CACHE_TTL_TENANT_STATUS_SECS: ${ATOM_CACHE_TTL_TENANT_STATUS_SECS:-60}
+      ATOM_CACHE_TTL_CREDENTIAL_SECS: ${ATOM_CACHE_TTL_CREDENTIAL_SECS:-60}
+      ATOM_CACHE_TTL_CREDENTIAL_CEILING_SECS: ${ATOM_CACHE_TTL_CREDENTIAL_CEILING_SECS:-60}
+      ATOM_CACHE_TTL_GRANTS_SECS: ${ATOM_CACHE_TTL_GRANTS_SECS:-60}
     volumes:
       # Mounts the host's PKI material into the container. Used by
       # ATOM_PKI_ROOT_CERT_PATH + ATOM_PKI_PLATFORM_INTERMEDIATE_{CERT,KEY}_PATH
@@ -268,6 +296,18 @@ services:
       ATOM_BOOTSTRAP_FILE: /etc/atom/bootstrap.yaml
       ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
       ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
+      ATOM_CACHE_ENABLED: ${ATOM_CACHE_ENABLED:-false}
+      ATOM_CACHE_REDIS_URL: ${ATOM_CACHE_REDIS_URL:-redis://redis:6379/0}
+      ATOM_CACHE_POOL_MAX_SIZE: ${ATOM_CACHE_POOL_MAX_SIZE:-20}
+      ATOM_CACHE_CONNECT_TIMEOUT_MS: ${ATOM_CACHE_CONNECT_TIMEOUT_MS:-2000}
+      ATOM_CACHE_OP_TIMEOUT_MS: ${ATOM_CACHE_OP_TIMEOUT_MS:-50}
+      ATOM_CACHE_FAIL_FAST_ON_STARTUP: ${ATOM_CACHE_FAIL_FAST_ON_STARTUP:-false}
+      ATOM_CACHE_TTL_SESSION_SECS: ${ATOM_CACHE_TTL_SESSION_SECS:-60}
+      ATOM_CACHE_TTL_ENTITY_STATUS_SECS: ${ATOM_CACHE_TTL_ENTITY_STATUS_SECS:-60}
+      ATOM_CACHE_TTL_TENANT_STATUS_SECS: ${ATOM_CACHE_TTL_TENANT_STATUS_SECS:-60}
+      ATOM_CACHE_TTL_CREDENTIAL_SECS: ${ATOM_CACHE_TTL_CREDENTIAL_SECS:-60}
+      ATOM_CACHE_TTL_CREDENTIAL_CEILING_SECS: ${ATOM_CACHE_TTL_CREDENTIAL_CEILING_SECS:-60}
+      ATOM_CACHE_TTL_GRANTS_SECS: ${ATOM_CACHE_TTL_GRANTS_SECS:-60}
     volumes:
       # Mounts the host's PKI material into the container. Used by
       # ATOM_PKI_ROOT_CERT_PATH + ATOM_PKI_PLATFORM_INTERMEDIATE_{CERT,KEY}_PATH

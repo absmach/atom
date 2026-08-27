@@ -196,7 +196,7 @@ async fn grant(pool: &PgPool, subject: Uuid, tenant_id: Option<Uuid>, object: Uu
 
 async fn serve(pool: &PgPool, cfg: Config) -> AuthServiceClient<Channel> {
     let keys = active_keys(pool).await;
-    let state = AppState::new(pool.clone(), cfg, keys);
+    let state = AppState::new(pool.clone(), cfg, keys, None);
     let listener = grpc::bind_listener("127.0.0.1:0".parse().expect("addr"))
         .await
         .expect("bind grpc");

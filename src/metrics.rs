@@ -67,6 +67,18 @@ pub const PKI_CRL_SIZE_BYTES: &str = "atom_pki_crl_size_bytes";
 pub const PKI_CRL_GENERATION_DURATION: &str = "atom_pki_crl_generation_duration_seconds";
 /// Minimum active/retiring authority time-to-expiry by bounded authority kind.
 pub const PKI_AUTHORITY_TIME_TO_EXPIRY: &str = "atom_pki_authority_time_to_expiry_seconds";
+/// Counter of cache reads, labelled by `category` (session|entity_status|
+/// tenant_status|credential|credential_ceiling|grants) and `outcome`
+/// (hit|miss|error).
+pub const CACHE_LOOKUP: &str = "atom_cache_lookup_total";
+/// Counter of cache invalidation/barrier operations, labelled by `category`
+/// and `outcome` (ok|error).
+pub const CACHE_INVALIDATION: &str = "atom_cache_invalidation_total";
+/// Counter of post-miss cache writes, labelled by `category` and `outcome`
+/// (applied|stale|error). A hit rate stuck at zero is ambiguous without this:
+/// `stale` distinguishes "every write is being rejected because a barrier is
+/// stuck dirty or the version keeps moving" from a merely cold cache.
+pub const CACHE_POPULATE: &str = "atom_cache_populate_total";
 
 #[cfg(feature = "metrics")]
 mod backend {
@@ -275,6 +287,20 @@ mod backend {
                 .record(elapsed.as_secs_f64());
         }
     }
+
+    pub fn record_cache_lookup(category: &'static str, outcome: &'static str) {
+        metrics::counter!(CACHE_LOOKUP, "category" => category, "outcome" => outcome).increment(1);
+    }
+
+    pub fn record_cache_invalidation(category: &'static str, outcome: &'static str) {
+        metrics::counter!(CACHE_INVALIDATION, "category" => category, "outcome" => outcome)
+            .increment(1);
+    }
+
+    pub fn record_cache_populate(category: &'static str, outcome: &'static str) {
+        metrics::counter!(CACHE_POPULATE, "category" => category, "outcome" => outcome)
+            .increment(1);
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
@@ -340,13 +366,19 @@ mod backend {
         _generation_elapsed: Option<Duration>,
     ) {
     }
+    #[inline]
+    pub fn record_cache_lookup(_category: &'static str, _outcome: &'static str) {}
+    #[inline]
+    pub fn record_cache_invalidation(_category: &'static str, _outcome: &'static str) {}
+    #[inline]
+    pub fn record_cache_populate(_category: &'static str, _outcome: &'static str) {}
 }
 
 pub use backend::{
-    enabled, init, record_audit_db_suppressed, record_audit_failure, record_callout,
-    record_decision, record_outbox_exhausted, record_outbox_publish_failure, record_pki_crl,
-    record_pki_enrollment, record_pki_enrollment_connection_rejection,
-    record_pki_enrollment_peer_rejection, record_pki_fleet_snapshot,
-    record_pki_key_provider_operation, record_pki_lifecycle_operation, record_rate_limit_rejection,
-    render,
+    enabled, init, record_audit_db_suppressed, record_audit_failure, record_cache_invalidation,
+    record_cache_lookup, record_cache_populate, record_callout, record_decision,
+    record_outbox_exhausted, record_outbox_publish_failure, record_pki_crl, record_pki_enrollment,
+    record_pki_enrollment_connection_rejection, record_pki_enrollment_peer_rejection,
+    record_pki_fleet_snapshot, record_pki_key_provider_operation, record_pki_lifecycle_operation,
+    record_rate_limit_rejection, render,
 };

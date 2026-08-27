@@ -184,6 +184,7 @@ async fn deleted_entity_cannot_consume_existing_password_reset_token() {
     assert!(
         service::reset_password(
             &pool,
+            None,
             PasswordResetConfirmRequest {
                 token,
                 password: "replacement-password".to_string(),

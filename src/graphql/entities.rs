@@ -322,26 +322,46 @@ impl EntityMutation {
                 .await?;
             }
 
-            repo::update_entity_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                entity_model::UpdateEntity {
-                    name: input.name,
-                    kind: parse_optional_entity_kind(input.kind),
-                    alias: input.alias.into(),
-                    external_id: input.external_id.into(),
-                    tenant_id,
-                    profile_id,
-                    profile_version_id,
-                    status: input.status.map(Into::into),
-                    attributes: input.attributes,
-                },
-                "entity.update",
-                details.clone(),
-            )
-            .await
+            let update = || {
+                repo::update_entity_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    entity_model::UpdateEntity {
+                        name: input.name,
+                        kind: parse_optional_entity_kind(input.kind),
+                        alias: input.alias.into(),
+                        external_id: input.external_id.into(),
+                        tenant_id,
+                        profile_id,
+                        profile_version_id,
+                        status: input.status.map(Into::into),
+                        attributes: input.attributes,
+                    },
+                    "entity.update",
+                    details.clone(),
+                )
+            };
+            let Some(cache) = state.cache.as_deref() else {
+                return update().await;
+            };
+            // Entity kind, tenant, and active status all affect the canonical
+            // grant expansion, so keep both cache categories behind one
+            // barrier for the complete mutation.
+            let entity_status_keys = [crate::cache::keys::entity_status(id)];
+            let grants_keys = [crate::cache::keys::grants(id)];
+            let groups = [
+                (
+                    crate::cache::CacheCategory::EntityStatus,
+                    entity_status_keys.as_slice(),
+                ),
+                (crate::cache::CacheCategory::Grants, grants_keys.as_slice()),
+            ];
+            crate::cache::invalidate::begin_all(cache, &groups).await?;
+            let result = update().await;
+            crate::cache::invalidate::end_all(cache, &groups).await;
+            result
         }
         .await;
 
@@ -385,10 +405,10 @@ impl EntityMutation {
                 )
                 .await?;
             }
-            repo::delete_entity_with_audit(
+            crate::identity::service::delete_entity(
                 &state.pool,
+                state.cache.as_deref(),
                 state.config.events.enabled(),
-                Some(auth.entity_id),
                 id,
                 Some(auth.entity_id),
             )
@@ -431,12 +451,21 @@ impl EntityMutation {
         let result = async {
             crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
                 .await?;
-            repo::restore_entity_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+            // Separate function from `update_entity`/`change_entity_status`,
+            // so it needs its own `entity_status` invalidation too.
+            crate::cache::invalidate::guarded_mutation(
+                state.cache.as_deref(),
+                crate::cache::CacheCategory::EntityStatus,
+                std::slice::from_ref(&crate::cache::keys::entity_status(id)),
+                || {
+                    repo::restore_entity_with_audit(
+                        &state.pool,
+                        state.config.events.enabled(),
+                        Some(auth.entity_id),
+                        id,
+                        Some(auth.entity_id),
+                    )
+                },
             )
             .await
         }
@@ -716,24 +745,31 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
             ],
         )
         .await?;
-        repo::update_entity_with_audit(
-            &state.pool,
-            state.config.events.enabled(),
-            Some(auth.entity_id),
-            entity_id,
-            entity_model::UpdateEntity {
-                name: None,
-                kind: None,
-                alias: None,
-                external_id: None,
-                tenant_id: None,
-                profile_id: None,
-                profile_version_id: None,
-                status: Some(status),
-                attributes: None,
+        crate::cache::invalidate::guarded_mutation(
+            state.cache.as_deref(),
+            crate::cache::CacheCategory::EntityStatus,
+            std::slice::from_ref(&crate::cache::keys::entity_status(entity_id)),
+            || {
+                repo::update_entity_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    entity_id,
+                    entity_model::UpdateEntity {
+                        name: None,
+                        kind: None,
+                        alias: None,
+                        external_id: None,
+                        tenant_id: None,
+                        profile_id: None,
+                        profile_version_id: None,
+                        status: Some(status),
+                        attributes: None,
+                    },
+                    event,
+                    details.clone(),
+                )
             },
-            event,
-            details.clone(),
         )
         .await
     }

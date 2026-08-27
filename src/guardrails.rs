@@ -1,4 +1,14 @@
-use sqlx::PgPool;
+//! Assignment guardrails: the rules that decide whether a grant may be
+//! created at all, independently of who is asking.
+//!
+//! Every entry point takes `&mut PgConnection` rather than `&PgPool`. Callers
+//! run these validations under the row locks their mutation already holds, so
+//! the reads must go through *that* transaction: a second pooled connection
+//! neither sees the transaction's uncommitted state nor respects its locks,
+//! and acquiring one while holding a transaction risks exhausting the pool
+//! (every request holding one connection and waiting for a second).
+
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::{
@@ -91,17 +101,20 @@ impl Rule {
     }
 }
 
-pub async fn validate_policy(pool: &PgPool, req: &CreatePolicyBinding) -> Result<(), AppError> {
-    let assignments = assignments_for_policy(pool, req).await?;
-    validate_assignments(pool, &assignments).await
+pub async fn validate_policy(
+    conn: &mut PgConnection,
+    req: &CreatePolicyBinding,
+) -> Result<(), AppError> {
+    let assignments = assignments_for_policy(&mut *conn, req).await?;
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 pub async fn validate_role_capability(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     role_id: Uuid,
     capability_id: Uuid,
 ) -> Result<(), AppError> {
-    let capability_names = capability_names(pool, &[capability_id]).await?;
+    let capability_names = capability_names(&mut *conn, &[capability_id]).await?;
     let rows = sqlx::query(
         r#"WITH RECURSIVE assigned_groups(edge_id, group_id) AS (
                SELECT pb.id, pb.subject_id
@@ -124,7 +137,7 @@ pub async fn validate_role_capability(
            JOIN entities e ON e.id = gm.entity_id"#,
     )
     .bind(role_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;
 
@@ -145,22 +158,22 @@ pub async fn validate_role_capability(
         }));
     }
 
-    validate_assignments(pool, &assignments).await
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 pub async fn validate_role_assignment(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     tenant_id: Option<Uuid>,
     subject_kind: SubjectKind,
     subject_id: Uuid,
     role_id: Uuid,
 ) -> Result<(), AppError> {
-    let entity_kinds = subject_entity_kinds(pool, subject_kind, subject_id).await?;
+    let entity_kinds = subject_entity_kinds(&mut *conn, subject_kind, subject_id).await?;
     if entity_kinds.is_empty() {
         return Ok(());
     }
 
-    let role_capabilities = role_permission_assignments(pool, &[role_id]).await?;
+    let role_capabilities = role_permission_assignments(&mut *conn, &[role_id]).await?;
     let assignments = entity_kinds
         .into_iter()
         .flat_map(|entity_kind| {
@@ -174,7 +187,7 @@ pub async fn validate_role_assignment(
         })
         .collect::<Vec<_>>();
 
-    validate_assignments(pool, &assignments).await
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 /// Validate a role assignment using the caller's existing connection.
@@ -211,7 +224,7 @@ pub async fn validate_role_assignment_on_connection(
 }
 
 pub async fn validate_composite_role_assignment_plan(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     entity_ids: &[Uuid],
     child_role_ids: &[Uuid],
     tenant_id: Option<Uuid>,
@@ -230,14 +243,14 @@ pub async fn validate_composite_role_assignment_plan(
     let entity_kinds =
         sqlx::query_scalar::<_, String>("SELECT kind FROM entities WHERE id = ANY($1::uuid[])")
             .bind(&unique_entity_ids)
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await
             .map_err(db_err)?;
     if entity_kinds.len() != unique_entity_ids.len() {
         return Err(AppError::bad_request("invalid member reference"));
     }
 
-    let role_capabilities = role_permission_assignments(pool, &unique_child_role_ids).await?;
+    let role_capabilities = role_permission_assignments(&mut *conn, &unique_child_role_ids).await?;
     let assignments = entity_kinds
         .into_iter()
         .flat_map(|entity_kind| {
@@ -251,11 +264,11 @@ pub async fn validate_composite_role_assignment_plan(
         })
         .collect::<Vec<_>>();
 
-    validate_assignments(pool, &assignments).await
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 pub async fn validate_role_assignment_plan(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     entity_ids: &[Uuid],
     capability_ids: &[Uuid],
     tenant_id: Option<Uuid>,
@@ -276,14 +289,14 @@ pub async fn validate_role_assignment_plan(
     let entity_kinds =
         sqlx::query_scalar::<_, String>("SELECT kind FROM entities WHERE id = ANY($1::uuid[])")
             .bind(&unique_entity_ids)
-            .fetch_all(pool)
+            .fetch_all(&mut *conn)
             .await
             .map_err(db_err)?;
     if entity_kinds.len() != unique_entity_ids.len() {
         return Err(AppError::bad_request("invalid member reference"));
     }
 
-    let capability_names = capability_names(pool, &unique_capability_ids).await?;
+    let capability_names = capability_names(&mut *conn, &unique_capability_ids).await?;
     if capability_names.len() != unique_capability_ids.len() {
         return Err(AppError::bad_request("invalid capability reference"));
     }
@@ -306,7 +319,7 @@ pub async fn validate_role_assignment_plan(
         })
         .collect::<Vec<_>>();
 
-    validate_assignments(pool, &assignments).await
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 /// Takes the caller's connection rather than the pool: every caller runs this
@@ -314,7 +327,7 @@ pub async fn validate_role_assignment_plan(
 /// while holding one deadlocks a saturated pool (and hangs outright at
 /// `max_connections = 1`).
 pub async fn validate_group_member(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut PgConnection,
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
@@ -373,11 +386,13 @@ pub async fn validate_group_member(
 }
 
 pub async fn validate_direct_policy(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     req: &CreateDirectPolicy,
 ) -> Result<(), AppError> {
-    let entity_kinds = subject_entity_kinds(pool, req.subject_kind.clone(), req.subject_id).await?;
-    let permission_blocks = permission_block_assignments(pool, &[req.permission_block_id]).await?;
+    let entity_kinds =
+        subject_entity_kinds(&mut *conn, req.subject_kind.clone(), req.subject_id).await?;
+    let permission_blocks =
+        permission_block_assignments(&mut *conn, &[req.permission_block_id]).await?;
     let assignments = entity_kinds
         .into_iter()
         .flat_map(|entity_kind| {
@@ -391,12 +406,12 @@ pub async fn validate_direct_policy(
         })
         .collect::<Vec<_>>();
 
-    validate_assignments(pool, &assignments).await
+    validate_assignments(&mut *conn, &assignments).await
 }
 
 /// Takes the caller's connection, not the pool — see [`validate_group_member`].
 pub async fn validate_role_permission_block_links(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut PgConnection,
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
@@ -440,13 +455,14 @@ pub async fn validate_role_permission_block_links(
 }
 
 async fn assignments_for_policy(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     req: &CreatePolicyBinding,
 ) -> Result<Vec<Assignment>, AppError> {
-    let entity_kinds = subject_entity_kinds(pool, req.subject_kind.clone(), req.subject_id).await?;
+    let entity_kinds =
+        subject_entity_kinds(&mut *conn, req.subject_kind.clone(), req.subject_id).await?;
     let capability_names = match req.grant_kind {
-        GrantKind::Capability => capability_names(pool, &[req.grant_id]).await?,
-        GrantKind::Role => role_capability_names(pool, req.grant_id).await?,
+        GrantKind::Capability => capability_names(&mut *conn, &[req.grant_id]).await?,
+        GrantKind::Role => role_capability_names(&mut *conn, req.grant_id).await?,
     };
     let (object_kind, object_type) =
         scope_to_object(req.scope_kind.clone(), req.scope_ref.as_deref());
@@ -469,30 +485,24 @@ async fn assignments_for_policy(
         .collect())
 }
 
-async fn validate_assignments<'e, E>(
-    executor: E,
+async fn validate_assignments(
+    conn: &mut PgConnection,
     assignments: &[Assignment],
-) -> Result<(), AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<(), AppError> {
     if assignments.is_empty() {
         return Ok(());
     }
-    let rules = load_rules(executor).await?;
+    let rules = load_rules(&mut *conn).await?;
     decide(assignments, &rules).map_err(AppError::bad_request)
 }
 
-async fn load_rules<'e, E>(executor: E) -> Result<Vec<Rule>, AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+async fn load_rules(conn: &mut PgConnection) -> Result<Vec<Rule>, AppError> {
     use sqlx::Row;
     sqlx::query(
         r#"SELECT tenant_id, entity_kind, action_name AS capability_name, object_kind, object_type, decision, is_absolute
            FROM action_assignment_rules"#,
     )
-    .fetch_all(executor)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?
     .into_iter()
@@ -510,17 +520,18 @@ where
     .collect()
 }
 
-async fn subject_entity_kinds<'e, E>(
-    executor: E,
+async fn subject_entity_kinds(
+    conn: &mut PgConnection,
     subject_kind: SubjectKind,
     subject_id: Uuid,
-) -> Result<Vec<String>, AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let query = match subject_kind {
-        SubjectKind::Entity => "SELECT kind FROM entities WHERE id = $1",
-        SubjectKind::Group => {
+) -> Result<Vec<String>, AppError> {
+    match subject_kind {
+        SubjectKind::Entity => sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
+            .bind(subject_id)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err),
+        SubjectKind::Group => sqlx::query_scalar(
             r#"WITH RECURSIVE subject_groups(group_id) AS (
                    SELECT $1::uuid
                    UNION ALL
@@ -531,31 +542,27 @@ where
                SELECT DISTINCT e.kind
                FROM group_members gm
                JOIN entities e ON e.id = gm.entity_id
-               WHERE gm.group_id IN (SELECT group_id FROM subject_groups)"#
-        }
-    };
-    sqlx::query_scalar(query)
+               WHERE gm.group_id IN (SELECT group_id FROM subject_groups)"#,
+        )
         .bind(subject_id)
-        .fetch_all(executor)
+        .fetch_all(&mut *conn)
         .await
-        .map_err(db_err)
+        .map_err(db_err),
+    }
 }
 
-async fn capability_names<'e, E>(executor: E, ids: &[Uuid]) -> Result<Vec<String>, AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+async fn capability_names(conn: &mut PgConnection, ids: &[Uuid]) -> Result<Vec<String>, AppError> {
     sqlx::query_scalar("SELECT name FROM actions WHERE id = ANY($1::uuid[])")
         .bind(ids)
-        .fetch_all(executor)
+        .fetch_all(&mut *conn)
         .await
         .map_err(db_err)
 }
 
-async fn role_capability_names<'e, E>(executor: E, role_id: Uuid) -> Result<Vec<String>, AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+async fn role_capability_names(
+    conn: &mut PgConnection,
+    role_id: Uuid,
+) -> Result<Vec<String>, AppError> {
     sqlx::query_scalar(
         r#"SELECT DISTINCT c.name
            FROM (SELECT $1::uuid AS role_id) roles
@@ -563,7 +570,7 @@ where
            JOIN actions c ON c.id = rc.capability_id"#,
     )
     .bind(role_id)
-    .fetch_all(executor)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)
 }
@@ -575,13 +582,10 @@ struct RoleCapabilityAssignment {
     object_type: Option<String>,
 }
 
-async fn role_permission_assignments<'e, E>(
-    executor: E,
+async fn role_permission_assignments(
+    conn: &mut PgConnection,
     role_ids: &[Uuid],
-) -> Result<Vec<RoleCapabilityAssignment>, AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
     if role_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -638,7 +642,7 @@ where
            WHERE rpb.role_id = ANY($1::uuid[])"#,
     )
     .bind(role_ids)
-    .fetch_all(executor)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?
     .into_iter()
@@ -652,13 +656,10 @@ where
     .collect()
 }
 
-async fn permission_block_assignments<'e, E>(
-    executor: E,
+async fn permission_block_assignments(
+    conn: &mut PgConnection,
     permission_block_ids: &[Uuid],
-) -> Result<Vec<RoleCapabilityAssignment>, AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
     if permission_block_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -714,7 +715,7 @@ where
            WHERE pb.id = ANY($1::uuid[])"#,
     )
     .bind(permission_block_ids)
-    .fetch_all(executor)
+    .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?
     .into_iter()

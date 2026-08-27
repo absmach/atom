@@ -193,7 +193,7 @@ pub async fn reset_password(
     State(state): State<AppState>,
     Json(req): Json<PasswordResetConfirmRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    service::reset_password(&state.pool, req).await?;
+    service::reset_password(&state.pool, state.cache.as_deref(), req).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -242,25 +242,43 @@ pub async fn logout(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Response, AppError> {
-    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-    if let Some(session_id) = auth.session_id {
-        repo::revoke_session_in_tx(&mut tx, session_id).await?;
+    let event = audit::AuditEvent {
+        actor_entity_id: Some(auth.entity_id),
+        tenant_id: auth.tenant_id,
+        target_kind: Some("entity"),
+        target_id: Some(auth.entity_id),
+        event: "auth.logout",
+        outcome: AuditOutcome::Allow,
+        details: serde_json::json!({}),
+    };
+
+    match auth.session_id {
+        Some(session_id) => {
+            // The barrier must span the revoke *and* its commit, not just
+            // the revoke: releasing it before `commit_with_audit`'s internal
+            // `tx.commit()` lets a concurrent reader load the still-
+            // uncommitted (pre-revoke) row from Postgres and repopulate the
+            // cache with it, right after the barrier that was supposed to
+            // block exactly that — see `src/cache/mod.rs`.
+            crate::cache::invalidate::guarded_mutation(
+                state.cache.as_deref(),
+                crate::cache::CacheCategory::Session,
+                std::slice::from_ref(&crate::cache::keys::session(session_id)),
+                || async {
+                    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+                    repo::revoke_session_in_tx(&mut tx, session_id).await?;
+                    audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
+                        .await
+                },
+            )
+            .await?;
+        }
+        None => {
+            let tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+            audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
+                .await?;
+        }
     }
-    audit::commit_with_audit(
-        &state.pool,
-        tx,
-        state.config.events.enabled(),
-        &audit::AuditEvent {
-            actor_entity_id: Some(auth.entity_id),
-            tenant_id: auth.tenant_id,
-            target_kind: Some("entity"),
-            target_id: Some(auth.entity_id),
-            event: "auth.logout",
-            outcome: AuditOutcome::Allow,
-            details: serde_json::json!({}),
-        },
-    )
-    .await?;
     let mut response = Json(serde_json::json!({"authenticated": false})).into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -398,7 +416,13 @@ pub async fn update_entity(
         scope_for_tenant(existing.tenant_id),
     )
     .await?;
-    let entity = repo::update_entity(&state.pool, id, req).await?;
+    let entity = crate::cache::invalidate::guarded_mutation(
+        state.cache.as_deref(),
+        crate::cache::CacheCategory::EntityStatus,
+        std::slice::from_ref(&crate::cache::keys::entity_status(id)),
+        || repo::update_entity(&state.pool, id, req),
+    )
+    .await?;
     Ok(Json(entity))
 }
 
@@ -417,7 +441,14 @@ pub async fn delete_entity(
         )
         .await?;
     }
-    repo::delete_entity(&state.pool, id, Some(auth.entity_id)).await?;
+    service::delete_entity(
+        &state.pool,
+        state.cache.as_deref(),
+        state.config.events.enabled(),
+        id,
+        Some(auth.entity_id),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -548,20 +579,31 @@ pub async fn revoke_credential(
         } else {
             require_credential_management(&state, &auth, entity_id).await?
         };
-    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-    service::revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
-    audit::commit_with_audit(
-        &state.pool,
-        tx,
-        state.config.events.enabled(),
-        &audit::AuditEvent {
-            actor_entity_id: Some(auth.entity_id),
-            tenant_id,
-            target_kind: Some("entity"),
-            target_id: Some(entity_id),
-            event: "credential.revoke",
-            outcome: AuditOutcome::Allow,
-            details: serde_json::json!({"credential_id": cred_id}),
+    // `revoke_credential` isn't kind-filtered — it can revoke an access-token
+    // credential too, not just password, so it must invalidate the same
+    // `atom:v1:credential:*` key `revoke_access_token` does.
+    crate::cache::invalidate::guarded_mutation(
+        state.cache.as_deref(),
+        crate::cache::CacheCategory::Credential,
+        std::slice::from_ref(&crate::cache::keys::credential(cred_id)),
+        || async {
+            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+            service::revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
+            audit::commit_with_audit(
+                &state.pool,
+                tx,
+                state.config.events.enabled(),
+                &audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: Some("entity"),
+                    target_id: Some(entity_id),
+                    event: "credential.revoke",
+                    outcome: AuditOutcome::Allow,
+                    details: serde_json::json!({"credential_id": cred_id}),
+                },
+            )
+            .await
         },
     )
     .await?;
@@ -770,7 +812,13 @@ pub async fn add_group_member(
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    repo::add_group_member(&state.pool, group_id, req.entity_id).await?;
+    crate::cache::invalidate::guarded_mutation(
+        state.cache.as_deref(),
+        crate::cache::CacheCategory::Grants,
+        std::slice::from_ref(&crate::cache::keys::grants(req.entity_id)),
+        || repo::add_group_member(&state.pool, group_id, req.entity_id),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -798,7 +846,13 @@ pub async fn remove_group_member(
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    repo::remove_group_member(&state.pool, group_id, entity_id).await?;
+    crate::cache::invalidate::guarded_mutation(
+        state.cache.as_deref(),
+        crate::cache::CacheCategory::Grants,
+        std::slice::from_ref(&crate::cache::keys::grants(entity_id)),
+        || repo::remove_group_member(&state.pool, group_id, entity_id),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

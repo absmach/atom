@@ -88,32 +88,55 @@ impl AuthMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
 
-        let mut tx = state
-            .pool
-            .begin()
-            .await
-            .map_err(|e| gql_error(crate::error::db_err(e)))?;
-        if let Some(session_id) = auth.session_id {
-            repo::revoke_session_in_tx(&mut tx, session_id)
+        let event = audit::AuditEvent {
+            actor_entity_id: Some(auth.entity_id),
+            tenant_id: auth.tenant_id,
+            target_kind: Some("entity"),
+            target_id: Some(auth.entity_id),
+            event: "auth.logout",
+            outcome: AuditOutcome::Allow,
+            details: serde_json::json!({}),
+        };
+
+        match auth.session_id {
+            Some(session_id) => {
+                // The barrier must span the revoke *and* its commit, not just
+                // the revoke: releasing it before `commit_with_audit`'s
+                // internal `tx.commit()` lets a concurrent reader load the
+                // still-uncommitted (pre-revoke) row from Postgres and
+                // repopulate the cache with it, right after the barrier
+                // that was supposed to block exactly that — see
+                // `src/cache/mod.rs`.
+                crate::cache::invalidate::guarded_mutation(
+                    state.cache.as_deref(),
+                    crate::cache::CacheCategory::Session,
+                    std::slice::from_ref(&crate::cache::keys::session(session_id)),
+                    || async {
+                        let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+                        repo::revoke_session_in_tx(&mut tx, session_id).await?;
+                        audit::commit_with_audit(
+                            &state.pool,
+                            tx,
+                            state.config.events.enabled(),
+                            &event,
+                        )
+                        .await
+                    },
+                )
                 .await
                 .map_err(gql_error)?;
+            }
+            None => {
+                let tx = state
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|e| gql_error(crate::error::db_err(e)))?;
+                audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
+                    .await
+                    .map_err(gql_error)?;
+            }
         }
-        audit::commit_with_audit(
-            &state.pool,
-            tx,
-            state.config.events.enabled(),
-            &audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: auth.tenant_id,
-                target_kind: Some("entity"),
-                target_id: Some(auth.entity_id),
-                event: "auth.logout",
-                outcome: AuditOutcome::Allow,
-                details: serde_json::json!({}),
-            },
-        )
-        .await
-        .map_err(gql_error)?;
 
         Ok(true)
     }
@@ -126,14 +149,33 @@ impl AuthMutation {
             ))
         })?;
         let state = ctx.data::<AppState>()?;
-        let keys = state.keys.read().await;
+        // Derive the signer under the read guard and release it immediately:
+        // cloning `LoadedKey` to escape the guard would put a copy of the raw
+        // PKCS8 private-key PEM on the heap for every refresh, dropped without
+        // zeroization. Holding the guard across the mutation instead would
+        // block key rotation for the length of a DB transaction.
+        let signer = {
+            let keys = state.keys.read().await;
+            crate::auth::JwtSigner::from_key(&keys.primary).map_err(gql_error)?
+        };
 
-        service::refresh_session(
-            &state.pool,
-            &state.config,
-            &keys.primary,
-            auth.entity_id,
-            session_id,
+        // Extends `expires_at` in place for the same session_id; without
+        // invalidating, a stale cached (shorter) expiry could cause a
+        // spurious "session expired" false-deny until the entry's own TTL
+        // catches up — not a security issue, but worth fixing.
+        crate::cache::invalidate::guarded_mutation(
+            state.cache.as_deref(),
+            crate::cache::CacheCategory::Session,
+            std::slice::from_ref(&crate::cache::keys::session(session_id)),
+            || {
+                service::refresh_session(
+                    &state.pool,
+                    &state.config,
+                    &signer,
+                    auth.entity_id,
+                    session_id,
+                )
+            },
         )
         .await
         .map(Into::into)
@@ -176,7 +218,8 @@ pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {
         | AppError::Forbidden
         | AppError::Conflict(_)
         | AppError::PayloadTooLarge(_)
-        | AppError::RateLimited { .. } => async_graphql::Error::new(err.to_string()),
+        | AppError::RateLimited { .. }
+        | AppError::ServiceUnavailable(_) => async_graphql::Error::new(err.to_string()),
     }
 }
 

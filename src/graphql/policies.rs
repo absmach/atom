@@ -468,12 +468,57 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::replace_role_permission_block_links_with_audit(
+            // The role's assignees (entity and group) are locked and
+            // enumerated together as one step — see
+            // `authz::repo::lock_role_and_collect_grants_keys` — so a
+            // concurrent `add_group_member` on one of its assigned groups
+            // can't commit a membership change this misses.
+            let Some(cache) = state.cache.as_deref() else {
+                authz_repo::replace_role_permission_block_links_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    role_id,
+                    &permission_block_ids,
+                )
+                .await?;
+                return Ok(tenant_id);
+            };
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                role_id,
-                &permission_block_ids,
+                |tx| {
+                    Box::pin(async move {
+                        authz_repo::lock_role_and_collect_grants_keys(tx, role_id).await
+                    })
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    let permission_block_ids = permission_block_ids.clone();
+                    Box::pin(async move {
+                        authz_repo::replace_role_permission_block_links_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            role_id,
+                            &permission_block_ids,
+                        )
+                        .await
+                    })
+                },
+                |_| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: None,
+                            target_kind: "role",
+                            target_id: Some(role_id),
+                            event: "role.permission_blocks.replace",
+                        },
+                        &serde_json::json!({ "permission_block_ids": permission_block_ids }),
+                    );
+                },
             )
             .await?;
             Ok(tenant_id)
@@ -520,12 +565,53 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::delete_role_with_audit(
+            // See `replace_role_permission_blocks` above for why the role
+            // and its assignees are locked (not just enumerated) together.
+            let Some(cache) = state.cache.as_deref() else {
+                authz_repo::delete_role_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    Some(auth.entity_id),
+                )
+                .await?;
+                return Ok(tenant_id);
+            };
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+                |tx| {
+                    Box::pin(
+                        async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
+                    )
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        authz_repo::delete_role_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
+                |_| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id,
+                            target_kind: "role",
+                            target_id: Some(id),
+                            event: "role.delete",
+                        },
+                        &details,
+                    );
+                },
             )
             .await?;
             Ok(tenant_id)
@@ -562,14 +648,78 @@ impl PolicyMutation {
         let details = serde_json::json!({});
         let result = async {
             require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
-            authz_repo::restore_role_with_audit(
+            // See `replace_role_permission_blocks` above for why the role
+            // and its assignees are locked (not just enumerated) together.
+            let Some(cache) = state.cache.as_deref() else {
+                return authz_repo::restore_role_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    Some(auth.entity_id),
+                )
+                .await;
+            };
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                Some(auth.entity_id),
+                |tx| {
+                    Box::pin(
+                        async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
+                    )
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        authz_repo::restore_role_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            Some(auth.entity_id),
+                        )
+                        .await
+                    })
+                },
+                |_| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: None,
+                            target_kind: "role",
+                            target_id: Some(id),
+                            event: "role.restore",
+                        },
+                        &details,
+                    );
+                },
             )
-            .await
+            .await?;
+            // Mirrors `restore_role_with_audit`'s own post-commit audit
+            // write (fire-and-forget, after the mutation durably commits) —
+            // see `audit::commit_with_audit`'s doc comment. Only needed on
+            // this locked path; the cache-disabled fallback above already
+            // gets it from `restore_role_with_audit` itself.
+            let tenant_id = authz_repo::get_role(&state.pool, id)
+                .await
+                .ok()
+                .and_then(|r| r.tenant_id);
+            audit::write(
+                &state.pool,
+                false,
+                audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id,
+                    target_kind: Some("role"),
+                    target_id: Some(id),
+                    event: "role.restore",
+                    outcome: crate::models::enums::AuditOutcome::Allow,
+                    details: serde_json::json!({}),
+                },
+            )
+            .await;
+            Ok(())
         }
         .await;
         if let Err(ref err) = result {
@@ -1041,18 +1191,87 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::create_role_assignment_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                CreateRoleAssignment {
-                    tenant_id,
-                    subject_kind,
-                    subject_id,
-                    role_id,
-                },
-            )
-            .await
+            let req = CreateRoleAssignment {
+                tenant_id,
+                subject_kind: subject_kind.clone(),
+                subject_id,
+                role_id,
+            };
+            match subject_kind {
+                crate::models::enums::SubjectKind::Entity => {
+                    let grants_keys = vec![crate::cache::keys::grants(subject_id)];
+                    crate::cache::invalidate::guarded_mutation(
+                        state.cache.as_deref(),
+                        crate::cache::CacheCategory::Grants,
+                        &grants_keys,
+                        || {
+                            authz_repo::create_role_assignment_with_audit(
+                                &state.pool,
+                                state.config.events.enabled(),
+                                Some(auth.entity_id),
+                                req,
+                            )
+                        },
+                    )
+                    .await
+                }
+                crate::models::enums::SubjectKind::Group => {
+                    let Some(cache) = state.cache.as_deref() else {
+                        return authz_repo::create_role_assignment_with_audit(
+                            &state.pool,
+                            state.config.events.enabled(),
+                            Some(auth.entity_id),
+                            req,
+                        )
+                        .await;
+                    };
+                    // Locks the role *before* `subject_id`'s group closure —
+                    // matching `replaceRolePermissionBlocks`/`deleteRole`/
+                    // `restoreRole`'s lock order exactly, since locking the
+                    // group first here (with the role locked later, inside
+                    // `create_role_assignment_in_tx`) can deadlock against
+                    // those paths. See
+                    // `authz::repo::lock_role_then_group_closure_and_collect_grants_keys`.
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
+                        &state.pool,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_role_then_group_closure_and_collect_grants_keys(
+                                    tx, role_id, subject_id,
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::create_role_assignment_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    req,
+                                )
+                                .await
+                            })
+                        },
+                        |assignment| {
+                            audit::log_observe_allow(
+                                &audit::AuditMeta {
+                                    actor_entity_id: Some(auth.entity_id),
+                                    tenant_id: assignment.tenant_id,
+                                    target_kind: "role_assignment",
+                                    target_id: Some(assignment.id),
+                                    event: "role_assignment.create",
+                                },
+                                &details,
+                            );
+                        },
+                    )
+                    .await
+                }
+            }
         }
         .await;
         if let Err(ref err) = result {
@@ -1090,13 +1309,76 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::delete_role_assignment_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-            )
-            .await?;
+            match assignment.subject_kind {
+                crate::models::enums::SubjectKind::Entity => {
+                    let grants_keys = vec![crate::cache::keys::grants(assignment.subject_id)];
+                    crate::cache::invalidate::guarded_mutation(
+                        state.cache.as_deref(),
+                        crate::cache::CacheCategory::Grants,
+                        &grants_keys,
+                        || {
+                            authz_repo::delete_role_assignment_with_audit(
+                                &state.pool,
+                                state.config.events.enabled(),
+                                Some(auth.entity_id),
+                                id,
+                            )
+                        },
+                    )
+                    .await?;
+                }
+                crate::models::enums::SubjectKind::Group => {
+                    let Some(cache) = state.cache.as_deref() else {
+                        authz_repo::delete_role_assignment_with_audit(
+                            &state.pool,
+                            state.config.events.enabled(),
+                            Some(auth.entity_id),
+                            id,
+                        )
+                        .await?;
+                        return Ok(tenant_id);
+                    };
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
+                        &state.pool,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_group_closures_and_collect_grants_keys(
+                                    tx,
+                                    &[assignment.subject_id],
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::delete_role_assignment_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    id,
+                                )
+                                .await
+                            })
+                        },
+                        |_| {
+                            audit::log_observe_allow(
+                                &audit::AuditMeta {
+                                    actor_entity_id: Some(auth.entity_id),
+                                    tenant_id,
+                                    target_kind: "role_assignment",
+                                    target_id: Some(id),
+                                    event: "role_assignment.delete",
+                                },
+                                &details,
+                            );
+                        },
+                    )
+                    .await?;
+                }
+            }
             Ok(tenant_id)
         }
         .await;
@@ -1140,18 +1422,81 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::create_direct_policy_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                CreateDirectPolicy {
-                    tenant_id,
-                    subject_kind,
-                    subject_id,
-                    permission_block_id,
-                },
-            )
-            .await
+            let req = CreateDirectPolicy {
+                tenant_id,
+                subject_kind: subject_kind.clone(),
+                subject_id,
+                permission_block_id,
+            };
+            match subject_kind {
+                crate::models::enums::SubjectKind::Entity => {
+                    let grants_keys = vec![crate::cache::keys::grants(subject_id)];
+                    crate::cache::invalidate::guarded_mutation(
+                        state.cache.as_deref(),
+                        crate::cache::CacheCategory::Grants,
+                        &grants_keys,
+                        || {
+                            authz_repo::create_direct_policy_with_audit(
+                                &state.pool,
+                                state.config.events.enabled(),
+                                Some(auth.entity_id),
+                                req,
+                            )
+                        },
+                    )
+                    .await
+                }
+                crate::models::enums::SubjectKind::Group => {
+                    let Some(cache) = state.cache.as_deref() else {
+                        return authz_repo::create_direct_policy_with_audit(
+                            &state.pool,
+                            state.config.events.enabled(),
+                            Some(auth.entity_id),
+                            req,
+                        )
+                        .await;
+                    };
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
+                        &state.pool,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_group_closures_and_collect_grants_keys(
+                                    tx,
+                                    &[subject_id],
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::create_direct_policy_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    req,
+                                )
+                                .await
+                            })
+                        },
+                        |policy| {
+                            audit::log_observe_allow(
+                                &audit::AuditMeta {
+                                    actor_entity_id: Some(auth.entity_id),
+                                    tenant_id: policy.tenant_id,
+                                    target_kind: "direct_policy",
+                                    target_id: Some(policy.id),
+                                    event: "direct_policy.create",
+                                },
+                                &details,
+                            );
+                        },
+                    )
+                    .await
+                }
+            }
         }
         .await;
         if let Err(ref err) = result {
@@ -1189,13 +1534,76 @@ impl PolicyMutation {
                 scope_for_tenant(tenant_id),
             )
             .await?;
-            authz_repo::delete_direct_policy_with_audit(
-                &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-            )
-            .await?;
+            match policy.subject_kind {
+                crate::models::enums::SubjectKind::Entity => {
+                    let grants_keys = vec![crate::cache::keys::grants(policy.subject_id)];
+                    crate::cache::invalidate::guarded_mutation(
+                        state.cache.as_deref(),
+                        crate::cache::CacheCategory::Grants,
+                        &grants_keys,
+                        || {
+                            authz_repo::delete_direct_policy_with_audit(
+                                &state.pool,
+                                state.config.events.enabled(),
+                                Some(auth.entity_id),
+                                id,
+                            )
+                        },
+                    )
+                    .await?;
+                }
+                crate::models::enums::SubjectKind::Group => {
+                    let Some(cache) = state.cache.as_deref() else {
+                        authz_repo::delete_direct_policy_with_audit(
+                            &state.pool,
+                            state.config.events.enabled(),
+                            Some(auth.entity_id),
+                            id,
+                        )
+                        .await?;
+                        return Ok(tenant_id);
+                    };
+                    crate::cache::invalidate::guarded_tx_mutation(
+                        cache,
+                        crate::cache::CacheCategory::Grants,
+                        &state.pool,
+                        |tx| {
+                            Box::pin(async move {
+                                authz_repo::lock_group_closures_and_collect_grants_keys(
+                                    tx,
+                                    &[policy.subject_id],
+                                )
+                                .await
+                            })
+                        },
+                        |tx| {
+                            let events_enabled = state.config.events.enabled();
+                            Box::pin(async move {
+                                authz_repo::delete_direct_policy_in_tx(
+                                    tx,
+                                    events_enabled,
+                                    Some(auth.entity_id),
+                                    id,
+                                )
+                                .await
+                            })
+                        },
+                        |_| {
+                            audit::log_observe_allow(
+                                &audit::AuditMeta {
+                                    actor_entity_id: Some(auth.entity_id),
+                                    tenant_id,
+                                    target_kind: "direct_policy",
+                                    target_id: Some(id),
+                                    event: "direct_policy.delete",
+                                },
+                                &details,
+                            );
+                        },
+                    )
+                    .await?;
+                }
+            }
             Ok(tenant_id)
         }
         .await;

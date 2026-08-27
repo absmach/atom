@@ -433,6 +433,7 @@ fn public_error_code(error: &AppError) -> &'static str {
         AppError::Unauthorized(_) | AppError::Forbidden => "forbidden",
         AppError::Conflict(_) => "conflict",
         AppError::RateLimited { .. } => "rate_limited",
+        AppError::ServiceUnavailable(_) => "service_unavailable",
         AppError::Database(_) | AppError::Internal(_) => "internal",
     }
 }
