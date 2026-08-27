@@ -689,9 +689,6 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
-    if !revoked_certificates.is_empty() {
-        crate::certs::repo::mark_crl_dirty_tx(tx).await?;
-    }
 
     sqlx::query(
         "UPDATE sessions SET revoked_at = now()

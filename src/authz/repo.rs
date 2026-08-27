@@ -4392,51 +4392,6 @@ pub async fn create_role_assignment(
     create_role_assignment_with_audit(pool, false, None, req).await
 }
 
-pub async fn delete_role_assignment_with_audit(
-    pool: &PgPool,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "role_assignments", id).await?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let assignment_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_err)?;
-    let Some(tenant_id) = assignment_tenant_id else {
-        return Err(AppError::not_found(format!(
-            "role assignment {id} not found"
-        )));
-    };
-    let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::not_found(format!(
-            "role assignment {id} not found"
-        )));
-    }
-    let meta = crate::audit::AuditMeta {
-        actor_entity_id: actor_id,
-        tenant_id,
-        target_kind: "role_assignment",
-        target_id: Some(id),
-        event: "role_assignment.delete",
-    };
-    let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    Ok(())
-}
-
-pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    delete_role_assignment_with_audit(pool, false, None, id).await
-}
-
 /// Returns `true` when a new assignment row was actually inserted, so callers
 /// can tell a real state change from an idempotent no-op and decide whether the
 /// operation is worth publishing as a domain event.

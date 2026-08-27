@@ -542,7 +542,7 @@ async fn subject_entity_kinds(
                SELECT DISTINCT e.kind
                FROM group_members gm
                JOIN entities e ON e.id = gm.entity_id
-               WHERE gm.group_id IN (SELECT group_id FROM subject_groups)"#
+               WHERE gm.group_id IN (SELECT group_id FROM subject_groups)"#,
         )
         .bind(subject_id)
         .fetch_all(&mut *conn)

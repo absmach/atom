@@ -53,7 +53,7 @@ async fn state_with_cache(pool: PgPool) -> (AppState, Arc<CacheClient>) {
     let active_keys = atom::keys::rotate(&pool, &cfg.signing_keys)
         .await
         .expect("rotate test signing key");
-    let state = AppState::new(pool, cfg, active_keys, None, Some(cache_client().await));
+    let state = AppState::new(pool, cfg, active_keys, Some(cache_client().await));
     let cache = state.cache.clone().expect("cache configured");
     (state, cache)
 }

@@ -1190,9 +1190,6 @@ pub async fn deactivate_and_finish_entity_deletion_in_tx(
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
-    if !revoked_certificates.is_empty() {
-        crate::certs::repo::mark_crl_dirty_tx(tx).await?;
-    }
     sqlx::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )
@@ -2157,94 +2154,6 @@ pub async fn list_child_groups(
             order: Default::default(),
             dir: Default::default(),
         },
-    )
-    .await
-}
-
-pub async fn update_group_with_audit(
-    pool: &PgPool,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-    req: UpdateGroup,
-    event_name: &str,
-    audit_details: Value,
-) -> Result<Group, AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "groups", id).await?;
-    let attributes = req.attributes.clone().map(normalize_attributes);
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_err)?;
-    let Some(tenant_id) = tenant_id else {
-        return Err(AppError::not_found(format!("group {id} not found")));
-    };
-    crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
-    let group = sqlx::query_as::<_, Group>(
-        r#"WITH p AS (
-             UPDATE principal_groups
-             SET name        = COALESCE($2, name),
-                 description = COALESCE($3, description),
-                 status      = COALESCE($4, status),
-                 attributes  = COALESCE($5, attributes),
-                 updated_at  = now()
-             WHERE id = $1 AND deleted_at IS NULL
-             RETURNING id, name, tenant_id, 'principal'::text AS group_type, description,
-                       (SELECT parent_id FROM principal_group_hierarchy WHERE child_id = principal_groups.id) AS parent_id,
-                       status, attributes, deleted_at, deleted_by, created_at, updated_at
-           ),
-           o AS (
-             UPDATE object_groups
-             SET name        = COALESCE($2, name),
-                 description = COALESCE($3, description),
-                 status      = COALESCE($4, status),
-                 attributes  = COALESCE($5, attributes),
-                 updated_at  = now()
-             WHERE id = $1 AND deleted_at IS NULL
-             RETURNING id, name, tenant_id, 'object'::text AS group_type, description,
-                       (SELECT parent_id FROM object_group_hierarchy WHERE child_id = object_groups.id) AS parent_id,
-                       status, attributes, deleted_at, deleted_by, created_at, updated_at
-           )
-           SELECT * FROM p
-           UNION ALL
-           SELECT * FROM o"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.description)
-    .bind(req.status)
-    .bind(attributes)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("group {id} not found")),
-        other => AppError::Database(other),
-    })?;
-
-    let meta = crate::audit::AuditMeta {
-        actor_entity_id: actor_id,
-        tenant_id: group.tenant_id,
-        target_kind: "group",
-        target_id: Some(id),
-        event: event_name,
-    };
-    let details = audit_details;
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    Ok(group)
-}
-
-pub async fn update_group(pool: &PgPool, id: Uuid, req: UpdateGroup) -> Result<Group, AppError> {
-    update_group_with_audit(
-        pool,
-        false,
-        None,
-        id,
-        req,
-        "group.update",
-        serde_json::json!({}),
     )
     .await
 }

@@ -48,6 +48,7 @@ pub(crate) fn test_state_without_database() -> crate::state::AppState {
             primary,
             standby: None,
         },
+        None,
     )
 }
 
