@@ -25,7 +25,11 @@ fi
 
 ref="$(tr -d '[:space:]' <"${REF_FILE}")"
 if [[ -z "${ref}" ]]; then
-  echo "error: ${REF_FILE} is empty; it must name a branch, tag, or commit" >&2
+  echo "error: ${REF_FILE} is empty; it must name a full commit SHA" >&2
+  exit 2
+fi
+if [[ ! "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "error: ${REF_FILE} must contain an immutable 40-character lowercase commit SHA" >&2
   exit 2
 fi
 

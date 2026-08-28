@@ -69,7 +69,10 @@ Atom stores security state in Postgres. All primary keys are UUIDs. Most objects
 | `role_assignments` | Gives a role to an entity or principal group. |
 | `direct_policies` | Gives one permission block directly to an entity or principal group. |
 | `audit_logs` | Immutable history of security-relevant events. |
-| `certificate_crl_state` | Cached CRL state for the active mounted certificate issuer. |
+| `pki_authorities` | Managed roots, platform intermediates, platform leaf issuers, and tenant intermediates. |
+| `certificate_profiles` | Reusable leaf issuance and renewal policy. |
+| `certificate_revocations` | Immutable revocation evidence for exact certificate credentials. |
+| `certificate_crl_state` | Cached CRL state for each managed issuer. |
 
 ## Aliases
 
@@ -136,17 +139,32 @@ The authorization model is split deliberately:
 This keeps scope and actions in one place: the permission block.
 
 The canonical protected object kinds are `entity`, `resource`, `group`,
-`tenant`, `role`, `policy`, `credential`, `audit_log`, and `signing_key`.
+`tenant`, `role`, `policy`, `credential`, `api_endpoint`, `audit_log`, and
+`signing_key`.
 Sub-kinds are stored with a kind prefix, such as `entity:device` and
 `resource:channel`, so authorization checks, audit logs, and explain output use
 the same values.
 
+Exact-object scopes store a UUID, so every UUID-addressable protected object
+shares one database-enforced namespace. The registry covers tenants, entities,
+resources, principal and object groups, roles, credentials, direct policies,
+role assignments, and custom API endpoints. Soft-deleted objects retain their
+reservation until physical purge. This prevents an exact grant for one kind
+from matching a different kind that happened to reuse the same UUID. Profiles
+and individual audit-log rows are not exact-object targets; signing keys use a
+textual `kid` and stay platform-scoped.
+
 ## Certificate State
 
-Atom does not store CA certificates or CA private keys in Postgres in file issuer mode. CA files are mounted into the container and loaded during startup.
+Atom stores every managed authority certificate and its lifecycle state in
+Postgres. Managed CA private keys are envelope-encrypted in Postgres by default;
+an authority can instead store an opaque reference to a non-exportable PKCS#11
+key. The production root private key remains offline and is never accepted by
+Atom.
 
-Postgres stores only issued certificate lifecycle state:
+Postgres stores certificate lifecycle state including:
 
+- authority rows in `pki_authorities`;
 - issued certificate rows in `credentials`;
-- revocation data in certificate credential metadata;
-- cached CRL bytes and CRL number in `certificate_crl_state`.
+- immutable revocation rows in `certificate_revocations`;
+- cached per-issuer CRL bytes and CRL numbers in `certificate_crl_state`.

@@ -243,3 +243,99 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
         .expect_err("role link guardrail rejected");
     assert!(matches!(role_link, AppError::BadRequest(_)));
 }
+
+#[tokio::test]
+#[ignore]
+async fn inactive_subject_cannot_receive_role_or_direct_grants() {
+    let p = common::pool().await;
+    let tenant_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+        .bind(tenant_id)
+        .bind(format!("m16-inactive-tenant-{tenant_id}"))
+        .execute(&p)
+        .await
+        .expect("insert tenant");
+
+    let subject_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'inactive')",
+    )
+    .bind(subject_id)
+    .bind(format!("m16-inactive-subject-{subject_id}"))
+    .bind(tenant_id)
+    .execute(&p)
+    .await
+    .expect("insert inactive subject");
+
+    let role = repo::create_role(
+        &p,
+        CreateRole {
+            name: format!("m16-inactive-role-{}", uuid::Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("create role");
+    let role_err = repo::create_role_assignment(
+        &p,
+        CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id,
+            role_id: role.id,
+        },
+    )
+    .await
+    .expect_err("inactive subject role assignment rejected");
+    assert!(matches!(role_err, AppError::BadRequest(_)));
+
+    let manage_action_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
+            .fetch_one(&p)
+            .await
+            .expect("manage action");
+    let block = repo::create_permission_block(
+        &p,
+        CreatePermissionBlock {
+            tenant_id: Some(tenant_id),
+            scope_mode: "tenant".into(),
+            object_kind: None,
+            object_type: None,
+            object_id: None,
+            group_id: None,
+            effect: Effect::Allow,
+            conditions: serde_json::json!({}),
+            action_ids: vec![manage_action_id],
+        },
+    )
+    .await
+    .expect("create permission block");
+    let policy_err = repo::create_direct_policy(
+        &p,
+        CreateDirectPolicy {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id,
+            permission_block_id: block.id,
+        },
+    )
+    .await
+    .expect_err("inactive subject direct policy rejected");
+    assert!(matches!(policy_err, AppError::BadRequest(_)));
+
+    let assignment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM role_assignments WHERE subject_id = $1")
+            .bind(subject_id)
+            .fetch_one(&p)
+            .await
+            .expect("count role assignments");
+    let policy_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1")
+            .bind(subject_id)
+            .fetch_one(&p)
+            .await
+            .expect("count direct policies");
+    assert_eq!(assignment_count, 0);
+    assert_eq!(policy_count, 0);
+}

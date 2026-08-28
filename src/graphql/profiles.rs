@@ -1,7 +1,11 @@
 use async_graphql::{Context, Object, Result, ID};
 use serde_json::json;
+use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::{
+    auth::AuthContext,
+    error::{db_err, AppError},
     identity::profile_repo,
     models::profile::{
         CreateProfile, CreateProfileVersion, ListProfiles, UpdateProfile, UpdateProfileVersion,
@@ -10,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    auth::{gql_error, require_auth, require_list_access, require_read_access, scope_for_tenant},
+    auth::{gql_error, require_auth, require_list_access, scope_for_tenant},
     types::{
         parse_id, parse_optional_id, CreateProfileInput, CreateProfileVersionInput, Profile,
         ProfileList, ProfileVersion, UpdateProfileInput, UpdateProfileVersionInput,
@@ -62,10 +66,21 @@ impl ProfileQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
+        require_profile_target_access(
+            &state.pool,
+            &auth,
+            profile_tenant_target(&state.pool, id)
+                .await
+                .map_err(gql_error)?,
+            id,
+            "profile",
+            &["read", "manage"],
+        )
+        .await
+        .map_err(gql_error)?;
         let profile = profile_repo::get_profile(&state.pool, id)
             .await
             .map_err(gql_error)?;
-        require_read_access(&state.pool, &auth, profile.tenant_id, id).await?;
         Ok(profile.into())
     }
 
@@ -77,10 +92,18 @@ impl ProfileQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let profile_id = parse_id(profile_id, "profileId")?;
-        let profile = profile_repo::get_profile(&state.pool, profile_id)
-            .await
-            .map_err(gql_error)?;
-        require_read_access(&state.pool, &auth, profile.tenant_id, profile_id).await?;
+        require_profile_target_access(
+            &state.pool,
+            &auth,
+            profile_tenant_target(&state.pool, profile_id)
+                .await
+                .map_err(gql_error)?,
+            profile_id,
+            "profile",
+            &["read", "manage"],
+        )
+        .await
+        .map_err(gql_error)?;
         let versions = profile_repo::list_profile_versions(&state.pool, profile_id)
             .await
             .map_err(gql_error)?;
@@ -158,24 +181,25 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let profile_id = parse_id(profile_id, "profileId")?;
-        let profile = profile_repo::get_profile(&state.pool, profile_id)
+        let target = profile_tenant_target(&state.pool, profile_id)
             .await
             .map_err(gql_error)?;
+        let tenant_id = target.flatten();
         let result = async {
-            crate::auth::require_any_capability(
+            require_profile_target_access(
                 &state.pool,
                 &auth,
-                &[
-                    ("manage", scope_for_tenant(profile.tenant_id)),
-                    ("write", scope_for_tenant(profile.tenant_id)),
-                ],
+                target,
+                profile_id,
+                "profile",
+                &["manage", "write"],
             )
             .await?;
             profile_repo::create_profile_version_with_audit(
                 &state.pool,
                 state.config.events.enabled(),
                 Some(auth.entity_id),
-                profile.tenant_id,
+                tenant_id,
                 profile_id,
                 CreateProfileVersion {
                     version: input.version,
@@ -194,7 +218,7 @@ impl ProfileMutation {
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
-                    tenant_id: profile.tenant_id,
+                    tenant_id,
                     target_kind: "profile_version",
                     target_id: None,
                     event: "profile_version.create",
@@ -217,19 +241,20 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = profile_repo::get_profile(&state.pool, id)
+        let target = profile_tenant_target(&state.pool, id)
             .await
             .map_err(gql_error)?;
+        let tenant_id = target.flatten();
         validate_profile_status(input.status.as_deref())?;
 
         let result = async {
-            crate::auth::require_any_capability(
+            require_profile_target_access(
                 &state.pool,
                 &auth,
-                &[
-                    ("manage", scope_for_tenant(existing.tenant_id)),
-                    ("write", scope_for_tenant(existing.tenant_id)),
-                ],
+                target,
+                id,
+                "profile",
+                &["manage", "write"],
             )
             .await?;
             profile_repo::update_profile_with_audit(
@@ -253,7 +278,7 @@ impl ProfileMutation {
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
-                    tenant_id: existing.tenant_id,
+                    tenant_id,
                     target_kind: "profile",
                     target_id: Some(id),
                     event: "profile.update",
@@ -278,29 +303,28 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = profile_repo::get_profile_version(&state.pool, id)
+        let target = profile_version_tenant_target(&state.pool, id)
             .await
             .map_err(gql_error)?;
-        let profile = profile_repo::get_profile(&state.pool, existing.profile_id)
-            .await
-            .map_err(gql_error)?;
+        let tenant_id = target.and_then(|(_, tenant_id)| tenant_id);
+        let profile_id = target.map(|(profile_id, _)| profile_id);
         validate_profile_version_status(input.status.as_deref())?;
 
         let result = async {
-            crate::auth::require_any_capability(
+            require_profile_target_access(
                 &state.pool,
                 &auth,
-                &[
-                    ("manage", scope_for_tenant(profile.tenant_id)),
-                    ("write", scope_for_tenant(profile.tenant_id)),
-                ],
+                target.map(|(_, tenant_id)| tenant_id),
+                id,
+                "profile version",
+                &["manage", "write"],
             )
             .await?;
             profile_repo::update_profile_version_with_audit(
                 &state.pool,
                 state.config.events.enabled(),
                 Some(auth.entity_id),
-                profile.tenant_id,
+                tenant_id,
                 id,
                 UpdateProfileVersion {
                     json_schema: None,
@@ -318,12 +342,12 @@ impl ProfileMutation {
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
-                    tenant_id: profile.tenant_id,
+                    tenant_id,
                     target_kind: "profile_version",
                     target_id: Some(id),
                     event: "profile_version.update",
                 },
-                &json!({ "profile_id": profile.id }),
+                &json!({ "profile_id": profile_id }),
                 err,
             )
             .await;
@@ -331,6 +355,58 @@ impl ProfileMutation {
 
         result.map(Into::into).map_err(gql_error)
     }
+}
+
+/// Resolve only the tenant boundary needed for the non-exact profile gate.
+/// The caller must pass the outer `Option` to `require_profile_target_access`
+/// before returning a row or a not-found error, so an unauthorized caller
+/// cannot distinguish a missing id from a profile in another tenant.
+async fn profile_tenant_target(
+    pool: &PgPool,
+    id: Uuid,
+) -> std::result::Result<Option<Option<Uuid>>, AppError> {
+    sqlx::query_scalar("SELECT tenant_id FROM profiles WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_err)
+}
+
+async fn profile_version_tenant_target(
+    pool: &PgPool,
+    id: Uuid,
+) -> std::result::Result<Option<(Uuid, Option<Uuid>)>, AppError> {
+    sqlx::query_as(
+        r#"SELECT version.profile_id, profile.tenant_id
+           FROM profile_versions version
+           JOIN profiles profile ON profile.id = version.profile_id
+           WHERE version.id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+async fn require_profile_target_access(
+    pool: &PgPool,
+    auth: &AuthContext,
+    target: Option<Option<Uuid>>,
+    id: Uuid,
+    label: &str,
+    actions: &[&str],
+) -> std::result::Result<Option<Uuid>, AppError> {
+    let tenant_id = target.flatten();
+    let scope = scope_for_tenant(tenant_id);
+    let checks = actions
+        .iter()
+        .map(|action| (*action, scope))
+        .collect::<Vec<_>>();
+    crate::auth::require_any_capability(pool, auth, &checks).await?;
+    if target.is_none() {
+        return Err(AppError::not_found(format!("{label} {id} not found")));
+    }
+    Ok(tenant_id)
 }
 
 fn validate_profile_status(status: Option<&str>) -> Result<()> {

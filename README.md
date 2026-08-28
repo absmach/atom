@@ -153,8 +153,8 @@ defaults, then start the stack:
 
 ```bash
 # 1. Create your local config — admin login `admin` / `12345678`, password
-#    login allowed before email verification, certificates disabled, so a
-#    fresh copy boots with no SMTP, OAuth, or CA setup.
+#    login allowed before email verification, and public certificate enrollment
+#    disabled, so a fresh copy boots without SMTP or OAuth setup.
 cat > .env <<'EOF'
 COMPOSE_PROJECT_NAME=atom-local
 
@@ -166,9 +166,12 @@ ADMIN_SECRET=12345678
 ATOM_MIN_PASSWORD_CHARS=8
 ATOM_KEY_ENCRYPTION_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
 ATOM_KEY_ENCRYPTION_KEY_ID=local:v1
+ATOM_PKI_CA_KEY_ENCRYPTION_KEY=YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=
+ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID=local:pki:v1
 ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS=false
 
-ATOM_CERTS_ENABLED=false
+ATOM_PKI_ENROLLMENT_ENABLED=false
+ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED=false
 ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN=true
 
 # Demo config-file bootstrap + external policy callouts. Values are host
@@ -379,34 +382,31 @@ The dev UI reads the backend GraphQL endpoint from `ATOM_GRAPHQL_URL`
 (server-side). Browser origins `:3000` and `:3005` are already allowed by the
 default `ATOM_CORS_ALLOWED_ORIGINS`.
 
-### Certificates (optional)
+### Managed certificates
 
-Certificates are off by default for local dev. To enable the legacy v1 PKI
-endpoints (`GET /certs/ca-chain`, `GET /certs/crl`, `POST /certs/ocsp`), generate
-a local root CA and flip the cert vars in `.env`:
+Atom stores every CA in its managed authority registry. Root and platform
+intermediate bootstrap is configuration-only: Atom imports a public root
+certificate and a pre-signed platform intermediate certificate plus its key.
+The production root private key stays offline and is never supplied to Atom.
 
-```bash
-mkdir -p certs
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout certs/root-ca.key -out certs/root-ca.crt -days 3650 \
-  -subj "/CN=Atom Dev Root CA" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign"
+For the local Compose stack, `make up` runs the idempotent
+`make pki-material` helper. It creates local demo material under `./certs` and
+writes these container paths to `.env`:
 
-# in .env:
-#   ATOM_CERTS_ENABLED=true
-#   ATOM_CERTS_CA_MODE=file_root_issuer
-#   ATOM_CERTS_ROOT_CA_CERT_PATH=/certs/root-ca.crt   (host: ./certs/root-ca.crt for cargo run)
-#   ATOM_CERTS_ROOT_CA_KEY_PATH=/certs/root-ca.key
+```dotenv
+ATOM_PKI_ROOT_CERT_PATH=/certs/pki-root.pem
+ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH=/certs/pki-platform-intermediate.pem
+ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH=/certs/pki-platform-intermediate.key
 ```
 
-Compose mounts `./certs` at `/certs:ro`; a host `cargo run` reads the files
-directly, so use `./certs/...` paths there. The legacy production mode uses
-`ATOM_CERTS_CA_MODE=file_intermediate_issuer` with read-only files. The managed
-authority registry instead imports only the root certificate and publishes its
-dynamic trust set at `GET /certs/trust-bundle.pem`. Managed CA keys may be
-envelope-encrypted in Postgres or generated as non-exportable PKCS#11 token
-objects; Atom never accepts a production root private key.
+Compose mounts the host directory selected by `ATOM_PKI_CERTS_DIR` (default
+`./certs`) at `/certs:ro`. For a host `cargo run`, use host paths such as
+`./certs/pki-root.pem` instead. Atom wraps managed CA private keys with the
+dedicated `ATOM_PKI_CA_KEY_ENCRYPTION_KEY`, or creates non-exportable keys in a
+configured PKCS#11 token. The public trust set is
+`GET /certs/trust-bundle.pem`; revocation artifacts are issuer-specific at
+`/certs/issuers/:issuer_id/{crl,ocsp}`. See the
+[certificate architecture and bootstrap guide](product-docs/12-certificates.md).
 
 ### Metrics
 
@@ -445,7 +445,7 @@ the gRPC listener to a private network or service mesh that supplies transport
 security.
 
 For server-side TLS, place the PEM certificate chain and matching private key
-under the host directory configured by `ATOM_CERTS_CA_DIR` (default
+under the host directory configured by `ATOM_PKI_CERTS_DIR` (default
 `./certs`). Compose already mounts that directory read-only at `/certs`:
 
 ```dotenv
@@ -490,6 +490,13 @@ grpcurl -cacert certs/root-ca.crt -cert certs/grpc-client.crt -key certs/grpc-cl
 For a host `cargo run`, use host paths such as
 `ATOM_GRPC_TLS_CERT_PATH=./certs/grpc-server.crt`; `/certs/...` paths apply
 inside the Compose containers.
+
+The broker-auth callout has no bearer credential for authenticating the broker
+itself. Enabling `ATOM_BROKER_AUTH_ENABLED=true` therefore requires all three
+gRPC TLS paths above and fails startup unless client-certificate verification is
+active. Use a dedicated client CA that signs broker peers only; every certificate
+issued by `ATOM_GRPC_TLS_CLIENT_CA_PATH` is trusted to reach the shared gRPC
+listener.
 
 ### Email templates
 
@@ -761,6 +768,10 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_GRPC_TLS_CERT_PATH`                                                                                                      | *(unset)*                                            | PEM server certificate chain; set with `ATOM_GRPC_TLS_KEY_PATH` to enable gRPC TLS      |
 | `ATOM_GRPC_TLS_KEY_PATH`                                                                                                       | *(unset)*                                            | PEM server private key; setting only one TLS cert/key path fails startup                |
 | `ATOM_GRPC_TLS_CLIENT_CA_PATH`                                                                                                 | *(unset)*                                            | PEM client CA bundle; requires server cert/key and enables mandatory mTLS               |
+| `ATOM_BROKER_AUTH_ENABLED`                                                                                                     | `false`                                              | Mount the broker auth callout; requires gRPC mTLS and should use a dedicated broker-client CA |
+| `ATOM_BROKER_TOPIC_TEMPLATE` / `ATOM_BROKER_TOPIC_REF`                                                                         | `{resource}/#` / `alias`                             | Topic-to-object templates and whether bound object references use `alias` or `uuid`     |
+| `ATOM_BROKER_CREDENTIAL_KIND`                                                                                                  | `password`                                           | Broker CONNECT credential kind: `password` or `shared_key`                              |
+| `ATOM_BROKER_TOPIC_ALLOW`                                                                                                      | *(empty)*                                            | MQTT filters allowed without PDP lookup; keep this narrowly scoped                      |
 | `ATOM_PKI_ENROLLMENT_ENABLED`                                                                                                 | `false`                                              | Enables the dedicated native and RFC 7030 EST enrollment TLS listener                  |
 | `ATOM_PKI_ENROLLMENT_LISTEN_ADDR`                                                                                             | `0.0.0.0:8443`                                       | Enrollment bind address; this is a public machine-facing surface                        |
 | `ATOM_PKI_ENROLLMENT_TLS_CERT_PATH` / `ATOM_PKI_ENROLLMENT_TLS_KEY_PATH`                                                      | *(unset)*                                            | Required server cert/key pair when enrollment is enabled; TLS terminates in Atom        |
@@ -776,6 +787,10 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_DB_MAX_CONNECTIONS` / `ATOM_DB_MIN_CONNECTIONS`                                                                          | `20` / `0`                                           | Postgres pool size controls                                                             |
 | `ATOM_DB_ACQUIRE_TIMEOUT_SECS` / `ATOM_DB_CONNECT_TIMEOUT_SECS`                                                                | `30` / `10`                                          | Pool acquire and startup connect timeouts                                               |
 | `ATOM_DB_IDLE_TIMEOUT_SECS` / `ATOM_DB_MAX_LIFETIME_SECS`                                                                      | `600` / `1800`                                       | Pool idle and lifetime limits                                                           |
+| `ATOM_CACHE_MODE` / `ATOM_CACHE_REDIS_URL`                                                                                     | `disabled` / *(unset)*                               | `prepare` runs write barriers only; `enabled` also serves cached auth inputs            |
+| `ATOM_CACHE_NAMESPACE`                                                                                                         | *(required when configured)*                         | Deployment/database-unique Redis key prefix                                              |
+| `ATOM_CACHE_INITIALIZE_NAMESPACE`                                                                                              | `false`                                              | One-startup initializer for a new/empty namespace; use only after a full Atom fleet drain, then unset |
+| `ATOM_CACHE_FAIL_FAST_ON_STARTUP`                                                                                              | `false`                                              | Abort instead of starting unready when Redis or its namespace safety checks fail         |
 | `ATOM_HTTP_MAX_CONNECTIONS` / `ATOM_HTTP_MAX_CONNECTIONS_PER_IP`                                                              | `1024` / `1024`                                      | Primary HTTP global and TCP-peer connection caps; lower the per-IP cap only for direct exposure |
 | `ATOM_HTTP_HEADER_TIMEOUT_SECS` / `ATOM_HTTP_REQUEST_TIMEOUT_SECS`                                                             | `10` / `30`                                          | Primary HTTP header-read and total request deadlines                                    |
 | `ATOM_HTTP_CONNECTION_TIMEOUT_SECS` / `ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS`                                                  | `300` / `30`                                         | Primary HTTP connection lifetime and graceful-shutdown drain deadline                  |
@@ -821,7 +836,6 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_SELF_REGISTRATION_ENABLED`                                                                                               | `true`                                               | Enables unauthenticated global human self-registration                                  |
 | `ATOM_UI_REGISTRATION_ENABLED`                                                                                                 | `true`                                               | UI service only; exposes `/register` and the login-page signup link                     |
 | `ATOM_UI_FORWARD_CLIENT_IP_HEADERS`                                                                                            | `false`                                              | UI service only; forwards client IP headers to Atom proxy calls when explicitly enabled |
-| `ATOM_SIGNUP_ENABLED`                                                                                                          | *(legacy alias)*                                     | Backward-compatible alias for `ATOM_SELF_REGISTRATION_ENABLED`                          |
 | `ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN`                                                                                            | `false`                                              | Development-only password login before email verification                               |
 | `ATOM_PUBLIC_BASE_URL`                                                                                                         | `http://localhost:8080`                              | Public URL used for issuer and redirect defaults; set it explicitly before issuing certificates so CRL/AIA URLs are embedded |
 | `ATOM_EMAIL_VERIFICATION_REDIRECT`                                                                                             | `http://localhost:8080/auth/email/verify`            | URL that verifies email tokens                                                          |
@@ -838,26 +852,35 @@ See the Quick Start above for a working `.env` starting point. Below are the mai
 | `ATOM_SMTP_PORT` / `ATOM_SMTP_TLS`                                                                                             | `587` / `starttls`                                   | SMTP port and TLS mode                                                                  |
 | `ATOM_SMTP_USERNAME` / `ATOM_SMTP_PASSWORD`                                                                                    | *(optional)*                                         | SMTP credentials                                                                        |
 | `ATOM_EMAIL_TEMPLATES_DIR`                                                                                                     | *(unset; `/email-templates` in Compose)*             | Directory checked first (per-file) for email template overrides, see [Email templates](#email-templates) |
-| `ATOM_CERTS_ENABLED`                                                                                                           | `true`                                               | Enables certificate lifecycle support                                                   |
-| `ATOM_CERTS_CA_MODE`                                                                                                           | `file_intermediate_issuer`                           | CA mode: `file_intermediate_issuer` or `file_root_issuer`                               |
-| `ATOM_CERTS_ROOT_CA_CERT_PATH`                                                                                                 | *(optional)*                                         | Mounted root CA certificate path                                                        |
-| `ATOM_CERTS_INTERMEDIATE_CA_CERT_PATH`                                                                                         | *(optional)*                                         | Mounted intermediate CA certificate path                                                |
-| `ATOM_CERTS_INTERMEDIATE_CA_KEY_PATH`                                                                                          | *(optional)*                                         | Mounted intermediate CA private key path                                                |
-| `ATOM_CERTS_ROOT_CA_KEY_PATH`                                                                                                  | *(optional)*                                         | Mounted root CA private key path for `file_root_issuer`                                 |
-| `ATOM_CERTS_LEAF_DEFAULT_TTL_SECS`                                                                                             | `2592000`                                            | Default issued certificate lifetime                                                     |
-| `ATOM_CERTS_LEAF_MAX_TTL_SECS`                                                                                                 | `2592000`                                            | Maximum issued certificate lifetime                                                     |
+| `ATOM_PKI_ROOT_CERT_PATH`                                                                                                      | *(unset)*                                            | PEM root certificate imported idempotently at startup; the root private key stays offline |
+| `ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH` / `ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH`                                         | *(unset)*                                            | Pre-signed platform intermediate certificate and matching key; set both together        |
 | `ATOM_PKI_CA_KEY_ENCRYPTION_KEY`                                                                                               | *(unset)*                                            | Dedicated base64-encoded 32-byte KEK required for managed CA keys                       |
-| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID`                                                                                            | `local-ca:v1`                                        | Operator-visible identifier for the managed CA KEK                                      |
+| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID`                                                                                            | `local-ca:v1`                                        | Operator-visible managed-CA KEK identifier; Compose explicitly uses `local:pki:v1`      |
 | `ATOM_PKI_CA_KEY_BACKEND`                                                                                                     | `encrypted_database`                                 | Operator-selected backend for newly provisioned CAs: `encrypted_database` or `pkcs11`  |
 | `ATOM_PKI_PKCS11_MODULE_PATH` / `ATOM_PKI_PKCS11_TOKEN_LABEL` / `ATOM_PKI_PKCS11_USER_PIN`                                    | *(unset)*                                            | PKCS#11 module, token selector, and redacted login credential                           |
 | `ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS` / `ATOM_PKI_PKCS11_MAX_RETRIES` / `ATOM_PKI_PKCS11_MAX_IN_FLIGHT`                       | `2000` / `1` / `8`                                   | Bounded provider call, retry, and concurrency policy                                    |
 | `ATOM_PKI_PKCS11_CIRCUIT_FAILURE_THRESHOLD` / `ATOM_PKI_PKCS11_CIRCUIT_RESET_SECS`                                             | `3` / `30`                                           | Fail-closed PKCS#11 circuit policy                                                      |
-| `ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED`                                                                                      | `false`                                              | Enables managed one-time key bootstrap; keep off in production until PR-010             |
-| `ATOM_CERTS_CA_DIR`                                                                                                            | `./certs`                                            | Docker Compose host directory mounted at `/certs:ro`                                    |
+| `ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED`                                                                                      | `false`                                              | Enables opt-in managed issuance with a one-time generated leaf private key              |
+| `ATOM_PKI_CERTS_DIR`                                                                                                           | `./certs`                                            | Docker Compose host directory mounted at `/certs:ro`                                    |
 | `ATOM_EMAIL_TEMPLATES_HOST_DIR`                                                                                                | `./email-templates`                                  | Docker Compose host directory mounted at `/email-templates:ro`                          |
 | `POSTGRES_HOST_PORT` / `ATOM_HTTP_PORT` / `ATOM_GRPC_PORT` / `ATOM_PKI_ENROLLMENT_PORT` / `ATOM_DEV_HTTP_PORT` / `ATOM_DEV_GRPC_PORT` / `ATOM_DEV_PKI_ENROLLMENT_PORT` / `ATOM_UI_HTTP_PORT` | `5432` / `8080` / `8081` / `8443` / `8081` / `18081` / `18443` / `3005` | Docker Compose host ports                                                               |
 | `ATOM_GRAPHQL_URL`                                                                                                             | `http://atom:8080/graphql`                           | GraphQL endpoint used by the Dockerized Next UI                                         |
 | `RUST_LOG`                                                                                                                     | *(legacy fallback)*                                  | Used only when `ATOM_LOG_LEVEL` is unset                                                |
+
+For a new or emptied cache namespace, stop traffic and fully drain/terminate
+every Atom process and in-flight request first. Start one process with
+`ATOM_CACHE_INITIALIZE_NAMESPACE=true`, wait for readiness, then unset it and
+start the remaining fleet. Atom records a random persistent incarnation in
+Redis; a running process that observes it missing or changed permanently falls
+back to Postgres, refuses protected mutations, and fails readiness until
+restart. Production requires a dedicated ephemeral standalone Redis primary:
+`maxmemory-policy=noeviction`, `save ""`, `appendonly no`, no replicas, no
+Cluster, and no automatic failover. Atom verifies this via `CONFIG GET` and
+`INFO replication`; grant those read commands to the application ACL, but not
+Redis reconfiguration or flush commands. Every Redis restart/replacement and
+every direct SQL or migration that changes a cached input without Atom's
+barrier protocol requires the same full-drain/fresh-namespace procedure. See
+[the cache contract](api/v1/cache-contract.md).
 
 ### Publishing Atom events through FluxMQ
 
@@ -1002,12 +1025,16 @@ hierarchy) → `permission_blocks` (+ actions) → `roles` (+ block links) →
 may reference rows that already exist in the database (for example the
 pre-seeded `admin` entity or `atom-admin` role).
 
-The file is applied once, right after migrations, and is **idempotent**: every
-record is keyed on a stable UUID and inserted with `ON CONFLICT DO NOTHING`
-(credentials are created only when the entity has no active credential of that
-kind), so re-running against an already-provisioned database is a no-op and
-never clobbers runtime changes. It runs alongside the env-var bootstrap above,
-not instead of it.
+The file is applied once, right after migrations, in one advisory-locked
+database transaction. Atom blocks concurrent configuration mutations while it
+reconciles the complete document, then commits every row and link together or
+rolls everything back. Re-running the same document is idempotent, but an
+existing row must match its declared normalized semantics exactly before Atom
+claims it as config-managed. Capability applicability is an exact set, not an
+additive patch. A declared password or shared key must be the entity's only
+active credential of that kind and must verify the declared material and
+metadata; drift aborts startup instead of choosing or overwriting a row. It
+runs alongside the env-var bootstrap above, not instead of it.
 
 Notes: permission-block `scope.mode` is one of `platform`, `tenant`,
 `object_kind`, `object_type`, `object`, or a group-relative mode
@@ -1015,11 +1042,14 @@ Notes: permission-block `scope.mode` is one of `platform`, `tenant`,
 `group_descendant_groups`) which scopes to an object group via `scope.group_id`
 — the `*_objects` modes also take `object_kind` (`entity`/`resource`) and
 `object_type` (e.g. `resource:channel`); block `actions` are seeded action
-names. An entity or resource belongs to at most one object group, and an object
-group with members must declare `tenant_id`. `shared_key` credentials are only valid for
-machine (non-human) entities and require an explicit `key`. Secrets are written
-in plaintext just like `ADMIN_SECRET`, so treat the file as a secret (restrict
-its mode, keep it out of version control). See
+names. Protected-object UUIDs are globally unique across tenants, entities,
+resources, both group tables, roles, credentials, both policy tables, and
+custom API endpoints. An entity or resource may belong to multiple object groups, while the
+object-group hierarchy itself remains a single-parent tree. An object group
+with members must declare `tenant_id`. `shared_key` credentials are only valid
+for machine (non-human) entities and require an explicit `key`. Secrets are
+written in plaintext just like `ADMIN_SECRET`, so treat the file as a secret
+(restrict its mode, keep it out of version control). See
 [`bootstrap.example.yaml`](bootstrap.example.yaml) for a fuller example.
 
 #### When to use bootstrap — and when not to
@@ -1029,6 +1059,10 @@ to exist before any application built on top of Atom can run. Every row it
 creates is stamped `managed_by='config'`, and the API refuses to update,
 delete, or restore those rows — a `409 Conflict` is returned. The only way
 to change a config-managed row is to edit the YAML and restart Atom.
+For password and shared-key declarations, that ownership covers the active
+`(entity, credential kind)` slot: API create, password change/reset, reveal,
+and revocation operations cannot replace or add beside the config-owned
+credential. Revoked historical rows do not own the slot.
 
 Treat that as a feature for stable infrastructure, and as a footgun for
 anything the downstream application manages itself.

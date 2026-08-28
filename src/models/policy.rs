@@ -408,9 +408,8 @@ mod tests {
 /// Two equivalent ways to identify the protected object:
 /// - `resource_id`: legacy form. Resolves the object from the `resources` table
 ///   with kind = `resources.kind`. Backwards compatible.
-/// - `object_kind` + `object_id`: explicit form. Currently supports
-///   `object_kind = "resource"` (same as `resource_id`) and
-///   `object_kind = "tenant"` (resolves from `tenants`, kind = `"tenant"`).
+/// - `object_kind` + `object_id`: explicit form. Supports `resource`, `tenant`,
+///   `entity`, `group`, and `credential`.
 /// - `object_kind = "platform"`: global platform object. Does not use
 ///   `object_id`.
 ///

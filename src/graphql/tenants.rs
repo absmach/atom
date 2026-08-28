@@ -44,7 +44,8 @@ impl TenantQuery {
     async fn tenants(
         &self,
         ctx: &Context<'_>,
-        id: Option<String>,
+        id: Option<ID>,
+        id_contains: Option<String>,
         q: Option<String>,
         name: Option<String>,
         alias: Option<String>,
@@ -60,7 +61,8 @@ impl TenantQuery {
         let state = ctx.data::<AppState>()?;
         let deleted = parse_deleted_filter(deleted);
         let params = ListTenants {
-            id,
+            id: parse_optional_id(id, "id")?,
+            id_contains,
             q,
             name,
             alias,
@@ -457,7 +459,7 @@ impl TenantMutation {
                 ),
                 (crate::cache::CacheCategory::Session, &session_keys),
             ];
-            crate::cache::invalidate::begin_all(cache, &groups).await?;
+            let leases = crate::cache::invalidate::begin_all(cache, &groups).await?;
             let outcome = tenant_repo::deactivate_and_finish_tenant_soft_delete_in_tx(
                 &mut tx,
                 state.config.events.enabled(),
@@ -468,12 +470,12 @@ impl TenantMutation {
             .await;
             match outcome {
                 Ok(tenant) => audit::commit_observed_with_cache_groups(
-                    tx, cache, &groups, tenant, &meta, &details,
+                    tx, cache, leases, tenant, &meta, &details,
                 )
                 .await
                 .map(|_| ()),
                 Err(err) => {
-                    crate::cache::invalidate::end_all(cache, &groups).await;
+                    crate::cache::invalidate::end_all(cache, leases).await;
                     Err(err)
                 }
             }
@@ -553,7 +555,7 @@ impl TenantMutation {
                 ),
                 (crate::cache::CacheCategory::Credential, &credential_keys),
             ];
-            crate::cache::invalidate::begin_all(cache, &groups).await?;
+            let leases = crate::cache::invalidate::begin_all(cache, &groups).await?;
             let outcome = tenant_repo::finish_tenant_restore_in_tx(
                 &mut tx,
                 state.config.events.enabled(),
@@ -563,42 +565,29 @@ impl TenantMutation {
             .await;
             match outcome {
                 Ok(()) => {
-                    audit::commit_observed_with_cache_groups(
+                    audit::commit_observed_with_cache_and_audit(
+                        &state.pool,
                         tx,
                         cache,
-                        &groups,
+                        leases,
                         (),
-                        &meta,
-                        &details,
+                        audit::AuditEvent {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: Some(tenant.id),
+                            target_kind: Some("tenant"),
+                            target_id: Some(tenant.id),
+                            event: "tenant.restore",
+                            outcome: crate::models::enums::AuditOutcome::Allow,
+                            details: details.clone(),
+                        },
                     )
                     .await?
                 }
                 Err(err) => {
-                    crate::cache::invalidate::end_all(cache, &groups).await;
+                    crate::cache::invalidate::end_all(cache, leases).await;
                     return Err(err);
                 }
             }
-            // Mirrors `restore_tenant_with_audit`'s own post-commit audit
-            // write (fire-and-forget, after the mutation durably commits) —
-            // see `audit::commit_with_audit`'s doc comment. Only needed on
-            // this locked path; the cache-disabled fallback above already
-            // gets it from `restore_tenant_with_audit` itself.
-            audit::write(
-                &state.pool,
-                false,
-                audit::AuditEvent {
-                    actor_entity_id: Some(auth.entity_id),
-                    tenant_id: Some(tenant.id),
-                    target_kind: Some("tenant"),
-                    target_id: Some(tenant.id),
-                    event: "tenant.restore",
-                    outcome: crate::models::enums::AuditOutcome::Allow,
-                    details: serde_json::json!({
-                        "tenant_name": tenant.name,
-                    }),
-                },
-            )
-            .await;
             Ok(tenant)
         }
         .await;
@@ -980,7 +969,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
             ),
             (crate::cache::CacheCategory::Session, &session_keys),
         ];
-        crate::cache::invalidate::begin_all(cache, &groups).await?;
+        let leases = crate::cache::invalidate::begin_all(cache, &groups).await?;
         let outcome = tenant_repo::change_tenant_status_in_tx(
             &mut tx,
             state.config.events.enabled(),
@@ -995,7 +984,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
                 audit::commit_observed_with_cache_groups(
                     tx,
                     cache,
-                    &groups,
+                    leases,
                     tenant,
                     &audit::AuditMeta {
                         actor_entity_id: Some(auth.entity_id),
@@ -1009,7 +998,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
                 .await
             }
             Err(err) => {
-                crate::cache::invalidate::end_all(cache, &groups).await;
+                crate::cache::invalidate::end_all(cache, leases).await;
                 Err(err)
             }
         }
@@ -1098,4 +1087,22 @@ async fn can_list_all_tenants(pool: &sqlx::PgPool, auth: &AuthContext) -> Result
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tenant_id_filters_keep_the_frozen_graphql_signature() {
+        let schema = crate::graphql::schema_sdl();
+        let tenants_field = schema
+            .lines()
+            .find(|line| line.trim_start().starts_with("tenants("))
+            .expect("tenants query field");
+
+        assert!(
+            tenants_field.starts_with("\ttenants(id: ID, idContains: String,"),
+            "unexpected tenants query signature: {tenants_field}"
+        );
+        assert!(!tenants_field.contains("tenants(id: String"));
+    }
 }

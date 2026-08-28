@@ -11,6 +11,7 @@ use async_graphql::Request as GraphqlRequest;
 use atom::{
     api_endpoints::repo as api_endpoint_repo,
     auth::{encode_jwt, AuthContext},
+    authz::repo as authz_repo,
     config::Config,
     graphql::build_schema,
     identity::repo as identity_repo,
@@ -40,11 +41,15 @@ async fn active_keys(pool: &PgPool) -> ActiveKeys {
 }
 
 async fn admin_token(pool: &PgPool, keys: &ActiveKeys) -> String {
-    let session = identity_repo::create_session(pool, common::admin_id(), 3600)
+    token_for_entity(pool, keys, common::admin_id()).await
+}
+
+async fn token_for_entity(pool: &PgPool, keys: &ActiveKeys, entity_id: Uuid) -> String {
+    let session = identity_repo::create_session(pool, entity_id, 3600)
         .await
-        .expect("create admin session");
+        .expect("create session");
     encode_jwt(
-        common::admin_id(),
+        entity_id,
         session.id,
         None,
         &keys.primary,
@@ -58,6 +63,15 @@ async fn admin_token(pool: &PgPool, keys: &ActiveKeys) -> String {
 fn authed(query: impl Into<String>) -> GraphqlRequest {
     GraphqlRequest::new(query).data(AuthContext {
         entity_id: common::admin_id(),
+        tenant_id: None,
+        session_id: None,
+        ..Default::default()
+    })
+}
+
+fn authed_as(entity_id: Uuid, query: impl Into<String>) -> GraphqlRequest {
+    GraphqlRequest::new(query).data(AuthContext {
+        entity_id,
         tenant_id: None,
         session_id: None,
         ..Default::default()
@@ -154,6 +168,93 @@ async fn repo_create_list_update_enable_and_disable_api_endpoint() {
 
 #[tokio::test]
 #[ignore]
+async fn graphql_endpoint_authorization_masks_oracles_and_preserves_missing_results() {
+    let pool = common::pool().await;
+    let active_keys = active_keys(&pool).await;
+    let suffix = Uuid::new_v4();
+    let endpoint = api_endpoint_repo::create_api_endpoint(
+        &pool,
+        endpoint_req(
+            &format!("endpoint_graphql_oracle_{suffix}"),
+            &format!("/api/custom/graphql-oracle-{suffix}"),
+            "{ health }",
+        ),
+        Some(common::admin_id()),
+    )
+    .await
+    .expect("create endpoint");
+    let outsider: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO entities (kind, name, status, attributes)
+           VALUES ('human', $1, 'active', '{}')
+           RETURNING id"#,
+    )
+    .bind(format!("endpoint-graphql-outsider-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("ordinary entity");
+    let missing_id = Uuid::new_v4();
+    let schema = build_schema(state(pool, active_keys));
+
+    for id in [endpoint.id, missing_id] {
+        let response = schema
+            .execute(authed_as(
+                outsider,
+                format!("{{ apiEndpoint(id: \"{id}\") {{ id }} }}"),
+            ))
+            .await;
+        assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+        assert_eq!(response.errors[0].message, "forbidden");
+    }
+
+    let outsider_list = schema
+        .execute(authed_as(
+            outsider,
+            "{ apiEndpoints { items { id } total } }",
+        ))
+        .await;
+    assert!(
+        outsider_list.errors.is_empty(),
+        "{:?}",
+        outsider_list.errors
+    );
+    let outsider_data = outsider_list.data.into_json().expect("json data");
+    assert_eq!(outsider_data["apiEndpoints"]["total"], 0);
+    assert_eq!(
+        outsider_data["apiEndpoints"]["items"],
+        serde_json::json!([])
+    );
+
+    let admin_missing = schema
+        .execute(authed(format!(
+            "{{ apiEndpoint(id: \"{missing_id}\") {{ id }} }}"
+        )))
+        .await;
+    assert_eq!(admin_missing.errors.len(), 1, "{:?}", admin_missing.errors);
+    assert_eq!(
+        admin_missing.errors[0].message,
+        format!("api endpoint {missing_id} not found")
+    );
+
+    let missing_executions = schema
+        .execute(authed(format!(
+            "{{ apiEndpointExecutions(endpointId: \"{missing_id}\") {{ items {{ id }} total }} }}"
+        )))
+        .await;
+    assert!(
+        missing_executions.errors.is_empty(),
+        "{:?}",
+        missing_executions.errors
+    );
+    let execution_data = missing_executions.data.into_json().expect("json data");
+    assert_eq!(execution_data["apiEndpointExecutions"]["total"], 0);
+    assert_eq!(
+        execution_data["apiEndpointExecutions"]["items"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn repo_rejects_invalid_path_duplicate_active_path_and_introspection_graphql() {
     let pool = common::pool().await;
     let suffix = Uuid::new_v4();
@@ -239,6 +340,24 @@ async fn graphql_management_api_creates_lists_updates_enables_and_disables_endpo
         .to_string();
     assert_eq!(create_json["createApiEndpoint"]["operationKind"], "query");
     assert_eq!(create_json["createApiEndpoint"]["graphql"], "{ health }");
+
+    let direct_list = authz_repo::list_api_endpoints_authorized(
+        &pool,
+        &AuthContext {
+            entity_id: common::admin_id(),
+            tenant_id: None,
+            session_id: None,
+            ..Default::default()
+        },
+        ListApiEndpoints {
+            tenant_id: None,
+            status: Some("draft".into()),
+            limit: 20,
+            offset: 0,
+        },
+    )
+    .await;
+    assert!(direct_list.is_ok(), "{direct_list:?}");
 
     let list = schema
         .execute(authed(
@@ -367,6 +486,7 @@ async fn custom_endpoint_route_runs_as_caller_and_writes_audit_row() {
         .expect("create active endpoint");
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -412,6 +532,7 @@ async fn custom_endpoint_unauthorized_caller_is_denied_and_audited() {
         .expect("create active endpoint");
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -424,12 +545,109 @@ async fn custom_endpoint_unauthorized_caller_is_denied_and_audited() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let count: i64 = sqlx::query_scalar(
+    let missing_path = format!("/api/custom/missing-{suffix}");
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&missing_path)
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .expect("missing request"),
+        )
+        .await
+        .expect("missing response");
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+    let associated: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM api_endpoint_executions WHERE endpoint_id = $1 AND status = 'denied'",
     )
     .bind(endpoint.id)
     .fetch_one(&pool)
     .await
-    .expect("audit count");
-    assert!(count >= 1);
+    .expect("associated audit count");
+    assert_eq!(
+        associated, 0,
+        "pre-auth denial must not reveal an endpoint id"
+    );
+    let anonymous: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM api_endpoint_executions
+           WHERE endpoint_id IS NULL AND caller_entity_id IS NULL AND status = 'denied'
+             AND request_summary->>'path' = ANY($1::text[])"#,
+    )
+    .bind(vec![path, missing_path])
+    .fetch_one(&pool)
+    .await
+    .expect("anonymous audit count");
+    assert_eq!(anonymous, 2);
+}
+
+#[tokio::test]
+#[ignore]
+async fn custom_endpoint_authenticated_denial_does_not_reveal_path_existence() {
+    let pool = common::pool().await;
+    let active_keys = active_keys(&pool).await;
+    let suffix = Uuid::new_v4();
+    let caller_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO entities (kind, name, status, attributes)
+           VALUES ('human', $1, 'active', '{}')
+           RETURNING id"#,
+    )
+    .bind(format!("endpoint-unprivileged-{suffix}"))
+    .fetch_one(&pool)
+    .await
+    .expect("ordinary entity");
+    let token = token_for_entity(&pool, &active_keys, caller_id).await;
+    let app = create_router(state(pool.clone(), active_keys));
+
+    let existing_path = format!("/api/custom/private-{suffix}");
+    let mut req = endpoint_req(
+        &format!("endpoint_private_{suffix}"),
+        &existing_path,
+        "{ health }",
+    );
+    req.status = Some("active".into());
+    let endpoint = api_endpoint_repo::create_api_endpoint(&pool, req, Some(common::admin_id()))
+        .await
+        .expect("create active endpoint");
+    let missing_path = format!("/api/custom/missing-private-{suffix}");
+
+    for path in [&existing_path, &missing_path] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    let existing_denial: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_endpoint_executions WHERE endpoint_id = $1 AND caller_entity_id = $2 AND status = 'denied'",
+    )
+    .bind(endpoint.id)
+    .bind(caller_id)
+    .fetch_one(&pool)
+    .await
+    .expect("existing denial audit count");
+    assert_eq!(existing_denial, 1);
+
+    let missing_denial: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM api_endpoint_executions
+           WHERE endpoint_id IS NULL AND caller_entity_id = $1 AND status = 'denied'
+             AND request_summary->>'path' = $2"#,
+    )
+    .bind(caller_id)
+    .bind(missing_path)
+    .fetch_one(&pool)
+    .await
+    .expect("missing denial audit count");
+    assert_eq!(missing_denial, 1);
 }

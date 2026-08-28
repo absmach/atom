@@ -150,7 +150,7 @@ async fn re_enrollment(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::BTreeSet, time::Duration};
 
     use axum::{
         body::Body,
@@ -160,10 +160,10 @@ mod tests {
     use tokio::time::sleep;
     use tower::ServiceExt;
 
-    use super::{create_router, TimeoutLayer};
+    use super::{create_router, NativeEnrollmentRequest, TimeoutLayer};
 
     #[tokio::test]
-    async fn request_timeout_is_a_total_deadline() {
+    async fn contract_request_timeout_is_a_total_deadline() {
         let app = axum::Router::new()
             .route(
                 "/",
@@ -183,7 +183,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_reenrollment_rejects_missing_peer_before_json_extraction() {
+    async fn contract_native_enrollment_requires_auth_before_json_extraction() {
+        let app = create_router(crate::certs::test_state_without_database());
+        let response = app
+            .oneshot(
+                Request::post("/pki/enroll")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not json"))
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible router");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn contract_native_reenrollment_requires_peer_before_json_extraction() {
         let app = create_router(crate::certs::test_state_without_database());
         let response = app
             .oneshot(
@@ -196,5 +212,57 @@ mod tests {
             .expect("infallible router");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn contract_native_enrollment_request_serde_matches_openapi_schema() {
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../apidocs/openapi.yaml"))
+                .expect("valid OpenAPI YAML");
+        let schema = &document["components"]["schemas"]["NativeEnrollmentRequest"];
+        let required = schema["required"]
+            .as_sequence()
+            .expect("required fields")
+            .iter()
+            .map(|field| field.as_str().expect("string field"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(required, BTreeSet::from(["csr_pem", "idempotency_key"]));
+        assert_eq!(schema["additionalProperties"].as_bool(), Some(false));
+
+        let complete = serde_json::json!({
+            "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----\n",
+            "ttl_secs": 3600,
+            "idempotency_key": "enrollment-1",
+        });
+        assert!(serde_json::from_value::<NativeEnrollmentRequest>(complete.clone()).is_ok());
+
+        let mut without_optional = complete.clone();
+        without_optional
+            .as_object_mut()
+            .expect("request object")
+            .remove("ttl_secs");
+        assert!(serde_json::from_value::<NativeEnrollmentRequest>(without_optional).is_ok());
+
+        for field in required {
+            let mut missing = complete.clone();
+            missing
+                .as_object_mut()
+                .expect("request object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<NativeEnrollmentRequest>(missing).is_err(),
+                "serde must reject the OpenAPI-required field {field} when absent"
+            );
+        }
+
+        let mut unknown = complete;
+        unknown.as_object_mut().expect("request object").insert(
+            "redirect_url".into(),
+            serde_json::json!("https://attacker.test"),
+        );
+        assert!(
+            serde_json::from_value::<NativeEnrollmentRequest>(unknown).is_err(),
+            "serde(deny_unknown_fields) must match additionalProperties: false"
+        );
     }
 }

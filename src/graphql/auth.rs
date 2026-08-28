@@ -27,11 +27,17 @@ impl AuthQuery {
     }
 
     async fn session(&self, ctx: &Context<'_>, id: ID) -> Result<Session> {
-        require_auth(ctx)?;
+        let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let session = repo::get_session(&state.pool, parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
+        if session.entity_id != auth.entity_id {
+            let entity = repo::get_entity(&state.pool, session.entity_id)
+                .await
+                .map_err(gql_error)?;
+            require_read_access(&state.pool, &auth, entity.tenant_id, session.entity_id).await?;
+        }
         Ok(session.into())
     }
 }

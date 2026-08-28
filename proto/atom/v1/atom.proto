@@ -2,23 +2,46 @@ syntax = "proto3";
 
 package atom.v1;
 
+// Unless an RPC documents a narrower result, Atom uses these application error
+// codes: INVALID_ARGUMENT for malformed input, invalid references, and stored
+// check-constraint failures; NOT_FOUND for missing objects; UNAUTHENTICATED for
+// invalid credentials; PERMISSION_DENIED for failed authorization;
+// ALREADY_EXISTS for conflicts and unique-constraint failures;
+// RESOURCE_EXHAUSTED for rate limits; UNAVAILABLE for dependency readiness;
+// and INTERNAL for unexpected database or server failures.
+
 // AuthzService evaluates authorization decisions.
 // Call this on every request to protected downstream resources.
 service AuthzService {
+  // Requires authorization: Bearer <JWT-or-Atom-access-token> metadata. The
+  // caller must hold authz.check for the target tenant or platform; the
+  // subject being evaluated may be different from the caller.
   rpc Check(CheckRequest) returns (CheckResponse);
 }
 
-// AuthService validates tokens and returns caller identity.
-// Use this to authenticate incoming requests without decoding JWTs locally.
+// AuthService validates tokens and delegated password/shared-key credentials.
+// Use Authenticate to validate incoming tokens without decoding JWTs locally.
 service AuthService {
+  // Requires no authorization metadata. The credential being authenticated is
+  // the token carried in the request body.
   rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+  // Requires authorization: Bearer <JWT-or-Atom-access-token> metadata. The
+  // caller must hold authz.check for the selected tenant, or at platform scope
+  // when no tenant is selected. The plaintext target credential stays in the
+  // request body and is never treated as caller authentication.
   rpc AuthenticateCredential(AuthenticateCredentialRequest) returns (AuthenticateCredentialResponse);
 }
 
 // CertificateService resolves and revokes Atom certificate credentials for
 // runtime services that terminate mTLS outside Atom.
 service CertificateService {
+  // ResolveCertificate was removed before v1; its RPC name is reserved by
+  // contract and must not be reused. Consumers use ResolveCertificateV2.
+  // Requires authorization: Bearer <JWT-or-Atom-access-token> metadata. The
+  // caller must hold authz.check for the resolved tenant or platform.
   rpc ResolveCertificateV2(ResolveCertificateV2Request) returns (ResolveCertificateV2Response);
+  // Requires authorization: Bearer <JWT-or-Atom-access-token> metadata. The
+  // caller must hold manage on the target entity or its owning tenant.
   rpc RevokeEntityCertificates(RevokeEntityCertificatesRequest) returns (RevokeEntityCertificatesResponse);
 }
 
@@ -28,6 +51,9 @@ service CertificateService {
 // AuthzService.Check. Resolution is capability-neutral — it reveals only the
 // UUIDs; the Check call is the authorization gate.
 service AliasService {
+  // Requires authorization: Bearer <JWT-or-Atom-access-token> metadata. Alias
+  // resolution itself has no capability gate; callers must authorize the
+  // returned UUID separately with AuthzService.Check.
   rpc ResolveAlias(ResolveAliasRequest) returns (ResolveAliasResponse);
 }
 
@@ -40,12 +66,14 @@ message CheckRequest {
   string resource_id = 3;
   // Optional ABAC context — flat string key/value pairs injected into the
   // evaluation context under the "context" key.
-  // Note: only string values are supported over gRPC; use REST for nested JSON.
+  // Note: only string values are supported over gRPC; use the GraphQL
+  // authzCheck input when nested JSON context is required.
   map<string, string> context = 4;
   // Explicit form: identifies any first-class protected object.
-  // Supported object_kind values: "resource" (same as resource_id) or
-  // "tenant" (resolved from the `tenants` table; kind = "tenant").
-  // Both fields must be set together, or both empty.
+  // resource, tenant, entity, group, role, policy, credential, and
+  // api_endpoint require object_id.
+  // platform requires object_id to be empty. Supplying the explicit form
+  // takes precedence over the legacy resource_id field.
   string object_kind = 5;
   string object_id   = 6;
 }

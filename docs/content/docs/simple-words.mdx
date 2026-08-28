@@ -98,7 +98,9 @@ Certificates are another kind of credential.
 
 Atom can issue a certificate for an entity, store the issued certificate as a credential row, and later resolve that certificate back to the entity during mTLS runtime traffic.
 
-The CA private key is not stored in Postgres. The platform operator mounts CA files into Atom.
+Atom stores every managed authority in Postgres. CA keys are envelope-encrypted
+there by default or kept as non-exportable objects in a PKCS#11 HSM. The
+production root private key stays offline and never enters Atom.
 
 ## How Magistrala Uses Atom
 

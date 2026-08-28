@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::{
     api_endpoints::repo as api_endpoint_repo,
-    auth::{authenticate_token, require_any_capability, scope_for_tenant, AuthContext, Scope},
+    auth::{authenticate_token, require_any_capability, AuthContext, Scope},
+    authz::engine::require_any_on_object,
     error::AppError,
     graphql::AtomSchema,
     models::api_endpoint::ApiEndpoint,
@@ -33,30 +34,13 @@ pub async fn custom_endpoint(
 ) -> Result<Json<Value>, AppError> {
     let path = format!("/api/custom/{path}");
     let method = method.as_str().to_string();
-    let endpoint = match api_endpoint_repo::find_api_endpoint(&state.pool, &method, &path).await {
-        Ok(endpoint) => endpoint,
-        Err(err) => {
-            record_execution(
-                &state,
-                None,
-                None,
-                "denied",
-                request_summary(&method, &path, json!({})),
-                json!({}),
-                Some(err.to_string()),
-            )
-            .await;
-            return Err(err);
-        }
-    };
-
     let caller = match bearer_token(&headers) {
         Ok(token) => match authenticate_token(&state, token).await {
             Ok(auth) => auth,
             Err(err) => {
                 record_execution(
                     &state,
-                    Some(endpoint.id),
+                    None,
                     None,
                     "denied",
                     request_summary(&method, &path, json!({})),
@@ -70,7 +54,7 @@ pub async fn custom_endpoint(
         Err(err) => {
             record_execution(
                 &state,
-                Some(endpoint.id),
+                None,
                 None,
                 "denied",
                 request_summary(&method, &path, json!({})),
@@ -82,15 +66,53 @@ pub async fn custom_endpoint(
         }
     };
 
-    if let Err(err) = require_any_capability(
+    // Authenticate before resolving the configured method/path. Otherwise an
+    // unauthenticated caller can distinguish an existing endpoint (401) from
+    // an unconfigured route (404) and enumerate the protected custom surface.
+    let endpoint = match api_endpoint_repo::find_api_endpoint(&state.pool, &method, &path).await {
+        Ok(endpoint) => endpoint,
+        Err(err) => {
+            let internal_error = err.to_string();
+            let public_error = match err {
+                AppError::NotFound(message) => {
+                    // A caller with no platform-wide endpoint access must not be
+                    // able to distinguish an unconfigured path from a configured
+                    // endpoint they cannot execute. Platform operators retain a
+                    // useful 404 for genuinely missing routes.
+                    match require_any_capability(
+                        &state.pool,
+                        &caller,
+                        &[("execute", Scope::Platform), ("manage", Scope::Platform)],
+                    )
+                    .await
+                    {
+                        Ok(()) => AppError::NotFound(message),
+                        Err(AppError::Forbidden) => AppError::Forbidden,
+                        Err(gate_error) => gate_error,
+                    }
+                }
+                other => other,
+            };
+            record_execution(
+                &state,
+                None,
+                Some(caller.entity_id),
+                "denied",
+                request_summary(&method, &path, json!({})),
+                json!({}),
+                Some(internal_error),
+            )
+            .await;
+            return Err(public_error);
+        }
+    };
+
+    if let Err(err) = require_any_on_object(
         &state.pool,
         &caller,
-        &[
-            ("execute", Scope::Object(endpoint.id)),
-            ("manage", Scope::Object(endpoint.id)),
-            ("execute", scope_for_tenant(endpoint.tenant_id)),
-            ("manage", scope_for_tenant(endpoint.tenant_id)),
-        ],
+        "api_endpoint",
+        endpoint.id,
+        &["execute", "manage"],
     )
     .await
     {
@@ -615,5 +637,156 @@ async fn record_execution(
     .await
     {
         tracing::warn!("failed to record api endpoint execution: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use axum::http::{HeaderMap, HeaderValue};
+    use serde_json::{json, Value};
+    use uuid::Uuid;
+
+    use crate::auth::AuthContext;
+
+    use super::{
+        apply_response_mapping, build_variables, contains_introspection, parse_body,
+        CUSTOM_ENDPOINT_TIMEOUT, MAX_CUSTOM_ENDPOINT_BODY_BYTES,
+    };
+
+    fn contract() -> Value {
+        serde_json::from_str(include_str!("../../api/v1/persisted-semantics.json"))
+            .expect("valid persisted-semantics contract")
+    }
+
+    fn strings(value: &Value) -> BTreeSet<&str> {
+        value
+            .as_array()
+            .expect("string array")
+            .iter()
+            .map(|value| value.as_str().expect("string value"))
+            .collect()
+    }
+
+    #[test]
+    fn custom_endpoint_execution_limits_match_the_v1_contract() {
+        let contract = contract();
+        let endpoint = &contract["customEndpoint"];
+        assert_eq!(
+            endpoint["maxBodyBytes"].as_u64(),
+            Some(MAX_CUSTOM_ENDPOINT_BODY_BYTES as u64)
+        );
+        assert_eq!(
+            endpoint["executionTimeoutMilliseconds"].as_u64(),
+            Some(CUSTOM_ENDPOINT_TIMEOUT.as_millis() as u64)
+        );
+        assert_eq!(endpoint["emptyBody"], json!({}));
+        assert_eq!(endpoint["emptyVariablesMapping"], "forward_body");
+        assert_eq!(endpoint["missingVariableSource"], "omit_target");
+        assert_eq!(endpoint["emptyResponseMapping"], "return_graphql_data");
+        assert_eq!(endpoint["responseSelectorPrefix"], "$.");
+        assert_eq!(endpoint["missingResponseSelector"], "null");
+        assert_eq!(endpoint["introspectionAllowed"], false);
+    }
+
+    #[test]
+    fn custom_endpoint_variable_sources_match_the_v1_contract() {
+        let contract = contract();
+        assert_eq!(
+            strings(&contract["customEndpoint"]["variableSources"]),
+            BTreeSet::from([
+                "$body",
+                "$body.<dot-path>",
+                "$query.<name>",
+                "$headers.<name>",
+                "$auth.entityId",
+                "$auth.entity_id",
+                "$auth.tenantId",
+                "$auth.tenant_id",
+                "$auth.sessionId",
+                "$auth.session_id",
+                "$path",
+                "$path.path",
+            ])
+        );
+
+        let entity_id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let tenant_id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let session_id = Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap();
+        let auth = AuthContext {
+            entity_id,
+            tenant_id: Some(tenant_id),
+            session_id: Some(session_id),
+            ..Default::default()
+        };
+        let body = json!({"nested": {"value": 7}});
+        let query = HashMap::from([("filter".into(), "online".into())]);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-correlation-id", HeaderValue::from_static("request-1"));
+        let mapping = json!({
+            "wholeBody": "$body",
+            "input.value": "$body.nested.value",
+            "query": "$query.filter",
+            "header": "$headers.x-correlation-id",
+            "entity": "$auth.entityId",
+            "tenant": "$auth.tenant_id",
+            "session": "$auth.sessionId",
+            "path": "$path.path",
+            "literal": "unchanged",
+            "number": 9,
+            "omitted": "$query.missing"
+        });
+        let variables = build_variables(
+            &mapping,
+            &body,
+            &query,
+            &headers,
+            &auth,
+            "/api/custom/devices",
+        )
+        .unwrap();
+        assert_eq!(
+            variables,
+            json!({
+                "wholeBody": body,
+                "input": {"value": 7},
+                "query": "online",
+                "header": "request-1",
+                "entity": entity_id.to_string(),
+                "tenant": tenant_id.to_string(),
+                "session": session_id.to_string(),
+                "path": "/api/custom/devices",
+                "literal": "unchanged",
+                "number": 9
+            })
+        );
+        assert_eq!(
+            build_variables(&json!({}), &body, &query, &headers, &auth, "/").unwrap(),
+            body
+        );
+        assert_eq!(parse_body(b"").unwrap(), json!({}));
+    }
+
+    #[test]
+    fn custom_endpoint_response_mapping_matches_the_v1_contract() {
+        let data = json!({"create": {"id": "object-1"}});
+        assert_eq!(apply_response_mapping(&json!({}), &data).unwrap(), data);
+        assert_eq!(
+            apply_response_mapping(
+                &json!({
+                    "id": "$.create.id",
+                    "missing": "$.create.name",
+                    "literal": "ok"
+                }),
+                &data,
+            )
+            .unwrap(),
+            json!({"id": "object-1", "missing": null, "literal": "ok"})
+        );
+        assert!(contains_introspection(
+            "query { __schema { types { name } } }"
+        ));
+        assert!(!contains_introspection("query { health }"));
     }
 }

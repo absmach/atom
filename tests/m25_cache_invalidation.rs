@@ -32,7 +32,7 @@ use atom::{
         group::CreateGroup,
         policy::{AuthzRequest, CreateDirectPolicy, CreatePermissionBlock, CreateRoleAssignment},
         role::CreateRole,
-        token::CreateAccessToken,
+        token::{AccessTokenPermission, CreateAccessToken},
     },
     state::AppState,
     tenants::repo as tenant_repo,
@@ -142,6 +142,28 @@ async fn new_group(pool: &PgPool, label: &str) -> Uuid {
     )
     .await
     .expect("create group")
+    .id
+}
+
+async fn new_group_in_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    group_type: &str,
+    label: &str,
+) -> Uuid {
+    identity_repo::create_group(
+        pool,
+        CreateGroup {
+            id: None,
+            name: format!("cache-test-{label}-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            group_type: Some(group_type.into()),
+            description: None,
+            attributes: json!({}),
+        },
+    )
+    .await
+    .expect("create tenant group")
     .id
 }
 
@@ -575,7 +597,7 @@ async fn logout_cannot_leave_a_stale_valid_session_cached_during_the_revoke() {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop2 = stop.clone();
     let p_poll = p.clone();
-    let key_poll = session_key.clone();
+    let key_poll = cache.redis_key(&session_key);
     let poller = tokio::spawn(async move {
         let mut conn = raw_redis_conn().await;
         let mut saw_dirty = false;
@@ -730,6 +752,92 @@ async fn credential_revoke_immediately_rejects_the_next_authentication() {
     assert!(
         result.is_err(),
         "revoked credential must be rejected on the very next authentication, not after a TTL"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn replacing_access_token_permissions_invalidates_the_cached_ceiling() {
+    let p = pool().await;
+    let (state, cache) = state_with_cache(p.clone()).await;
+    let entity_id = active_entity(&p, "service").await;
+    let read_action_id = read_action_id(&p).await;
+    let manage_action_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
+            .fetch_one(&p)
+            .await
+            .expect("manage action");
+
+    let minted = access_tokens::create_access_token(
+        &p,
+        &state.config.signing_keys,
+        entity_id,
+        CreateAccessToken {
+            name: "cache-test-ceiling".into(),
+            description: None,
+            expires_at: None,
+            permissions: vec![AccessTokenPermission {
+                actions: vec!["read".into()],
+                scope_mode: "object_kind".into(),
+                tenant_id: None,
+                object_kind: Some("entity".into()),
+                object_type: None,
+                object_id: None,
+                conditions: None,
+            }],
+        },
+        true,
+    )
+    .await
+    .expect("create scoped access token");
+
+    let before = auth::authenticate_token(&state, &minted.token)
+        .await
+        .expect("warm credential and ceiling caches");
+    let before = before.ceiling.expect("scoped token ceiling");
+    assert!(before
+        .entries
+        .iter()
+        .any(|entry| entry.capability_id == read_action_id));
+    assert!(!before
+        .entries
+        .iter()
+        .any(|entry| entry.capability_id == manage_action_id));
+
+    let schema = build_schema(state.clone());
+    let replaced = schema
+        .execute(authed(
+            common::admin_id(),
+            cache,
+            format!(
+                r#"mutation {{ replaceAccessTokenPermissions(credentialId: "{}", permissions: [{{ actions: ["manage"], scopeMode: "object_kind", objectKind: "entity" }}]) }}"#,
+                minted.credential_id
+            ),
+        ))
+        .await;
+    assert!(
+        replaced.errors.is_empty(),
+        "replace failed: {:?}",
+        replaced.errors
+    );
+
+    let after = auth::authenticate_token(&state, &minted.token)
+        .await
+        .expect("authenticate after ceiling replacement");
+    let after = after.ceiling.expect("scoped token ceiling");
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|entry| entry.capability_id == manage_action_id),
+        "the next authentication must load the replacement ceiling"
+    );
+    assert!(
+        !after
+            .entries
+            .iter()
+            .any(|entry| entry.capability_id == read_action_id),
+        "the cached read-only ceiling must not survive replacement"
     );
 }
 
@@ -1671,6 +1779,168 @@ async fn tenant_creation_immediately_grants_the_creator_tenant_admin() {
 
 // ─── Group-subject mutation vs. concurrent membership change ───────────────
 
+/// A real hierarchy mutation used to acquire the global hierarchy advisory
+/// lock before reaching for its owning tenant. A concurrent group-subject
+/// policy mutation takes those resources in the opposite order, so the pair
+/// could deadlock. Hold the tenant, start the real uncached mutation, and prove
+/// the advisory lock is still free while that mutation waits.
+#[tokio::test]
+#[ignore]
+async fn group_hierarchy_mutation_locks_tenant_before_advisory() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let parent = new_group_in_tenant(&p, tenant_id, "principal", "lock-order-parent").await;
+    let child = new_group_in_tenant(&p, tenant_id, "principal", "lock-order-child").await;
+
+    let mut tenant_tx = p.begin().await.expect("begin tenant-locking tx");
+    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+        .bind(tenant_id)
+        .fetch_one(&mut *tenant_tx)
+        .await
+        .expect("lock tenant");
+
+    let p2 = p.clone();
+    let handle =
+        tokio::spawn(async move { identity_repo::set_group_parent(&p2, child, parent).await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !handle.is_finished(),
+        "hierarchy mutation must wait for the tenant lock"
+    );
+
+    let advisory_available: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))",
+    )
+    .fetch_one(&mut *tenant_tx)
+    .await
+    .expect("try hierarchy advisory lock");
+    assert!(
+        advisory_available,
+        "a hierarchy mutation waiting on its tenant must not already hold the hierarchy advisory lock"
+    );
+
+    tenant_tx
+        .commit()
+        .await
+        .expect("release tenant and advisory locks");
+    handle
+        .await
+        .expect("join hierarchy mutation")
+        .expect("hierarchy mutation completes after release");
+}
+
+/// The generic closure preparation is shared by cached group mutations and
+/// bootstrap object-group linking. Object roots do not produce a
+/// `principal_groups` row lock, so this specifically proves the tenant barrier
+/// happens before the advisory lock even for that otherwise-empty closure.
+#[tokio::test]
+#[ignore]
+async fn object_group_closure_preparation_locks_tenant_before_advisory() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let object_group = new_group_in_tenant(&p, tenant_id, "object", "object-lock-order").await;
+
+    let mut tenant_tx = p.begin().await.expect("begin tenant-locking tx");
+    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+        .bind(tenant_id)
+        .fetch_one(&mut *tenant_tx)
+        .await
+        .expect("lock tenant");
+
+    let p2 = p.clone();
+    let handle = tokio::spawn(async move {
+        let mut mutation_tx = p2.begin().await.expect("begin closure-preparation tx");
+        authz_repo::lock_group_closures_and_collect_member_ids(&mut mutation_tx, &[object_group])
+            .await
+            .expect("prepare object-group closure");
+        // Mirrors the old mutation/bootstrap body which reached for the tenant
+        // only after preparation had already acquired the advisory lock.
+        sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+            .bind(tenant_id)
+            .fetch_one(&mut *mutation_tx)
+            .await
+            .expect("re-lock tenant in mutation body");
+        mutation_tx.commit().await.expect("commit preparation tx");
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !handle.is_finished(),
+        "object-group preparation must wait for the tenant lock"
+    );
+
+    let advisory_available: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))",
+    )
+    .fetch_one(&mut *tenant_tx)
+    .await
+    .expect("try hierarchy advisory lock");
+    assert!(
+        advisory_available,
+        "object-group preparation waiting on its tenant must not hold the hierarchy advisory lock"
+    );
+
+    tenant_tx
+        .commit()
+        .await
+        .expect("release tenant and advisory locks");
+    handle.await.expect("join object-group preparation");
+}
+
+/// Legacy data can contain the same UUID in both physical group tables. Group
+/// mutations lock the object row before the principal row, so closure
+/// preparation must use that same order or the two paths can deadlock.
+#[tokio::test]
+#[ignore]
+async fn group_closure_preparation_locks_object_before_principal_for_duplicate_legacy_id() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let group_id = new_group_in_tenant(&p, tenant_id, "object", "dual-physical-lock").await;
+    sqlx::query("INSERT INTO principal_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
+        .bind(group_id)
+        .bind(format!("cache-test-dual-principal-{group_id}"))
+        .bind(tenant_id)
+        .execute(&p)
+        .await
+        .expect("insert legacy principal row with the same UUID");
+
+    let mut object_tx = p.begin().await.expect("begin object-locking tx");
+    sqlx::query("SELECT id FROM object_groups WHERE id = $1 FOR UPDATE")
+        .bind(group_id)
+        .fetch_one(&mut *object_tx)
+        .await
+        .expect("lock object-group row");
+
+    let p2 = p.clone();
+    let handle = tokio::spawn(async move {
+        let mut closure_tx = p2.begin().await.expect("begin closure tx");
+        authz_repo::lock_group_closures_and_collect_member_ids(&mut closure_tx, &[group_id])
+            .await
+            .expect("prepare duplicate-id group closure");
+        closure_tx.commit().await.expect("commit closure tx");
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !handle.is_finished(),
+        "closure preparation must wait for the object-group row before reaching the principal row"
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        sqlx::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
+            .bind(group_id)
+            .fetch_one(&mut *object_tx),
+    )
+    .await
+    .expect("principal row must remain unlocked while closure preparation waits for the object row")
+    .expect("lock principal-group row");
+
+    object_tx
+        .commit()
+        .await
+        .expect("release physical group rows");
+    handle.await.expect("join closure preparation");
+}
+
 /// Regression test for a review finding: resolving a group-subject
 /// mutation's affected `grants` keys from "current members" alone has a
 /// race against a concurrent `add_group_member` for the same group — a
@@ -1732,13 +2002,90 @@ async fn concurrent_group_membership_change_serializes_against_the_group_subject
         .expect("add_group_member should succeed once unblocked");
 }
 
+/// Tenant-scoped role mutations and role-assignment creation must acquire the
+/// same resources in the same order. Assignment preparation locks the tenant
+/// before the role. The cached role-mutation preparation used to lock the role
+/// first, while its mutation body later reached for the tenant through
+/// `lock_role`; a concurrent assignment holding the tenant and waiting for the
+/// role completed the tenant <-> role cycle.
+///
+/// Hold the tenant, start the exact cached preparation helper, then try to lock
+/// the role from the tenant-owning transaction. With the canonical tenant ->
+/// role order the helper is still queued on the tenant and the role is
+/// immediately available. With the old order the helper already owns the role.
+#[tokio::test]
+#[ignore]
+async fn cached_role_mutation_locks_tenant_before_role() {
+    let p = pool().await;
+    let tenant_id = tenant(&p).await;
+    let role = authz_repo::create_role(
+        &p,
+        CreateRole {
+            name: format!("m25-tenant-role-lock-order-{}", Uuid::new_v4()),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("create tenant role");
+
+    let mut tx = p.begin().await.expect("begin tenant-locking tx");
+    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+        .bind(tenant_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("lock tenant");
+
+    let role_id = role.id;
+    let p2 = p.clone();
+    let (prepared_sender, mut prepared_receiver) = tokio::sync::oneshot::channel();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let mut mutation_tx = p2.begin().await.expect("begin cached-preparation tx");
+        authz_repo::lock_role_and_collect_grants_keys(&mut mutation_tx, role_id)
+            .await
+            .expect("prepare cached role mutation");
+        prepared_sender.send(()).expect("report preparation");
+        let _ = release_receiver.await;
+        mutation_tx.commit().await.expect("commit preparation tx");
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        matches!(
+            prepared_receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "cached role preparation must wait for the owning tenant before locking the role"
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+            .bind(role_id)
+            .fetch_one(&mut *tx),
+    )
+    .await
+    .expect(
+        "role must remain unlocked while the cached mutation waits for its tenant; a timeout \
+         proves the old role -> tenant inversion is still present",
+    )
+    .expect("lock role");
+
+    tx.commit().await.expect("release tenant and role locks");
+    prepared_receiver
+        .await
+        .expect("preparation completes after tenant release");
+    release_sender.send(()).expect("release preparation tx");
+    handle.await.expect("join cached role preparation");
+}
+
 /// Regression test for a review finding: `createRoleAssignment`'s
 /// group-subject path locked the subject group's closure first and only
 /// reached the role lock afterward (inside `create_role_assignment_in_tx`'s
 /// own `lock_role` call) — the reverse of every role mutation
 /// (`replaceRolePermissionBlocks`/`deleteRole`/`restoreRole`, via
-/// `lock_role_and_collect_grants_keys`), which always locks the role first,
-/// then any assigned groups' closures. If role R is already assigned to an
+/// `lock_role_and_collect_grants_keys`), which always locks the tenant and
+/// role before any assigned groups' closures. If role R is already assigned to an
 /// ancestor group and a concurrent pair of requests ran — assign R to a
 /// descendant group; mutate R's blocks — they could hold the descendant
 /// group's row and the role row in opposite order: a genuine wait-for cycle,
@@ -1746,8 +2093,8 @@ async fn concurrent_group_membership_change_serializes_against_the_group_subject
 /// "deadlock detected" error.
 ///
 /// Fixed by having `createRoleAssignment`'s group-subject path lock the role
-/// *before* the group closure too, via
-/// `authz::repo::lock_role_then_group_closure_and_collect_grants_keys`.
+/// *before* the group closure too, via the canonical
+/// `authz::repo::prepare_role_assignment_in_tx` helper.
 ///
 /// A first version of this test held only the role lock and asserted
 /// `createRoleAssignment` blocked on it — but that passes under *either*
@@ -1884,7 +2231,7 @@ async fn create_role_assignment_for_group_subject_locks_the_role_before_the_grou
 async fn hmget_raw(key: &str) -> (Option<i64>, Option<String>, Option<Vec<u8>>) {
     let mut conn = raw_redis_conn().await;
     redis::cmd("HMGET")
-        .arg(key)
+        .arg(format!("integration-tests:{key}"))
         .arg("v")
         .arg("dirty")
         .arg("p")
@@ -1897,10 +2244,17 @@ async fn hmget_raw(key: &str) -> (Option<i64>, Option<String>, Option<Vec<u8>>) 
 /// entry — bypassing `try_populate`'s version check entirely, since this is
 /// for hand-seeding test fixtures, not exercising the barrier itself.
 async fn seed_hit<T: serde::Serialize>(key: &str, value: &T) {
-    let payload = serde_json::to_vec(value).expect("serialize seed value");
+    let payload = rmp_serde::to_vec(value).expect("serialize seed value");
     let mut conn = raw_redis_conn().await;
+    let incarnation: String = redis::cmd("GET")
+        .arg("integration-tests:atom:v1:incarnation")
+        .query_async(&mut conn)
+        .await
+        .expect("test cache namespace incarnation");
     let _: () = redis::cmd("HSET")
-        .arg(key)
+        .arg(format!("integration-tests:{key}"))
+        .arg("i")
+        .arg(incarnation)
         .arg("v")
         .arg(1)
         .arg("dirty")
@@ -1945,7 +2299,7 @@ async fn tenant_status_change_does_not_touch_the_grants_cache_key() {
     let auth = auth_context(member, cache.clone());
     let _ = engine::evaluate(&p, &req, &auth).await.expect("evaluate");
 
-    let grants_key = atom::cache::keys::grants(member);
+    let grants_key = cache.redis_key(&atom::cache::keys::grants(member));
     let mut conn = raw_redis_conn().await;
     let before_exists: bool = redis::cmd("EXISTS")
         .arg(&grants_key)

@@ -64,9 +64,9 @@ pub(crate) struct ProtectedObject {
 
 /// Resolve the protected object identified by an authz request.
 /// Returns `Ok(None)` if the object does not exist; returns
-/// `BadRequest` if the request supplies neither `resource_id` nor
-/// `(object_kind, object_id)`, supplies `object_kind = "platform"`, or supplies
-/// an unsupported `object_kind`.
+/// `BadRequest` if the request supplies neither `resource_id` nor a supported
+/// explicit target, pairs `object_kind = "platform"` with an `object_id`, or
+/// supplies an unsupported `object_kind`.
 pub(crate) async fn resolve_object(
     pool: &PgPool,
     req: &AuthzRequest,
@@ -110,8 +110,11 @@ pub(crate) async fn resolve_object(
             "entity" => load_entity_as_object(pool, id).await,
             "group" => load_group_as_object(pool, id).await,
             "credential" => load_credential_as_object(pool, id).await,
+            "role" => load_role_as_object(pool, id).await,
+            "policy" => load_policy_as_object(pool, id).await,
+            "api_endpoint" => load_api_endpoint_as_object(pool, id).await,
             other => Err(AppError::bad_request(format!(
-                "unsupported object_kind '{other}' (supported: platform, resource, tenant, entity, group, credential)"
+                "unsupported object_kind '{other}' (supported: platform, resource, tenant, entity, group, role, policy, credential, api_endpoint)"
             ))),
         };
     }
@@ -162,6 +165,34 @@ async fn load_credential_as_object(
         pool,
         "credential",
         repo::load_authz_credential_object(pool, id).await?,
+    )
+    .await
+}
+
+async fn load_role_as_object(pool: &PgPool, id: Uuid) -> Result<Option<ProtectedObject>, AppError> {
+    load_protected_object(pool, "role", repo::load_authz_role_object(pool, id).await?).await
+}
+
+async fn load_policy_as_object(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<ProtectedObject>, AppError> {
+    load_protected_object(
+        pool,
+        "policy",
+        repo::load_authz_policy_object(pool, id).await?,
+    )
+    .await
+}
+
+async fn load_api_endpoint_as_object(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<ProtectedObject>, AppError> {
+    load_protected_object(
+        pool,
+        "api_endpoint",
+        repo::load_authz_api_endpoint_object(pool, id).await?,
     )
     .await
 }
@@ -544,6 +575,58 @@ pub async fn allows_any(
         }
     }
     Ok(false)
+}
+
+/// Require at least one named action on an exact protected object. Each action
+/// is evaluated by the canonical PDP, so tenant/platform allows, exact denies,
+/// ABAC conditions, tenant lifecycle, and access-token ceilings all retain the
+/// same semantics as `authzCheck`.
+pub async fn require_any_on_object(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    object_kind: &str,
+    object_id: Uuid,
+    actions: &[&str],
+) -> Result<(), AppError> {
+    if allows_any(pool, auth, auth.entity_id, object_kind, object_id, actions).await? {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+/// Require exact-object access while preserving the established result for a
+/// missing target when the caller is authorized at platform scope.
+///
+/// Exact authorization deliberately runs first. If the object exists and an
+/// exact deny overrides a platform allow, the deny must remain authoritative.
+/// Only when the requested live kind is genuinely absent do we try the same
+/// actions at platform scope. That lets an authorized operator reach the
+/// repository's native missing result (`NotFound`, or an empty child list)
+/// without letting an unprivileged caller distinguish missing from forbidden.
+pub async fn require_any_on_object_or_platform_if_missing(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    object_kind: &str,
+    object_id: Uuid,
+    actions: &[&str],
+) -> Result<(), AppError> {
+    if allows_any(pool, auth, auth.entity_id, object_kind, object_id, actions).await? {
+        return Ok(());
+    }
+
+    let live_target = crate::protected_objects::lookup(pool, object_id)
+        .await?
+        .is_some_and(|target| target.live && target.object_kind == object_kind);
+    if live_target {
+        return Err(AppError::Forbidden);
+    }
+
+    let checks = actions
+        .iter()
+        .map(|action| (*action, crate::auth::Scope::Platform))
+        .collect::<Vec<_>>();
+    crate::auth::require_any_capability(pool, auth, &checks).await
 }
 
 /// Match a canonical grant against the request: assignment tenant boundary →
@@ -986,9 +1069,8 @@ fn build_context(
 fn namespaced_object_type(object: &ProtectedObject) -> Value {
     match object.coarse_kind.as_str() {
         "entity" | "resource" => Value::String(format!("{}:{}", object.coarse_kind, object.kind)),
-        "group" | "tenant" | "role" | "policy" | "credential" | "audit_log" | "signing_key" => {
-            Value::Null
-        }
+        "group" | "tenant" | "role" | "policy" | "credential" | "api_endpoint" | "audit_log"
+        | "signing_key" => Value::Null,
         _ => Value::Null,
     }
 }
@@ -1146,6 +1228,18 @@ mod tests {
         assert_eq!(ctx["tenant"]["id"], json!(tenant_id));
         assert_eq!(ctx["tenant"]["status"], "active");
         assert_eq!(ctx["context"]["mfa_verified"], true);
+        let roots = ctx
+            .as_object()
+            .expect("ABAC context object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            roots,
+            crate::authz::conditions::ABAC_CONTEXT_ROOTS
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

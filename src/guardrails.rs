@@ -598,47 +598,30 @@ async fn role_permission_assignments(
                     WHEN pb.scope_mode = 'tenant' THEN 'tenant'
                     WHEN pb.scope_mode IN ('object_kind', 'object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_kind
                     WHEN pb.scope_mode IN ('group', 'group_child_groups', 'group_descendant_groups') THEN 'group'
-                    WHEN pb.scope_mode = 'object' THEN COALESCE(
-                      target_resource.object_kind,
-                      target_entity.object_kind,
-                      target_group.object_kind,
-                      target_tenant.object_kind,
-                      'object'
-                    )
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(target_registry.object_kind, 'object')
                     ELSE 'unknown'
                   END AS object_kind,
                   CASE
                     WHEN pb.scope_mode IN ('object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_type
-                    WHEN pb.scope_mode = 'object' THEN COALESCE(
-                      target_resource.object_type,
-                      target_entity.object_type
-                    )
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(target_resource.object_type, target_entity.object_type)
                     ELSE NULL
                   END AS object_type
            FROM role_permission_blocks rpb
            JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
            JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
            JOIN actions a ON a.id = pba.action_id
+           LEFT JOIN protected_object_ids target_registry
+             ON target_registry.id = pb.object_id AND pb.scope_mode = 'object'
            LEFT JOIN LATERAL (
-             SELECT 'resource'::text AS object_kind, 'resource:' || kind::text AS object_type
+             SELECT 'resource:' || kind::text AS object_type
              FROM resources
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+             WHERE id = pb.object_id AND target_registry.source_table = 'resources'
            ) target_resource ON TRUE
            LEFT JOIN LATERAL (
-             SELECT 'entity'::text AS object_kind, 'entity:' || kind::text AS object_type
+             SELECT 'entity:' || kind::text AS object_type
              FROM entities
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+             WHERE id = pb.object_id AND target_registry.source_table = 'entities'
            ) target_entity ON TRUE
-           LEFT JOIN LATERAL (
-             SELECT 'group'::text AS object_kind
-             FROM object_groups
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
-           ) target_group ON TRUE
-           LEFT JOIN LATERAL (
-             SELECT 'tenant'::text AS object_kind
-             FROM tenants
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
-           ) target_tenant ON TRUE
            WHERE rpb.role_id = ANY($1::uuid[])"#,
     )
     .bind(role_ids)
@@ -672,46 +655,29 @@ async fn permission_block_assignments(
                     WHEN pb.scope_mode = 'tenant' THEN 'tenant'
                     WHEN pb.scope_mode IN ('object_kind', 'object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_kind
                     WHEN pb.scope_mode IN ('group', 'group_child_groups', 'group_descendant_groups') THEN 'group'
-                    WHEN pb.scope_mode = 'object' THEN COALESCE(
-                      target_resource.object_kind,
-                      target_entity.object_kind,
-                      target_group.object_kind,
-                      target_tenant.object_kind,
-                      'object'
-                    )
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(target_registry.object_kind, 'object')
                     ELSE 'unknown'
                   END AS object_kind,
                   CASE
                     WHEN pb.scope_mode IN ('object_type', 'group_direct_objects', 'group_descendant_objects') THEN pb.object_type
-                    WHEN pb.scope_mode = 'object' THEN COALESCE(
-                      target_resource.object_type,
-                      target_entity.object_type
-                    )
+                    WHEN pb.scope_mode = 'object' THEN COALESCE(target_resource.object_type, target_entity.object_type)
                     ELSE NULL
                   END AS object_type
            FROM permission_blocks pb
            JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
            JOIN actions a ON a.id = pba.action_id
+           LEFT JOIN protected_object_ids target_registry
+             ON target_registry.id = pb.object_id AND pb.scope_mode = 'object'
            LEFT JOIN LATERAL (
-             SELECT 'resource'::text AS object_kind, 'resource:' || kind::text AS object_type
+             SELECT 'resource:' || kind::text AS object_type
              FROM resources
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+             WHERE id = pb.object_id AND target_registry.source_table = 'resources'
            ) target_resource ON TRUE
            LEFT JOIN LATERAL (
-             SELECT 'entity'::text AS object_kind, 'entity:' || kind::text AS object_type
+             SELECT 'entity:' || kind::text AS object_type
              FROM entities
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
+             WHERE id = pb.object_id AND target_registry.source_table = 'entities'
            ) target_entity ON TRUE
-           LEFT JOIN LATERAL (
-             SELECT 'group'::text AS object_kind
-             FROM object_groups
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
-           ) target_group ON TRUE
-           LEFT JOIN LATERAL (
-             SELECT 'tenant'::text AS object_kind
-             FROM tenants
-             WHERE id = pb.object_id AND pb.scope_mode = 'object'
-           ) target_tenant ON TRUE
            WHERE pb.id = ANY($1::uuid[])"#,
     )
     .bind(permission_block_ids)

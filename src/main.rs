@@ -4,6 +4,7 @@ use atom::{
     metrics, purge, routes,
     state::{self, GrpcRuntimeStatus},
 };
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -21,7 +22,14 @@ async fn main() -> anyhow::Result<()> {
 
     metrics::init(cfg.metrics.enabled);
     let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
+    let bootstrap_cfg = match cfg.bootstrap_file.as_deref() {
+        Some(path) => Some(bootstrap::load(std::path::Path::new(path)).await?),
+        None => None,
+    };
 
+    bootstrap::preflight_product_applicability(&pool, bootstrap_cfg.as_ref()).await?;
+    bootstrap::preflight_legacy_email_uniqueness(&pool).await?;
+    atom::protected_objects::preflight_global_protected_object_ids(&pool).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
@@ -57,28 +65,11 @@ async fn main() -> anyhow::Result<()> {
 
     let cache = init_cache(&cfg.cache).await?;
 
-    if let Some(ref path) = cfg.bootstrap_file {
-        let bootstrap_cfg = bootstrap::load(std::path::Path::new(path))?;
-        if let Some(cache) = cache.as_ref() {
-            let mut entity_ids: Vec<Uuid> =
-                sqlx::query_scalar("SELECT id FROM entities WHERE deleted_at IS NULL")
-                    .fetch_all(&pool)
-                    .await?;
-            entity_ids.extend(bootstrap_cfg.entities.iter().map(|entity| entity.id));
-            entity_ids.sort_unstable();
-            entity_ids.dedup();
-            let grants_keys: Vec<String> =
-                entity_ids.into_iter().map(cache::keys::grants).collect();
-            cache
-                .begin(cache::CacheCategory::Grants, &grants_keys)
-                .await
-                .map_err(|err| anyhow::anyhow!("bootstrap cache barrier failed: {err}"))?;
-            let result = bootstrap::apply(&pool, &cfg.signing_keys, &bootstrap_cfg).await;
-            cache.end(cache::CacheCategory::Grants, &grants_keys).await;
-            result?;
-        } else {
-            bootstrap::apply(&pool, &cfg.signing_keys, &bootstrap_cfg).await?;
-        }
+    if let (Some(path), Some(bootstrap_cfg)) =
+        (cfg.bootstrap_file.as_deref(), bootstrap_cfg.as_ref())
+    {
+        bootstrap::apply_with_cache(&pool, &cfg.signing_keys, bootstrap_cfg, cache.as_ref())
+            .await?;
         tracing::info!("bootstrap file applied: {path}");
     }
 
@@ -128,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     // Spawn gRPC server on a separate port; runs concurrently with HTTP. It
     // installs its own shutdown listener and drains on SIGINT/SIGTERM.
     let grpc_state = state.clone();
-    let grpc_handle = tokio::spawn(async move {
+    let mut grpc_handle = tokio::spawn(async move {
         if let Err(e) = grpc::serve(grpc_listener, grpc_state, grpc_tls).await {
             tracing::error!("grpc server exited: {e}");
         }
@@ -147,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;
     tracing::info!("atom listening on {}", cfg.listen_addr);
 
+    let shutdown_drain_timeout = Duration::from_secs(cfg.http_server.shutdown_drain_timeout_secs);
     http_server::serve(
         listener,
         app,
@@ -158,8 +150,17 @@ async fn main() -> anyhow::Result<()> {
     // HTTP has drained; wait for the gRPC task to finish draining too so the
     // process does not exit out from under in-flight gRPC requests.
     tracing::info!("http server stopped; waiting for grpc to drain");
-    if let Err(e) = grpc_handle.await {
-        tracing::error!("grpc task join error: {e}");
+    match tokio::time::timeout(shutdown_drain_timeout, &mut grpc_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(%error, "grpc task join error"),
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = shutdown_drain_timeout.as_secs(),
+                "grpc drain timed out; aborting remaining requests"
+            );
+            grpc_handle.abort();
+            let _ = grpc_handle.await;
+        }
     }
     if let Some(handle) = enrollment_handle {
         if let Err(error) = handle.await {
@@ -170,10 +171,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Builds the Redis-backed cache when enabled.
+/// Builds the Redis-backed cache in prepare or enabled mode.
 ///
 /// `None` means "caching is not configured", and every mutation guard becomes
-/// a pure pass-through on that basis. So an *enabled* cache that merely can't
+/// a pure pass-through on that basis. So a configured cache that merely can't
 /// reach Redis right now must never degrade to `None`: this process would go
 /// on mutating grants, sessions, and credentials without invalidating entries
 /// that other replicas are still serving, and a revoke here would stay
@@ -187,20 +188,25 @@ async fn main() -> anyhow::Result<()> {
 /// `ATOM_CACHE_FAIL_FAST_ON_STARTUP` then decides whether an unreachable
 /// Redis should also abort startup, rather than boot into the refusing state.
 async fn init_cache(cfg: &config::CacheConfig) -> anyhow::Result<Option<cache::CacheClient>> {
-    if !cfg.enabled {
+    if !cfg.mode.configured() {
         return Ok(None);
     }
     let client = cache::CacheClient::build(cfg).context("cache configuration is invalid")?;
     match client.probe(cfg.connect_timeout_ms).await {
-        Ok(()) => tracing::info!("cache enabled; connected to Redis"),
+        Ok(()) => tracing::info!(
+            mode = ?cfg.mode,
+            namespace = %cfg.namespace,
+            "cache configured; connected to Redis"
+        ),
         Err(err) if cfg.fail_fast_on_startup => {
             return Err(
                 err.context("cache connect failed and ATOM_CACHE_FAIL_FAST_ON_STARTUP=true")
             );
         }
         Err(err) => tracing::error!(
-            "cache enabled but Redis is unreachable: {err}. Reads fall through to Postgres; \
-             security-sensitive mutations are refused until Redis recovers."
+            "cache configured but not ready: {err}. Reads fall through to Postgres; \
+             security-sensitive mutations are refused until the cache is safely initialized or \
+             the process is restarted, as the reported condition requires."
         ),
     }
     Ok(Some(client))
@@ -314,26 +320,43 @@ async fn bootstrap_password_credentials(
     secret: &str,
     label: &str,
 ) -> anyhow::Result<()> {
+    identity::service::validate_password_strength(secret).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let hash =
+        identity::service::hash_secret(secret.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .with_context(|| format!("failed to begin {label} password bootstrap transaction"))?;
+    if identity::repo::lock_active_entity(&mut tx, entity_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("{label} password bootstrap: {e}"))?
+        .is_none()
+    {
+        anyhow::bail!("active {label} entity {entity_id} not found");
+    }
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
     .bind(entity_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
+    let mut created = false;
     if count == 0 {
-        identity::service::validate_password_strength(secret)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let hash = identity::service::hash_secret(secret.as_bytes())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
         sqlx::query(
             "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
         )
         .bind(Uuid::new_v4())
         .bind(entity_id)
         .bind(hash)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+        created = true;
+    }
+    tx.commit()
+        .await
+        .with_context(|| format!("failed to commit {label} password bootstrap"))?;
+    if created {
         tracing::info!("{label} password bootstrapped");
     }
 

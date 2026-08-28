@@ -138,6 +138,36 @@ pub async fn lock_optional_active_tenant(
     Ok(())
 }
 
+/// Lock existing tenant rows in a deterministic order without imposing a
+/// lifecycle predicate.
+///
+/// This is the ordering primitive for mutations which must establish a tenant
+/// barrier before taking a group-hierarchy advisory lock or a group row lock.
+/// Some of those mutations deliberately operate on tombstoned objects, so the
+/// helper only proves that each referenced tenant row still exists; the caller
+/// remains responsible for any `active`/`deleted_at` policy check.
+pub(crate) async fn lock_tenant_rows_in_order(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_ids: &[Option<Uuid>],
+) -> Result<(), AppError> {
+    let mut tenant_ids = tenant_ids.iter().copied().flatten().collect::<Vec<_>>();
+    tenant_ids.sort_unstable();
+    tenant_ids.dedup();
+
+    for tenant_id in tenant_ids {
+        let locked: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+                .bind(tenant_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(db_err)?;
+        if locked.is_none() {
+            return Err(AppError::not_found(format!("tenant {tenant_id} not found")));
+        }
+    }
+    Ok(())
+}
+
 pub async fn create_tenant_with_audit(
     pool: &PgPool,
     events_enabled: bool,
@@ -328,7 +358,8 @@ pub async fn get_tenant(pool: &PgPool, id: Uuid) -> Result<Tenant, AppError> {
 pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let id = search_pattern(params.id);
+    let id = params.id;
+    let id_contains = search_pattern(params.id_contains);
     let name = search_pattern(params.name);
     let alias = search_pattern(params.alias);
     let tags = search_pattern(params.tags);
@@ -347,11 +378,12 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
              AND ($9::text = 'all'
                   OR ($9::text = 'live' AND deleted_at IS NULL)
                   OR ($9::text = 'deleted' AND deleted_at IS NOT NULL))
-             AND ($1::text IS NULL OR id::text ILIKE $1)
+             AND ($1::uuid IS NULL OR id = $1)
+             AND ($10::text IS NULL OR id::text ILIKE $10)
              ORDER BY {order_by}
            LIMIT $7 OFFSET $8"#,
     ))
-    .bind(id.clone())
+    .bind(id)
     .bind(name.clone())
     .bind(alias.clone())
     .bind(status.clone())
@@ -360,6 +392,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     .bind(limit)
     .bind(offset)
     .bind(deleted)
+    .bind(id_contains.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -374,7 +407,8 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
              AND ($7::text = 'all'
                   OR ($7::text = 'live' AND deleted_at IS NULL)
                   OR ($7::text = 'deleted' AND deleted_at IS NOT NULL))
-             AND ($1::text IS NULL OR id::text ILIKE $1)"#,
+             AND ($1::uuid IS NULL OR id = $1)
+             AND ($8::text IS NULL OR id::text ILIKE $8)"#,
     )
     .bind(id)
     .bind(name)
@@ -383,6 +417,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     .bind(q)
     .bind(tags)
     .bind(deleted)
+    .bind(id_contains)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -414,7 +449,8 @@ pub async fn list_tenants_for_entity_with_ceiling(
 ) -> Result<TenantList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let id = search_pattern(params.id);
+    let id = params.id;
+    let id_contains = search_pattern(params.id_contains);
     let name = search_pattern(params.name);
     let alias = search_pattern(params.alias);
     let tags = search_pattern(params.tags);
@@ -495,7 +531,8 @@ pub async fn list_tenants_for_entity_with_ceiling(
              AND ($9::text = 'all'
                   OR ($9::text = 'live' AND t.deleted_at IS NULL)
                   OR ($9::text = 'deleted' AND t.deleted_at IS NOT NULL))
-             AND ($12::text IS NULL OR t.id::text ILIKE $12)"#;
+             AND ($12::uuid IS NULL OR t.id = $12)
+             AND ($13::text IS NULL OR t.id::text ILIKE $13)"#;
 
     let items = sqlx::query_as::<_, Tenant>(&format!(
         "{ctes} SELECT {TENANT_COLS} FROM tenants t \
@@ -512,7 +549,8 @@ pub async fn list_tenants_for_entity_with_ceiling(
     .bind(deleted)
     .bind(ceiling_credential_id)
     .bind(tags.clone())
-    .bind(id.clone())
+    .bind(id)
+    .bind(id_contains.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -532,6 +570,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
     .bind(ceiling_credential_id)
     .bind(tags)
     .bind(id)
+    .bind(id_contains)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
@@ -547,11 +586,11 @@ pub async fn update_tenant_with_audit(
     req: UpdateTenant,
     updated_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
     let mut tx = pool.begin().await.map_err(db_err)?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "tenants", id).await?;
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET name       = COALESCE($2, name),
@@ -624,6 +663,7 @@ pub async fn lock_tenant_and_collect_session_ids_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "tenants", id).await?;
     let locked =
         sqlx::query("SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE")
             .bind(id)
@@ -762,7 +802,6 @@ pub async fn soft_delete_tenant_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "tenants", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_tenant_and_collect_session_ids_in_tx(&mut tx, id).await?;
     let tenant = deactivate_and_finish_tenant_soft_delete_in_tx(
@@ -829,6 +868,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(Tenant, Vec<Uuid>), AppError> {
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "tenants", id).await?;
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = 'active', deleted_at = NULL, deleted_by = NULL,
@@ -1027,6 +1067,8 @@ pub async fn purge_tenant_with_audit(
 ) -> Result<PurgedTenant, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
 
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "tenants", id).await?;
+
     let doomed = tenant_purge_object_ids(&mut tx, &[id]).await?;
     purge_tenant_pki_in_tx(&mut tx, &[id]).await?;
 
@@ -1117,6 +1159,7 @@ pub(crate) async fn change_tenant_status_in_tx(
             "use delete tenant to apply the soft-delete lifecycle",
         ));
     }
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "tenants", id).await?;
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
            SET status = $2, updated_by = $3, updated_at = now()
@@ -1540,6 +1583,49 @@ pub async fn remove_tenant_member_with_audit(
     entity_id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+
+    // Tenant-member removal is also a bulk clear of this entity's principal
+    // group memberships and tenant-scoped role assignments. Serialize it with
+    // bootstrap and the individual link mutators before checking every
+    // affected owner; otherwise a config stamp could land after a pooled
+    // precheck and its link would then be deleted out of band.
+    lock_tenant_rows_in_order(&mut tx, &[Some(tenant_id)]).await?;
+    let affected_group_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT gm.group_id
+           FROM principal_group_members gm
+           JOIN principal_groups g ON g.id = gm.group_id
+           WHERE g.tenant_id = $1 AND gm.entity_id = $2
+           ORDER BY gm.group_id"#,
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    for group_id in affected_group_ids {
+        crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "principal_groups", group_id)
+            .await?;
+    }
+    let affected_assignment_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM role_assignments
+           WHERE tenant_id = $1
+             AND subject_kind = 'entity'
+             AND subject_id = $2
+           ORDER BY id"#,
+    )
+    .bind(tenant_id)
+    .bind(entity_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    for assignment_id in affected_assignment_ids {
+        crate::managed_by::ensure_not_config_managed_in_tx(
+            &mut tx,
+            "role_assignments",
+            assignment_id,
+        )
+        .await?;
+    }
 
     sqlx::query(
         r#"DELETE FROM principal_group_members gm
@@ -2227,6 +2313,7 @@ mod tests {
             &pool,
             ListTenants {
                 id: None,
+                id_contains: None,
                 tags: None,
                 q: None,
                 name: None,
@@ -2244,6 +2331,103 @@ mod tests {
         assert!(active.items.iter().any(|t| t.id == a.id));
         assert!(!active.items.iter().any(|t| t.id == b.id));
         cleanup(&pool, &[a.id, b.id]).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn list_distinguishes_exact_and_substring_id_filters() {
+        let pool = pool().await;
+        let exact_target = create_tenant(
+            &pool,
+            CreateTenant {
+                id: None,
+                name: unique_name("id-exact"),
+                alias: None,
+                tags: vec![],
+                attributes: Value::Null,
+            },
+            None,
+        )
+        .await
+        .expect("create exact target");
+        let substring_target = create_tenant(
+            &pool,
+            CreateTenant {
+                id: None,
+                name: unique_name("id-contains"),
+                alias: None,
+                tags: vec![],
+                attributes: Value::Null,
+            },
+            None,
+        )
+        .await
+        .expect("create substring target");
+
+        let exact = list_tenants(
+            &pool,
+            ListTenants {
+                id: Some(exact_target.id),
+                id_contains: None,
+                tags: None,
+                q: None,
+                name: None,
+                alias: None,
+                status: None,
+                deleted: crate::models::enums::DeletedFilter::Live,
+                limit: 100,
+                offset: 0,
+                order: Default::default(),
+                dir: Default::default(),
+            },
+        )
+        .await
+        .expect("list by exact id");
+        assert_eq!(
+            exact
+                .items
+                .iter()
+                .map(|tenant| tenant.id)
+                .collect::<Vec<_>>(),
+            vec![exact_target.id]
+        );
+
+        let id_fragment = substring_target
+            .id
+            .to_string()
+            .rsplit('-')
+            .next()
+            .expect("uuid suffix")
+            .to_owned();
+        let substring = list_tenants(
+            &pool,
+            ListTenants {
+                id: None,
+                id_contains: Some(id_fragment),
+                tags: None,
+                q: None,
+                name: None,
+                alias: None,
+                status: None,
+                deleted: crate::models::enums::DeletedFilter::Live,
+                limit: 100,
+                offset: 0,
+                order: Default::default(),
+                dir: Default::default(),
+            },
+        )
+        .await
+        .expect("list by id substring");
+        assert_eq!(
+            substring
+                .items
+                .iter()
+                .map(|tenant| tenant.id)
+                .collect::<Vec<_>>(),
+            vec![substring_target.id]
+        );
+
+        cleanup(&pool, &[exact_target.id, substring_target.id]).await;
     }
 
     #[tokio::test]

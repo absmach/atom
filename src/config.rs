@@ -247,22 +247,63 @@ impl Default for CacheTtlConfig {
     }
 }
 
+/// Deployment mode for the Redis-backed AuthN/AuthZ cache.
+///
+/// `Prepare` is the compatibility bridge for rolling deployments: it keeps
+/// reads on Postgres while making every v1 writer participate in Redis
+/// invalidation. Once every pre-v1/disabled writer is gone, replicas can roll
+/// from `Prepare` to `Enabled` without creating a stale-cache window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheMode {
+    #[default]
+    Disabled,
+    Prepare,
+    Enabled,
+}
+
+impl CacheMode {
+    fn from_env_value(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "disabled" => Ok(Self::Disabled),
+            "prepare" => Ok(Self::Prepare),
+            "enabled" => Ok(Self::Enabled),
+            other => {
+                anyhow::bail!("ATOM_CACHE_MODE must be disabled, prepare, or enabled, got {other}")
+            }
+        }
+    }
+
+    pub fn configured(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    pub fn reads_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 /// Redis-backed cache for AuthN/AuthZ decision inputs. Off by default — this
 /// is a pure performance optimization; every check works correctly with it
 /// disabled, since Postgres remains authoritative. See `src/cache/mod.rs` for
 /// the consistency model this configures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheConfig {
-    pub enabled: bool,
+    pub mode: CacheMode,
     pub redis_url: String,
+    /// Deployment-unique Redis key prefix. Required in prepare/enabled mode so
+    /// two Atom databases can never consume one another's cached auth state.
+    pub namespace: String,
+    /// Explicitly create the namespace incarnation marker when it is absent.
+    /// This is a one-startup bootstrap/recovery switch, not a steady-state
+    /// setting: initialization is only safe after every Atom process and
+    /// in-flight request using the namespace has been fully drained.
+    pub initialize_namespace: bool,
     pub pool_max_size: u32,
     pub connect_timeout_ms: u64,
     pub op_timeout_ms: u64,
-    /// When `enabled` and Redis is unreachable at startup: abort like an
-    /// unreachable Postgres would (`true`), or log and continue with caching
-    /// disabled (`false`, the recommended default — Redis is not a
-    /// correctness dependency for reads, only, while enabled, a write-path
-    /// dependency for security-sensitive mutations; see `src/cache/mod.rs`).
+    /// When Redis is configured and unreachable at startup, abort instead of
+    /// starting unready. Redis remains a mutation dependency in both prepare
+    /// and enabled mode, so production deployments should keep this true.
     pub fail_fast_on_startup: bool,
     pub ttl: CacheTtlConfig,
 }
@@ -270,8 +311,10 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            mode: CacheMode::Disabled,
             redis_url: String::new(),
+            namespace: String::new(),
+            initialize_namespace: false,
             pool_max_size: 20,
             connect_timeout_ms: 2_000,
             op_timeout_ms: 50,
@@ -860,6 +903,20 @@ impl Config {
             .unwrap_or_else(|_| "http://localhost:8080".into());
         let ui_auth_callback = public_url(&public_base_url, "/auth/callback");
         let signing_keys = signing_keys_from_env()?;
+        let grpc_tls = grpc_tls_from_env()?;
+        let broker_auth = broker_auth_from_env()?;
+        if broker_auth.enabled
+            && grpc_tls
+                .as_ref()
+                .and_then(|tls| tls.client_ca_path.as_deref())
+                .is_none()
+        {
+            anyhow::bail!(
+                "ATOM_BROKER_AUTH_ENABLED=true requires gRPC mTLS: set \
+                 ATOM_GRPC_TLS_CERT_PATH, ATOM_GRPC_TLS_KEY_PATH, and \
+                 ATOM_GRPC_TLS_CLIENT_CA_PATH"
+            );
+        }
         let mut pki_ca_keys = pki_ca_keys_from_env()?;
         // `public_base_url` has a localhost default for local UI and auth
         // flows. Certificate discovery URLs are permanent certificate
@@ -887,7 +944,7 @@ impl Config {
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             http_server: http_server_from_env()?,
             grpc_addr: std::env::var("GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
-            grpc_tls: grpc_tls_from_env()?,
+            grpc_tls,
             enrollment: enrollment_from_env()?,
             pki_lifecycle: pki_lifecycle_from_env()?,
             signing_keys,
@@ -967,7 +1024,7 @@ impl Config {
                 "ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH",
             ),
             cache: cache_from_env()?,
-            broker_auth: broker_auth_from_env()?,
+            broker_auth,
             public_base_url,
         })
     }
@@ -1209,8 +1266,10 @@ fn cache_from_env() -> Result<CacheConfig> {
     let default = CacheConfig::default();
     let default_ttl = CacheTtlConfig::default();
     let cfg = CacheConfig {
-        enabled: env_bool_default("ATOM_CACHE_ENABLED", default.enabled),
+        mode: cache_mode_from_env()?,
         redis_url: std::env::var("ATOM_CACHE_REDIS_URL").unwrap_or_default(),
+        namespace: nonempty_env("ATOM_CACHE_NAMESPACE").unwrap_or_default(),
+        initialize_namespace: env_bool_default("ATOM_CACHE_INITIALIZE_NAMESPACE", false),
         pool_max_size: env_parse("ATOM_CACHE_POOL_MAX_SIZE", default.pool_max_size)?,
         connect_timeout_ms: env_parse("ATOM_CACHE_CONNECT_TIMEOUT_MS", default.connect_timeout_ms)?,
         op_timeout_ms: env_parse("ATOM_CACHE_OP_TIMEOUT_MS", default.op_timeout_ms)?,
@@ -1239,9 +1298,16 @@ fn cache_from_env() -> Result<CacheConfig> {
             grants_secs: env_parse("ATOM_CACHE_TTL_GRANTS_SECS", default_ttl.grants_secs)?,
         },
     };
-    if cfg.enabled {
+    if cfg.mode.configured() {
         if cfg.redis_url.trim().is_empty() {
-            anyhow::bail!("ATOM_CACHE_REDIS_URL must be set when ATOM_CACHE_ENABLED=true");
+            anyhow::bail!(
+                "ATOM_CACHE_REDIS_URL must be set when ATOM_CACHE_MODE is prepare or enabled"
+            );
+        }
+        if !valid_cache_namespace(&cfg.namespace) {
+            anyhow::bail!(
+                "ATOM_CACHE_NAMESPACE must be 1-64 ASCII letters, digits, dots, underscores, or hyphens when ATOM_CACHE_MODE is prepare or enabled"
+            );
         }
         if cfg.pool_max_size == 0 {
             anyhow::bail!("ATOM_CACHE_POOL_MAX_SIZE must be greater than zero");
@@ -1264,10 +1330,9 @@ fn cache_from_env() -> Result<CacheConfig> {
         if ttls.contains(&0) {
             anyhow::bail!("ATOM_CACHE_TTL_* values must all be greater than zero");
         }
-        // Bounded at startup rather than left to fail on the mutation path:
-        // `cache::barrier_ttl` scales these by 5, and the resulting `Duration`
-        // has to stay representable. A day is already far beyond any sane
-        // staleness window for auth/authz state.
+        // Bound the Redis PEXPIRE millisecond conversion before any cache
+        // operation and reject operationally nonsensical auth/authz staleness
+        // windows. A day is already far beyond a useful cache lifetime.
         if ttls.iter().any(|secs| *secs > MAX_CACHE_TTL_SECS) {
             anyhow::bail!(
                 "ATOM_CACHE_TTL_* values must not exceed {MAX_CACHE_TTL_SECS} seconds (24h)"
@@ -1275,6 +1340,40 @@ fn cache_from_env() -> Result<CacheConfig> {
         }
     }
     Ok(cfg)
+}
+
+fn cache_mode_from_env() -> Result<CacheMode> {
+    let explicit_mode = nonempty_env("ATOM_CACHE_MODE")
+        .map(|value| CacheMode::from_env_value(&value))
+        .transpose()?;
+    let legacy_enabled =
+        nonempty_env("ATOM_CACHE_ENABLED").map(|_| env_bool_default("ATOM_CACHE_ENABLED", false));
+
+    match (explicit_mode, legacy_enabled) {
+        (Some(mode), Some(enabled)) => {
+            let compatible = matches!(
+                (mode, enabled),
+                (CacheMode::Enabled, true) | (CacheMode::Disabled, false)
+            );
+            if !compatible {
+                anyhow::bail!(
+                    "ATOM_CACHE_MODE conflicts with deprecated ATOM_CACHE_ENABLED; remove ATOM_CACHE_ENABLED"
+                );
+            }
+            Ok(mode)
+        }
+        (Some(mode), None) => Ok(mode),
+        (None, Some(true)) => Ok(CacheMode::Enabled),
+        (None, Some(false)) | (None, None) => Ok(CacheMode::Disabled),
+    }
+}
+
+fn valid_cache_namespace(namespace: &str) -> bool {
+    !namespace.is_empty()
+        && namespace.len() <= 64
+        && namespace
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn signing_keys_from_env() -> Result<SigningKeyConfig> {
@@ -1882,7 +1981,7 @@ fn public_url(public_base_url: &str, path: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use super::{public_url, Config, LogFormat, PkiCaProvisioningBackend};
+    use super::{public_url, CacheMode, Config, LogFormat, PkiCaProvisioningBackend};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -2030,6 +2129,28 @@ mod tests {
     }
 
     #[test]
+    fn broker_auth_requires_grpc_mutual_tls() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_BROKER_AUTH_ENABLED", "true");
+
+        let plaintext = Config::from_env().expect_err("plaintext broker auth");
+        assert!(plaintext.to_string().contains("requires gRPC mTLS"));
+
+        std::env::set_var("ATOM_GRPC_TLS_CERT_PATH", "/tls/server.crt");
+        std::env::set_var("ATOM_GRPC_TLS_KEY_PATH", "/tls/server.key");
+        let server_tls_only = Config::from_env().expect_err("server-only broker TLS");
+        assert!(server_tls_only.to_string().contains("requires gRPC mTLS"));
+
+        std::env::set_var("ATOM_GRPC_TLS_CLIENT_CA_PATH", "/tls/client-ca.crt");
+        let cfg = Config::from_env().expect("mTLS broker config");
+        assert!(cfg.broker_auth.enabled);
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn blank_email_templates_dir_env_is_treated_as_unset() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -2091,7 +2212,7 @@ mod tests {
         let _db_guard = DatabaseUrlGuard::set();
 
         let cfg = Config::from_env().expect("config");
-        assert!(!cfg.cache.enabled, "caching must default off");
+        assert_eq!(cfg.cache.mode, CacheMode::Disabled);
         assert!(!cfg.cache.fail_fast_on_startup);
 
         clear_hardening_env();
@@ -2130,12 +2251,60 @@ mod tests {
     }
 
     #[test]
+    fn cache_mode_requires_a_deployment_namespace() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_CACHE_MODE", "prepare");
+        std::env::set_var("ATOM_CACHE_REDIS_URL", "redis://localhost:6379/0");
+
+        let err = Config::from_env().expect_err("cache namespace");
+        assert!(err.to_string().contains("ATOM_CACHE_NAMESPACE"));
+
+        std::env::set_var("ATOM_CACHE_NAMESPACE", "deployment-a");
+        std::env::set_var("ATOM_CACHE_INITIALIZE_NAMESPACE", "true");
+        let cfg = Config::from_env().expect("prepare cache config");
+        assert_eq!(cfg.cache.mode, CacheMode::Prepare);
+        assert!(cfg.cache.initialize_namespace);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn deprecated_cache_enabled_alias_is_compatible_but_conflicts_fail() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+        std::env::set_var("ATOM_CACHE_ENABLED", "true");
+        std::env::set_var("ATOM_CACHE_REDIS_URL", "redis://localhost:6379/0");
+        std::env::set_var("ATOM_CACHE_NAMESPACE", "deployment-a");
+        assert_eq!(
+            Config::from_env().expect("legacy enabled").cache.mode,
+            CacheMode::Enabled
+        );
+
+        std::env::set_var("ATOM_CACHE_MODE", "prepare");
+        let err = Config::from_env().expect_err("conflicting cache settings");
+        assert!(err.to_string().contains("conflicts"));
+
+        std::env::set_var("ATOM_CACHE_MODE", "enabled");
+        std::env::set_var("ATOM_CACHE_ENABLED", "");
+        assert_eq!(
+            Config::from_env().expect("blank legacy alias").cache.mode,
+            CacheMode::Enabled
+        );
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn cache_enabled_with_zero_ttl_fails_config() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
         let _db_guard = DatabaseUrlGuard::set();
         std::env::set_var("ATOM_CACHE_ENABLED", "true");
         std::env::set_var("ATOM_CACHE_REDIS_URL", "redis://localhost:6379/0");
+        std::env::set_var("ATOM_CACHE_NAMESPACE", "config-test");
         std::env::set_var("ATOM_CACHE_TTL_GRANTS_SECS", "0");
 
         let err = Config::from_env().expect_err("zero grants ttl");
@@ -2151,6 +2320,7 @@ mod tests {
         let _db_guard = DatabaseUrlGuard::set();
         std::env::set_var("ATOM_CACHE_ENABLED", "true");
         std::env::set_var("ATOM_CACHE_REDIS_URL", "redis://localhost:6379/0");
+        std::env::set_var("ATOM_CACHE_NAMESPACE", "config-test");
         std::env::set_var("ATOM_CACHE_POOL_MAX_SIZE", "0");
 
         let err = Config::from_env().expect_err("zero pool size");
@@ -2167,7 +2337,7 @@ mod tests {
         // ATOM_CACHE_ENABLED left unset (false) — an absent/invalid redis url
         // must not fail config parsing when caching is off.
         let cfg = Config::from_env().expect("config");
-        assert!(!cfg.cache.enabled);
+        assert_eq!(cfg.cache.mode, CacheMode::Disabled);
         assert!(cfg.cache.redis_url.is_empty());
 
         clear_hardening_env();
@@ -2532,6 +2702,11 @@ mod tests {
             "ATOM_GRPC_TLS_CERT_PATH",
             "ATOM_GRPC_TLS_KEY_PATH",
             "ATOM_GRPC_TLS_CLIENT_CA_PATH",
+            "ATOM_BROKER_AUTH_ENABLED",
+            "ATOM_BROKER_TOPIC_TEMPLATE",
+            "ATOM_BROKER_TOPIC_REF",
+            "ATOM_BROKER_CREDENTIAL_KIND",
+            "ATOM_BROKER_TOPIC_ALLOW",
             "ATOM_PKI_ENROLLMENT_ENABLED",
             "ATOM_PKI_ENROLLMENT_LISTEN_ADDR",
             "ATOM_PKI_ENROLLMENT_TLS_CERT_PATH",
@@ -2559,7 +2734,10 @@ mod tests {
             "ATOM_PKI_AUTHORITY_WARNING_SECS",
             "ATOM_EMAIL_TEMPLATES_DIR",
             "ATOM_CACHE_ENABLED",
+            "ATOM_CACHE_MODE",
             "ATOM_CACHE_REDIS_URL",
+            "ATOM_CACHE_NAMESPACE",
+            "ATOM_CACHE_INITIALIZE_NAMESPACE",
             "ATOM_CACHE_POOL_MAX_SIZE",
             "ATOM_CACHE_CONNECT_TIMEOUT_MS",
             "ATOM_CACHE_OP_TIMEOUT_MS",

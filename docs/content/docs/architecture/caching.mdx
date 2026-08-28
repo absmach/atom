@@ -38,6 +38,10 @@ Six categories, each keyed by a UUID under the `atom:v1:` namespace.
 | `CredentialCeiling` | `atom:v1:cred_ceiling:<uuid>` | Scoped-token permission cap. |
 | `Grants` | `atom:v1:grants:<subject_uuid>` | The user's full flattened permission list. |
 
+Payloads are positional MessagePack. Exact v1 bytes are frozen in
+`api/v1/cache-wire-v1.json`; changing a field order, enum spelling, nested
+shape, or encoding requires a new logical key version and rollout plan.
+
 ### What is *not* cached
 
 - **Passwords** — never used on the request path. Used only during login, which mints a JWT; the JWT then uses the `Session` cache.
@@ -74,26 +78,36 @@ Six categories, each keyed by a UUID under the `atom:v1:` namespace.
   PDP --> Done
 `} />
 
-The auth hot path batches the keys it can into **one pipelined round trip on a single pooled connection**. Issued one at a time, three lookups would mean three pool acquisitions and three serial round trips, each bounded by the operation timeout, before any request work started.
+The auth hot path batches the keys it can into **one atomic Lua round trip on a single pooled connection**. Issued one at a time, three lookups would mean three pool acquisitions and three serial round trips, each bounded by the operation timeout, before any request work started.
 
 Only keys with no data dependency on each other can share a round trip. For JWT auth, session, entity, and tenant are all known up front — the tenant key comes from the token's `tid` claim — so all three go together. For API-key auth the credential key is read first and alone because it gates everything after it, and the tenant key is derived from the entity's current tenant rather than from the credential, so it cannot be batched with it.
 
 ## Consistency Model
 
-Every cached entry is a Redis hash with three fields:
+Every cached entry is a Redis hash with these fields:
 
+- `i` — the random namespace incarnation that owns the hash.
 - `v` — an integer version, bumped on every mutation that could affect the entry.
-- `dirty` — `"1"` while a mutation is in flight, absent otherwise.
+- `dirty` — the count of live mutation leases.
 - `p` — the serialized payload, present only when the entry holds a valid value.
+- `lease:<uuid>` — one exact persistent token per in-flight mutation.
+
+Two persistent namespace keys hold a random `incarnation` marker and a global
+`mutation_epoch`. Every process remembers the incarnation it observed during
+startup, and every Lua script atomically verifies it. If Redis loses or replaces
+that marker, the process permanently stops cache reads, refuses protected
+mutations, and fails readiness until restart. Initialization succeeds only
+when both the marker and epoch are absent; a missing marker with a surviving
+epoch is treated as a damaged or globally fenced generation.
 
 Four atomic Lua scripts implement a per-key **mutation barrier**.
 
 | Primitive | When it runs | What it does |
 |---|---|---|
-| `begin` | Before a security-sensitive Postgres mutation | Bumps `v`, sets `dirty=1`, clears `p`. Fails the mutation if Redis is unreachable. |
-| `end` | After the mutation (success or failure) | Bumps `v` again, clears `dirty`, clears `p`, and re-applies the entry's expiry. Best-effort. |
-| `try_populate` | After a cache-miss reader finishes loading from Postgres | Writes the payload only if `dirty=0` **and** `v` still equals what the reader observed pre-load; otherwise discards silently. |
-| `discard` | After a reader fails to deserialize a payload | Clears **only** `p`, and only if `dirty=0` and `v` still equals what that reader observed. Never touches the barrier fields. |
+| `begin` | Before a security-sensitive Postgres mutation | Verifies incarnation/epoch, bumps both versions, adds an exact lease, increments `dirty`, clears `p`, and makes the dirty hash persistent. |
+| `end` | After the mutation (success or failure) | Verifies incarnation/epoch and the exact lease, bumps both versions, consumes that lease, decrements `dirty`, clears `p`, and restores TTL only when clean. |
+| `try_populate` | After a cache-miss reader finishes loading from Postgres | Verifies incarnation/epoch and writes only if `dirty=0`, local `v` matches, and the captured epoch still matches. |
+| `discard` | After a reader fails to deserialize a payload | Verifies incarnation/epoch and clears only `p`, version/dirty guarded. |
 
 ### Read path
 
@@ -137,9 +151,17 @@ Four atomic Lua scripts implement a per-key **mutation barrier**.
 
 1. **Read-before-mutation.** A reader observes version `N`, starts loading from Postgres; a mutation runs to completion, bumping to `N+2`. The reader's `try_populate` presents `N` — rejected on version mismatch.
 2. **Read-during-dirty-window.** A reader lands while `dirty=1`, observes the post-`begin` version. `end`'s **second** version bump ensures that observed version is stale by the time `try_populate` runs — rejected either by the dirty check (if still dirty) or the version check (if `end` already ran).
-3. **Lost-invalidation.** If `end` never runs (crash), the barrier TTL causes the whole entry to expire rather than being stuck dirty forever.
+3. **Lost-invalidation.** If `end` never runs (crash), the exact lease and dirty hash remain persistent, forcing Postgres fallback until a full-drain operator repair.
 4. **Cross-key poisoning during populate.** A miss loader whose returned payload describes a *different* key than the one being populated must never write across keys — populates only apply when the observed version's key matches the key the payload describes.
 5. **Cleanup destroying a live barrier.** Discarding a corrupt payload must not take `v` and `dirty` with it. Deleting the whole hash would erase a concurrent mutation's barrier: the next reader would find an absent key, observe version `0`, load pre-commit state, and populate it successfully. `discard` is version-guarded and clears only `p`; `end` also clears `p` defensively.
+6. **Redis state loss.** A reader that started before a flush/replacement presents
+   its remembered incarnation when its Postgres load finishes. The fresh
+   namespace has a different marker, so populate is rejected and the old
+   process permanently latches unsafe.
+7. **Unsafe topology or a lost exact lease.** Atom globally poisons the
+   namespace marker, making every peer fail closed. If the poison write fails,
+   it deletes the marker and the surviving epoch prevents in-place
+   reinitialization.
 
 ## Invalidation Map
 
@@ -174,9 +196,13 @@ The enumeration functions therefore lock the relevant rows `FOR UPDATE` inside t
 |---|---|---|
 | Redis unreachable at startup | The client is retained, never downgraded to `cache: None`. `ATOM_CACHE_FAIL_FAST_ON_STARTUP` decides whether to abort instead. | Reads fall through to Postgres; security-sensitive mutations are refused until Redis recovers. |
 | Cache config invalid at startup | Fatal regardless of the fail-fast flag — an unparseable URL cannot recover by retrying. | Startup fails. |
+| New/empty namespace without explicit initialization | Startup/readiness rejects it. | A new process cannot silently recreate state while old processes may still be alive. |
+| Marker missing/invalid while the epoch survives | Rejected even with explicit initialization. | A damaged or globally fenced generation cannot be repaired in place. |
+| Incarnation or epoch missing/changed after startup | Process permanently latches unsafe. | Reads use Postgres; protected mutations and readiness fail until restart. |
 | Redis unreachable during read | Treated as unavailable; falls through to Postgres. | Auth works, slower. |
 | Redis unreachable during `begin` | Mutation refused with `503 service_unavailable`. | Mutation does not commit. |
-| Redis unreachable during `end` | Best-effort; entry stays dirty until barrier TTL. | Entry reloads on next reader. |
+| Redis unreachable during `end` | Best-effort; the exact lease stays persistently dirty. | Reads use Postgres until full-drain operator repair. |
+| Unsafe persistence/Cluster/replica/failover topology or a missing END lease | Atom globally poisons the namespace and fails readiness. | Every peer fails closed until full-drain recovery. |
 | Redis unreachable during `try_populate` | Best-effort; dropped silently. | Next reader still gets a miss and retries. |
 | Corrupt payload | Treated as a miss; only the payload field is cleared, version-guarded, so a concurrent mutation's barrier survives. | One extra Postgres round trip. |
 
@@ -184,15 +210,34 @@ The enumeration functions therefore lock the relevant rows `FOR UPDATE` inside t
 
 All knobs live under the `ATOM_CACHE_*` prefix:
 
-- `ATOM_CACHE_ENABLED` — master switch.
+- `ATOM_CACHE_MODE` — `disabled`, `prepare` (barriers only), or `enabled`.
+- `ATOM_CACHE_ENABLED` — deprecated alias used only when mode is absent.
 - `ATOM_CACHE_REDIS_URL` — connection URL.
+- `ATOM_CACHE_NAMESPACE` — required deployment/database-unique prefix.
+- `ATOM_CACHE_INITIALIZE_NAMESPACE` — one-startup initializer for a new/empty
+  namespace. Use only after the entire Atom fleet and all in-flight requests
+  are drained, then unset it.
 - `ATOM_CACHE_POOL_MAX_SIZE` — max Redis connections.
 - `ATOM_CACHE_FAIL_FAST_ON_STARTUP` — `true` aborts startup when Redis is unreachable. Default `false`.
 - `ATOM_CACHE_CONNECT_TIMEOUT_MS` — startup PING timeout.
 - `ATOM_CACHE_OP_TIMEOUT_MS` — per-operation timeout.
-- `ATOM_CACHE_TTL_<CATEGORY>_SECS` — one per category (session, entity_status, tenant_status, credential, credential_ceiling, grants). Each must be greater than zero and no more than 86400 seconds (24h); the barrier expiry is derived as `entry_ttl * 5` and has to stay representable.
+- `ATOM_CACHE_TTL_<CATEGORY>_SECS` — one per category (session, entity_status, tenant_status, credential, credential_ceiling, grants). Each must be greater than zero and no more than 86400 seconds (24h).
 
-TTLs are the residual staleness bound if invalidation is missed entirely (e.g. `end` never completed and the barrier TTL elapsed). They should be short enough that a missed invalidation is a bounded outage, not an indefinite one.
+Clean payload hashes expire by category TTL. Dirty barriers, the incarnation,
+and the epoch do not expire, but the supported Redis itself is intentionally
+ephemeral: one dedicated standalone primary, `maxmemory-policy=noeviction`,
+`save ""`, `appendonly no`, no replicas, no Cluster, and no automatic failover.
+Atom verifies this with `CONFIG GET` and `INFO replication`. Its ACL needs those
+read commands, but should not grant `CONFIG SET`, flush/migration/restore, or
+replication reconfiguration.
+
+Every Redis restart, flush, replacement, or barrier repair requires: stop
+traffic; fully terminate/drain every Atom process and in-flight request; empty
+the namespace; start one process with
+`ATOM_CACHE_INITIALIZE_NAMESPACE=true`; wait for readiness; unset it; then start
+the remaining fleet. A rolling restart is not sufficient. Direct SQL,
+backfills, or migrations that change cached inputs must use the same barrier
+protocol or run under this full-drain/fresh-namespace procedure.
 
 ## Metrics
 

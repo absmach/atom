@@ -148,11 +148,27 @@ release-check:
 		echo "release tag $$tag does not point at HEAD" >&2; \
 		exit 1; \
 	fi; \
+	if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then \
+		echo "release requires origin/main; fetch the main branch before retrying" >&2; \
+		exit 1; \
+	fi; \
+	if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then \
+		echo "release tag $$tag must point to a commit already merged into origin/main" >&2; \
+		exit 1; \
+	fi; \
+	package_id="$$(cargo pkgid --quiet)"; \
+	package_version="$${package_id##*#}"; \
+	package_version="$${package_version##*@}"; \
+	if [ "$$tag" != "v$$package_version" ]; then \
+		echo "release tag $$tag does not match Cargo package version $$package_version" >&2; \
+		exit 1; \
+	fi; \
 	if [ -n "$$(git status --porcelain --untracked-files=normal)" ]; then \
 		echo "release requires a clean worktree, including no untracked files" >&2; \
 		git status --short >&2; \
 		exit 1; \
 	fi
+	bash scripts/check-v1-contracts.sh
 
 atom-build:
 	docker build \

@@ -51,7 +51,8 @@ pub struct UpdateTenant {
 
 #[derive(Debug, Deserialize)]
 pub struct ListTenants {
-    pub id: Option<String>,
+    pub id: Option<Uuid>,
+    pub id_contains: Option<String>,
     pub q: Option<String>,
     pub name: Option<String>,
     pub alias: Option<String>,

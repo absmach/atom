@@ -391,7 +391,7 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     .await
     .expect("resolver concurrency check exceeded ten seconds");
 
-    // Exercise the actual versioned gRPC contract and its deprecated sibling.
+    // Exercise the frozen versioned gRPC contract.
     let active_keys = active_keys(&pool, &config).await;
     let admin_token = token_for(&pool, &config, &active_keys, common::admin_id()).await;
     let state = AppState::new(pool.clone(), config.clone(), active_keys, None);

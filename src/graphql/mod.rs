@@ -20,9 +20,10 @@ pub mod schema;
 pub mod tenants;
 pub mod types;
 
-use async_graphql::{Response, ServerError};
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::{extract::State, http::HeaderMap, Extension};
+use async_graphql::{Extensions, Request, Response, ServerError, Variables};
+use async_graphql_axum::GraphQLResponse;
+use axum::{extract::State, http::HeaderMap, Extension, Json};
+use serde::Deserialize;
 
 use crate::{
     auth::{authenticate_token, require_trusted_origin, token_from_headers, AuthTokenSource},
@@ -31,13 +32,34 @@ use crate::{
 
 pub use schema::{build_schema, schema_sdl, AtomSchema};
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphqlHttpRequest {
+    query: String,
+    #[serde(default)]
+    operation_name: Option<String>,
+    #[serde(default)]
+    variables: Option<Variables>,
+    #[serde(default)]
+    extensions: Option<Extensions>,
+}
+
 pub async fn graphql_handler(
     Extension(schema): Extension<AtomSchema>,
     State(state): State<AppState>,
     headers: HeaderMap,
-    req: GraphQLRequest,
+    Json(body): Json<GraphqlHttpRequest>,
 ) -> GraphQLResponse {
-    let mut req = req.into_inner();
+    let mut req = Request::new(body.query);
+    if let Some(operation_name) = body.operation_name {
+        req = req.operation_name(operation_name);
+    }
+    if let Some(variables) = body.variables {
+        req = req.variables(variables);
+    }
+    if let Some(extensions) = body.extensions {
+        req.extensions = extensions;
+    }
     match token_from_headers(&headers) {
         Ok(Some((token, source))) => {
             if source == AuthTokenSource::Cookie {

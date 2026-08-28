@@ -207,7 +207,7 @@ impl CalloutService {
 
 async fn build_endpoint(cfg: &EndpointConfig) -> Result<EndpointClient> {
     match &cfg.transport {
-        TransportConfig::Http(_) => Ok(EndpointClient::Http(HttpCallout::build(cfg)?)),
+        TransportConfig::Http(_) => Ok(EndpointClient::Http(HttpCallout::build(cfg).await?)),
         TransportConfig::Grpc(_) => Ok(EndpointClient::Grpc(GrpcCallout::build(cfg).await?)),
     }
 }

@@ -128,12 +128,22 @@ async fn read_role(pool: &sqlx::PgPool, tenant_id: Uuid, effect: &str) -> Uuid {
 }
 
 async fn visible_tenant_ids(pool: &sqlx::PgPool, entity_id: Uuid) -> Vec<Uuid> {
+    visible_tenant_ids_with_filters(pool, entity_id, None, None).await
+}
+
+async fn visible_tenant_ids_with_filters(
+    pool: &sqlx::PgPool,
+    entity_id: Uuid,
+    id: Option<Uuid>,
+    id_contains: Option<String>,
+) -> Vec<Uuid> {
     atom::tenants::repo::list_tenants_for_entity_with_ceiling(
         pool,
         entity_id,
         None,
         ListTenants {
-            id: None,
+            id,
+            id_contains,
             tags: None,
             q: None,
             name: None,
@@ -196,6 +206,33 @@ async fn active_membership_lists_and_reads_tenant() {
             .await
             .expect("resource read check"),
         "tenant membership read must not authorize reading resources inside the tenant"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn authorized_listing_distinguishes_exact_and_substring_id_filters() {
+    let p = pool().await;
+    let exact_target = make_tenant(&p).await;
+    let substring_target = make_tenant(&p).await;
+    let caller = make_human(&p, None).await;
+    add_membership(&p, exact_target, caller, "active").await;
+    add_membership(&p, substring_target, caller, "active").await;
+
+    assert_eq!(
+        visible_tenant_ids_with_filters(&p, caller, Some(exact_target), None).await,
+        vec![exact_target]
+    );
+
+    let id_fragment = substring_target
+        .to_string()
+        .rsplit('-')
+        .next()
+        .expect("uuid suffix")
+        .to_owned();
+    assert_eq!(
+        visible_tenant_ids_with_filters(&p, caller, None, Some(id_fragment)).await,
+        vec![substring_target]
     );
 }
 
@@ -626,6 +663,7 @@ async fn ceiling_visible_tenant_ids(
         Some(credential_id),
         ListTenants {
             id: None,
+            id_contains: None,
             tags: None,
             q: None,
             name: None,

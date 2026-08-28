@@ -7,7 +7,29 @@ artifacts are:
 
 - `apidocs/openapi.yaml` for the mounted HTTP routes and DTOs;
 - `apidocs/graphql-schema.graphql` for the complete GraphQL type system;
-- `proto/atom/v1/atom.proto` for Atom's gRPC services.
+- `proto/atom/v1/atom.proto` and `proto/atom/v1/callout.proto` for Atom's
+  owned gRPC services;
+- `proto/broker/v1/auth.proto` plus its immutable upstream commit in
+  `proto/broker/v1/REF` for the broker callout wire contract; and
+- `api/v1/bootstrap.schema.json` for the declarative bootstrap document shape;
+- `api/v1/domain-event.schema.json` for the `schema_version = 1` outbox/broker
+  envelope and `api/v1/domain-event-catalog.json` for emitted names,
+  target-kind/outcome profiles, publication conditions, and stable required
+  detail keys;
+- `api/v1/jwt-contract.json` for the ES256 header, identity/session claims,
+  nullability, and online-validation semantics;
+- `api/v1/graphql-auth-matrix.json` for root-operation authentication and
+  authorization profiles, including the frozen rule that authenticated
+  self-checks need no invocation capability while delegated checks require
+  `authz.check` in the resolved tenant or at platform scope;
+- `api/v1/deployment-config.json` for runtime environment names, effective
+  defaults, parser/alias precedence, dynamic callout overrides, and fail-fast
+  relationships;
+- `api/v1/persisted-semantics.json` for stored enum strings, seeded action
+  names, ABAC operators, custom-endpoint behavior, callout configuration, and
+  credential encodings/metadata keys (including legacy PKI sentinels); and
+- `api/v1/cache-contract.md` plus `api/v1/cache-wire-v1.json` for the
+  cross-version Redis key and value ABI and its exact binary golden vectors.
 
 After `v1.0.0`, those v1 artifacts are immutable. Bug fixes may change an
 implementation only when accepted requests, response shapes, status/error
@@ -15,8 +37,24 @@ semantics, authentication requirements, field and enum meanings, and stored
 data meanings remain compatible. A necessary contract change belongs in a new
 versioned API rather than an edit to v1.
 
+`bootstrap.schema.json` is generated from the Rust bootstrap DTOs and checked
+byte-for-value in unit tests; `bootstrap.example.yaml` must satisfy both that
+schema and the runtime's cross-field validation. The schema is the structural
+contract, while `persisted-semantics.json` pins stored and behavioral
+vocabularies that JSON Schema cannot infer. Config-managed access tokens remain
+visible through credential/token listings as non-secret metadata with
+`managedBy = "config"`; mutation/revocation endpoints reject them so rotation
+stays in the bootstrap file. The domain-event schema rejects unknown envelope
+fields and versions other than `1`; the catalog separately prevents silent
+event renames and pins consumer-required detail keys. Other event detail keys
+remain additive.
+
 The password-reset request contains only `email`. Atom always constructs its
 link from `ATOM_PASSWORD_RESET_REDIRECT`; callers cannot select a redirect.
+If the entity's active password is owned by `ATOM_BOOTSTRAP_FILE`, reset
+confirmation returns `409 Conflict` without consuming the token, replacing the
+credential, or revoking sessions. API password/shared-key creation and password
+change follow the same config-owned-slot rule.
 The removed legacy `CertificateService.ResolveCertificate` RPC is not part of
 v1. Consumers use `ResolveCertificateV2`.
 
@@ -26,6 +64,58 @@ The oldest supported in-place upgrade to v1 is `v0.50.0`. Earlier database
 releases are not a supported direct upgrade source. Move their data into a
 clean, v0.50-compatible database through a separately qualified export/import
 process before upgrading to v1.
+
+The supported v0.50.0 -> v1 path is a **maintenance-window upgrade**, not a
+rolling mixed-version upgrade. Migration 009 replaces the old single-object-
+group membership keys, and v0.50 writers cannot write against the new keys.
+Migration 025 also establishes the canonical case-insensitive human-email
+identity. The shortest safe procedure is:
+
+1. Back up the database, stop ingress, and drain **every** v0.50 Atom process
+   and other process that writes Atom's schema.
+2. Start the v1 binary once. Before running migrations it performs three
+   read-only preflights. The first refuses any action-applicability row on
+   `resource:channel` / `resource:rule` that has no exact replacement in
+   `ATOM_BOOTSTRAP_FILE`, because the immutable historical migration 007
+   removes every row for those types (including the three v0.50 seeds).
+   Declare every reported row and retry; bootstrap restores them before Atom
+   accepts traffic. The second
+   refuses when two active identities would claim the same case-insensitive
+   email. The third rejects any UUID that would still identify more than one
+   protected object after migration 026. It covers tenants, entities,
+   resources, both physical group tables, roles, credentials, direct policies,
+   role assignments, and custom API endpoints. The one known v0.50 seed
+   collision is handled deterministically: migration 026 changes the built-in
+   admin role-assignment id from `00000000-0000-0000-0000-000000000001` to
+   reserved id `00000000-0000-0000-0000-00000000000a` and moves exact policy
+   scopes that explicitly declare `object_kind = policy`. An exact scope on the
+   legacy id without `object_kind` is ambiguous and blocks the upgrade until
+   the operator classifies it as `entity` or `policy`. Reconcile every other
+   reported email or UUID in v0.50, including all references to a remapped UUID,
+   then retry. No preflight chooses an owner or edits data. Operators that run migrations
+   separately must first run `scripts/check-v1-upgrade-readiness.sh`. Since
+   that read-only script cannot parse YAML, copy every row it reports into the
+   bootstrap file, remove the copied rows from stopped v0.50, and rerun the
+   script before the external migration runner. Do not run `sqlx migrate`
+   first.
+3. Let that v1 process apply all migrations and the configured
+   `ATOM_BOOTSTRAP_FILE`. The bootstrap must declare product-specific
+   capabilities and applicability (for example `publish`/`subscribe` on
+   `resource:channel`) before permission blocks use them.
+4. Verify those capability/applicability rows and the upgraded authorization
+   paths, then start the remaining v1 replicas and reopen traffic.
+
+Never allow a v0.50 writer to reconnect after v1 migrations begin. Supporting
+mixed-version writers would require a separate expand/backfill/contract bridge;
+it is deliberately outside the v1 upgrade contract.
+
+Pre-release databases that already recorded migration 007 need a one-time
+operator reconciliation before v1: compare their action applicability with a
+pre-007 backup or the product's intended bootstrap configuration and re-add
+anything the historical migration removed. Atom cannot infer arbitrary rows
+after they have been deleted. Migration 007 itself stays immutable so sqlx
+checksums remain valid; the supported v0.50 path prevents the loss before it
+happens.
 
 The four migrations shipped by v0.50.0 are pinned in
 `api/v1/migrations-v0.50.0.sha384`. CI verifies those exact checksums. Once
@@ -40,6 +130,31 @@ migration and, where readers and writers can overlap during rollout, a
 compatible expand/backfill/contract sequence. Never rewrite an applied
 migration.
 
+Bootstrap entity writes use the same canonical `entity_emails` invariant as
+the API. The legacy `parent_group_id` entity/resource attribute is rejected;
+object-group membership is declared only through the bootstrap
+`object_groups[].entities` / `object_groups[].resources` lists.
+Every bootstrap identity is idempotent only on exact normalized semantic
+equality. Reusing an ID (or an action-rule natural key) for different stored
+fields, links, membership, decisions, or credential material aborts startup
+before the row is claimed as config-managed.
+The complete file is reconciled under one advisory lock, one database
+transaction, and a relation-level mutation barrier. Capability applicability
+must equal the declared set; unexpected rows are reported rather than silently
+deleted. A declared password or shared key must be the only active credential
+of that kind on the entity and must match exactly. A late failure rolls back
+every row, link, and config-ownership stamp, while the Redis grants barrier
+remains active through the commit or rollback.
+
+Migration 026 creates the global protected-object UUID registry and repeats
+the duplicate check while holding database locks, closing the race between the
+read-only startup preflight and migration. Soft deletion retains the UUID
+reservation; physical purge or cascade releases it. The seeded assignment-id
+remap above is the only automatic identity rewrite. Roles, direct
+policies/role assignments, and API endpoints are first-class PDP targets in
+v1. Profiles and individual audit-log rows remain tenant/object-kind controlled
+and cannot be addressed by an exact-object grant.
+
 ## Release verification
 
 Before tagging v1:
@@ -50,5 +165,6 @@ Before tagging v1:
 4. Complete PKCS#11 recovery, PKI smoke, and image-build jobs at the exact tag
    commit.
 
-After tagging, CI compares the three API artifacts to `v1.0.0`, runs Buf's
-breaking-change detector, and checks every released migration for immutability.
+After tagging, CI compares every frozen contract artifact to `v1.0.0`, runs
+Buf's breaking-change detector, and checks every released migration for
+immutability.

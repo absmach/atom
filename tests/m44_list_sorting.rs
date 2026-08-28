@@ -398,6 +398,7 @@ async fn tenant_lists_apply_order_before_pagination() {
         &pool,
         ListTenants {
             id: None,
+            id_contains: None,
             tags: None,
             q: Some(prefix.clone()),
             name: None,

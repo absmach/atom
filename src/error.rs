@@ -97,36 +97,31 @@ impl IntoResponse for AppError {
             }
             AppError::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             AppError::Database(e) => {
-                if let sqlx::Error::Database(db) = e {
-                    match db.code().as_deref() {
-                        // Unique violation
-                        Some("23505") => {
-                            return (
-                                StatusCode::CONFLICT,
-                                Json(json!({"error": "already exists"})),
-                            )
-                                .into_response();
-                        }
-                        // Foreign-key violation — most commonly an unknown tenant_id
-                        Some("23503") => {
-                            tracing::warn!("foreign-key violation: {}", db.message());
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({"error": "invalid reference"})),
-                            )
-                                .into_response();
-                        }
-                        // Check violation
-                        Some("23514") => {
-                            tracing::warn!("check violation: {}", db.message());
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({"error": "invalid value"})),
-                            )
-                                .into_response();
-                        }
-                        _ => {}
+                match database_constraint_violation(e) {
+                    Some(DatabaseConstraintViolation::Unique) => {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({"error": "already exists"})),
+                        )
+                            .into_response();
                     }
+                    Some(DatabaseConstraintViolation::ForeignKey) => {
+                        tracing::warn!("foreign-key violation: {e}");
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "invalid reference"})),
+                        )
+                            .into_response();
+                    }
+                    Some(DatabaseConstraintViolation::Check) => {
+                        tracing::warn!("check violation: {e}");
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "invalid value"})),
+                        )
+                            .into_response();
+                    }
+                    None => {}
                 }
                 tracing::error!("db error: {}", e);
                 (
@@ -158,6 +153,20 @@ impl From<AppError> for tonic::Status {
             AppError::RateLimited { message, .. } => tonic::Status::resource_exhausted(message),
             AppError::ServiceUnavailable(msg) => tonic::Status::unavailable(msg),
             AppError::Database(e) => {
+                match database_constraint_violation(&e) {
+                    Some(DatabaseConstraintViolation::Unique) => {
+                        return tonic::Status::already_exists("already exists");
+                    }
+                    Some(DatabaseConstraintViolation::ForeignKey) => {
+                        tracing::warn!("foreign-key violation: {e}");
+                        return tonic::Status::invalid_argument("invalid reference");
+                    }
+                    Some(DatabaseConstraintViolation::Check) => {
+                        tracing::warn!("check violation: {e}");
+                        return tonic::Status::invalid_argument("invalid value");
+                    }
+                    None => {}
+                }
                 tracing::error!("db error: {e}");
                 tonic::Status::internal("database error")
             }
@@ -183,8 +192,31 @@ pub fn db_err(e: sqlx::Error) -> AppError {
 const ENTITY_EXTERNAL_ID_INDEX: &str = "idx_entities_external_id";
 const ENTITY_EMAIL_INDEX: &str = "idx_entity_emails_email";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabaseConstraintViolation {
+    Unique,
+    ForeignKey,
+    Check,
+}
+
+fn database_constraint_violation(e: &sqlx::Error) -> Option<DatabaseConstraintViolation> {
+    let sqlx::Error::Database(db) = e else {
+        return None;
+    };
+    database_constraint_violation_code(db.code().as_deref())
+}
+
+fn database_constraint_violation_code(code: Option<&str>) -> Option<DatabaseConstraintViolation> {
+    match code {
+        Some("23505") => Some(DatabaseConstraintViolation::Unique),
+        Some("23503") => Some(DatabaseConstraintViolation::ForeignKey),
+        Some("23514") => Some(DatabaseConstraintViolation::Check),
+        _ => None,
+    }
+}
+
 fn is_unique_violation(e: &sqlx::Error) -> bool {
-    matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
+    database_constraint_violation(e) == Some(DatabaseConstraintViolation::Unique)
 }
 
 /// The constraint a unique-violation (23505) names, if this error is one.
@@ -239,4 +271,27 @@ pub fn entity_write_conflict(e: sqlx::Error) -> AppError {
         return AppError::conflict("Email address already taken");
     }
     db_err(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{database_constraint_violation_code, DatabaseConstraintViolation};
+
+    #[test]
+    fn frozen_database_constraint_codes_are_classified_once_for_http_and_grpc() {
+        assert_eq!(
+            database_constraint_violation_code(Some("23505")),
+            Some(DatabaseConstraintViolation::Unique)
+        );
+        assert_eq!(
+            database_constraint_violation_code(Some("23503")),
+            Some(DatabaseConstraintViolation::ForeignKey)
+        );
+        assert_eq!(
+            database_constraint_violation_code(Some("23514")),
+            Some(DatabaseConstraintViolation::Check)
+        );
+        assert_eq!(database_constraint_violation_code(Some("40001")), None);
+        assert_eq!(database_constraint_violation_code(None), None);
+    }
 }

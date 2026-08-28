@@ -242,7 +242,7 @@ Tenant admins can manage certificates only for tenant-owned entities in their te
 | `ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH` | *(unset)* | Path to the platform intermediate private key (PKCS#8 or SEC1 PEM). Atom wraps it with the CA KEK before persisting. |
 | `ATOM_PKI_CA_KEY_BACKEND` | `encrypted_database` | `encrypted_database` \| `pkcs11`. |
 | `ATOM_PKI_CA_KEY_ENCRYPTION_KEY` | *(unset)* | Base64(32) KEK wrapping encrypted-DB CA private keys. Must not reuse `ATOM_KEY_ENCRYPTION_KEY`. |
-| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID` | `local:pki:v1` | Rotation identifier on stored key material. |
+| `ATOM_PKI_CA_KEY_ENCRYPTION_KEY_ID` | `local-ca:v1` (`local:pki:v1` in Compose) | Rotation identifier on stored key material. |
 | `ATOM_PKI_PKCS11_MODULE_PATH` / `_TOKEN_LABEL` / `_USER_PIN` | — | Required when the PKCS#11 backend is selected. |
 | `ATOM_PKI_PKCS11_OPERATION_TIMEOUT_MS` | `2000` | Per-operation timeout. |
 | `ATOM_PKI_PKCS11_MAX_RETRIES` | `1` | Bounded retry on transient errors. |

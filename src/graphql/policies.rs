@@ -3,6 +3,7 @@ use async_graphql::{Context, Object, Result, ID};
 use crate::{
     audit,
     auth::{require_capability, Scope},
+    authz::engine::require_any_on_object_or_platform_if_missing,
     authz::repo as authz_repo,
     models::{
         action_assignment_rule::{CreateActionAssignmentRule, ListActionAssignmentRules},
@@ -56,23 +57,29 @@ impl PolicyQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         let deleted = parse_deleted_filter(deleted);
-        if deleted != DeletedFilter::Live {
+        let params = ListRoles {
+            tenant_id,
+            derived_kind,
+            q,
+            deleted,
+            limit: limit.map(i64::from).unwrap_or(20),
+            offset: offset.map(i64::from).unwrap_or(0),
+        };
+        let list = if deleted != DeletedFilter::Live {
+            // Deleted-role visibility is the existing platform-admin surface.
+            // A platform `manage` grant is sufficient even when it does not
+            // also contain `read`/`role.manage`, so do not apply the live
+            // candidate filter to this branch.
             require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
+            authz_repo::list_roles(&state.pool, params).await
         } else {
+            // Preserve the frozen query-level gate. The authorized repository
+            // additionally filters individual role objects, but must not turn
+            // a caller with no role-read capability into a successful empty
+            // response.
             require_role_read(&state.pool, &auth, tenant_id).await?;
+            authz_repo::list_roles_authorized(&state.pool, &auth, params).await
         }
-        let list = authz_repo::list_roles(
-            &state.pool,
-            ListRoles {
-                tenant_id,
-                derived_kind,
-                q,
-                deleted,
-                limit: limit.map(i64::from).unwrap_or(20),
-                offset: offset.map(i64::from).unwrap_or(0),
-            },
-        )
-        .await
         .map_err(gql_error)?;
 
         Ok(RoleList {
@@ -85,10 +92,18 @@ impl PolicyQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
+        require_any_on_object_or_platform_if_missing(
+            &state.pool,
+            &auth,
+            "role",
+            id,
+            &["read", "role.manage"],
+        )
+        .await
+        .map_err(gql_error)?;
         let role = authz_repo::get_role(&state.pool, id)
             .await
             .map_err(gql_error)?;
-        require_role_read(&state.pool, &auth, role.tenant_id).await?;
         Ok(role.into())
     }
 
@@ -261,9 +276,12 @@ impl PolicyQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
+        // Keep the established policy-list invocation gate, then apply the
+        // exact policy-object visibility filter in the repository.
         require_policy_read(&state.pool, &auth, tenant_id).await?;
-        let list = authz_repo::list_role_assignments(
+        let list = authz_repo::list_role_assignments_authorized(
             &state.pool,
+            &auth,
             ListRoleAssignments {
                 tenant_id,
                 subject_kind: parse_optional_subject_kind(subject_kind),
@@ -315,12 +333,15 @@ impl PolicyQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
+        // Reverse and subject-forward policy lookup share the same frozen
+        // coarse gate; candidate filtering below prevents cross-object leaks.
         require_policy_read(&state.pool, &auth, tenant_id).await?;
         let object_kind = object_kind
             .map(|value| parse_object_kind(value, "objectKind"))
             .transpose()?;
-        let list = authz_repo::list_direct_policies(
+        let list = authz_repo::list_direct_policies_authorized(
             &state.pool,
+            &auth,
             ListDirectPolicies {
                 tenant_id,
                 subject_kind: parse_optional_subject_kind(subject_kind),
@@ -407,22 +428,65 @@ impl PolicyMutation {
         };
         let details = serde_json::json!({});
         let result = async {
-            let role = authz_repo::get_role(&state.pool, id).await?;
-            require_capability(
+            require_any_on_object_or_platform_if_missing(
                 &state.pool,
                 &auth,
-                "role.manage",
-                scope_for_tenant(role.tenant_id),
+                "role",
+                id,
+                &["role.manage"],
             )
             .await?;
-            authz_repo::update_role_with_audit(
+            let update = UpdateRole {
+                name: input.name,
+                description: input.description,
+            };
+            let Some(cache) = state.cache.as_deref() else {
+                return authz_repo::update_role_with_audit(
+                    &state.pool,
+                    state.config.events.enabled(),
+                    Some(auth.entity_id),
+                    id,
+                    update,
+                )
+                .await;
+            };
+            // `role_name` is embedded in every cached EffectiveGrant reached
+            // through this role. Lock the role and every assigned group,
+            // enumerate the exact affected subjects, then keep the Grants
+            // barrier up through the metadata update's commit.
+            crate::cache::invalidate::guarded_tx_mutation(
+                cache,
+                crate::cache::CacheCategory::Grants,
                 &state.pool,
-                state.config.events.enabled(),
-                Some(auth.entity_id),
-                id,
-                UpdateRole {
-                    name: input.name,
-                    description: input.description,
+                |tx| {
+                    Box::pin(
+                        async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
+                    )
+                },
+                |tx| {
+                    let events_enabled = state.config.events.enabled();
+                    Box::pin(async move {
+                        authz_repo::update_role_in_tx(
+                            tx,
+                            events_enabled,
+                            Some(auth.entity_id),
+                            id,
+                            update,
+                        )
+                        .await
+                    })
+                },
+                |role| {
+                    audit::log_observe_allow(
+                        &audit::AuditMeta {
+                            actor_entity_id: Some(auth.entity_id),
+                            tenant_id: role.tenant_id,
+                            target_kind: "role",
+                            target_id: Some(id),
+                            event: "role.update",
+                        },
+                        &details,
+                    );
                 },
             )
             .await
@@ -459,15 +523,16 @@ impl PolicyMutation {
         permission_block_ids.sort_unstable();
         permission_block_ids.dedup();
         let result = async {
-            let role = authz_repo::get_role(&state.pool, role_id).await?;
-            let tenant_id = role.tenant_id;
-            require_capability(
+            require_any_on_object_or_platform_if_missing(
                 &state.pool,
                 &auth,
-                "role.manage",
-                scope_for_tenant(tenant_id),
+                "role",
+                role_id,
+                &["role.manage"],
             )
             .await?;
+            let role = authz_repo::get_role(&state.pool, role_id).await?;
+            let tenant_id = role.tenant_id;
             // The role's assignees (entity and group) are locked and
             // enumerated together as one step — see
             // `authz::repo::lock_role_and_collect_grants_keys` — so a
@@ -556,15 +621,16 @@ impl PolicyMutation {
         };
         let details = serde_json::json!({});
         let result = async {
-            let role = authz_repo::get_role(&state.pool, id).await?;
-            let tenant_id = role.tenant_id;
-            require_capability(
+            require_any_on_object_or_platform_if_missing(
                 &state.pool,
                 &auth,
-                "role.manage",
-                scope_for_tenant(tenant_id),
+                "role",
+                id,
+                &["role.manage"],
             )
             .await?;
+            let role = authz_repo::get_role(&state.pool, id).await?;
+            let tenant_id = role.tenant_id;
             // See `replace_role_permission_blocks` above for why the role
             // and its assignees are locked (not just enumerated) together.
             let Some(cache) = state.cache.as_deref() else {
@@ -1225,23 +1291,23 @@ impl PolicyMutation {
                         )
                         .await;
                     };
-                    // Locks the role *before* `subject_id`'s group closure —
+                    // Locks all tenant rows in stable order, then the role,
+                    // before `subject_id`'s group closure —
                     // matching `replaceRolePermissionBlocks`/`deleteRole`/
                     // `restoreRole`'s lock order exactly, since locking the
                     // group first here (with the role locked later, inside
                     // `create_role_assignment_in_tx`) can deadlock against
-                    // those paths. See
-                    // `authz::repo::lock_role_then_group_closure_and_collect_grants_keys`.
+                    // those paths. The same canonical preparation is repeated
+                    // defensively inside the insert helper, covering uncached
+                    // and internal callers too.
+                    let prepare_req = req.clone();
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
                         &state.pool,
                         |tx| {
                             Box::pin(async move {
-                                authz_repo::lock_role_then_group_closure_and_collect_grants_keys(
-                                    tx, role_id, subject_id,
-                                )
-                                .await
+                                authz_repo::prepare_role_assignment_in_tx(tx, &prepare_req).await
                             })
                         },
                         |tx| {
@@ -1300,15 +1366,16 @@ impl PolicyMutation {
         };
         let details = serde_json::json!({});
         let result = async {
-            let assignment = authz_repo::get_role_assignment(&state.pool, id).await?;
-            let tenant_id = assignment.tenant_id;
-            require_capability(
+            require_any_on_object_or_platform_if_missing(
                 &state.pool,
                 &auth,
-                "policy.manage",
-                scope_for_tenant(tenant_id),
+                "policy",
+                id,
+                &["policy.manage"],
             )
             .await?;
+            let assignment = authz_repo::get_role_assignment(&state.pool, id).await?;
+            let tenant_id = assignment.tenant_id;
             match assignment.subject_kind {
                 crate::models::enums::SubjectKind::Entity => {
                     let grants_keys = vec![crate::cache::keys::grants(assignment.subject_id)];
@@ -1456,17 +1523,14 @@ impl PolicyMutation {
                         )
                         .await;
                     };
+                    let prepare_req = req.clone();
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
                         &state.pool,
                         |tx| {
                             Box::pin(async move {
-                                authz_repo::lock_group_closures_and_collect_grants_keys(
-                                    tx,
-                                    &[subject_id],
-                                )
-                                .await
+                                authz_repo::prepare_direct_policy_in_tx(tx, &prepare_req).await
                             })
                         },
                         |tx| {
@@ -1525,15 +1589,16 @@ impl PolicyMutation {
         };
         let details = serde_json::json!({});
         let result = async {
-            let policy = authz_repo::get_direct_policy(&state.pool, id).await?;
-            let tenant_id = policy.tenant_id;
-            require_capability(
+            require_any_on_object_or_platform_if_missing(
                 &state.pool,
                 &auth,
-                "policy.manage",
-                scope_for_tenant(tenant_id),
+                "policy",
+                id,
+                &["policy.manage"],
             )
             .await?;
+            let policy = authz_repo::get_direct_policy(&state.pool, id).await?;
+            let tenant_id = policy.tenant_id;
             match policy.subject_kind {
                 crate::models::enums::SubjectKind::Entity => {
                     let grants_keys = vec![crate::cache::keys::grants(policy.subject_id)];

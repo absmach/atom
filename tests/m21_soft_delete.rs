@@ -17,7 +17,7 @@ use atom::{
         group::{CreateGroup, ListGroups, UpdateGroup},
         resource::{ListResources, UpdateResource},
         role::{ListRoles, UpdateRole},
-        session::PasswordResetConfirmRequest,
+        session::{PasswordResetConfirmRequest, PasswordResetRequest},
         tenant::{CreateTenantInvitation, ListTenants},
         token::{AccessTokenPermission, CreateAccessToken},
     },
@@ -148,10 +148,11 @@ async fn deleted_entity_cannot_consume_existing_password_reset_token() {
     let pool = common::pool().await;
     let id = make_entity(&pool, &format!("sd-reset-{}", Uuid::new_v4()), None).await;
     let email_id = Uuid::new_v4();
+    let email = format!("{id}@example.com");
     sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
         .bind(email_id)
         .bind(id)
-        .bind(format!("{id}@example.com"))
+        .bind(&email)
         .execute(&pool)
         .await
         .expect("insert email");
@@ -206,6 +207,107 @@ async fn deleted_entity_cannot_consume_existing_password_reset_token() {
         consumed_at.is_none(),
         "rejected reset token must remain unconsumed"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn config_managed_password_cannot_be_reset() {
+    let pool = common::pool().await;
+    let id = make_entity(&pool, &format!("managed-reset-{}", Uuid::new_v4()), None).await;
+    let email_id = Uuid::new_v4();
+    let email = format!("{id}@example.com");
+    sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+        .bind(email_id)
+        .bind(id)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("insert email");
+    let managed_id = Uuid::new_v4();
+    let managed_hash = service::hash_secret(b"managed-password-123").expect("hash password");
+    sqlx::query(
+        r#"INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
+           VALUES ($1, $2, 'password', $3, 'config')"#,
+    )
+    .bind(managed_id)
+    .bind(id)
+    .bind(&managed_hash)
+    .execute(&pool)
+    .await
+    .expect("insert managed password");
+    service::request_password_reset(
+        &pool,
+        &atom::config::Config::for_tests(),
+        PasswordResetRequest { email },
+    )
+    .await
+    .expect("managed reset request remains enumeration-safe");
+    let generated_tokens: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM password_reset_tokens WHERE entity_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("managed reset token count");
+    assert_eq!(generated_tokens, 0);
+    let session = atom::identity::repo::create_session(&pool, id, 3600)
+        .await
+        .expect("create session");
+
+    let token_id = Uuid::new_v4();
+    let token_secret = "cd".repeat(32);
+    let token = format!(
+        "atomr_{}_{}",
+        hex::encode(token_id.as_bytes()),
+        token_secret
+    );
+    let token_hash = service::hash_secret(token_secret.as_bytes()).expect("hash token");
+    sqlx::query(
+        r#"INSERT INTO password_reset_tokens
+             (id, entity_id, email_id, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, now() + interval '1 hour')"#,
+    )
+    .bind(token_id)
+    .bind(id)
+    .bind(email_id)
+    .bind(token_hash)
+    .execute(&pool)
+    .await
+    .expect("insert reset token");
+
+    let err = service::reset_password(
+        &pool,
+        None,
+        PasswordResetConfirmRequest {
+            token,
+            password: "replacement-password-123".to_string(),
+            confirm_password: Some("replacement-password-123".to_string()),
+        },
+    )
+    .await
+    .expect_err("config-managed password must reject reset");
+    assert!(matches!(err, atom::error::AppError::Conflict(_)));
+
+    let unchanged: (String, String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        r#"SELECT c.status, c.secret_hash, reset.consumed_at
+           FROM credentials c
+           CROSS JOIN password_reset_tokens reset
+           WHERE c.id = $1 AND reset.id = $2"#,
+    )
+    .bind(managed_id)
+    .bind(token_id)
+    .fetch_one(&pool)
+    .await
+    .expect("unchanged managed credential and token");
+    assert_eq!(unchanged.0, "active");
+    assert_eq!(unchanged.1, managed_hash);
+    assert!(unchanged.2.is_none());
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
+            .bind(session.id)
+            .fetch_one(&pool)
+            .await
+            .expect("session status");
+    assert!(revoked_at.is_none());
 }
 
 #[tokio::test]
@@ -517,6 +619,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         &pool,
         ListTenants {
             id: None,
+            id_contains: None,
             tags: None,
             q: Some(tenant_name.clone()),
             name: None,
@@ -539,6 +642,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         &pool,
         ListTenants {
             id: None,
+            id_contains: None,
             tags: None,
             q: Some(tenant_name),
             name: None,

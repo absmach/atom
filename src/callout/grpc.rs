@@ -87,14 +87,17 @@ async fn build_channel(
         }
         let mut tls_cfg = ClientTlsConfig::new();
         if let Some(ca_path) = &tls.ca_path {
-            let pem = std::fs::read(ca_path)
+            let pem = tokio::fs::read(ca_path)
+                .await
                 .with_context(|| format!("read gRPC callout TLS CA {ca_path}"))?;
             tls_cfg = tls_cfg.ca_certificate(tonic::transport::Certificate::from_pem(pem));
         }
         if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
-            let cert = std::fs::read(cert_path)
+            let cert = tokio::fs::read(cert_path)
+                .await
                 .with_context(|| format!("read gRPC callout mTLS cert {cert_path}"))?;
-            let key = std::fs::read(key_path)
+            let key = tokio::fs::read(key_path)
+                .await
                 .with_context(|| format!("read gRPC callout mTLS key {key_path}"))?;
             tls_cfg = tls_cfg.identity(Identity::from_pem(cert, key));
         }

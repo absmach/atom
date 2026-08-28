@@ -11,14 +11,23 @@ The proto source lives at [`proto/atom/v1/atom.proto`](../proto/atom/v1/atom.pro
 ```text
 host: atom:8081 inside Docker Compose, localhost:8081 only when explicitly exposed
 protocol: gRPC (HTTP/2)
-TLS: none inside the trusted service network; terminate TLS at the service mesh or load balancer in production
+TLS: plaintext unless ATOM_GRPC_TLS_CERT_PATH and ATOM_GRPC_TLS_KEY_PATH are both set
+mTLS: set ATOM_GRPC_TLS_CLIENT_CA_PATH in addition to the server certificate and key
 ```
 
-Runtime services should call Atom over the service network. The default container bind address is `0.0.0.0:8081` so sibling containers can reach Atom gRPC at `atom:8081`.
+Runtime services should call Atom over the service network. The default
+container bind address is `0.0.0.0:8081` so sibling containers can reach Atom
+gRPC at `atom:8081`. A plaintext listener must stay on a private network or
+behind a service mesh that supplies transport security. Setting only one of
+the server certificate/key paths, or configuring an unreadable TLS file,
+aborts startup. `ATOM_GRPC_TLS_CLIENT_CA_PATH` makes client certificates
+mandatory and verified.
 
 ### Authentication Metadata
 
-`AuthzService.Check`, `AliasService.ResolveAlias`, both certificate resolver versions, and `CertificateService.RevokeEntityCertificates` require gRPC metadata:
+`AuthzService.Check`, `AuthService.AuthenticateCredential`,
+`AliasService.ResolveAlias`, `CertificateService.ResolveCertificateV2`, and
+`CertificateService.RevokeEntityCertificates` require gRPC metadata:
 
 ```text
 authorization: Bearer <jwt-or-api-key>
@@ -61,11 +70,12 @@ Requires `authorization: Bearer <token>` metadata. The caller must have `authz.c
 | `subject_id` | `string` UUID | yes | Entity performing the action. |
 | `action` | `string` | yes | Action name, for example `publish`, `read`, or `manage`. |
 | `resource_id` | `string` UUID | conditional | Legacy resource-row target. Mutually exclusive with `object_kind`/`object_id`; explicit object fields win if both are sent. |
-| `object_kind` | `string` | conditional | Explicit protected object kind, for example `resource` or `tenant`. Must be set with `object_id`. |
-| `object_id` | `string` UUID | conditional | Explicit protected object id. Must be set with `object_kind`. |
+| `object_kind` | `string` | conditional | Explicit protected object kind: `resource`, `tenant`, `entity`, `group`, `credential`, or `platform`. Non-platform kinds require `object_id`; `platform` requires it to be empty. |
+| `object_id` | `string` UUID | conditional | Explicit protected object id. Required with every non-platform `object_kind`; forbidden for `platform`. |
 | `context` | `map<string, string>` | no | Flat ABAC context injected under the `context` key during evaluation. |
 
-The gRPC interface supports flat `string -> string` context values only. Use HTTP/GraphQL for nested JSON context.
+The gRPC interface supports flat `string -> string` context values only. Use
+the GraphQL `authzCheck` input for nested JSON context.
 
 **Response: `CheckResponse`**
 
@@ -113,7 +123,11 @@ Token authentication. Use `Authenticate` to validate incoming Bearer tokens in d
 rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse)
 ```
 
-Validates a JWT or API key and returns the caller identity. JWTs are checked against the live signing keys and session state. API keys are checked by embedded credential id, argon2 hash, status, and expiry.
+Validates a JWT or API key and returns the caller identity. JWTs are checked
+against the live signing keys and session state. API keys use their embedded
+credential id for lookup, then a constant-time keyed HMAC-SHA256 verifier under
+the deployment KEK (with the legacy Argon2 verifier fallback when no KEK is
+configured), plus live status and expiry checks.
 
 This RPC does not require authorization metadata because the token to validate is carried in the request body.
 
@@ -137,6 +151,7 @@ This RPC does not require authorization metadata because the token to validate i
 |---|---|
 | `OK` | Token valid. |
 | `UNAUTHENTICATED` | Token missing, malformed, expired, revoked, or invalid. |
+| `PERMISSION_DENIED` | A configured authentication callout denies the operation. |
 | `INTERNAL` | Database or internal error. |
 
 **Example**
@@ -145,6 +160,66 @@ This RPC does not require authorization metadata because the token to validate i
 grpcurl -plaintext \
   -d '{"token": "'"$ATOM_TOKEN"'"}' \
   atom:8081 atom.v1.AuthService/Authenticate
+```
+
+#### `AuthenticateCredential`
+
+```text
+rpc AuthenticateCredential(AuthenticateCredentialRequest) returns (AuthenticateCredentialResponse)
+```
+
+Authenticates a password or shared key for a protocol adapter without minting
+a session. This is a delegated operation: the adapter authenticates itself
+with `authorization: Bearer <token>` metadata, while the target identity's
+plaintext credential is carried in the request body. The caller must hold
+`authz.check` for the selected tenant, or at platform scope when no tenant is
+selected.
+
+At most one of `tenant_id` and `tenant_alias` may be supplied. Leaving both
+empty selects the global namespace. An explicitly selected tenant must exist
+and be active. Authentication failures do not reveal whether the tenant,
+identity, or credential exists.
+
+**Request: `AuthenticateCredentialRequest`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `identifier` | `string` | yes | Password: entity UUID, email, name, or tenant-scoped alias. Shared key: machine-entity identifier. |
+| `secret` | `string` | yes | Plaintext password or shared key. Never stored in plaintext or forwarded to callouts. |
+| `kind` | `string` | no | `password` (also the empty-string default) or `shared_key`. |
+| `tenant_id` | `string` UUID | conditional | Tenant UUID selector; mutually exclusive with `tenant_alias`. |
+| `tenant_alias` | `string` | conditional | Case-insensitive tenant alias selector; mutually exclusive with `tenant_id`. |
+
+**Response: `AuthenticateCredentialResponse`**
+
+| Field | Type | Description |
+|---|---|---|
+| `entity_id` | `string` UUID | Authenticated entity. |
+| `tenant_id` | `string` UUID | Owning tenant; empty for a global entity. |
+| `credential_id` | `string` UUID | Exact credential that authenticated. |
+
+**gRPC status codes**
+
+| Code | Condition |
+|---|---|
+| `OK` | Credential valid and caller authorized. |
+| `INVALID_ARGUMENT` | Kind or tenant selector shape is invalid. |
+| `UNAUTHENTICATED` | Caller metadata or target credential is invalid. |
+| `PERMISSION_DENIED` | Caller lacks delegated `authz.check` authority or a configured callout denies the operation. |
+| `INTERNAL` | Database or internal error. |
+
+**Example**
+
+```bash
+grpcurl -plaintext \
+  -H 'authorization: Bearer '"$ATOM_TOKEN" \
+  -d '{
+    "identifier": "device-a",
+    "secret": "<target-shared-key>",
+    "kind": "shared_key",
+    "tenant_alias": "factory-a"
+  }' \
+  atom:8081 atom.v1.AuthService/AuthenticateCredential
 ```
 
 ---

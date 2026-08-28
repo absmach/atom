@@ -21,11 +21,14 @@ services:
       retries: 5
 
   # Redis-backed AuthN/AuthZ cache (see src/cache/mod.rs). Off by default
-  # (ATOM_CACHE_ENABLED=false) — a pure performance optimization, Postgres
-  # remains authoritative. Pure cache, no persistence needed.
+  # (ATOM_CACHE_MODE=disabled) — a pure performance optimization, Postgres
+  # remains authoritative. This is deliberately one standalone, non-replicated
+  # ephemeral primary: no RDB, no AOF, no Cluster/failover, and no eviction.
+  # Dirty mutation barriers are persistent only for this process lifetime;
+  # never flush/restart Redis while Atom writers are running.
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
     ports:
       - "127.0.0.1:${ATOM_CACHE_REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -92,6 +95,11 @@ services:
       ATOM_GRPC_TLS_CERT_PATH: ${ATOM_GRPC_TLS_CERT_PATH:-}
       ATOM_GRPC_TLS_KEY_PATH: ${ATOM_GRPC_TLS_KEY_PATH:-}
       ATOM_GRPC_TLS_CLIENT_CA_PATH: ${ATOM_GRPC_TLS_CLIENT_CA_PATH:-}
+      ATOM_BROKER_AUTH_ENABLED: ${ATOM_BROKER_AUTH_ENABLED:-false}
+      ATOM_BROKER_TOPIC_TEMPLATE: ${ATOM_BROKER_TOPIC_TEMPLATE:-}
+      ATOM_BROKER_TOPIC_REF: ${ATOM_BROKER_TOPIC_REF:-alias}
+      ATOM_BROKER_CREDENTIAL_KIND: ${ATOM_BROKER_CREDENTIAL_KIND:-password}
+      ATOM_BROKER_TOPIC_ALLOW: ${ATOM_BROKER_TOPIC_ALLOW:-}
       ATOM_PKI_ENROLLMENT_ENABLED: ${ATOM_PKI_ENROLLMENT_ENABLED:-false}
       ATOM_PKI_ENROLLMENT_LISTEN_ADDR: 0.0.0.0:${ATOM_PKI_ENROLLMENT_PORT:-8443}
       ATOM_PKI_ENROLLMENT_TLS_CERT_PATH: ${ATOM_PKI_ENROLLMENT_TLS_CERT_PATH:-}
@@ -150,10 +158,12 @@ services:
       ATOM_BOOTSTRAP_FILE: /etc/atom/bootstrap.yaml
       ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
       ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
-      # Off by default. Set ATOM_CACHE_ENABLED=true (and add `redis` to
-      # depends_on below) once Redis is provisioned — see .env.example.
-      ATOM_CACHE_ENABLED: ${ATOM_CACHE_ENABLED:-false}
+      # Use prepare on every replica before enabled; see .env.example.
+      ATOM_CACHE_MODE: ${ATOM_CACHE_MODE:-}
+      ATOM_CACHE_ENABLED: ${ATOM_CACHE_ENABLED:-}
       ATOM_CACHE_REDIS_URL: ${ATOM_CACHE_REDIS_URL:-redis://redis:6379/0}
+      ATOM_CACHE_NAMESPACE: ${ATOM_CACHE_NAMESPACE:-}
+      ATOM_CACHE_INITIALIZE_NAMESPACE: ${ATOM_CACHE_INITIALIZE_NAMESPACE:-false}
       ATOM_CACHE_POOL_MAX_SIZE: ${ATOM_CACHE_POOL_MAX_SIZE:-20}
       ATOM_CACHE_CONNECT_TIMEOUT_MS: ${ATOM_CACHE_CONNECT_TIMEOUT_MS:-2000}
       ATOM_CACHE_OP_TIMEOUT_MS: ${ATOM_CACHE_OP_TIMEOUT_MS:-50}
@@ -244,6 +254,11 @@ services:
       ATOM_GRPC_TLS_CERT_PATH: ${ATOM_GRPC_TLS_CERT_PATH:-}
       ATOM_GRPC_TLS_KEY_PATH: ${ATOM_GRPC_TLS_KEY_PATH:-}
       ATOM_GRPC_TLS_CLIENT_CA_PATH: ${ATOM_GRPC_TLS_CLIENT_CA_PATH:-}
+      ATOM_BROKER_AUTH_ENABLED: ${ATOM_BROKER_AUTH_ENABLED:-false}
+      ATOM_BROKER_TOPIC_TEMPLATE: ${ATOM_BROKER_TOPIC_TEMPLATE:-}
+      ATOM_BROKER_TOPIC_REF: ${ATOM_BROKER_TOPIC_REF:-alias}
+      ATOM_BROKER_CREDENTIAL_KIND: ${ATOM_BROKER_CREDENTIAL_KIND:-password}
+      ATOM_BROKER_TOPIC_ALLOW: ${ATOM_BROKER_TOPIC_ALLOW:-}
       ATOM_PKI_ENROLLMENT_ENABLED: ${ATOM_PKI_ENROLLMENT_ENABLED:-false}
       ATOM_PKI_ENROLLMENT_LISTEN_ADDR: 0.0.0.0:${ATOM_DEV_PKI_ENROLLMENT_PORT:-18443}
       ATOM_PKI_ENROLLMENT_TLS_CERT_PATH: ${ATOM_PKI_ENROLLMENT_TLS_CERT_PATH:-}
@@ -296,8 +311,11 @@ services:
       ATOM_BOOTSTRAP_FILE: /etc/atom/bootstrap.yaml
       ATOM_CALLOUTS_FILE: /etc/atom/callout.yaml
       ATOM_CALLOUTS_ENABLED: ${ATOM_CALLOUTS_ENABLED:-true}
-      ATOM_CACHE_ENABLED: ${ATOM_CACHE_ENABLED:-false}
+      ATOM_CACHE_MODE: ${ATOM_CACHE_MODE:-}
+      ATOM_CACHE_ENABLED: ${ATOM_CACHE_ENABLED:-}
       ATOM_CACHE_REDIS_URL: ${ATOM_CACHE_REDIS_URL:-redis://redis:6379/0}
+      ATOM_CACHE_NAMESPACE: ${ATOM_CACHE_NAMESPACE:-}
+      ATOM_CACHE_INITIALIZE_NAMESPACE: ${ATOM_CACHE_INITIALIZE_NAMESPACE:-false}
       ATOM_CACHE_POOL_MAX_SIZE: ${ATOM_CACHE_POOL_MAX_SIZE:-20}
       ATOM_CACHE_CONNECT_TIMEOUT_MS: ${ATOM_CACHE_CONNECT_TIMEOUT_MS:-2000}
       ATOM_CACHE_OP_TIMEOUT_MS: ${ATOM_CACHE_OP_TIMEOUT_MS:-50}

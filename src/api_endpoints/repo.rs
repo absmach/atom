@@ -519,8 +519,106 @@ fn json_object_or_default(value: Value) -> Value {
 fn endpoint_db_err(err: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(db) = &err {
         if db.code().as_deref() == Some("23505") {
+            if db.constraint() == Some("protected_object_ids_pkey") {
+                return AppError::conflict("api endpoint id is already used by another object");
+            }
             return AppError::conflict("api endpoint key or active method/path already exists");
         }
     }
     db_err(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use serde_json::Value;
+
+    use super::{
+        normalize_method, validate_auth_mode, validate_execution_status, validate_operation_kind,
+        validate_path, validate_status,
+    };
+
+    fn contract() -> Value {
+        serde_json::from_str(include_str!("../../api/v1/persisted-semantics.json"))
+            .expect("valid persisted-semantics contract")
+    }
+
+    fn strings(value: &Value) -> BTreeSet<&str> {
+        value
+            .as_array()
+            .expect("string array")
+            .iter()
+            .map(|value| value.as_str().expect("string value"))
+            .collect()
+    }
+
+    #[test]
+    fn custom_endpoint_stored_enums_match_the_v1_contract() {
+        let contract = contract();
+        let endpoint = &contract["customEndpoint"];
+
+        let methods = strings(&endpoint["methods"]);
+        assert_eq!(
+            methods,
+            BTreeSet::from(["GET", "POST", "PUT", "PATCH", "DELETE"])
+        );
+        for method in &methods {
+            assert_eq!(
+                normalize_method(&method.to_ascii_lowercase()).unwrap(),
+                *method
+            );
+        }
+        assert!(normalize_method("OPTIONS").is_err());
+
+        let operation_kinds = strings(&endpoint["operationKinds"]);
+        assert_eq!(operation_kinds, BTreeSet::from(["query", "mutation"]));
+        for kind in &operation_kinds {
+            assert!(validate_operation_kind(kind).is_ok());
+        }
+        assert!(validate_operation_kind("subscription").is_err());
+
+        let auth_modes = strings(&endpoint["authModes"]);
+        assert_eq!(
+            auth_modes,
+            BTreeSet::from(["caller_context", "service_context"])
+        );
+        assert!(validate_auth_mode("caller_context", None).is_ok());
+        assert!(validate_auth_mode("service_context", Some(uuid::Uuid::nil())).is_ok());
+        assert!(validate_auth_mode("service_context", None).is_err());
+
+        let statuses = strings(&endpoint["statuses"]);
+        assert_eq!(statuses, BTreeSet::from(["draft", "active", "disabled"]));
+        for status in &statuses {
+            assert!(validate_status(status).is_ok());
+        }
+
+        let execution_statuses = strings(&endpoint["executionStatuses"]);
+        assert_eq!(
+            execution_statuses,
+            BTreeSet::from(["success", "error", "denied"])
+        );
+        for status in &execution_statuses {
+            assert!(validate_execution_status(status).is_ok());
+        }
+    }
+
+    #[test]
+    fn custom_endpoint_path_rules_match_the_v1_contract() {
+        let contract = contract();
+        let endpoint = &contract["customEndpoint"];
+        let prefix = endpoint["pathPrefix"].as_str().expect("path prefix");
+        assert_eq!(prefix, "/api/custom/");
+        assert!(validate_path(&format!("{prefix}devices/online")).is_ok());
+        assert!(validate_path("/outside/custom").is_err());
+
+        let forbidden = strings(&endpoint["forbiddenPathFragments"]);
+        assert_eq!(forbidden, BTreeSet::from(["//", "..", "?", "#"]));
+        for fragment in forbidden {
+            assert!(
+                validate_path(&format!("{prefix}devices{fragment}online")).is_err(),
+                "path fragment {fragment:?} must stay forbidden"
+            );
+        }
+    }
 }

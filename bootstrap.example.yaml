@@ -1,16 +1,20 @@
 # Atom bootstrap file (example).
 #
 # Point Atom at this file with ATOM_BOOTSTRAP_FILE=/path/to/bootstrap.yaml.
-# It is applied once at startup, right after migrations, and is idempotent:
-# every record is keyed on a stable UUID and inserted with ON CONFLICT DO
-# NOTHING, so existing rows are left untouched and it is safe to leave
-# configured across restarts. Records may reference rows that already exist in
-# the database (e.g. the pre-seeded `admin` entity or `atom-admin` role).
+# It is applied once at startup, right after migrations, under one advisory
+# lock and one database transaction: every row/link commits together or the
+# complete reconciliation rolls back. Re-runs are idempotent because every
+# record is keyed on a stable identity. Existing rows are accepted only when
+# their normalized stored semantics match exactly; drift aborts startup instead
+# of overwriting runtime state or attaching links to a different row.
+# Records may reference rows that already exist when they match exactly (e.g.
+# the pre-seeded `admin` entity or `atom-admin` role).
 #
 # Sections are applied in dependency order:
 #   tenants -> entities (+credentials) -> resources -> groups (+members)
-#     -> object_groups (+members, hierarchy) -> permission_blocks (+actions)
-#     -> roles (+block links) -> role_assignments -> direct_policies
+#     -> object_groups (+members, hierarchy) -> capabilities (+applicability)
+#     -> assignment guardrails -> permission_blocks (+actions) -> roles
+#     (+block links) -> role_assignments -> direct_policies
 #
 # Secrets are declared inline (just like ADMIN_SECRET) — protect this file:
 # mount it as a secret, keep it out of version control, restrict its mode.
@@ -32,6 +36,9 @@ entities:
   - id: 00000000-0000-0000-0000-000000000001
     kind: human
     name: admin
+    attributes:
+      role: admin
+      system: true
     credentials:
       - kind: password
         secret: change-me-please
@@ -65,14 +72,49 @@ groups:
       - 22222222-2222-2222-2222-222222222222
 
 # --- Object groups (group entities/resources for group-scoped blocks) ----
-# An entity or resource belongs to at most one object group. A group with
-# members must declare tenant_id. `parent` nests groups for descendant scopes.
+# Membership is many-to-many: an entity or resource may belong to several
+# object groups. A group with members must declare tenant_id. `parent` nests
+# groups for descendant scopes. Do not put `parent_group_id` in entity/resource
+# attributes; declare membership only in these entity/resource lists.
 object_groups:
   - id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
     name: production-channels
     tenant_id: 33333333-3333-3333-3333-333333333333
     resources:
       - 99999999-9999-9999-9999-999999999999
+
+# --- Capabilities (product-specific vocabulary + applicability) -----------
+# v1 does not assign product meanings to these names. Declare applicability
+# before any permission block uses a product-specific action.
+capabilities:
+  - name: publish
+    description: Publish messages to a channel
+    applicability:
+      - object_kind: resource
+        object_type: resource:channel
+  - name: subscribe
+    description: Subscribe to channel messages
+    applicability:
+      - object_kind: resource
+        object_type: resource:channel
+  - name: execute
+    description: Execute a command or action
+    applicability:
+      - object_kind: resource
+        object_type: resource:rule
+
+# --- Assignment guardrails -----------------------------------------------
+action_assignment_rules:
+  - entity_kind: device
+    action_name: publish
+    object_kind: resource
+    object_type: resource:channel
+    decision: allow
+  - entity_kind: device
+    action_name: subscribe
+    object_kind: resource
+    object_type: resource:channel
+    decision: allow
 
 # --- Permission blocks (scope + actions + effect + conditions) -----------
 # Shared: link to roles below and/or grant directly via direct_policies.

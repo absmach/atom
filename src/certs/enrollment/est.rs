@@ -616,6 +616,9 @@ impl IntoResponse for EstError {
 
 #[cfg(test)]
 mod tests {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
     use super::*;
 
     #[test]
@@ -660,7 +663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simple_enroll_authenticates_before_decoding_the_csr() {
+    async fn contract_est_simple_enroll_authenticates_before_decoding_the_csr() {
         let response = simple_enroll(
             State(test_state()),
             pkcs10_headers(),
@@ -674,7 +677,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_keygen_authenticates_before_decoding_the_csr() {
+    async fn contract_est_server_keygen_authenticates_before_decoding_the_csr() {
         let response = server_keygen(
             State(test_state()),
             pkcs10_headers(),
@@ -685,6 +688,45 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn contract_est_reenrollment_requires_peer_before_media_type_and_body() {
+        let app = routes().with_state(test_state());
+        let response = app
+            .oneshot(
+                Request::post("/.well-known/est/simplereenroll")
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from("not a CSR"))
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible router");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE),
+            Some(&HeaderValue::from_static(BASIC_CHALLENGE))
+        );
+    }
+
+    #[tokio::test]
+    async fn contract_est_rejects_unsupported_http_auth_before_csr_decoding() {
+        let mut headers = pkcs10_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Digest unsupported"),
+        );
+        let response = simple_enroll(State(test_state()), headers, Bytes::from_static(b"%%%"))
+            .await
+            .expect_err("an unsupported auth scheme must be rejected")
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE),
+            Some(&HeaderValue::from_static(BASIC_CHALLENGE))
+        );
     }
 
     fn pkcs10_headers() -> HeaderMap {

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -20,6 +20,7 @@ use crate::{
             ListActionAssignmentRules,
         },
         alias::AliasObjectClass,
+        api_endpoint::{ApiEndpoint, ApiEndpointList, ListApiEndpoints},
         capability::{
             Capability, CapabilityApplicability, CapabilityApplicabilityEntry,
             CapabilityApplicabilityInput, CapabilityApplicabilityList, CreateCapability,
@@ -43,6 +44,176 @@ use crate::{
         },
     },
 };
+
+/// Apply the canonical grant expansion to an already-filtered, ordered set of
+/// flat protected-object candidates. Role, policy, and API-endpoint objects do
+/// not participate in object groups, so their scope target carries empty group
+/// arrays. Authorization is still performed before LIMIT/OFFSET and total is
+/// the authorized total, not the raw candidate count.
+#[allow(clippy::too_many_arguments)]
+async fn authorize_flat_candidate_query(
+    pool: &PgPool,
+    subject_id: Uuid,
+    ceiling_id: Option<Uuid>,
+    object_kind: &str,
+    actions: &[&str],
+    filters: Value,
+    candidate_sql: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<AuthorizedObjectIdsResponse, AppError> {
+    let action_names = actions
+        .iter()
+        .map(|action| (*action).to_string())
+        .collect::<Vec<_>>();
+    let sql = format!(
+        r#"WITH candidates AS ({candidate_sql}),
+           grants AS (
+               SELECT * FROM subject_effective_grants($1)
+           ),
+           {ceiling},
+           caps AS (
+               SELECT a.id
+               FROM actions a
+               JOIN action_applicability aa ON aa.action_id = a.id
+               WHERE a.name = ANY($2::text[])
+                 AND aa.object_kind = $3
+                 AND aa.object_type IS NULL
+           ),
+           authorized AS (
+               SELECT candidate.id, candidate.ordinality
+               FROM candidates candidate
+               WHERE candidate.tenant_id IS NULL
+                  OR EXISTS (
+                       SELECT 1 FROM tenants tenant
+                       WHERE tenant.id = candidate.tenant_id
+                         AND tenant.status = 'active'
+                         AND tenant.deleted_at IS NULL
+                  )
+               INTERSECT
+               SELECT candidate.id, candidate.ordinality
+               FROM candidates candidate
+               WHERE EXISTS (
+                   SELECT 1
+                   FROM caps cap
+                   WHERE EXISTS (
+                       SELECT 1 FROM grants effective_grant
+                       WHERE effective_grant.capability_id = cap.id
+                         AND effective_grant.effect = 'allow'
+                         AND effective_grant.conditions = '{{}}'::jsonb
+                         AND (effective_grant.tenant_boundary IS NULL OR effective_grant.tenant_boundary = candidate.tenant_id)
+                         AND grant_scope_matches(
+                               effective_grant.scope_kind, effective_grant.scope_ref, $3, $3,
+                               candidate.id, candidate.tenant_id,
+                               '{{}}'::uuid[], '{{}}'::uuid[])
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM grants effective_grant
+                       WHERE effective_grant.capability_id = cap.id
+                         AND effective_grant.effect = 'deny'
+                         AND (effective_grant.tenant_boundary IS NULL OR effective_grant.tenant_boundary = candidate.tenant_id)
+                         AND grant_scope_matches(
+                               effective_grant.scope_kind, effective_grant.scope_ref, $3, $3,
+                               candidate.id, candidate.tenant_id,
+                               '{{}}'::uuid[], '{{}}'::uuid[])
+                   )
+                   AND ($4::uuid IS NULL OR EXISTS (
+                       SELECT 1 FROM ceiling token_scope
+                       WHERE token_scope.action_id = cap.id
+                         AND (token_scope.tenant_id IS NULL OR token_scope.tenant_id = candidate.tenant_id)
+                         AND grant_scope_matches(
+                               token_scope.scope_kind, token_scope.scope_ref, $3, $3,
+                               candidate.id, candidate.tenant_id,
+                               '{{}}'::uuid[], '{{}}'::uuid[])
+                   ))
+               )
+           ),
+           totals AS (SELECT count(*)::bigint AS total FROM authorized),
+           page AS (
+               SELECT id FROM authorized ORDER BY ordinality LIMIT $6 OFFSET $7
+           )
+           SELECT page.id, totals.total
+           FROM totals
+           LEFT JOIN LATERAL (SELECT id FROM page) page ON TRUE"#,
+        ceiling = ceiling_cte("$4")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(subject_id)
+        .bind(action_names)
+        .bind(object_kind)
+        .bind(ceiling_id)
+        .bind(filters)
+        .bind(limit.clamp(1, 100))
+        .bind(offset.max(0))
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?;
+    let total = rows
+        .first()
+        .map(|row| row.try_get::<i64, _>("total").map_err(db_err))
+        .transpose()?
+        .unwrap_or(0);
+    let ids = rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<Option<Uuid>, _>("id").ok().flatten())
+        .collect();
+    Ok(AuthorizedObjectIdsResponse { ids, total })
+}
+
+const API_ENDPOINT_CANDIDATES: &str = r#"
+    SELECT id, tenant_id,
+           row_number() OVER (ORDER BY tenant_id NULLS FIRST, key, id) AS ordinality
+    FROM api_endpoints
+    WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
+           OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
+      AND (NULLIF($5->>'status', '') IS NULL OR status = ($5->>'status'))"#;
+
+pub async fn list_api_endpoints_authorized(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    params: ListApiEndpoints,
+) -> Result<ApiEndpointList, AppError> {
+    if params
+        .status
+        .as_deref()
+        .is_some_and(|status| !matches!(status, "draft" | "active" | "disabled"))
+    {
+        return Err(AppError::bad_request("unsupported api endpoint status"));
+    }
+    let authorized = authorize_flat_candidate_query(
+        pool,
+        auth.entity_id,
+        auth.ceiling_credential_for(auth.entity_id),
+        "api_endpoint",
+        &["read", "manage"],
+        serde_json::json!({"tenant_id": params.tenant_id, "status": params.status}),
+        API_ENDPOINT_CANDIDATES,
+        params.limit,
+        params.offset,
+    )
+    .await?;
+    let items = if authorized.ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, ApiEndpoint>(
+            r#"SELECT id, tenant_id, key, name, description, method, path,
+                      operation_kind, graphql, auth_mode, service_entity_id,
+                      variables_mapping, request_schema, response_mapping, status,
+                      created_by, updated_by, created_at, updated_at
+               FROM api_endpoints
+               WHERE id = ANY($1::uuid[])
+               ORDER BY array_position($1::uuid[], id)"#,
+        )
+        .bind(&authorized.ids)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?
+    };
+    Ok(ApiEndpointList {
+        items,
+        total: authorized.total,
+    })
+}
 
 // ─── Resources ────────────────────────────────────────────────────────────────
 
@@ -301,7 +472,6 @@ pub async fn update_resource_with_audit(
     req: UpdateResource,
     updated_fields: Vec<&'static str>,
 ) -> Result<Resource, AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     if let Some(attrs) = req.attributes.as_ref() {
         reject_parent_group_attribute(attrs)?;
     }
@@ -334,6 +504,7 @@ pub async fn update_resource_with_audit(
     if locked.is_none() {
         return Err(AppError::not_found(format!("resource {id} not found")));
     }
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
     let resource = sqlx::query_as::<_, Resource>(
         r#"UPDATE resources
            SET name       = COALESCE($2, name),
@@ -383,7 +554,6 @@ pub async fn delete_resource_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
@@ -394,6 +564,18 @@ pub async fn delete_resource_with_audit(
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("resource {id} not found")));
     };
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM resources WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if !live {
+        return Err(AppError::not_found(format!("resource {id} not found")));
+    }
     let result = sqlx::query(
         "UPDATE resources SET deleted_at = now(), deleted_by = $2
          WHERE id = $1 AND deleted_at IS NULL",
@@ -434,17 +616,34 @@ pub async fn restore_resource_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "resources", id).await?;
     let _ = restored_by;
     let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let expected_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let Some(expected_tenant_id) = expected_tenant_id else {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted resource {id} to restore"
+        )));
+    };
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
 
     let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
         "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
          FROM resources r
          LEFT JOIN tenants t ON t.id = r.tenant_id
-         WHERE r.id = $1 AND r.deleted_at IS NOT NULL",
+         WHERE r.id = $1
+           AND r.tenant_id IS NOT DISTINCT FROM $2
+           AND r.deleted_at IS NOT NULL",
     )
     .bind(id)
+    .bind(expected_tenant_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -553,6 +752,20 @@ pub async fn purge_resource_with_audit(
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(expected_tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted resource {id} to purge"
+        )));
+    };
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
 
     let purged_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
         "DELETE FROM resources WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
@@ -806,10 +1019,30 @@ pub async fn clear_resource_object_groups_with_audit(
     Ok(resource)
 }
 
-async fn add_resource_to_object_group_in_tx(
+pub(crate) async fn add_resource_to_object_group_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     resource_id: Uuid,
     group_id: Uuid,
+) -> Result<bool, AppError> {
+    add_resource_to_object_group_in_tx_impl(tx, resource_id, group_id, true).await
+}
+
+/// Bootstrap-only replay of a declarative object-group resource membership.
+/// Runtime callers use [`add_resource_to_object_group_in_tx`] and cannot
+/// change a config-owned member set.
+pub(crate) async fn add_config_resource_to_object_group_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    resource_id: Uuid,
+    group_id: Uuid,
+) -> Result<bool, AppError> {
+    add_resource_to_object_group_in_tx_impl(tx, resource_id, group_id, false).await
+}
+
+async fn add_resource_to_object_group_in_tx_impl(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    resource_id: Uuid,
+    group_id: Uuid,
+    enforce_api_ownership: bool,
 ) -> Result<bool, AppError> {
     use sqlx::Row;
     let resource_tenant_id: Option<Option<Uuid>> =
@@ -852,6 +1085,9 @@ async fn add_resource_to_object_group_in_tx(
         return Err(AppError::bad_request(
             "resource and parent group must belong to the same tenant",
         ));
+    }
+    if enforce_api_ownership {
+        crate::managed_by::ensure_not_config_managed_in_tx(tx, "object_groups", group_id).await?;
     }
     // Additive: membership is a set, so re-adding an existing membership is an
     // idempotent no-op rather than a silent move between groups.
@@ -905,6 +1141,24 @@ async fn delete_resource_object_groups_in_tx(
         return Err(AppError::not_found(format!(
             "resource {resource_id} not found"
         )));
+    }
+    let mut affected_group_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT group_id FROM object_group_resources
+           WHERE resource_id = $1 AND ($2::uuid IS NULL OR group_id = $2)
+           ORDER BY group_id"#,
+    )
+    .bind(resource_id)
+    .bind(group_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    affected_group_ids.dedup();
+    // A clear-all is one atomic ownership decision: if any membership belongs
+    // to a config-managed group, none of the API-managed memberships are
+    // removed either.
+    for affected_group_id in affected_group_ids {
+        crate::managed_by::ensure_not_config_managed_in_tx(tx, "object_groups", affected_group_id)
+            .await?;
     }
     let deleted = sqlx::query(
         r#"DELETE FROM object_group_resources
@@ -1299,20 +1553,32 @@ pub async fn create_role_with_permission_blocks(
 /// inserting a link after another has deleted the existing set). An FK insert
 /// into role_permission_blocks takes a FOR KEY SHARE lock on the role row, which
 /// conflicts with this FOR UPDATE. Returns not-found if the role is absent.
-async fn lock_role(
+pub(crate) async fn lock_role(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     role_id: Uuid,
 ) -> Result<(), AppError> {
-    let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
-            .bind(role_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(db_err)?;
-    let Some(tenant_id) = tenant_id else {
-        return Err(AppError::not_found(format!("role {role_id} not found")));
-    };
-    crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
+    let tenant_id = read_live_role_tenant_id(tx, role_id).await?;
+    lock_active_tenant_ids(tx, [tenant_id]).await?;
+    lock_live_role_row(tx, role_id, tenant_id).await
+}
+
+async fn read_live_role_tenant_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    role_id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
+    sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+        .bind(role_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))
+}
+
+async fn lock_live_role_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    role_id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
     let locked: Option<Uuid> = sqlx::query_scalar(
         r#"SELECT id FROM roles
            WHERE id = $1
@@ -1321,7 +1587,7 @@ async fn lock_role(
            FOR UPDATE"#,
     )
     .bind(role_id)
-    .bind(tenant_id)
+    .bind(expected_tenant_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -1424,6 +1690,7 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
         }
     }
     lock_role(tx, role_id).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", role_id).await?;
     // Validate under the role lock so a concurrent role assignment cannot commit
     // a prohibited combination against stale state: any other role-link or
     // assignment mutator blocks on this lock and re-validates against our result.
@@ -1531,6 +1798,7 @@ async fn delete_orphaned_blocks(
     sqlx::query(
         r#"DELETE FROM permission_blocks pb
            WHERE pb.id = ANY($1)
+             AND pb.managed_by IS DISTINCT FROM 'config'
              AND NOT EXISTS (
                  SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
              )
@@ -2207,7 +2475,6 @@ pub async fn delete_permission_block_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "permission_blocks", id).await?;
     // Blocks are shared: refuse to delete one still linked to a role or attached
     // to a direct policy, so an explicit delete cannot cascade live links away.
     //
@@ -2219,17 +2486,19 @@ pub async fn delete_permission_block_with_audit(
     // the referenced block row, which conflicts with FOR UPDATE, so no link can
     // slip in between the reference check and the delete.
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let locked: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(db_err)?;
-    if locked.is_none() {
+    let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!(
             "permission block {id} not found"
         )));
-    }
+    };
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "permission_blocks", id).await?;
     let referenced: bool = sqlx::query_scalar(
         r#"SELECT EXISTS (SELECT 1 FROM role_permission_blocks WHERE permission_block_id = $1)
               OR EXISTS (SELECT 1 FROM direct_policies WHERE permission_block_id = $1)"#,
@@ -2253,7 +2522,7 @@ pub async fn delete_permission_block_with_audit(
         events_enabled,
         &crate::audit::AuditMeta {
             actor_entity_id: actor_id,
-            tenant_id: locked.flatten(),
+            tenant_id,
             target_kind: "permission_block",
             target_id: Some(id),
             event: "permission_block.delete",
@@ -2264,8 +2533,16 @@ pub async fn delete_permission_block_with_audit(
     Ok(())
 }
 
-async fn validate_permission_block_input(
+pub(crate) async fn validate_permission_block_input(
     pool: &PgPool,
+    req: &CreatePermissionBlock,
+) -> Result<(), AppError> {
+    let mut connection = pool.acquire().await.map_err(db_err)?;
+    validate_permission_block_input_on_connection(&mut connection, req).await
+}
+
+pub(crate) async fn validate_permission_block_input_on_connection(
+    connection: &mut sqlx::PgConnection,
     req: &CreatePermissionBlock,
 ) -> Result<(), AppError> {
     if req.action_ids.is_empty() {
@@ -2273,12 +2550,12 @@ async fn validate_permission_block_input(
             "permission block requires at least one action",
         ));
     }
-    let target = permission_block_input_target(pool, req).await?;
-    validate_capabilities_against_target(pool, &req.action_ids, target).await
+    let target = permission_block_input_target_on_connection(connection, req).await?;
+    validate_capabilities_against_target_on_connection(connection, &req.action_ids, target).await
 }
 
-async fn permission_block_input_target(
-    pool: &PgPool,
+async fn permission_block_input_target_on_connection(
+    connection: &mut sqlx::PgConnection,
     req: &CreatePermissionBlock,
 ) -> Result<Option<CapabilityValidationTarget>, AppError> {
     match req.scope_mode.as_str() {
@@ -2321,7 +2598,7 @@ async fn permission_block_input_target(
             let object_id = req.object_id.ok_or_else(|| {
                 AppError::bad_request("object permission block requires objectId")
             })?;
-            resolve_exact_object_target(pool, object_id)
+            resolve_exact_object_target_on_connection(connection, object_id)
                 .await?
                 .map(Some)
                 .ok_or_else(|| {
@@ -2329,14 +2606,14 @@ async fn permission_block_input_target(
                 })
         }
         "group" => {
-            validate_object_group_boundary(pool, req.tenant_id, req.group_id).await?;
+            validate_object_group_boundary(connection, req.tenant_id, req.group_id).await?;
             Ok(Some(CapabilityValidationTarget {
                 object_kind: "group".to_string(),
                 object_type: None,
             }))
         }
         "group_direct_objects" | "group_descendant_objects" => {
-            validate_object_group_boundary(pool, req.tenant_id, req.group_id).await?;
+            validate_object_group_boundary(connection, req.tenant_id, req.group_id).await?;
             match (&req.object_kind, &req.object_type) {
                 (Some(object_kind), Some(object_type)) => Ok(Some(CapabilityValidationTarget {
                     object_kind: object_kind.clone(),
@@ -2348,7 +2625,7 @@ async fn permission_block_input_target(
             }
         }
         "group_child_groups" | "group_descendant_groups" => {
-            validate_object_group_boundary(pool, req.tenant_id, req.group_id).await?;
+            validate_object_group_boundary(connection, req.tenant_id, req.group_id).await?;
             Ok(Some(CapabilityValidationTarget {
                 object_kind: "group".to_string(),
                 object_type: None,
@@ -2361,7 +2638,7 @@ async fn permission_block_input_target(
 }
 
 async fn validate_object_group_boundary(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     tenant_id: Option<Uuid>,
     group_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -2371,7 +2648,7 @@ async fn validate_object_group_boundary(
         "SELECT tenant_id FROM object_groups WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(group_id)
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .map_err(db_err)?
     .ok_or_else(|| AppError::bad_request("object group scope references unknown group"))?;
@@ -2477,6 +2754,84 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     .map_err(db_err)?;
 
     Ok(RoleList { items, total })
+}
+
+pub async fn list_roles_authorized(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    params: ListRoles,
+) -> Result<RoleList, AppError> {
+    let q = search_pattern(params.q);
+    let derived_kind = params
+        .derived_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_ascii_lowercase);
+    if derived_kind
+        .as_deref()
+        .is_some_and(|kind| !matches!(kind, "simple" | "composite" | "empty"))
+    {
+        return Err(AppError::bad_request(
+            "derivedKind must be simple, composite, or empty",
+        ));
+    }
+    const CANDIDATES: &str = r#"SELECT id, tenant_id,
+                  row_number() OVER (ORDER BY name, id) AS ordinality
+           FROM roles
+           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
+                  OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
+             AND (NULLIF($5->>'q', '') IS NULL
+                  OR name ILIKE ($5->>'q') OR description ILIKE ($5->>'q'))
+             AND (
+               NULLIF($5->>'derived_kind', '') IS NULL
+               OR ($5->>'derived_kind' = 'simple' AND EXISTS (
+                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
+                  ))
+               OR ($5->>'derived_kind' = 'composite' AND FALSE)
+               OR ($5->>'derived_kind' = 'empty' AND NOT EXISTS (
+                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
+                  ))
+             )
+             AND ($5->>'deleted' = 'all'
+                  OR ($5->>'deleted' = 'live' AND deleted_at IS NULL)
+                  OR ($5->>'deleted' = 'deleted' AND deleted_at IS NOT NULL))"#;
+    let authorized = authorize_flat_candidate_query(
+        pool,
+        auth.entity_id,
+        auth.ceiling_credential_for(auth.entity_id),
+        "role",
+        &["read", "role.manage"],
+        serde_json::json!({
+            "tenant_id": params.tenant_id,
+            "q": q,
+            "derived_kind": derived_kind,
+            "deleted": params.deleted.as_str(),
+        }),
+        CANDIDATES,
+        params.limit,
+        params.offset,
+    )
+    .await?;
+    let items = if authorized.ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, Role>(
+            r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by,
+                      created_at, updated_at, managed_by
+               FROM roles
+               WHERE id = ANY($1::uuid[])
+               ORDER BY array_position($1::uuid[], id)"#,
+        )
+        .bind(&authorized.ids)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?
+    };
+    Ok(RoleList {
+        items,
+        total: authorized.total,
+    })
 }
 
 pub async fn role_derived_kind(pool: &PgPool, role_id: Uuid) -> Result<RoleDerivedKind, AppError> {
@@ -2776,6 +3131,16 @@ async fn validate_capabilities_against_target(
     capability_ids: &[Uuid],
     target: Option<CapabilityValidationTarget>,
 ) -> Result<(), AppError> {
+    let mut connection = pool.acquire().await.map_err(db_err)?;
+    validate_capabilities_against_target_on_connection(&mut connection, capability_ids, target)
+        .await
+}
+
+async fn validate_capabilities_against_target_on_connection(
+    connection: &mut sqlx::PgConnection,
+    capability_ids: &[Uuid],
+    target: Option<CapabilityValidationTarget>,
+) -> Result<(), AppError> {
     if capability_ids.is_empty() {
         return Ok(());
     }
@@ -2787,7 +3152,7 @@ async fn validate_capabilities_against_target(
     use sqlx::Row;
     let rows = sqlx::query("SELECT id, name FROM actions WHERE id = ANY($1::uuid[])")
         .bind(&unique_capability_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await
         .map_err(db_err)?;
     let capability_names = rows
@@ -2830,7 +3195,7 @@ async fn validate_capabilities_against_target(
     .bind(&unique_capability_ids)
     .bind(&target.object_kind)
     .bind(&target.object_type)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(db_err)?;
 
@@ -2858,52 +3223,23 @@ async fn resolve_exact_object_target(
     pool: &PgPool,
     object_id: Uuid,
 ) -> Result<Option<CapabilityValidationTarget>, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
-        r#"SELECT object_kind, object_type
-           FROM (
-             SELECT 'entity'::text AS object_kind, ('entity:' || kind)::text AS object_type
-             FROM entities
-             WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT 'resource'::text AS object_kind, ('resource:' || kind)::text AS object_type
-             FROM resources
-             WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT 'group'::text AS object_kind, NULL::text AS object_type
-             FROM groups
-             WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT 'tenant'::text AS object_kind, NULL::text AS object_type
-             FROM tenants
-             WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT 'role'::text AS object_kind, NULL::text AS object_type
-             FROM roles
-             WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT 'policy'::text AS object_kind, NULL::text AS object_type
-             FROM effective_access_edges()
-             WHERE id = $1
-             UNION ALL
-             SELECT 'credential'::text AS object_kind, NULL::text AS object_type
-             FROM credentials
-             WHERE id = $1
-           ) AS objects
-           LIMIT 1"#,
-    )
-    .bind(object_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
+    let mut connection = pool.acquire().await.map_err(db_err)?;
+    resolve_exact_object_target_on_connection(&mut connection, object_id).await
+}
 
-    row.map(|row| {
-        Ok(CapabilityValidationTarget {
-            object_kind: row.try_get("object_kind").map_err(db_err)?,
-            object_type: row.try_get("object_type").map_err(db_err)?,
-        })
-    })
-    .transpose()
+async fn resolve_exact_object_target_on_connection(
+    connection: &mut sqlx::PgConnection,
+    object_id: Uuid,
+) -> Result<Option<CapabilityValidationTarget>, AppError> {
+    Ok(
+        crate::protected_objects::lookup_on_connection(connection, object_id)
+            .await?
+            .filter(|object| object.live)
+            .map(|object| CapabilityValidationTarget {
+                object_kind: object.object_kind,
+                object_type: object.object_type,
+            }),
+    )
 }
 
 pub async fn update_role_with_audit(
@@ -2914,42 +3250,75 @@ pub async fn update_role_with_audit(
     req: UpdateRole,
 ) -> Result<Role, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
+    let role = update_role_in_tx(&mut tx, events_enabled, actor_id, id, req).await?;
+    tx.commit().await.map_err(db_err)?;
+    crate::audit::log_observe_allow(
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: role.tenant_id,
+            target_kind: "role",
+            target_id: Some(id),
+            event: "role.update",
+        },
+        &serde_json::json!({}),
+    );
+    Ok(role)
+}
+
+/// Transaction body for a role metadata update. Cache-aware callers first
+/// lock and enumerate every assignee with
+/// [`lock_role_and_collect_grants_keys`], establish the Grants barrier, then
+/// call this helper on that same transaction. The ownership check remains
+/// here as the final defense for uncached and internal callers.
+pub(crate) async fn update_role_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    req: UpdateRole,
+) -> Result<Role, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("role {id} not found")));
     };
-    crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
+    crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
     let role = sqlx::query_as::<_, Role>(
         r#"UPDATE roles
            SET name        = COALESCE($2, name),
                description = COALESCE($3, description),
                updated_at  = now()
            WHERE id = $1 AND deleted_at IS NULL
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
+           RETURNING id, name, tenant_id, description, deleted_at, deleted_by,
+                     created_at, updated_at, managed_by"#,
     )
     .bind(id)
     .bind(req.name)
     .bind(req.description)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("role {id} not found")),
         other => AppError::Database(other),
     })?;
-    let meta = crate::audit::AuditMeta {
-        actor_entity_id: actor_id,
-        tenant_id: role.tenant_id,
-        target_kind: "role",
-        target_id: Some(id),
-        event: "role.update",
-    };
-    let details = serde_json::json!({});
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
+    crate::audit::observe_in_tx(
+        tx,
+        events_enabled,
+        &crate::audit::AuditMeta {
+            actor_entity_id: actor_id,
+            tenant_id: role.tenant_id,
+            target_kind: "role",
+            target_id: Some(id),
+            event: "role.update",
+        },
+        &serde_json::json!({}),
+    )
+    .await?;
     Ok(role)
 }
 
@@ -2964,7 +3333,6 @@ pub async fn delete_role_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id = delete_role_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
     tx.commit().await.map_err(db_err)?;
@@ -3003,6 +3371,18 @@ pub(crate) async fn delete_role_in_tx(
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("role {id} not found")));
     };
+    crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM roles WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if !live {
+        return Err(AppError::not_found(format!("role {id} not found")));
+    }
     let result = sqlx::query(
         "UPDATE roles SET deleted_at = now(), deleted_by = $2
          WHERE id = $1 AND deleted_at IS NULL",
@@ -3042,7 +3422,6 @@ pub async fn restore_role_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "roles", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     restore_role_in_tx(&mut tx, events_enabled, actor_id, id, restored_by).await?;
     tx.commit().await.map_err(db_err)?;
@@ -3079,13 +3458,29 @@ pub(crate) async fn restore_role_in_tx(
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     let _ = restored_by;
+    let expected_tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NOT NULL")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    let Some(expected_tenant_id) = expected_tenant_id else {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted role {id} to restore"
+        )));
+    };
+    crate::tenants::repo::lock_tenant_rows_in_order(tx, &[expected_tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
     let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
         "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
          FROM roles r
          LEFT JOIN tenants t ON t.id = r.tenant_id
-         WHERE r.id = $1 AND r.deleted_at IS NOT NULL",
+         WHERE r.id = $1
+           AND r.tenant_id IS NOT DISTINCT FROM $2
+           AND r.deleted_at IS NOT NULL",
     )
     .bind(id)
+    .bind(expected_tenant_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -3139,6 +3534,20 @@ pub async fn purge_role_with_audit(
 ) -> Result<Option<Uuid>, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
 
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(expected_tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!(
+            "no soft-deleted role {id} to purge"
+        )));
+    };
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", id).await?;
+
     let candidate_block_ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT permission_block_id FROM role_permission_blocks WHERE role_id = $1",
     )
@@ -3161,6 +3570,7 @@ pub async fn purge_role_with_audit(
         sqlx::query(
             r#"DELETE FROM permission_blocks pb
                WHERE pb.id = ANY($1)
+                 AND pb.managed_by IS DISTINCT FROM 'config'
                  AND NOT EXISTS (
                      SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
                  )
@@ -3212,6 +3622,7 @@ pub async fn add_role_capability(
     drop(conn);
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, role_id).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", role_id).await?;
     insert_role_capability_as_permission_block(
         &mut tx,
         role_id,
@@ -3234,6 +3645,7 @@ pub async fn add_composite_role_child(
     validate_composite_children(pool, parent_role_id, parent.tenant_id, &[child_role_id]).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, parent_role_id).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", parent_role_id).await?;
     lock_role(&mut tx, child_role_id).await?;
     copy_role_permission_blocks(&mut tx, parent_role_id, child_role_id).await?;
     tx.commit().await.map_err(db_err)?;
@@ -3249,6 +3661,7 @@ pub async fn replace_composite_role_children(
     validate_composite_children(pool, parent_role_id, parent.tenant_id, child_role_ids).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, parent_role_id).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", parent_role_id).await?;
     let mut locked_child_role_ids = child_role_ids.to_vec();
     locked_child_role_ids.sort_unstable();
     locked_child_role_ids.dedup();
@@ -3271,6 +3684,7 @@ pub async fn remove_role_capability(
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, role_id).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", role_id).await?;
     // Blocks this role links that grant `cap_id`. Unlink them from this role and
     // GC any now-orphaned; blocks the same `cap_id` reaches through other roles
     // are untouched.
@@ -3578,40 +3992,9 @@ pub async fn create_action_assignment_rule_with_audit(
     req: CreateActionAssignmentRule,
     transport: &str,
 ) -> Result<ActionAssignmentRule, AppError> {
-    let action_name = req.action_name.trim().to_string();
-    if action_name.is_empty() {
-        return Err(AppError::bad_request("actionName is required"));
-    }
-    if req.decision == ActionAssignmentDecision::RequireOverride {
-        return Err(AppError::bad_request(
-            "require_override guardrail creation is not available in v1",
-        ));
-    }
-    if req.tenant_id.is_some() && req.decision != ActionAssignmentDecision::Deny {
-        return Err(AppError::bad_request(
-            "tenant-specific guardrail rules can only deny in v1",
-        ));
-    }
-    if req.tenant_id.is_some() && req.is_absolute {
-        return Err(AppError::bad_request(
-            "tenant-specific guardrail rules cannot be absolute",
-        ));
-    }
-
-    let object_type = normalize_optional_text(req.object_type);
-    validate_rule_object_type(req.object_kind, object_type.as_deref())?;
-
-    let action_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE name = $1)")
-            .bind(&action_name)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
-    if !action_exists {
-        return Err(AppError::bad_request(format!(
-            "actionName references unknown action {action_name}"
-        )));
-    }
+    let req = validate_and_normalize_action_assignment_rule(pool, req).await?;
+    let action_name = req.action_name.clone();
+    let object_type = req.object_type.clone();
 
     let duplicate: bool = sqlx::query_scalar(
         r#"SELECT EXISTS (
@@ -3675,6 +4058,56 @@ pub async fn create_action_assignment_rule_with_audit(
     Ok(rule)
 }
 
+pub(crate) async fn validate_and_normalize_action_assignment_rule(
+    pool: &PgPool,
+    req: CreateActionAssignmentRule,
+) -> Result<CreateActionAssignmentRule, AppError> {
+    let mut connection = pool.acquire().await.map_err(db_err)?;
+    validate_and_normalize_action_assignment_rule_on_connection(&mut connection, req).await
+}
+
+pub(crate) async fn validate_and_normalize_action_assignment_rule_on_connection(
+    connection: &mut sqlx::PgConnection,
+    mut req: CreateActionAssignmentRule,
+) -> Result<CreateActionAssignmentRule, AppError> {
+    req.action_name = req.action_name.trim().to_string();
+    if req.action_name.is_empty() {
+        return Err(AppError::bad_request("actionName is required"));
+    }
+    if req.decision == ActionAssignmentDecision::RequireOverride {
+        return Err(AppError::bad_request(
+            "require_override guardrail creation is not available in v1",
+        ));
+    }
+    if req.tenant_id.is_some() && req.decision != ActionAssignmentDecision::Deny {
+        return Err(AppError::bad_request(
+            "tenant-specific guardrail rules can only deny in v1",
+        ));
+    }
+    if req.tenant_id.is_some() && req.is_absolute {
+        return Err(AppError::bad_request(
+            "tenant-specific guardrail rules cannot be absolute",
+        ));
+    }
+
+    req.object_type = normalize_optional_text(req.object_type);
+    validate_rule_object_type(req.object_kind, req.object_type.as_deref())?;
+
+    let action_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE name = $1)")
+            .bind(&req.action_name)
+            .fetch_one(connection)
+            .await
+            .map_err(db_err)?;
+    if !action_exists {
+        return Err(AppError::bad_request(format!(
+            "actionName references unknown action {}",
+            req.action_name
+        )));
+    }
+    Ok(req)
+}
+
 pub async fn delete_action_assignment_rule(
     pool: &PgPool,
     id: Uuid,
@@ -3690,8 +4123,21 @@ pub async fn delete_action_assignment_rule_with_audit(
     id: Uuid,
     transport: &str,
 ) -> Result<ActionAssignmentRule, AppError> {
-    ensure_not_config_managed_rule(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM action_assignment_rules WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!(
+            "action assignment rule {id} not found"
+        )));
+    };
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "action_assignment_rules", id)
+        .await?;
     let rule = sqlx::query_as::<_, ActionAssignmentRule>(
         r#"DELETE FROM action_assignment_rules
            WHERE id = $1
@@ -3728,67 +4174,40 @@ pub async fn delete_action_assignment_rule_with_audit(
     Ok(rule)
 }
 
-async fn ensure_not_config_managed_capability(
-    pool: &PgPool,
-    capability_id: Uuid,
-) -> Result<(), AppError> {
-    let managed_by: Option<Option<String>> =
-        sqlx::query_scalar("SELECT managed_by FROM actions WHERE id = $1")
-            .bind(capability_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?;
-    match managed_by {
-        None => Err(AppError::not_found(format!(
-            "capability {capability_id} not found"
-        ))),
-        Some(Some(value)) if value == "config" => Err(AppError::conflict(
-            "capability is managed by the bootstrap config file and cannot be modified via the API",
-        )),
-        _ => Ok(()),
-    }
-}
-
-async fn ensure_not_config_managed_applicability(
-    pool: &PgPool,
+async fn ensure_not_config_managed_applicability_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     capability_id: Uuid,
     object_kind: &str,
     object_type: Option<&str>,
 ) -> Result<(), AppError> {
+    let action_locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM actions WHERE id = $1 FOR UPDATE")
+            .bind(capability_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    if action_locked.is_none() {
+        return Err(AppError::not_found(format!(
+            "capability {capability_id} not found"
+        )));
+    }
     let managed_by: Option<Option<String>> = sqlx::query_scalar(
         r#"SELECT managed_by FROM action_applicability
            WHERE action_id = $1
              AND object_kind = $2
-             AND object_type IS NOT DISTINCT FROM $3"#,
+             AND object_type IS NOT DISTINCT FROM $3
+           FOR UPDATE"#,
     )
     .bind(capability_id)
     .bind(object_kind)
     .bind(object_type)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
     match managed_by {
         None => Ok(()),
         Some(Some(value)) if value == "config" => Err(AppError::conflict(
             "capability applicability is managed by the bootstrap config file and cannot be modified via the API",
-        )),
-        _ => Ok(()),
-    }
-}
-
-async fn ensure_not_config_managed_rule(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let managed_by: Option<Option<String>> =
-        sqlx::query_scalar("SELECT managed_by FROM action_assignment_rules WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?;
-    match managed_by {
-        None => Err(AppError::not_found(format!(
-            "action assignment rule {id} not found"
-        ))),
-        Some(Some(value)) if value == "config" => Err(AppError::conflict(
-            "action assignment rule is managed by the bootstrap config file and cannot be modified via the API",
         )),
         _ => Ok(()),
     }
@@ -3833,7 +4252,7 @@ pub async fn add_capability_applicability_with_audit(
         )));
     }
 
-    sqlx::query(
+    let insert = sqlx::query(
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            VALUES ($1, $2, $3)
            ON CONFLICT DO NOTHING"#,
@@ -3866,19 +4285,23 @@ pub async fn add_capability_applicability_with_audit(
     .await
     .map_err(db_err)?;
 
-    crate::audit::commit_with_observation(
-        tx,
-        events_enabled,
-        &crate::audit::AuditMeta {
-            actor_entity_id: actor_id,
-            tenant_id: None,
-            target_kind: "action",
-            target_id: Some(capability_id),
-            event: "action_applicability.add",
-        },
-        &serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
-    )
-    .await?;
+    if insert.rows_affected() == 0 {
+        tx.commit().await.map_err(db_err)?;
+    } else {
+        crate::audit::commit_with_observation(
+            tx,
+            events_enabled,
+            &crate::audit::AuditMeta {
+                actor_entity_id: actor_id,
+                tenant_id: None,
+                target_kind: "action",
+                target_id: Some(capability_id),
+                event: "action_applicability.add",
+            },
+            &serde_json::json!({ "object_kind": object_kind, "object_type": object_type }),
+        )
+        .await?;
+    }
     Ok(entry)
 }
 
@@ -3907,14 +4330,14 @@ pub async fn remove_capability_applicability_with_audit(
     object_kind: String,
     object_type: Option<String>,
 ) -> Result<(), AppError> {
-    ensure_not_config_managed_applicability(
-        pool,
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    ensure_not_config_managed_applicability_in_tx(
+        &mut tx,
         capability_id,
         &object_kind,
         object_type.as_deref(),
     )
     .await?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
     let result = sqlx::query(
         r#"DELETE FROM action_applicability
            WHERE action_id = $1
@@ -3986,8 +4409,8 @@ pub async fn update_capability_with_audit(
     id: Uuid,
     req: crate::models::capability::UpdateCapability,
 ) -> Result<Capability, AppError> {
-    ensure_not_config_managed_capability(pool, id).await?;
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "actions", id).await?;
     let updated = sqlx::query_as::<_, Capability>(
         r#"UPDATE actions
            SET name          = COALESCE($2, name),
@@ -4085,8 +4508,29 @@ pub async fn delete_capability_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
-    ensure_not_config_managed_capability(pool, id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
+    // The action row is the FK serialization point for every
+    // permission_block_actions insert. Lock it before checking ownership so a
+    // concurrent bootstrap cannot add and stamp a declarative block link after
+    // our check but before the cascading delete.
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "actions", id).await?;
+    let config_owned_link: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+               SELECT 1
+               FROM permission_block_actions pba
+               JOIN permission_blocks pb ON pb.id = pba.permission_block_id
+               WHERE pba.action_id = $1 AND pb.managed_by = 'config'
+           )"#,
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if config_owned_link {
+        return Err(AppError::conflict(
+            "capability is linked to a permission block managed by the bootstrap config file and cannot be deleted via the API",
+        ));
+    }
     let result = sqlx::query("DELETE FROM actions WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -4118,6 +4562,16 @@ async fn lock_live_subject(
     subject_kind: &SubjectKind,
     subject_id: Uuid,
 ) -> Result<(), AppError> {
+    let subject_tenant_id = read_live_subject_tenant_id(tx, subject_kind, subject_id).await?;
+    lock_active_tenant_ids(tx, [assignment_tenant_id, subject_tenant_id]).await?;
+    lock_live_subject_row(tx, subject_kind, subject_id, subject_tenant_id).await
+}
+
+async fn read_live_subject_tenant_id(
+    tx: &mut Transaction<'_, Postgres>,
+    subject_kind: &SubjectKind,
+    subject_id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
     let subject_tenant_id: Option<Option<Uuid>> = match subject_kind {
         SubjectKind::Entity => sqlx::query_scalar(
             r#"SELECT tenant_id FROM entities
@@ -4141,17 +4595,28 @@ async fn lock_live_subject(
             "assignment references a deleted, disabled, or unknown subject",
         ));
     };
+    Ok(subject_tenant_id)
+}
 
-    let mut tenant_ids = [assignment_tenant_id, subject_tenant_id]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+async fn lock_active_tenant_ids<const N: usize>(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_ids: [Option<Uuid>; N],
+) -> Result<(), AppError> {
+    let mut tenant_ids = tenant_ids.into_iter().flatten().collect::<Vec<_>>();
     tenant_ids.sort_unstable();
     tenant_ids.dedup();
     for tenant_id in tenant_ids {
         crate::tenants::repo::lock_active_tenant(tx, tenant_id).await?;
     }
+    Ok(())
+}
 
+async fn lock_live_subject_row(
+    tx: &mut Transaction<'_, Postgres>,
+    subject_kind: &SubjectKind,
+    subject_id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
     let table = match subject_kind {
         SubjectKind::Entity => "entities",
         SubjectKind::Group => "principal_groups",
@@ -4166,7 +4631,7 @@ async fn lock_live_subject(
     );
     let locked: Option<Uuid> = sqlx::query_scalar(&sql)
         .bind(subject_id)
-        .bind(subject_tenant_id)
+        .bind(expected_tenant_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(db_err)?;
@@ -4176,6 +4641,66 @@ async fn lock_live_subject(
         ));
     }
     Ok(())
+}
+
+/// Prepare a role-assignment mutation under the canonical lock order.
+///
+/// All relevant tenant rows are locked in UUID order first. The role is then
+/// locked so this path agrees with role/block-link mutations; for a group
+/// subject, the hierarchy advisory lock and full descendant closure follow.
+/// Finally the live subject predicate is revalidated under its row lock.
+/// Holding these locks in the caller's transaction makes both guardrail
+/// validation and the affected grants-cache keys stable through the insert.
+///
+/// Callers may invoke this twice in one transaction (the cache barrier path
+/// prepares before `cache.begin`, and the insert helper defensively prepares
+/// again). Re-acquiring transaction-owned row/advisory locks is safe.
+pub(crate) async fn prepare_role_assignment_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateRoleAssignment,
+) -> Result<Vec<String>, AppError> {
+    // Read all tenant ownership first, then lock the complete tenant set in a
+    // stable order before taking either the role or subject row. This avoids a
+    // cross-tenant invalid request creating a tenant/role lock inversion while
+    // it is on the way to being rejected by boundary validation.
+    let role_tenant_id = read_live_role_tenant_id(tx, req.role_id).await?;
+    let subject_tenant_id =
+        read_live_subject_tenant_id(tx, &req.subject_kind, req.subject_id).await?;
+    lock_active_tenant_ids(tx, [req.tenant_id, role_tenant_id, subject_tenant_id]).await?;
+    lock_live_role_row(tx, req.role_id, role_tenant_id).await?;
+    let grants_keys = match &req.subject_kind {
+        SubjectKind::Entity => vec![crate::cache::keys::grants(req.subject_id)],
+        SubjectKind::Group => {
+            lock_group_closures_and_collect_grants_keys(tx, &[req.subject_id]).await?
+        }
+    };
+    // For a group subject the closure helper already owns the root row lock.
+    // Re-checking the live/tenant predicate under that lock catches status,
+    // deletion, or ownership drift since the initial unlocked pre-read.
+    lock_live_subject_row(tx, &req.subject_kind, req.subject_id, subject_tenant_id).await?;
+    Ok(grants_keys)
+}
+
+/// Prepare a direct-policy mutation while matching group-membership lock
+/// order: active tenant row(s), hierarchy advisory lock, then group row(s).
+/// The subject's live predicate is revalidated under the resulting row lock.
+/// This prevents a membership change from racing between guardrail
+/// validation/cache-key enumeration and the policy insert.
+pub(crate) async fn prepare_direct_policy_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    req: &CreateDirectPolicy,
+) -> Result<Vec<String>, AppError> {
+    let subject_tenant_id =
+        read_live_subject_tenant_id(tx, &req.subject_kind, req.subject_id).await?;
+    lock_active_tenant_ids(tx, [req.tenant_id, subject_tenant_id]).await?;
+    let grants_keys = match &req.subject_kind {
+        SubjectKind::Entity => vec![crate::cache::keys::grants(req.subject_id)],
+        SubjectKind::Group => {
+            lock_group_closures_and_collect_grants_keys(tx, &[req.subject_id]).await?
+        }
+    };
+    lock_live_subject_row(tx, &req.subject_kind, req.subject_id, subject_tenant_id).await?;
+    Ok(grants_keys)
 }
 
 pub async fn create_policy(
@@ -4337,10 +4862,11 @@ pub async fn create_role_assignment_with_audit(
 }
 
 /// Body of [`create_role_assignment`], callable directly against a caller-held
-/// `tx` (not committed here). For a group subject, the caller must already
-/// have run [`lock_group_closures_and_collect_grants_keys`] on this same `tx`
-/// and called `cache.begin()` on the result — `lock_role`/`lock_live_subject`
-/// below then just re-acquire those same locks (safe, same-transaction no-op).
+/// `tx` (not committed here). The helper always runs
+/// [`prepare_role_assignment_in_tx`] itself, so uncached/internal callers hold
+/// the same live-subject and group-closure locks as the cache-aware transport.
+/// A cache-aware caller prepares once before `cache.begin()` and this helper
+/// safely re-acquires the transaction-owned locks before validation/insert.
 /// Every other `_in_tx` twin in this module and `identity::repo` follows this
 /// same convention: caller locks + begins the cache barrier first, this kind
 /// of function re-acquires (never re-validates) those locks, and the caller
@@ -4351,13 +4877,13 @@ pub(crate) async fn create_role_assignment_in_tx(
     actor_id: Option<Uuid>,
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
-    lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
-    // Lock the role and validate under the lock so a concurrent block-link
-    // mutation cannot add a prohibited block against stale state: it blocks on
-    // this same lock and re-validates against the assignment we are inserting.
+    prepare_role_assignment_in_tx(tx, &req).await?;
+    // Validate under the role/subject/closure locks so a concurrent block-link
+    // or group-membership mutation cannot change the assignment's effective
+    // entity set after the guardrail decision. A block-link mutation waits on
+    // the same role lock and re-validates against the assignment inserted here.
     // Validation must run on `tx` for that to hold at all — the pool variant
     // would neither see the locked state nor respect the locks.
-    lock_role(tx, req.role_id).await?;
     validate_role_assignment_in_tx(tx, &req).await?;
     let assignment = sqlx::query_as::<_, RoleAssignment>(
         r#"INSERT INTO role_assignments
@@ -4399,8 +4925,7 @@ pub(crate) async fn create_role_assignment_if_missing_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateRoleAssignment,
 ) -> Result<bool, AppError> {
-    lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
-    lock_role(tx, req.role_id).await?;
+    prepare_role_assignment_in_tx(tx, req).await?;
     validate_role_assignment_in_tx(tx, req).await?;
     let inserted = sqlx::query(
         r#"INSERT INTO role_assignments
@@ -4488,6 +5013,64 @@ pub async fn list_role_assignments(
     Ok(RoleAssignmentList { items, total })
 }
 
+pub async fn list_role_assignments_authorized(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    params: ListRoleAssignments,
+) -> Result<RoleAssignmentList, AppError> {
+    const CANDIDATES: &str = r#"SELECT id, tenant_id,
+                  row_number() OVER (ORDER BY created_at DESC, id) AS ordinality
+           FROM role_assignments
+           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
+                  OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
+             AND (NULLIF($5->>'subject_kind', '') IS NULL
+                  OR subject_kind = ($5->>'subject_kind'))
+             AND (NULLIF($5->>'subject_id', '')::uuid IS NULL
+                  OR subject_id = NULLIF($5->>'subject_id', '')::uuid)
+             AND (NULLIF($5->>'role_id', '')::uuid IS NULL
+                  OR role_id = NULLIF($5->>'role_id', '')::uuid)
+             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)
+             AND (
+               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = role_assignments.subject_id AND se.deleted_at IS NULL))
+               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = role_assignments.subject_id AND sg.deleted_at IS NULL))
+             )"#;
+    let authorized = authorize_flat_candidate_query(
+        pool,
+        auth.entity_id,
+        auth.ceiling_credential_for(auth.entity_id),
+        "policy",
+        &["read", "policy.manage", "manage"],
+        serde_json::json!({
+            "tenant_id": params.tenant_id,
+            "subject_kind": params.subject_kind,
+            "subject_id": params.subject_id,
+            "role_id": params.role_id,
+        }),
+        CANDIDATES,
+        params.limit,
+        params.offset,
+    )
+    .await?;
+    let items = if authorized.ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, RoleAssignment>(
+            r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at, managed_by
+               FROM role_assignments
+               WHERE id = ANY($1::uuid[])
+               ORDER BY array_position($1::uuid[], id)"#,
+        )
+        .bind(&authorized.ids)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?
+    };
+    Ok(RoleAssignmentList {
+        items,
+        total: authorized.total,
+    })
+}
+
 pub async fn get_role_assignment(pool: &PgPool, id: Uuid) -> Result<RoleAssignment, AppError> {
     sqlx::query_as::<_, RoleAssignment>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
@@ -4551,6 +5134,8 @@ pub(crate) async fn delete_role_assignment_in_tx(
             "role assignment {id} not found"
         )));
     };
+    crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "role_assignments", id).await?;
     // A role assignment is a 'policy' protected object; the policy-object cleanup trigger
     // sweeps the permission blocks targeting it when this row is deleted.
     let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
@@ -4598,17 +5183,18 @@ pub async fn create_direct_policy_with_audit(
 }
 
 /// Body of [`create_direct_policy`]; caller contract per
-/// [`create_role_assignment_in_tx`]. Validates on `tx` rather than a pooled
-/// connection — see [`replace_role_permission_block_links_in_tx`].
+/// [`create_role_assignment_in_tx`]. Always prepares the live subject and its
+/// group closure before validating on `tx`, rather than on a pooled connection
+/// — see [`replace_role_permission_block_links_in_tx`].
 pub(crate) async fn create_direct_policy_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateDirectPolicy,
 ) -> Result<DirectPolicy, AppError> {
+    prepare_direct_policy_in_tx(tx, &req).await?;
     validate_direct_policy_in_tx(tx, &req).await?;
     crate::guardrails::validate_direct_policy(tx, &req).await?;
-    lock_live_subject(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     let block_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
             .bind(req.permission_block_id)
@@ -4855,6 +5441,89 @@ pub async fn list_direct_policies(
     Ok(DirectPolicyList { items, total })
 }
 
+pub async fn list_direct_policies_authorized(
+    pool: &PgPool,
+    auth: &crate::auth::AuthContext,
+    params: ListDirectPolicies,
+) -> Result<DirectPolicyList, AppError> {
+    let object_type = normalize_optional_text(params.object_type);
+    validate_direct_policy_object_filter(
+        params.object_id,
+        params.object_kind,
+        object_type.as_deref(),
+    )?;
+    let object_cte =
+        DIRECT_POLICY_OBJECT_CTE.replace("$5::uuid", "NULLIF($5->>'object_id', '')::uuid");
+    let object_predicate = DIRECT_POLICY_OBJECT_PREDICATE
+        .replace("$5::uuid", "__OBJECT_ID__")
+        .replace("$5", "__OBJECT_ID__")
+        .replace("$6::text", "__OBJECT_KIND__")
+        .replace("$6", "__OBJECT_KIND__")
+        .replace("$7::text", "__OBJECT_TYPE__")
+        .replace("$7", "__OBJECT_TYPE__")
+        .replace("__OBJECT_ID__", "NULLIF($5->>'object_id', '')::uuid")
+        .replace("__OBJECT_KIND__", "NULLIF($5->>'object_kind', '')")
+        .replace("__OBJECT_TYPE__", "NULLIF($5->>'object_type', '')");
+    let candidates_sql = format!(
+        r#"{object_cte}
+           SELECT id, tenant_id,
+                  row_number() OVER (ORDER BY created_at DESC, id) AS ordinality
+           FROM direct_policies
+           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
+                  OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
+             AND (NULLIF($5->>'subject_kind', '') IS NULL
+                  OR subject_kind = ($5->>'subject_kind'))
+             AND (NULLIF($5->>'subject_id', '')::uuid IS NULL
+                  OR subject_id = NULLIF($5->>'subject_id', '')::uuid)
+             AND (NULLIF($5->>'permission_block_id', '')::uuid IS NULL
+                  OR permission_block_id = NULLIF($5->>'permission_block_id', '')::uuid)
+             AND (
+               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
+               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
+             )
+             AND {object_predicate}"#
+    );
+    let authorized = authorize_flat_candidate_query(
+        pool,
+        auth.entity_id,
+        auth.ceiling_credential_for(auth.entity_id),
+        "policy",
+        &["read", "policy.manage", "manage"],
+        serde_json::json!({
+            "tenant_id": params.tenant_id,
+            "subject_kind": params.subject_kind,
+            "subject_id": params.subject_id,
+            "permission_block_id": params.permission_block_id,
+            "object_id": params.object_id,
+            "object_kind": params.object_kind,
+            "object_type": object_type,
+        }),
+        &candidates_sql,
+        params.limit,
+        params.offset,
+    )
+    .await?;
+    let items = if authorized.ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, DirectPolicy>(
+            r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id,
+                      created_at, managed_by
+               FROM direct_policies
+               WHERE id = ANY($1::uuid[])
+               ORDER BY array_position($1::uuid[], id)"#,
+        )
+        .bind(&authorized.ids)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)?
+    };
+    Ok(DirectPolicyList {
+        items,
+        total: authorized.total,
+    })
+}
+
 pub async fn get_direct_policy(pool: &PgPool, id: Uuid) -> Result<DirectPolicy, AppError> {
     sqlx::query_as::<_, DirectPolicy>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
@@ -4876,7 +5545,6 @@ pub async fn delete_direct_policy_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
-    crate::managed_by::ensure_not_config_managed(pool, "direct_policies", id).await?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id = delete_direct_policy_in_tx(&mut tx, events_enabled, actor_id, id).await?;
     tx.commit().await.map_err(db_err)?;
@@ -4912,6 +5580,8 @@ pub(crate) async fn delete_direct_policy_in_tx(
     let Some(tenant_id) = policy_tenant_id else {
         return Err(AppError::not_found(format!("direct policy {id} not found")));
     };
+    crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "direct_policies", id).await?;
     let block_id: Option<Uuid> = sqlx::query_scalar(
         "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
     )
@@ -4943,7 +5613,7 @@ pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppErro
     delete_direct_policy_with_audit(pool, false, None, id).await
 }
 
-async fn validate_role_assignment_in_tx(
+pub(crate) async fn validate_role_assignment_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateRoleAssignment,
 ) -> Result<(), AppError> {
@@ -4970,7 +5640,7 @@ async fn validate_role_assignment_in_tx(
     .await
 }
 
-async fn validate_direct_policy_in_tx(
+pub(crate) async fn validate_direct_policy_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateDirectPolicy,
 ) -> Result<(), AppError> {
@@ -5194,14 +5864,22 @@ pub async fn subject_role_assignments(
 
 pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let direct_block_id: Option<Uuid> = sqlx::query_scalar(
-        "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_err)?;
-    if let Some(block_id) = direct_block_id {
+    let direct_tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    if let Some(tenant_id) = direct_tenant_id {
+        crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
+        crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "direct_policies", id).await?;
+        let block_id: Uuid = sqlx::query_scalar(
+            "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
         // The block is shared: GC it only if removing this policy left it
         // unreferenced. A block still linked to a role or another policy stays.
         // Blocks targeting this policy as an object are swept by the policy-object cleanup
@@ -5211,14 +5889,23 @@ pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
         return Ok(());
     }
 
+    let assignment_tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(tenant_id) = assignment_tenant_id else {
+        return Err(AppError::not_found(format!("policy {id} not found")));
+    };
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
+    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "role_assignments", id).await?;
     let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::not_found(format!("policy {id} not found")));
-    }
+    debug_assert_eq!(result.rows_affected(), 1);
     tx.commit().await.map_err(db_err)?;
     Ok(())
 }
@@ -5230,38 +5917,10 @@ pub async fn object_tenant_id_by_id(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<Option<Option<Uuid>>, AppError> {
-    let row = sqlx::query(
-        r#"SELECT tenant_id FROM (
-             SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL
-             UNION ALL
-             SELECT tenant_id FROM effective_access_edges() WHERE id = $1
-             UNION ALL
-             SELECT t.id AS tenant_id FROM tenants t WHERE t.id = $1 AND t.deleted_at IS NULL
-             UNION ALL
-             SELECT e.tenant_id FROM credentials c
-             JOIN entities e ON e.id = c.entity_id AND e.deleted_at IS NULL
-             WHERE c.id = $1
-             UNION ALL
-             SELECT tenant_id FROM audit_logs WHERE id = $1
-           ) matches
-           LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
-
-    row.map(|r| {
-        use sqlx::Row;
-        r.try_get::<Option<Uuid>, _>("tenant_id").map_err(db_err)
-    })
-    .transpose()
+    Ok(crate::protected_objects::lookup(pool, id)
+        .await?
+        .filter(|object| object.live)
+        .map(|object| object.tenant_id))
 }
 
 /// SQL CTE selecting the unconditional ceiling entries of the caller's scoped
@@ -5314,10 +5973,69 @@ pub async fn authorized_object_ids_with_ceiling(
         "entity" => authorized_entity_ids(pool, params, ceiling_credential_id).await,
         "resource" => authorized_resource_ids(pool, params, ceiling_credential_id).await,
         "group" => authorized_group_ids(pool, params, ceiling_credential_id).await,
+        "role" | "policy" | "api_endpoint" => {
+            authorized_flat_object_ids(pool, params, ceiling_credential_id).await
+        }
         other => Err(AppError::bad_request(format!(
             "authorized object listing does not support object kind '{other}'"
         ))),
     }
+}
+
+async fn authorized_flat_object_ids(
+    pool: &PgPool,
+    params: AuthorizedObjectIdsQuery,
+    ceiling_credential_id: Option<Uuid>,
+) -> Result<AuthorizedObjectIdsResponse, AppError> {
+    if params.object_type.is_some() {
+        return Ok(AuthorizedObjectIdsResponse {
+            ids: Vec::new(),
+            total: 0,
+        });
+    }
+    let q = search_pattern(params.q);
+    let id = search_pattern(params.id);
+    const ROLE_CANDIDATES: &str = r#"SELECT id, tenant_id,
+               row_number() OVER (ORDER BY name, id) AS ordinality
+           FROM roles
+           WHERE deleted_at IS NULL
+             AND (NULLIF($5->>'tenant_id', '')::uuid IS NULL OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
+             AND (NULLIF($5->>'q', '') IS NULL OR name ILIKE ($5->>'q') OR description ILIKE ($5->>'q'))
+             AND (NULLIF($5->>'id', '') IS NULL OR id::text ILIKE ($5->>'id'))"#;
+    const POLICY_CANDIDATES: &str = r#"SELECT id, tenant_id,
+               row_number() OVER (ORDER BY created_at DESC, id) AS ordinality
+           FROM (
+               SELECT id, tenant_id, created_at FROM direct_policies
+               UNION ALL
+               SELECT id, tenant_id, created_at FROM role_assignments
+           ) policies
+           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
+             AND (NULLIF($5->>'q', '') IS NULL OR id::text ILIKE ($5->>'q'))
+             AND (NULLIF($5->>'id', '') IS NULL OR id::text ILIKE ($5->>'id'))"#;
+    const ENDPOINT_CANDIDATES: &str = r#"SELECT id, tenant_id,
+               row_number() OVER (ORDER BY tenant_id NULLS FIRST, key, id) AS ordinality
+           FROM api_endpoints
+           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
+             AND (NULLIF($5->>'q', '') IS NULL OR name ILIKE ($5->>'q') OR key ILIKE ($5->>'q'))
+             AND (NULLIF($5->>'id', '') IS NULL OR id::text ILIKE ($5->>'id'))"#;
+    let candidate_sql = match params.object_kind.as_str() {
+        "role" => ROLE_CANDIDATES,
+        "policy" => POLICY_CANDIDATES,
+        "api_endpoint" => ENDPOINT_CANDIDATES,
+        _ => unreachable!("flat protected-object dispatch is exhaustive"),
+    };
+    authorize_flat_candidate_query(
+        pool,
+        params.subject_id,
+        ceiling_credential_id,
+        &params.object_kind,
+        &[params.action.as_str()],
+        serde_json::json!({"tenant_id": params.tenant_id, "q": q, "id": id}),
+        candidate_sql,
+        params.limit,
+        params.offset,
+    )
+    .await
 }
 
 async fn authorized_entity_ids(
@@ -6358,12 +7076,14 @@ pub async fn effective_grants_for_subject(
         .collect()
 }
 
-/// Locks every group in the closure rooted at `root_group_ids` (each root
-/// plus every descendant subgroup, via a `group_hierarchy` descent) `FOR
-/// UPDATE` in `principal_groups` — in a stable, id-sorted order, so this can
-/// never deadlock against another
-/// call to this same function locking an overlapping closure — then returns
-/// the member entity ids across that (now-locked) closure.
+/// Locks every root group's owning tenant row first, then the hierarchy
+/// advisory lock, then every group in the closure rooted at `root_group_ids`
+/// (each root plus every descendant subgroup, via a `group_hierarchy`
+/// descent) `FOR UPDATE`. Object-group rows are locked before principal-group
+/// rows, and each physical table is locked in stable UUID order. This matches
+/// the canonical physical-group ordering used by mutations when a legacy UUID
+/// exists in both tables. The member entity ids across that (now-locked)
+/// closure are returned.
 ///
 /// # Why this exists
 ///
@@ -6401,6 +7121,56 @@ pub async fn lock_group_closures_and_collect_member_ids(
         return Ok(Vec::new());
     }
 
+    lock_group_tenant_rows(tx, root_group_ids).await?;
+    lock_group_closures_after_tenant_rows(tx, root_group_ids).await
+}
+
+/// Prepare a hierarchy mutation under the global
+/// tenant(s) -> hierarchy-advisory -> group-row order.
+///
+/// A reparent can name two different tenants on an invalid request. Both
+/// ownership sets must therefore be discovered and locked before the advisory
+/// lock; locking only the child tenant and discovering the parent later would
+/// recreate the inversion while the request is on its way to being rejected.
+/// The returned keys cover the child subtree, which is exactly the set whose
+/// inherited grants can change when that child is attached or detached.
+pub(crate) async fn prepare_group_hierarchy_mutation_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    child_id: Uuid,
+    parent_id: Option<Uuid>,
+) -> Result<Vec<String>, AppError> {
+    let mut group_ids = vec![child_id];
+    group_ids.extend(parent_id);
+    lock_group_tenant_rows(tx, &group_ids).await?;
+    Ok(lock_group_closures_after_tenant_rows(tx, &[child_id])
+        .await?
+        .into_iter()
+        .map(crate::cache::keys::grants)
+        .collect())
+}
+
+/// Read every tenant ownership row before taking any lock, then lock the
+/// complete tenant set in UUID order. `groups` intentionally includes both
+/// principal and object rows and does not filter tombstones: restore/delete
+/// preparation needs the same ordering barrier as live mutations, and a UUID
+/// present in both physical group tables must contribute both ownership rows.
+async fn lock_group_tenant_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    group_ids: &[Uuid],
+) -> Result<(), AppError> {
+    let tenant_ids: Vec<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = ANY($1::uuid[])")
+            .bind(group_ids)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids).await
+}
+
+async fn lock_group_closures_after_tenant_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    root_group_ids: &[Uuid],
+) -> Result<Vec<Uuid>, AppError> {
     // Hierarchy rows can be inserted or removed without an existing row lock
     // to wait on. Serialize closure enumeration with every hierarchy mutation
     // so a newly attached subtree cannot enter the graph between enumeration
@@ -6424,8 +7194,17 @@ pub async fn lock_group_closures_and_collect_member_ids(
     closure.sort_unstable();
     closure.dedup();
 
-    // Locks whichever of these ids are principal groups (object groups have
-    // no members and simply won't match here — harmless, not an error).
+    // A legacy UUID may exist in both physical group tables. Every mutation
+    // that can encounter both uses object -> principal ordering; taking only
+    // the principal lock here could deadlock with such a mutation holding the
+    // object row. Object-only roots still need this lock so their hierarchy
+    // cannot be changed while the prepared closure is in use.
+    sqlx::query("SELECT id FROM object_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+        .bind(&closure)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db_err)?;
+
     sqlx::query("SELECT id FROM principal_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
         .bind(&closure)
         .fetch_all(&mut **tx)
@@ -6437,6 +7216,73 @@ pub async fn lock_group_closures_and_collect_member_ids(
         .fetch_all(&mut **tx)
         .await
         .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_role_object(
+    pool: &PgPool,
+    role_id: Uuid,
+) -> Result<Option<AuthzObjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzObjectRecord>(
+        r#"SELECT r.id, 'role'::text AS kind, r.name, r.tenant_id,
+                  '{}'::jsonb AS attributes, '{}'::uuid[] AS parent_group_ids
+           FROM roles r
+           JOIN protected_object_ids registry
+             ON registry.id = r.id
+            AND registry.object_kind = 'role'
+            AND registry.source_table = 'roles'
+           WHERE r.id = $1 AND r.deleted_at IS NULL"#,
+    )
+    .bind(role_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_policy_object(
+    pool: &PgPool,
+    policy_id: Uuid,
+) -> Result<Option<AuthzObjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzObjectRecord>(
+        r#"SELECT registry.id, 'policy'::text AS kind, NULL::text AS name,
+                  policy.tenant_id, '{}'::jsonb AS attributes,
+                  '{}'::uuid[] AS parent_group_ids
+           FROM protected_object_ids registry
+           JOIN LATERAL (
+               SELECT tenant_id
+               FROM direct_policies
+               WHERE registry.source_table = 'direct_policies' AND id = registry.id
+               UNION ALL
+               SELECT tenant_id
+               FROM role_assignments
+               WHERE registry.source_table = 'role_assignments' AND id = registry.id
+           ) policy ON TRUE
+           WHERE registry.id = $1 AND registry.object_kind = 'policy'"#,
+    )
+    .bind(policy_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
+}
+
+pub(crate) async fn load_authz_api_endpoint_object(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+) -> Result<Option<AuthzObjectRecord>, AppError> {
+    sqlx::query_as::<_, AuthzObjectRecord>(
+        r#"SELECT endpoint.id, 'api_endpoint'::text AS kind, endpoint.name,
+                  endpoint.tenant_id, '{}'::jsonb AS attributes,
+                  '{}'::uuid[] AS parent_group_ids
+           FROM api_endpoints endpoint
+           JOIN protected_object_ids registry
+             ON registry.id = endpoint.id
+            AND registry.object_kind = 'api_endpoint'
+            AND registry.source_table = 'api_endpoints'
+           WHERE endpoint.id = $1"#,
+    )
+    .bind(endpoint_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
 }
 
 /// Serializes recursive group-closure reads with hierarchy mutations. A
@@ -6475,23 +7321,61 @@ pub async fn lock_group_closures_and_collect_grants_keys(
 /// the affected key is exactly their `subject_id`, deterministic and
 /// race-free.
 ///
-/// Locks the role row directly (`SELECT ... FOR UPDATE`, no `deleted_at`
-/// filter) rather than going through the private, alive-only `lock_role` —
-/// `restore_role` is a caller here and operates on an *already*
-/// soft-deleted role, so requiring "alive" would always fail for it. Each
-/// caller's own mutation separately validates/enforces whatever alive-ness
-/// it needs; this only needs the lock (for closure consistency) and the
-/// current assignee set (which was never conditioned on the role's own
-/// status either, before this fix).
+/// Locks the owning tenant first, then the role row, then assigned
+/// group closures. This is the same tenant -> role -> hierarchy/group order
+/// used by [`prepare_role_assignment_in_tx`]; taking the role first here and
+/// reaching for its tenant later inside the mutation creates a real inversion
+/// with concurrent assignment creation.
+///
+/// The role-row lock deliberately has no `deleted_at` filter because
+/// `restore_role` is a caller and operates on an already soft-deleted role.
+/// The caller's mutation separately validates the alive/deleted state it
+/// requires; this preparation only establishes the canonical lock order and
+/// captures the stable current assignee set.
 pub async fn lock_role_and_collect_grants_keys(
     tx: &mut Transaction<'_, Postgres>,
     role_id: Uuid,
 ) -> Result<Vec<String>, AppError> {
-    sqlx::query_scalar::<_, Uuid>("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
-        .bind(role_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(db_err)?;
+    let role_tenant_id: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+            .bind(role_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    let Some(role_tenant_id) = role_tenant_id else {
+        return Err(AppError::not_found(format!("role {role_id} not found")));
+    };
+    if let Some(tenant_id) = role_tenant_id {
+        // Do not impose a lifecycle predicate here: restore_role deliberately
+        // accepts a soft-deleted role and owns the user-facing decision about
+        // whether its tenant state permits restoration. This row lock is only
+        // for the canonical tenant -> role order.
+        let tenant_locked: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+                .bind(tenant_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(db_err)?;
+        if tenant_locked.is_none() {
+            return Err(AppError::not_found(format!(
+                "role {role_id} tenant {tenant_id} not found"
+            )));
+        }
+    }
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM roles
+           WHERE id = $1 AND tenant_id IS NOT DISTINCT FROM $2
+           FOR UPDATE"#,
+    )
+    .bind(role_id)
+    .bind(role_tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if locked.is_none() {
+        return Err(AppError::not_found(format!("role {role_id} not found")));
+    }
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", role_id).await?;
     let entity_subject_ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT subject_id FROM role_assignments WHERE role_id = $1 AND subject_kind = 'entity'",
     )
@@ -6520,7 +7404,8 @@ pub async fn lock_role_and_collect_grants_keys(
 /// both in the same transaction: creating a role assignment for a group
 /// subject. **Lock order matters here**: [`lock_role_and_collect_grants_keys`]
 /// (used by `replaceRolePermissionBlocks`/`deleteRole`/`restoreRole`) always
-/// locks the role first, then the closures of every group assigned it. If
+/// locks the owning tenant, then the role, then the closures of every group
+/// assigned it. If
 /// `createRoleAssignment` locked the *subject group* first and only reached
 /// the role lock afterward (inside `create_role_assignment_in_tx`'s own
 /// `lock_role` call — which is exactly what the original code did), a
@@ -6530,13 +7415,11 @@ pub async fn lock_role_and_collect_grants_keys(
 /// already assigned the role). Postgres detects the cycle and aborts one
 /// side. (Reported by external review, 2026-07-29.)
 ///
-/// Locking the role first here — before the group closure — makes
-/// `createRoleAssignment`'s lock order match every role-mutation path
-/// exactly, closing the inversion. `create_role_assignment_in_tx`'s own
-/// `lock_role`/`lock_live_subject` calls afterward re-acquire the same locks
-/// (a same-transaction no-op) — kept as-is since that function is also used,
-/// unlocked, by the entity-subject path, which has no group lock to order
-/// against.
+/// Locking the tenant and role before the group closure makes
+/// `createRoleAssignment`'s order match every role-mutation path, closing the
+/// inversion. The newer creation path uses
+/// [`prepare_role_assignment_in_tx`] directly; this helper remains the
+/// equivalent role/group utility for callers that already have those ids.
 pub async fn lock_role_then_group_closure_and_collect_grants_keys(
     tx: &mut Transaction<'_, Postgres>,
     role_id: Uuid,
