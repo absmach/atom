@@ -54,6 +54,10 @@ pub async fn cache_client() -> CacheClient {
         redis_url: url,
         namespace: "integration-tests".into(),
         initialize_namespace: true,
+        // Keep correctness tests independent of transient hosted-runner
+        // latency without weakening Atom's production cache deadlines.
+        connect_timeout_ms: 5_000,
+        op_timeout_ms: 1_000,
         ..CacheConfig::default()
     };
     CacheClient::connect(&cfg)

@@ -1387,6 +1387,12 @@ mod tests {
             redis_url: url,
             namespace,
             initialize_namespace,
+            // The production 50 ms data-plane deadline is intentionally
+            // strict, but it is too small for a cold CI readiness handshake
+            // (pool acquisition + PING + CONFIG + INFO + namespace Lua).
+            // These tests validate correctness, not Redis latency.
+            connect_timeout_ms: 5_000,
+            op_timeout_ms: 1_000,
             ..CacheConfig::default()
         }
     }
