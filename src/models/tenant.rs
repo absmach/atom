@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::enums::{DeletedFilter, SortDir, TenantOrderField, TenantStatus};
+use super::enums::{DeletedFilter, InvitationState, SortDir, TenantOrderField, TenantStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Tenant {
@@ -112,6 +112,8 @@ pub struct ListTenantInvitations {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    #[serde(default)]
+    pub state: Option<InvitationState>,
 }
 
 #[derive(Debug, Serialize)]

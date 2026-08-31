@@ -191,6 +191,17 @@ pub enum DeletedFilter {
     All,
 }
 
+/// Filters a tenant invitation list by outcome. Absent (`None`) means no
+/// filtering — every invitation regardless of state, matching prior behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationState {
+    Pending,
+    Accepted,
+    Rejected,
+    Revoked,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDir {

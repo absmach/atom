@@ -17,11 +17,11 @@ use crate::{
 use super::{
     auth::{gql_error, require_any_capability, require_auth},
     types::{
-        parse_deleted_filter, parse_id, parse_optional_id, parse_optional_tenant_status,
-        parse_sort_dir, parse_tenant_order, CreateTenantInput, CreateTenantInvitationInput,
-        EntityList, GqlDeletedFilter, GqlSortDir, GqlTenantOrderField, GqlTenantStatus,
-        InvitationTokenInput, Tenant, TenantInvitation, TenantInvitationList, TenantList,
-        UpdateTenantInput,
+        parse_deleted_filter, parse_id, parse_invitation_state, parse_optional_id,
+        parse_optional_tenant_status, parse_sort_dir, parse_tenant_order, CreateTenantInput,
+        CreateTenantInvitationInput, EntityList, GqlDeletedFilter, GqlInvitationState, GqlSortDir,
+        GqlTenantOrderField, GqlTenantStatus, InvitationTokenInput, Tenant, TenantInvitation,
+        TenantInvitationList, TenantList, UpdateTenantInput,
     },
 };
 
@@ -190,12 +190,13 @@ impl TenantQuery {
         tenant_id: ID,
         limit: Option<i32>,
         offset: Option<i32>,
+        state: Option<GqlInvitationState>,
     ) -> Result<TenantInvitationList> {
         let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
+        let app_state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_any_capability(
-            &state.pool,
+            &app_state.pool,
             &auth,
             &[
                 ("manage", Scope::Tenant(tenant_id)),
@@ -204,11 +205,12 @@ impl TenantQuery {
         )
         .await?;
         let list = tenant_repo::list_tenant_invitations(
-            &state.pool,
+            &app_state.pool,
             tenant_id,
             tenant_model::ListTenantInvitations {
                 limit: limit.map(i64::from).unwrap_or(20),
                 offset: offset.map(i64::from).unwrap_or(0),
+                state: parse_invitation_state(state),
             },
         )
         .await
@@ -249,15 +251,17 @@ impl TenantQuery {
         ctx: &Context<'_>,
         limit: Option<i32>,
         offset: Option<i32>,
+        state: Option<GqlInvitationState>,
     ) -> Result<TenantInvitationList> {
         let auth = require_auth(ctx)?;
-        let state = ctx.data::<AppState>()?;
+        let app_state = ctx.data::<AppState>()?;
         let list = tenant_repo::list_user_invitations(
-            &state.pool,
+            &app_state.pool,
             auth.entity_id,
             tenant_model::ListTenantInvitations {
                 limit: limit.map(i64::from).unwrap_or(20),
                 offset: offset.map(i64::from).unwrap_or(0),
+                state: parse_invitation_state(state),
             },
         )
         .await

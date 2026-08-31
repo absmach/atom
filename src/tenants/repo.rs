@@ -8,7 +8,7 @@ use crate::{
     identity::service::{hash_secret, verify_secret},
     models::{
         entity::{Entity, EntityList},
-        enums::{SortDir, SubjectKind, TenantOrderField, TenantStatus},
+        enums::{InvitationState, SortDir, SubjectKind, TenantOrderField, TenantStatus},
         policy::CreateRoleAssignment,
         tenant::{
             CreateTenant, CreateTenantInvitation, ListTenantInvitations, ListTenants, Tenant,
@@ -1202,7 +1202,16 @@ pub async fn create_invitation(
         },
     };
 
-    let (token_id, token_secret, token) = new_secret_token("atomi");
+    // The secret can be generated upfront -- it doesn't depend on which row
+    // ends up holding it -- but the *id* half of the token must come from
+    // whichever row this upsert actually resolves to. Re-inviting someone who
+    // already has a tenant_invitations row (a resend, or simply inviting them
+    // again) hits the UPDATE branch below and keeps that row's existing id;
+    // a token built from a speculatively pre-generated id would then point at
+    // a row that was never inserted, and accept_invitation_token's `WHERE id
+    // = $1` lookup would find nothing ("invitation not found") for an
+    // otherwise legitimate invitee.
+    let (_, token_secret, _) = new_secret_token("atomi");
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = Utc::now() + Duration::seconds(expiry_secs as i64);
 
@@ -1227,9 +1236,9 @@ pub async fn create_invitation(
            ),
            inserted AS (
                INSERT INTO tenant_invitations
-                   (id, tenant_id, invitee_user_id, invitee_email, invited_by, role_id,
+                   (tenant_id, invitee_user_id, invitee_email, invited_by, role_id,
                     secret_hash, expires_at, rejected_at, revoked_at, updated_at)
-               SELECT $8, $1, $2, $3, $4, $5, $6, $7, NULL, NULL, now()
+               SELECT $1, $2, $3, $4, $5, $6, $7, NULL, NULL, now()
                WHERE NOT EXISTS (SELECT 1 FROM updated)
                RETURNING *
            )
@@ -1250,16 +1259,33 @@ pub async fn create_invitation(
     .bind(req.role_id)
     .bind(token_hash)
     .bind(expires_at)
-    .bind(token_id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
+
+    let token = format!(
+        "atomi_{}_{}",
+        hex::encode(invitation.id.as_bytes()),
+        token_secret
+    );
 
     Ok(CreatedInvitation {
         invitation,
         token: email.as_ref().map(|_| token),
         email,
     })
+}
+
+/// Maps a state filter to the value bound into each query's `$N::text`
+/// state parameter. `None` means no filtering — matches every state,
+/// including the "all" tab, where the argument is omitted entirely.
+fn invitation_state_str(state: Option<InvitationState>) -> Option<&'static str> {
+    match state? {
+        InvitationState::Pending => Some("pending"),
+        InvitationState::Accepted => Some("accepted"),
+        InvitationState::Rejected => Some("rejected"),
+        InvitationState::Revoked => Some("revoked"),
+    }
 }
 
 pub async fn list_tenant_invitations(
@@ -1269,6 +1295,7 @@ pub async fn list_tenant_invitations(
 ) -> Result<TenantInvitationList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
+    let state = invitation_state_str(params.state);
     let items = sqlx::query_as::<_, TenantInvitation>(
         r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
                   ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
@@ -1277,21 +1304,41 @@ pub async fn list_tenant_invitations(
            LEFT JOIN roles r ON r.id = ti.role_id
            LEFT JOIN entities e ON e.id = ti.invitee_user_id AND e.deleted_at IS NULL
            WHERE ti.tenant_id = $1
+             AND (
+               $4::text IS NULL
+               OR ($4 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
+               OR ($4 = 'accepted' AND ti.accepted_at IS NOT NULL)
+               OR ($4 = 'rejected' AND ti.rejected_at IS NOT NULL)
+               OR ($4 = 'revoked' AND ti.revoked_at IS NOT NULL)
+             )
            ORDER BY ti.created_at DESC
            LIMIT $2 OFFSET $3"#,
     )
     .bind(tenant_id)
     .bind(limit)
     .bind(offset)
+    .bind(state)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM tenant_invitations WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM tenant_invitations ti
+           WHERE ti.tenant_id = $1
+             AND (
+               $2::text IS NULL
+               OR ($2 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
+               OR ($2 = 'accepted' AND ti.accepted_at IS NOT NULL)
+               OR ($2 = 'rejected' AND ti.rejected_at IS NOT NULL)
+               OR ($2 = 'revoked' AND ti.revoked_at IS NOT NULL)
+             )"#,
+    )
+    .bind(tenant_id)
+    .bind(state)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
     Ok(TenantInvitationList { items, total })
 }
 
@@ -1302,6 +1349,7 @@ pub async fn list_user_invitations(
 ) -> Result<TenantInvitationList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
+    let state = invitation_state_str(params.state);
     let items = sqlx::query_as::<_, TenantInvitation>(
         r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
                   ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
@@ -1309,31 +1357,53 @@ pub async fn list_user_invitations(
            FROM tenant_invitations ti
            LEFT JOIN roles r ON r.id = ti.role_id
            LEFT JOIN entities e ON e.id = ti.invitee_user_id AND e.deleted_at IS NULL
-           WHERE ti.invitee_user_id = $1
-              OR EXISTS (
-                  SELECT 1 FROM entity_emails ee
-                  WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
-                    AND ee.deleted_at IS NULL
-              )
+           WHERE (
+               ti.invitee_user_id = $1
+               OR EXISTS (
+                   SELECT 1 FROM entity_emails ee
+                   WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
+                     AND ee.deleted_at IS NULL
+               )
+           )
+             AND (
+               $4::text IS NULL
+               OR ($4 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
+               OR ($4 = 'accepted' AND ti.accepted_at IS NOT NULL)
+               OR ($4 = 'rejected' AND ti.rejected_at IS NOT NULL)
+               OR ($4 = 'revoked' AND ti.revoked_at IS NOT NULL)
+             )
            ORDER BY ti.created_at DESC
            LIMIT $2 OFFSET $3"#,
     )
     .bind(invitee_user_id)
     .bind(limit)
     .bind(offset)
+    .bind(state)
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM tenant_invitations ti
-               WHERE ti.invitee_user_id = $1
-                  OR EXISTS (
-                      SELECT 1 FROM entity_emails ee
-                      WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
-                        AND ee.deleted_at IS NULL
-                  )"#,
+           WHERE (
+               ti.invitee_user_id = $1
+               OR EXISTS (
+                   SELECT 1 FROM entity_emails ee
+                   WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
+                     AND ee.deleted_at IS NULL
+               )
+           )
+             AND (
+               $2::text IS NULL
+               OR ($2 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
+               OR ($2 = 'accepted' AND ti.accepted_at IS NOT NULL)
+               OR ($2 = 'rejected' AND ti.rejected_at IS NOT NULL)
+               OR ($2 = 'revoked' AND ti.revoked_at IS NOT NULL)
+             )"#,
     )
     .bind(invitee_user_id)
+    .bind(state)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;

@@ -12,8 +12,8 @@ use crate::{
         enums::{
             ActionAssignmentDecision, AuditOutcome, CredentialKind, CredentialStatus,
             DeletedFilter, Effect, EntityKind, EntityOrderField, EntityStatus, GrantKind,
-            GroupOrderField, ObjectKind, ResourceOrderField, ScopeKind, SortDir, SubjectKind,
-            TenantOrderField, TenantStatus,
+            GroupOrderField, InvitationState, ObjectKind, ResourceOrderField, ScopeKind, SortDir,
+            SubjectKind, TenantOrderField, TenantStatus,
         },
         group as group_model, policy as policy_model, profile as profile_model,
         resource as resource_model, role as role_model, session as session_model,
@@ -62,6 +62,15 @@ pub enum GqlDeletedFilter {
 pub enum GqlSortDir {
     Asc,
     Desc,
+}
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "InvitationState", rename_items = "snake_case")]
+pub enum GqlInvitationState {
+    Pending,
+    Accepted,
+    Rejected,
+    Revoked,
 }
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
@@ -2816,6 +2825,12 @@ pub fn parse_deleted_filter(value: Option<GqlDeletedFilter>) -> DeletedFilter {
     value.map(DeletedFilter::from).unwrap_or_default()
 }
 
+/// `None` means no filtering (every state), unlike `parse_deleted_filter`
+/// which always resolves to a concrete default.
+pub fn parse_invitation_state(value: Option<GqlInvitationState>) -> Option<InvitationState> {
+    value.map(InvitationState::from)
+}
+
 pub fn parse_sort_dir(value: Option<GqlSortDir>) -> SortDir {
     value.map(SortDir::from).unwrap_or_default()
 }
@@ -2897,6 +2912,17 @@ impl From<GqlDeletedFilter> for DeletedFilter {
             GqlDeletedFilter::Live => DeletedFilter::Live,
             GqlDeletedFilter::Deleted => DeletedFilter::Deleted,
             GqlDeletedFilter::All => DeletedFilter::All,
+        }
+    }
+}
+
+impl From<GqlInvitationState> for InvitationState {
+    fn from(state: GqlInvitationState) -> Self {
+        match state {
+            GqlInvitationState::Pending => InvitationState::Pending,
+            GqlInvitationState::Accepted => InvitationState::Accepted,
+            GqlInvitationState::Rejected => InvitationState::Rejected,
+            GqlInvitationState::Revoked => InvitationState::Revoked,
         }
     }
 }
