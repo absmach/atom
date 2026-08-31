@@ -1306,7 +1306,8 @@ pub async fn list_tenant_invitations(
            WHERE ti.tenant_id = $1
              AND (
                $4::text IS NULL
-               OR ($4 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL)
+               OR ($4 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
                OR ($4 = 'accepted' AND ti.accepted_at IS NOT NULL)
                OR ($4 = 'rejected' AND ti.rejected_at IS NOT NULL)
                OR ($4 = 'revoked' AND ti.revoked_at IS NOT NULL)
@@ -1326,7 +1327,8 @@ pub async fn list_tenant_invitations(
            WHERE ti.tenant_id = $1
              AND (
                $2::text IS NULL
-               OR ($2 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL)
+               OR ($2 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
                OR ($2 = 'accepted' AND ti.accepted_at IS NOT NULL)
                OR ($2 = 'rejected' AND ti.rejected_at IS NOT NULL)
                OR ($2 = 'revoked' AND ti.revoked_at IS NOT NULL)
@@ -1365,7 +1367,8 @@ pub async fn list_user_invitations(
            )
              AND (
                $4::text IS NULL
-               OR ($4 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL)
+               OR ($4 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
                OR ($4 = 'accepted' AND ti.accepted_at IS NOT NULL)
                OR ($4 = 'rejected' AND ti.rejected_at IS NOT NULL)
                OR ($4 = 'revoked' AND ti.revoked_at IS NOT NULL)
@@ -1392,7 +1395,8 @@ pub async fn list_user_invitations(
            )
              AND (
                $2::text IS NULL
-               OR ($2 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL)
+               OR ($2 = 'pending' AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                   AND (ti.expires_at IS NULL OR ti.expires_at >= now()))
                OR ($2 = 'accepted' AND ti.accepted_at IS NOT NULL)
                OR ($2 = 'rejected' AND ti.rejected_at IS NOT NULL)
                OR ($2 = 'revoked' AND ti.revoked_at IS NOT NULL)

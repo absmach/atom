@@ -7,7 +7,14 @@
 
 mod common;
 
-use atom::{error::AppError, models::tenant::CreateTenantInvitation, tenants::repo as tenant_repo};
+use atom::{
+    error::AppError,
+    models::{
+        enums::InvitationState,
+        tenant::{CreateTenantInvitation, ListTenantInvitations},
+    },
+    tenants::repo as tenant_repo,
+};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
@@ -327,4 +334,62 @@ async fn reinviting_existing_invitee_keeps_the_emailed_token_valid() {
         tenant_repo::accept_invitation_token(&pool, &stale_token, invitee2).await,
         "invalid invitation token",
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn expired_invitations_are_excluded_from_the_pending_filter() {
+    let pool = common::pool().await;
+    let inviter = make_entity(&pool, &format!("expiry-inviter-{}", Uuid::new_v4())).await;
+    let invitee = make_entity(&pool, &format!("expiry-invitee-{}", Uuid::new_v4())).await;
+    let tenant = make_tenant(&pool, &format!("expiry-tenant-{}", Uuid::new_v4())).await;
+
+    let still_pending = insert_user_invitation(&pool, tenant, inviter, invitee).await;
+    let other_invitee = make_entity(&pool, &format!("expiry-invitee2-{}", Uuid::new_v4())).await;
+    let expired = insert_user_invitation(&pool, tenant, inviter, other_invitee).await;
+    set_invitation_state(&pool, expired, "expired").await;
+
+    let pending = tenant_repo::list_tenant_invitations(
+        &pool,
+        tenant,
+        ListTenantInvitations {
+            limit: 100,
+            offset: 0,
+            state: Some(InvitationState::Pending),
+        },
+    )
+    .await
+    .expect("list pending invitations");
+
+    assert_eq!(
+        pending.total, 1,
+        "expired invitation must not count toward the pending total"
+    );
+    assert_eq!(
+        pending.items.len(),
+        1,
+        "expired invitation must not appear in the pending list"
+    );
+    assert_eq!(pending.items[0].id, still_pending);
+    assert!(
+        pending.items.iter().all(|item| item.id != expired),
+        "expired invitation leaked into the pending list"
+    );
+
+    let user_pending = tenant_repo::list_user_invitations(
+        &pool,
+        other_invitee,
+        ListTenantInvitations {
+            limit: 100,
+            offset: 0,
+            state: Some(InvitationState::Pending),
+        },
+    )
+    .await
+    .expect("list user's pending invitations");
+    assert_eq!(
+        user_pending.total, 0,
+        "the expired invitee's own pending list must not include it either"
+    );
+    assert!(user_pending.items.is_empty());
 }
