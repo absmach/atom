@@ -285,3 +285,46 @@ async fn reject_and_revoke_invitation_report_state_specific_errors() {
         "tenant invitation not found",
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn reinviting_existing_invitee_keeps_the_emailed_token_valid() {
+    let pool = common::pool().await;
+    let inviter = make_entity(&pool, &format!("reinvite-inviter-{}", Uuid::new_v4())).await;
+    let invitee = make_entity(&pool, &format!("reinvite-invitee-{}", Uuid::new_v4())).await;
+    let email = format!("reinvite-{}@example.test", Uuid::new_v4());
+    add_email(&pool, invitee, &email).await;
+    let tenant = make_tenant(&pool, &format!("reinvite-tenant-{}", Uuid::new_v4())).await;
+
+    let (first_id, _first_token) = create_email_invitation(&pool, tenant, inviter, &email).await;
+    // Inviting the same person again for the same tenant hits create_invitation's
+    // UPDATE branch (there's already a row matching on invitee_email), reusing
+    // that row's id rather than inserting a new one.
+    let (second_id, second_token) = create_email_invitation(&pool, tenant, inviter, &email).await;
+    assert_eq!(
+        first_id, second_id,
+        "re-inviting the same person should reuse their existing invitation row"
+    );
+
+    // The freshly emailed (second) token must resolve to that row.
+    let accepted_tenant = tenant_repo::accept_invitation_token(&pool, &second_token, invitee)
+        .await
+        .expect("accept the just-sent invitation token");
+    assert_eq!(accepted_tenant, tenant);
+
+    // The superseded first token pointed at the same row id but an old
+    // secret, so it now fails signature verification rather than the row
+    // itself being unreachable — a stale link errors clearly instead of
+    // reporting "invitation not found" for a link that was never sent.
+    let inviter2 = make_entity(&pool, &format!("reinvite-inviter2-{}", Uuid::new_v4())).await;
+    let invitee2 = make_entity(&pool, &format!("reinvite-invitee2-{}", Uuid::new_v4())).await;
+    let email2 = format!("reinvite2-{}@example.test", Uuid::new_v4());
+    add_email(&pool, invitee2, &email2).await;
+    let tenant2 = make_tenant(&pool, &format!("reinvite-tenant2-{}", Uuid::new_v4())).await;
+    let (_, stale_token) = create_email_invitation(&pool, tenant2, inviter2, &email2).await;
+    let (_, _fresh_token) = create_email_invitation(&pool, tenant2, inviter2, &email2).await;
+    assert_err_contains(
+        tenant_repo::accept_invitation_token(&pool, &stale_token, invitee2).await,
+        "invalid invitation token",
+    );
+}

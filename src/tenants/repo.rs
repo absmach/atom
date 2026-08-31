@@ -1202,7 +1202,16 @@ pub async fn create_invitation(
         },
     };
 
-    let (token_id, token_secret, token) = new_secret_token("atomi");
+    // The secret can be generated upfront -- it doesn't depend on which row
+    // ends up holding it -- but the *id* half of the token must come from
+    // whichever row this upsert actually resolves to. Re-inviting someone who
+    // already has a tenant_invitations row (a resend, or simply inviting them
+    // again) hits the UPDATE branch below and keeps that row's existing id;
+    // a token built from a speculatively pre-generated id would then point at
+    // a row that was never inserted, and accept_invitation_token's `WHERE id
+    // = $1` lookup would find nothing ("invitation not found") for an
+    // otherwise legitimate invitee.
+    let (_, token_secret, _) = new_secret_token("atomi");
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = Utc::now() + Duration::seconds(expiry_secs as i64);
 
@@ -1227,9 +1236,9 @@ pub async fn create_invitation(
            ),
            inserted AS (
                INSERT INTO tenant_invitations
-                   (id, tenant_id, invitee_user_id, invitee_email, invited_by, role_id,
+                   (tenant_id, invitee_user_id, invitee_email, invited_by, role_id,
                     secret_hash, expires_at, rejected_at, revoked_at, updated_at)
-               SELECT $8, $1, $2, $3, $4, $5, $6, $7, NULL, NULL, now()
+               SELECT $1, $2, $3, $4, $5, $6, $7, NULL, NULL, now()
                WHERE NOT EXISTS (SELECT 1 FROM updated)
                RETURNING *
            )
@@ -1250,10 +1259,15 @@ pub async fn create_invitation(
     .bind(req.role_id)
     .bind(token_hash)
     .bind(expires_at)
-    .bind(token_id)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;
+
+    let token = format!(
+        "atomi_{}_{}",
+        hex::encode(invitation.id.as_bytes()),
+        token_secret
+    );
 
     Ok(CreatedInvitation {
         invitation,
