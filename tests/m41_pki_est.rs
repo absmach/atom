@@ -575,16 +575,31 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         .await,
     );
 
-    // Saturate this subject's persisted rate window without changing the
-    // service configuration, then prove both remaining mutation adapters emit
-    // structured failure observations on their service-error branches.
+    // Saturate this subject's current and immediately following persisted rate
+    // windows without changing the service configuration. Covering the next
+    // fixed window keeps the pair of assertions deterministic when the clock
+    // crosses a boundary between the two requests.
     sqlx::query(
-        r#"UPDATE pki_enrollment_rate_windows
-           SET request_count = $2
-           WHERE scope_kind = 'entity' AND scope_id = $1"#,
+        r#"WITH windows AS (
+               SELECT generate_series(0, 1) AS step,
+                      to_timestamp(
+                          floor(extract(epoch FROM now()) / $3) * $3
+                      ) AS current_start
+           )
+           INSERT INTO pki_enrollment_rate_windows (
+               scope_kind, scope_id, window_start, request_count, updated_at
+           )
+           SELECT 'entity', $1,
+                  current_start + (step * $3 * interval '1 second'),
+                  $2, now()
+             FROM windows
+           ON CONFLICT (scope_kind, scope_id, window_start) DO UPDATE
+           SET request_count = EXCLUDED.request_count,
+               updated_at = EXCLUDED.updated_at"#,
     )
     .bind(entity)
     .bind(i64::from(config.enrollment.entity_rate_limit.max_requests))
+    .bind(i64::try_from(config.enrollment.entity_rate_limit.window_secs).unwrap())
     .execute(&pool)
     .await
     .unwrap();

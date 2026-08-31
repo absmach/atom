@@ -13,7 +13,7 @@ use atom::{
     broker_auth::service::proto::{
         auth_service_client::AuthServiceClient, Action, AuthnReq, AuthzReq,
     },
-    config::{BrokerAuthConfig, BrokerTopicRef, Config},
+    config::{BrokerAuthConfig, BrokerTopicRef, Config, GrpcTlsConfig},
     grpc,
     identity::{repo as identity_repo, service as identity_service},
     keys::{self, ActiveKeys},
@@ -26,10 +26,17 @@ use atom::{
     state::AppState,
     tenants::repo as tenant_repo,
 };
+use rcgen::{
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
+};
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
-use tonic::{transport::Channel, Request};
+use tonic::{
+    transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity, ServerTlsConfig},
+    Request,
+};
 use uuid::Uuid;
 
 const DEVICE_SECRET: &str = "broker-device-secret";
@@ -58,6 +65,86 @@ async fn active_keys(pool: &PgPool) -> ActiveKeys {
     keys::rotate(pool, &Config::for_tests().signing_keys)
         .await
         .expect("rotate signing key")
+}
+
+async fn configure_mtls(cfg: &mut Config) -> (ServerTlsConfig, ClientTlsConfig) {
+    let ca_key = KeyPair::generate().expect("generate test CA key");
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("test CA params");
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Atom m29 test CA");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let ca_cert = ca_params.self_signed(&ca_key).expect("sign test CA");
+    let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+    let server_key = KeyPair::generate().expect("generate test server key");
+    let mut server_params =
+        CertificateParams::new(vec!["localhost".to_string()]).expect("test server params");
+    server_params
+        .distinguished_name
+        .push(DnType::CommonName, "localhost");
+    server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let server_cert = server_params
+        .signed_by(&server_key, &issuer)
+        .expect("sign test server certificate");
+
+    let client_key = KeyPair::generate().expect("generate test broker key");
+    let mut client_params =
+        CertificateParams::new(vec!["broker.test".to_string()]).expect("test client params");
+    client_params
+        .distinguished_name
+        .push(DnType::CommonName, "Atom m29 test broker");
+    client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client_cert = client_params
+        .signed_by(&client_key, &issuer)
+        .expect("sign test broker certificate");
+
+    let ca_pem = ca_cert.pem();
+    let server_cert_pem = format!("{}{}", server_cert.pem(), ca_pem);
+    let client_cert_pem = format!("{}{}", client_cert.pem(), ca_pem);
+    let dir = std::env::temp_dir().join(format!("atom-m29-mtls-{}", Uuid::new_v4()));
+    tokio::fs::create_dir(&dir)
+        .await
+        .expect("create m29 TLS fixture directory");
+    let cert_path = dir.join("server-chain.pem");
+    let key_path = dir.join("server-key.pem");
+    let ca_path = dir.join("client-ca.pem");
+    tokio::fs::write(&cert_path, server_cert_pem)
+        .await
+        .expect("write test server certificate");
+    tokio::fs::write(&key_path, server_key.serialize_pem())
+        .await
+        .expect("write test server key");
+    tokio::fs::write(&ca_path, &ca_pem)
+        .await
+        .expect("write test client CA");
+
+    cfg.grpc_tls = Some(GrpcTlsConfig {
+        cert_path: cert_path.to_string_lossy().into_owned(),
+        key_path: key_path.to_string_lossy().into_owned(),
+        client_ca_path: Some(ca_path.to_string_lossy().into_owned()),
+    });
+    let server_tls = grpc::load_tls_config(cfg).await;
+    tokio::fs::remove_dir_all(&dir)
+        .await
+        .expect("remove m29 TLS fixture directory");
+
+    let client_tls = ClientTlsConfig::new()
+        .domain_name("localhost")
+        .ca_certificate(Certificate::from_pem(ca_pem))
+        .identity(Identity::from_pem(
+            client_cert_pem,
+            client_key.serialize_pem(),
+        ));
+    (
+        server_tls
+            .expect("load m29 server mTLS")
+            .expect("m29 server TLS is configured"),
+        client_tls,
+    )
 }
 
 async fn make_tenant(pool: &PgPool) -> (Uuid, String) {
@@ -194,28 +281,50 @@ async fn grant(pool: &PgPool, subject: Uuid, tenant_id: Option<Uuid>, object: Uu
     .expect("assign role");
 }
 
-async fn serve(pool: &PgPool, cfg: Config) -> AuthServiceClient<Channel> {
+async fn serve(pool: &PgPool, mut cfg: Config) -> AuthServiceClient<Channel> {
+    let (server_tls, client_tls) = if cfg.broker_auth.enabled {
+        let (server_tls, client_tls) = configure_mtls(&mut cfg).await;
+        (Some(server_tls), Some(client_tls))
+    } else {
+        (None, None)
+    };
     let keys = active_keys(pool).await;
     let state = AppState::new(pool.clone(), cfg, keys, None);
     let listener = grpc::bind_listener("127.0.0.1:0".parse().expect("addr"))
         .await
         .expect("bind grpc");
     let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        let _ = grpc::serve(listener, state, None).await;
-    });
+    let server = tokio::spawn(async move { grpc::serve(listener, state, server_tls).await });
 
-    let endpoint = format!("http://{addr}");
+    let scheme = if client_tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let mut endpoint = Endpoint::from_shared(format!("{scheme}://{addr}"))
+        .expect("valid test gRPC endpoint")
+        .connect_timeout(Duration::from_millis(250))
+        .timeout(Duration::from_secs(5));
+    if let Some(client_tls) = client_tls {
+        endpoint = endpoint
+            .tls_config(client_tls)
+            .expect("configure test broker mTLS client");
+    }
     for _ in 0..40 {
-        if let Ok(channel) = Channel::from_shared(endpoint.clone())
-            .expect("endpoint")
-            .connect()
-            .await
-        {
+        if server.is_finished() {
+            let result = server.await.expect("gRPC server task panicked");
+            panic!("gRPC server exited before accepting a connection: {result:?}");
+        }
+        if let Ok(channel) = endpoint.clone().connect().await {
             return AuthServiceClient::new(channel);
         }
         sleep(Duration::from_millis(25)).await;
     }
+    if server.is_finished() {
+        let result = server.await.expect("gRPC server task panicked");
+        panic!("gRPC server exited before accepting a connection: {result:?}");
+    }
+    server.abort();
     panic!("gRPC server did not come up");
 }
 
