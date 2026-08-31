@@ -90,7 +90,9 @@ pub async fn preflight_global_protected_object_ids(pool: &PgPool) -> Result<()> 
                   AND to_regclass('public.credentials') IS NOT NULL
                   AND to_regclass('public.direct_policies') IS NOT NULL
                   AND to_regclass('public.role_assignments') IS NOT NULL
-                  AND to_regclass('public.api_endpoints') IS NOT NULL"#,
+                  AND to_regclass('public.api_endpoints') IS NOT NULL
+                  AND to_regclass('public.permission_blocks') IS NOT NULL
+                  AND to_regclass('public.credential_permission_limits') IS NOT NULL"#,
     )
     .fetch_one(pool)
     .await
@@ -109,29 +111,46 @@ pub async fn preflight_global_protected_object_ids(pool: &PgPool) -> Result<()> 
         return Ok(());
     }
 
-    let ambiguous_seed_scope: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS (
-               SELECT 1
-               FROM role_assignments assignment
-               JOIN permission_blocks block
-                 ON block.scope_mode = 'object'
-                AND block.object_id = assignment.id
-                AND block.object_kind IS NULL
-               WHERE assignment.id = '00000000-0000-0000-0000-000000000001'
-                 AND assignment.tenant_id IS NULL
-                 AND assignment.subject_kind = 'entity'
-                 AND assignment.subject_id = '00000000-0000-0000-0000-000000000001'
-                 AND assignment.role_id = '00000000-0000-0000-0000-000000000002'
-           )"#,
+    let invalid_seed_scopes: Option<String> = sqlx::query_scalar(
+        r#"WITH seeded_assignment AS (
+               SELECT id
+               FROM role_assignments
+               WHERE id = '00000000-0000-0000-0000-000000000001'
+                 AND tenant_id IS NULL
+                 AND subject_kind = 'entity'
+                 AND subject_id = '00000000-0000-0000-0000-000000000001'
+                 AND role_id = '00000000-0000-0000-0000-000000000002'
+           ), invalid AS (
+               SELECT 'permission_blocks'::text AS source_table, block.id, block.object_kind
+               FROM permission_blocks block
+               JOIN seeded_assignment assignment ON assignment.id = block.object_id
+               WHERE block.scope_mode = 'object'
+                 AND (block.object_kind IS NULL OR block.object_kind NOT IN ('entity', 'policy'))
+
+               UNION ALL
+
+               SELECT 'credential_permission_limits', ceiling.id, ceiling.object_kind
+               FROM credential_permission_limits ceiling
+               JOIN seeded_assignment assignment ON assignment.id = ceiling.object_id
+               WHERE ceiling.scope_mode = 'object'
+                 AND (ceiling.object_kind IS NULL OR ceiling.object_kind NOT IN ('entity', 'policy'))
+           )
+           SELECT string_agg(
+                      format('%s[%s, object_kind=%s]', source_table, id,
+                             COALESCE(object_kind, 'NULL')),
+                      '; ' ORDER BY source_table, id
+                  )
+           FROM invalid"#,
     )
     .fetch_one(pool)
     .await
-    .context("failed to inspect legacy exact-object scopes")?;
-    if ambiguous_seed_scope {
+    .context("failed to inspect legacy exact-object references")?;
+    if let Some(invalid_seed_scopes) = invalid_seed_scopes {
         bail!(
-            "v1 upgrade blocked by an exact-object permission block targeting legacy UUID \
-             00000000-0000-0000-0000-000000000001 without object_kind. Set the affected \
-             permission_blocks.object_kind to entity or policy and rerun the readiness check"
+            "v1 upgrade blocked by unclassified exact-object references targeting legacy UUID \
+             00000000-0000-0000-0000-000000000001: {invalid_seed_scopes}. Set each reported \
+             permission_blocks.object_kind or credential_permission_limits.object_kind to entity \
+             or policy and rerun the readiness check"
         );
     }
 

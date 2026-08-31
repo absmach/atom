@@ -96,8 +96,13 @@
       "sourceTable": "role_assignments",
       "oldId": "00000000-0000-0000-0000-000000000001",
       "newId": "00000000-0000-0000-0000-00000000000a",
-      "scopeReferenceMigration": "object_kind_policy_only",
-      "missingObjectKind": "upgrade_blocked_as_ambiguous"
+      "scopeReferenceTables": [
+        "permission_blocks",
+        "credential_permission_limits"
+      ],
+      "policyQualifiedReferences": "remapped_to_new_id",
+      "entityQualifiedReferences": "retained_on_old_id",
+      "unclassifiedOrInvalidObjectKind": "upgrade_blocked_as_ambiguous"
     },
     "softDeleteReservation": "retained",
     "physicalDeleteReservation": "released_in_same_transaction",

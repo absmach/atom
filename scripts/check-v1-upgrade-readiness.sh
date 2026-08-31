@@ -113,6 +113,7 @@ DO $preflight$
 DECLARE
     missing_tables text;
     collisions text;
+    invalid_scopes text;
 BEGIN
     IF to_regclass('public._sqlx_migrations') IS NULL THEN
         RAISE NOTICE 'legacy Atom tables are absent; protected-object UUID preflight is not needed';
@@ -124,10 +125,12 @@ BEGIN
     FROM (
         VALUES
             ('api_endpoints'),
+            ('credential_permission_limits'),
             ('credentials'),
             ('direct_policies'),
             ('entities'),
             ('object_groups'),
+            ('permission_blocks'),
             ('principal_groups'),
             ('resources'),
             ('role_assignments'),
@@ -150,22 +153,41 @@ BEGIN
         RETURN;
     END IF;
 
-    IF EXISTS (
-        SELECT 1
-        FROM role_assignments assignment
-        JOIN permission_blocks block
-          ON block.scope_mode = 'object'
-         AND block.object_id = assignment.id
-         AND block.object_kind IS NULL
-        WHERE assignment.id = '00000000-0000-0000-0000-000000000001'
-          AND assignment.tenant_id IS NULL
-          AND assignment.subject_kind = 'entity'
-          AND assignment.subject_id = '00000000-0000-0000-0000-000000000001'
-          AND assignment.role_id = '00000000-0000-0000-0000-000000000002'
-    ) THEN
+    WITH seeded_assignment AS (
+        SELECT id
+        FROM role_assignments
+        WHERE id = '00000000-0000-0000-0000-000000000001'
+          AND tenant_id IS NULL
+          AND subject_kind = 'entity'
+          AND subject_id = '00000000-0000-0000-0000-000000000001'
+          AND role_id = '00000000-0000-0000-0000-000000000002'
+    ), invalid AS (
+        SELECT 'permission_blocks'::text AS source_table, block.id, block.object_kind
+        FROM permission_blocks block
+        JOIN seeded_assignment assignment ON assignment.id = block.object_id
+        WHERE block.scope_mode = 'object'
+          AND (block.object_kind IS NULL OR block.object_kind NOT IN ('entity', 'policy'))
+
+        UNION ALL
+
+        SELECT 'credential_permission_limits', ceiling.id, ceiling.object_kind
+        FROM credential_permission_limits ceiling
+        JOIN seeded_assignment assignment ON assignment.id = ceiling.object_id
+        WHERE ceiling.scope_mode = 'object'
+          AND (ceiling.object_kind IS NULL OR ceiling.object_kind NOT IN ('entity', 'policy'))
+    )
+    SELECT string_agg(
+               format('%s[%s, object_kind=%s]', source_table, id,
+                      COALESCE(object_kind, 'NULL')),
+               '; ' ORDER BY source_table, id
+           )
+    INTO invalid_scopes
+    FROM invalid;
+
+    IF invalid_scopes IS NOT NULL THEN
         RAISE EXCEPTION USING
-            MESSAGE = 'v1 upgrade blocked: an exact-object scope targets legacy UUID 00000000-0000-0000-0000-000000000001 without object_kind',
-            HINT = 'Set each affected permission_blocks.object_kind to entity or policy, then rerun this read-only check.';
+            MESSAGE = 'v1 upgrade blocked: unclassified exact-object references target legacy UUID 00000000-0000-0000-0000-000000000001: ' || invalid_scopes,
+            HINT = 'Set each reported permission_blocks.object_kind or credential_permission_limits.object_kind to entity or policy, then rerun this read-only check.';
     END IF;
 
     WITH protected_objects AS (

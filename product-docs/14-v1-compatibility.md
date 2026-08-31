@@ -72,7 +72,11 @@ Migration 025 also establishes the canonical case-insensitive human-email
 identity. The shortest safe procedure is:
 
 1. Back up the database, stop ingress, and drain **every** v0.50 Atom process
-   and other process that writes Atom's schema.
+   and other process that writes Atom's schema. If Redis caching is configured,
+   prepare a fresh, empty namespace for v1; migration 026 rewrites cached
+   credential ceiling inputs, so reusing a pre-upgrade namespace can retain the
+   old UUID meaning. Follow the full-drain/fresh-namespace procedure in
+   `api/v1/cache-contract.md`.
 2. Start the v1 binary once. Before running migrations it performs three
    read-only preflights. The first refuses any action-applicability row on
    `resource:channel` / `resource:rule` that has no exact replacement in
@@ -88,9 +92,11 @@ identity. The shortest safe procedure is:
    collision is handled deterministically: migration 026 changes the built-in
    admin role-assignment id from `00000000-0000-0000-0000-000000000001` to
    reserved id `00000000-0000-0000-0000-00000000000a` and moves exact policy
-   scopes that explicitly declare `object_kind = policy`. An exact scope on the
-   legacy id without `object_kind` is ambiguous and blocks the upgrade until
-   the operator classifies it as `entity` or `policy`. Reconcile every other
+   references in both permission blocks and access-token ceilings that
+   explicitly declare `object_kind = policy`; entity-qualified references stay
+   on the admin entity's legacy id. An exact reference on the legacy id without
+   `object_kind`, or with any kind other than `entity` or `policy`, is ambiguous
+   and blocks the upgrade until the operator classifies it. Reconcile every other
    reported email or UUID in v0.50, including all references to a remapped UUID,
    then retry. No preflight chooses an owner or edits data. Operators that run migrations
    separately must first run `scripts/check-v1-upgrade-readiness.sh`. Since
@@ -99,7 +105,9 @@ identity. The shortest safe procedure is:
    script before the external migration runner. Do not run `sqlx migrate`
    first.
 3. Let that v1 process apply all migrations and the configured
-   `ATOM_BOOTSTRAP_FILE`. The bootstrap must declare product-specific
+   `ATOM_BOOTSTRAP_FILE`. When caching is configured, initialize the fresh
+   namespace with one process before starting the rest of the fleet. The
+   bootstrap must declare product-specific
    capabilities and applicability (for example `publish`/`subscribe` on
    `resource:channel`) before permission blocks use them.
 4. Verify those capability/applicability rows and the upgraded authorization

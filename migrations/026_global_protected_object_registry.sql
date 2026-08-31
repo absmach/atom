@@ -3,18 +3,21 @@
 -- can never name two different objects.
 
 LOCK TABLE tenants, entities, resources, principal_groups, object_groups, roles,
-           credentials, direct_policies, role_assignments, api_endpoints
+           credentials, direct_policies, role_assignments, api_endpoints,
+           permission_blocks, credential_permission_limits
     IN SHARE ROW EXCLUSIVE MODE;
 
 -- Migration 001 used ...0001 for both the seeded admin entity and that
 -- entity's seeded role assignment. Resolve this one known legacy collision to
 -- a permanently reserved assignment UUID before enforcing the global
--- namespace. Exact-object blocks declare their target kind, so only policy
--- scopes move with the assignment; an undeclared/ambiguous legacy scope must
--- be repaired by the operator instead of being guessed here.
+-- namespace. Exact-object blocks and access-token ceilings declare their
+-- target kind, so only policy references move with the assignment; an
+-- unclassified/invalid legacy reference must be repaired by the operator
+-- instead of being guessed here.
 DO $seed_assignment_remap$
 DECLARE
     occupied text;
+    invalid_scopes text;
 BEGIN
     IF EXISTS (
         SELECT 1
@@ -57,20 +60,42 @@ BEGIN
                 HINT = 'Remap the reported custom row before rerunning migration 026.';
         END IF;
 
-        IF EXISTS (
-            SELECT 1
+        SELECT string_agg(
+                   format('%s[%s, object_kind=%s]', source_table, id,
+                          COALESCE(object_kind, 'NULL')),
+                   '; ' ORDER BY source_table, id
+               )
+        INTO invalid_scopes
+        FROM (
+            SELECT 'permission_blocks'::text AS source_table, id, object_kind
             FROM permission_blocks
             WHERE scope_mode = 'object'
               AND object_id = '00000000-0000-0000-0000-000000000001'
-              AND object_kind IS NULL
-        ) THEN
+              AND (object_kind IS NULL OR object_kind NOT IN ('entity', 'policy'))
+
+            UNION ALL
+
+            SELECT 'credential_permission_limits', id, object_kind
+            FROM credential_permission_limits
+            WHERE scope_mode = 'object'
+              AND object_id = '00000000-0000-0000-0000-000000000001'
+              AND (object_kind IS NULL OR object_kind NOT IN ('entity', 'policy'))
+        ) invalid;
+
+        IF invalid_scopes IS NOT NULL THEN
             RAISE EXCEPTION USING
                 ERRCODE = '23514',
-                MESSAGE = 'ambiguous exact-object scope targets legacy UUID 00000000-0000-0000-0000-000000000001 without object_kind',
-                HINT = 'Set each affected permission_blocks.object_kind to entity or policy before rerunning migration 026.';
+                MESSAGE = 'unclassified exact-object reference targets legacy UUID 00000000-0000-0000-0000-000000000001: ' || invalid_scopes,
+                HINT = 'Set each reported permission_blocks.object_kind or credential_permission_limits.object_kind to entity or policy before rerunning migration 026.';
         END IF;
 
         UPDATE permission_blocks
+        SET object_id = '00000000-0000-0000-0000-00000000000a'
+        WHERE scope_mode = 'object'
+          AND object_kind = 'policy'
+          AND object_id = '00000000-0000-0000-0000-000000000001';
+
+        UPDATE credential_permission_limits
         SET object_id = '00000000-0000-0000-0000-00000000000a'
         WHERE scope_mode = 'object'
           AND object_kind = 'policy'

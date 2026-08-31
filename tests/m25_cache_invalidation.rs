@@ -1886,26 +1886,22 @@ async fn object_group_closure_preparation_locks_tenant_before_advisory() {
     handle.await.expect("join object-group preparation");
 }
 
-/// Legacy data can contain the same UUID in both physical group tables. Group
-/// mutations lock the object row before the principal row, so closure
-/// preparation must use that same order or the two paths can deadlock.
+/// A closure can contain both object and principal groups. Group mutations lock
+/// all object rows before principal rows, so closure preparation must use that
+/// same cross-table order or the two paths can deadlock.
 #[tokio::test]
 #[ignore]
-async fn group_closure_preparation_locks_object_before_principal_for_duplicate_legacy_id() {
+async fn group_closure_preparation_locks_object_rows_before_principal_rows() {
     let p = pool().await;
     let tenant_id = tenant(&p).await;
-    let group_id = new_group_in_tenant(&p, tenant_id, "object", "dual-physical-lock").await;
-    sqlx::query("INSERT INTO principal_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(group_id)
-        .bind(format!("cache-test-dual-principal-{group_id}"))
-        .bind(tenant_id)
-        .execute(&p)
-        .await
-        .expect("insert legacy principal row with the same UUID");
+    let object_group_id =
+        new_group_in_tenant(&p, tenant_id, "object", "object-physical-lock").await;
+    let principal_group_id =
+        new_group_in_tenant(&p, tenant_id, "principal", "principal-physical-lock").await;
 
     let mut object_tx = p.begin().await.expect("begin object-locking tx");
     sqlx::query("SELECT id FROM object_groups WHERE id = $1 FOR UPDATE")
-        .bind(group_id)
+        .bind(object_group_id)
         .fetch_one(&mut *object_tx)
         .await
         .expect("lock object-group row");
@@ -1913,9 +1909,12 @@ async fn group_closure_preparation_locks_object_before_principal_for_duplicate_l
     let p2 = p.clone();
     let handle = tokio::spawn(async move {
         let mut closure_tx = p2.begin().await.expect("begin closure tx");
-        authz_repo::lock_group_closures_and_collect_member_ids(&mut closure_tx, &[group_id])
-            .await
-            .expect("prepare duplicate-id group closure");
+        authz_repo::lock_group_closures_and_collect_member_ids(
+            &mut closure_tx,
+            &[principal_group_id, object_group_id],
+        )
+        .await
+        .expect("prepare mixed-kind group closure");
         closure_tx.commit().await.expect("commit closure tx");
     });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1927,7 +1926,7 @@ async fn group_closure_preparation_locks_object_before_principal_for_duplicate_l
     tokio::time::timeout(
         std::time::Duration::from_millis(500),
         sqlx::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
-            .bind(group_id)
+            .bind(principal_group_id)
             .fetch_one(&mut *object_tx),
     )
     .await

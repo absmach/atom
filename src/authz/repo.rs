@@ -7081,9 +7081,9 @@ pub async fn effective_grants_for_subject(
 /// (each root plus every descendant subgroup, via a `group_hierarchy`
 /// descent) `FOR UPDATE`. Object-group rows are locked before principal-group
 /// rows, and each physical table is locked in stable UUID order. This matches
-/// the canonical physical-group ordering used by mutations when a legacy UUID
-/// exists in both tables. The member entity ids across that (now-locked)
-/// closure are returned.
+/// the canonical physical-group ordering used by mutations that can touch both
+/// group classes. The member entity ids across that (now-locked) closure are
+/// returned.
 ///
 /// # Why this exists
 ///
@@ -7152,8 +7152,8 @@ pub(crate) async fn prepare_group_hierarchy_mutation_in_tx(
 /// Read every tenant ownership row before taking any lock, then lock the
 /// complete tenant set in UUID order. `groups` intentionally includes both
 /// principal and object rows and does not filter tombstones: restore/delete
-/// preparation needs the same ordering barrier as live mutations, and a UUID
-/// present in both physical group tables must contribute both ownership rows.
+/// preparation needs the same ordering barrier as live mutations, and a mixed
+/// principal/object closure must contribute both ownership sets.
 async fn lock_group_tenant_rows(
     tx: &mut Transaction<'_, Postgres>,
     group_ids: &[Uuid],
@@ -7194,11 +7194,11 @@ async fn lock_group_closures_after_tenant_rows(
     closure.sort_unstable();
     closure.dedup();
 
-    // A legacy UUID may exist in both physical group tables. Every mutation
-    // that can encounter both uses object -> principal ordering; taking only
-    // the principal lock here could deadlock with such a mutation holding the
-    // object row. Object-only roots still need this lock so their hierarchy
-    // cannot be changed while the prepared closure is in use.
+    // Every mutation that can encounter both group classes uses object ->
+    // principal ordering; reversing that order here could deadlock with a
+    // mutation already holding an object row. Object-only roots still need
+    // this lock so their hierarchy cannot be changed while the prepared
+    // closure is in use.
     sqlx::query("SELECT id FROM object_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
         .bind(&closure)
         .fetch_all(&mut **tx)
