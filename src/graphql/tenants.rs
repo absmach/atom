@@ -19,9 +19,9 @@ use super::{
     types::{
         parse_deleted_filter, parse_id, parse_invitation_state, parse_optional_id,
         parse_optional_tenant_status, parse_sort_dir, parse_tenant_order, CreateTenantInput,
-        CreateTenantInvitationInput, EntityList, GqlDeletedFilter, GqlInvitationState,
-        GqlSortDir, GqlTenantOrderField, GqlTenantStatus, InvitationTokenInput, Tenant,
-        TenantInvitation, TenantInvitationList, TenantList, UpdateTenantInput,
+        CreateTenantInvitationInput, EntityList, GqlDeletedFilter, GqlInvitationState, GqlSortDir,
+        GqlTenantOrderField, GqlTenantStatus, InvitationTokenInput, Tenant, TenantInvitation,
+        TenantInvitationList, TenantList, UpdateTenantInput,
     },
 };
 

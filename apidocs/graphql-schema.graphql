@@ -693,6 +693,13 @@ enum GroupOrderField {
 	status
 }
 
+enum InvitationState {
+	pending
+	accepted
+	rejected
+	revoked
+}
+
 input InvitationTokenInput {
 	token: String!
 }
@@ -1020,9 +1027,9 @@ type QueryRoot {
 	tenant(id: ID!): Tenant!
 	tenantMembers(tenantId: ID!, q: String, limit: Int, offset: Int): EntityList!
 	tenantAssignableEntities(tenantId: ID!, q: String!, limit: Int, offset: Int): EntityList!
-	tenantInvitations(tenantId: ID!, limit: Int, offset: Int): TenantInvitationList!
+	tenantInvitations(tenantId: ID!, limit: Int, offset: Int, state: InvitationState): TenantInvitationList!
 	myTenantRoles(tenantId: ID!): [TenantRoleAssignment!]!
-	myTenantInvitations(limit: Int, offset: Int): TenantInvitationList!
+	myTenantInvitations(limit: Int, offset: Int, state: InvitationState): TenantInvitationList!
 	profiles(objectKind: String, kind: String, tenantId: ID, status: String, limit: Int, offset: Int): ProfileList!
 	profile(id: ID!): Profile!
 	profileVersions(profileId: ID!): [ProfileVersion!]!
