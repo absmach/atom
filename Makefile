@@ -69,7 +69,7 @@ help:
 	@echo "  make docker-build-release      Build the raw release Docker image (cached)"
 	@echo "  make docker-build-release-prod Build the raw release Docker image (--no-cache)"
 	@echo "  make pki-material              Generate PKI trust anchor material into ./certs/ (idempotent)"
-	@echo "                                 See app/tests/visual/README.md for the visual walkthrough."
+	@echo "                                 See ui/tests/visual/README.md for the visual walkthrough."
 	@echo ""
 	@echo "Variables:"
 	@echo "  COMPOSE=$(COMPOSE)"
@@ -112,7 +112,7 @@ dev: db
 	@command -v pnpm  >/dev/null 2>&1 || { echo "pnpm is required for 'make dev'"; exit 1; }
 	@trap 'kill 0' INT TERM EXIT; \
 	LISTEN_ADDR=0.0.0.0:$(DEV_HTTP_PORT) ATOM_PUBLIC_BASE_URL=http://localhost:$(DEV_HTTP_PORT) cargo run & \
-	( cd app && pnpm install --frozen-lockfile && \
+	( cd ui && pnpm install --frozen-lockfile && \
 	  ATOM_GRAPHQL_URL=http://localhost:$(DEV_HTTP_PORT)/graphql PORT=$(DEV_UI_PORT) pnpm dev ) & \
 	wait
 
@@ -191,7 +191,7 @@ docker_atom_dev:
 	mkdir -p "$(DOCKER_ATOM_DEV_CONTEXT)"
 	install -m 0755 target/release/atom "$(DOCKER_ATOM_DEV_CONTEXT)/atom"
 	cp -R migrations "$(DOCKER_ATOM_DEV_CONTEXT)/migrations"
-	cp Dockerfile.atom-dev "$(DOCKER_ATOM_DEV_CONTEXT)/Dockerfile"
+	cp docker/Dockerfile.host-built "$(DOCKER_ATOM_DEV_CONTEXT)/Dockerfile"
 	docker build \
 		$(DOCKER_BUILD_ARGS) \
 		-t "$(DOCKER_ATOM_DEV_IMAGE)" \
@@ -200,11 +200,11 @@ docker_atom_dev:
 ui-build:
 	docker build \
 		$(DOCKER_CACHE_FLAG) \
-		-f app/Dockerfile \
+		-f ui/Dockerfile \
 		$(DOCKER_BUILD_ARGS) \
 		-t "$(ATOM_UI_IMAGE)" \
 		$(ATOM_UI_EXTRA_TAG) \
-		app
+		ui
 
 ui-build-prod:
 	$(MAKE) ui-build DOCKER_NO_CACHE=1
@@ -213,9 +213,9 @@ up: $(DEV_ENV_FILE) pki-material
 	$(COMPOSE_ENV) $(COMPOSE) --env-file $(DEV_ENV_FILE) $(COMPOSE_PROFILES) up -d postgres atom atom-ui
 	@echo ""
 	@echo "  Atom is coming up. When health checks pass:"
-	@echo "    UI:        http://localhost:$${ATOM_UI_HTTP_PORT:-3006}"
-	@echo "    GraphQL:   http://localhost:$${ATOM_HTTP_PORT:-18080}/graphql"
-	@echo "    Playbook:  app/tests/visual/README.md  # visual PKI walkthrough"
+	@echo "    UI:        http://localhost:$${ATOM_UI_HTTP_PORT:-3005}"
+	@echo "    GraphQL:   http://localhost:$${ATOM_HTTP_PORT:-8080}/graphql"
+	@echo "    Playbook:  ui/tests/visual/README.md  # visual PKI walkthrough"
 	@echo ""
 
 restart: down up

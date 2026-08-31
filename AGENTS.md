@@ -224,7 +224,7 @@ Environment variables: create `.env` in the repo root (gitignored) — see the Q
 
 Optional: `ADMIN_SECRET` — if set, bootstraps the admin entity's password on first boot.
 Optional: `ADMIN_ENTITY_ID` — override the seeded admin UUID (default `00000000-0000-0000-0000-000000000001`).
-Optional: `ATOM_BOOTSTRAP_FILE` — path to a YAML file (`src/bootstrap.rs`) applied idempotently after migrations to provision the RBAC baseline (tenants, entities + credentials, groups, permission blocks, roles, policies); runs alongside the env-var bootstrap. See `bootstrap.example.yaml`.
+Optional: `ATOM_BOOTSTRAP_FILE` — path to a YAML file (`src/bootstrap.rs`) applied idempotently after migrations to provision the RBAC baseline (tenants, entities + credentials, groups, permission blocks, roles, policies); runs alongside the env-var bootstrap. See `config/examples/bootstrap.yaml`.
 
 The runtime is production-hardened: configurable DB pool, five-category IP rate limiter, GraphQL depth/complexity/introspection limits (introspection **off** by default — opt in with `ATOM_GRAPHQL_INTROSPECTION_ENABLED=true`), per-route body limits, encryption at rest for recoverable secrets (signing keys, shared keys), audit retention, a `/health/ready` readiness probe, and graceful shutdown on SIGINT/SIGTERM (both the HTTP and gRPC servers drain in-flight requests before exit).
 
@@ -329,7 +329,7 @@ middlewares.
   set of `operations:` that opt in by resolver name (GraphQL) or
   fully-qualified method (gRPC). Kill-switch: `ATOM_CALLOUTS_ENABLED=false`.
   Env overrides per endpoint id: `ATOM_CALLOUT_<UPPER_ID>_URL`, `_ADDRESS`,
-  `_TIMEOUT_MS`. See `callouts.example.yaml`.
+  `_TIMEOUT_MS`. See `config/examples/callouts.yaml`.
 - **Two transports, one wire shape.** HTTP (POST/GET, TLS + mTLS via reqwest)
   and gRPC (tonic client of `atom.v1.CalloutService/Check` — see
   `proto/atom/v1/callout.proto`). Both send the same canonical envelope

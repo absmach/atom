@@ -1,0 +1,60 @@
+---
+title: GraphQL Explorer
+description: Development guide for Atom's built-in GraphQL explorer.
+---
+
+# GraphQL Explorer (Playground)
+
+Atom ships an authenticated GraphQL playground at `/playground` under the admin app. It replaces the need for hand-crafted curl commands during development and demos.
+
+## Route
+
+- Path: `/playground`
+- Auth: platform-admin only (mounted inside the `(admin)` route group). The `/api/graphql` Next proxy attaches the current user's Bearer token server-side, so there are no tokens in the browser tab.
+- Backend: `POST /graphql` on the Atom process.
+
+## What it does
+
+| Panel | Purpose |
+|---|---|
+| **Request editor** | Query, variables, and operation-name inputs. Cmd/Ctrl-click Run to execute. |
+| **Response** | Body, HTTP status, elapsed ms, plus a `fetch` snippet and `curl` snippet for reuse outside the app. |
+| **Operations** (sidebar) | Every query and mutation the schema exposes, grouped by domain (PKI Authorities, Certificates, Tenants, Entities, Authorization, Identity & Sessions, Groups, Resources, Audit & Health, Other). Search bar filters across name + description. Click any entry to load a template into the editor with argument stubs; arg types are shown inline. |
+| **Starter Operations** (sidebar) | Curated named queries — Health, Tenants, Entities, Authorization Explain. |
+| **Types** (sidebar) | Introspection type reference — OBJECT / INPUT_OBJECT / ENUM / SCALAR. |
+
+The Operations panel auto-loads on mount. If your backend rejects introspection you see an inline red banner telling you to set `ATOM_GRAPHQL_INTROSPECTION_ENABLED=true` and restart Atom.
+
+## Enabling introspection
+
+Add to `.env`:
+
+```
+ATOM_GRAPHQL_INTROSPECTION_ENABLED=true
+```
+
+Restart the backend:
+
+```
+make restart
+```
+
+This flag is defaulted **off** in production. Do not set it in production without a documented reason — introspection makes the entire schema world-readable to any authenticated caller.
+
+## Auth model
+
+- The playground calls `/api/graphql` (the Next server route), which forwards to Atom's `POST /graphql` with the current session's Bearer token attached server-side.
+- If you need to test as a different principal, log out and log back in — the playground has no "impersonate" surface by design.
+- Requests fail with HTTP 401 if the session is expired; refresh the page to re-authenticate.
+
+## Adding a new operation group
+
+Domain groups live in the `OPERATION_GROUPS` array in [`ui/components/playground/graphql-playground.tsx`](https://github.com/absmach/atom/blob/main/ui/components/playground/graphql-playground.tsx). Each entry is `{ name, label, matches: (name) => boolean }`. Match by name prefix or an explicit inclusion — the framework groups whichever fields match the first predicate that returns true; anything unmatched falls into "Other".
+
+## Known gaps
+
+- No named-query history / saved-tab persistence — each page load resets state.
+- No schema autocomplete inside the editor.
+- No subscription support (Atom's GraphQL schema does not expose subscriptions today).
+
+If you need any of those, the Altair standalone app pointed at `http://localhost:8080/graphql` with your session's Bearer token in the headers works well.

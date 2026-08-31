@@ -427,7 +427,7 @@ replies with ALLOW (proceed) or DENY (short-circuit with the given reason).
 Multiple endpoints may be chained in config; atom calls them in order and
 fails fast on the first non-ALLOW response.
 
-See docs in AGENTS.md and callouts.example.yaml for the config-side view.
+See docs in AGENTS.md and config/examples/callouts.yaml for configuration.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|

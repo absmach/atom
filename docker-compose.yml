@@ -149,8 +149,8 @@ services:
       ATOM_LOG_LEVEL: ${ATOM_LOG_LEVEL:-${RUST_LOG:-info}}
       ATOM_LOG_FORMAT: ${ATOM_LOG_FORMAT:-text}
       ATOM_EMAIL_TEMPLATES_DIR: ${ATOM_EMAIL_TEMPLATES_DIR:-/email-templates}
-      # Demo bootstrap + callout wiring — see ./bootstrap.yaml and ./callout.yaml
-      # in the repo root. Which host files get mounted is controlled by
+      # Demo bootstrap + callout wiring lives under config/demo/. Which host
+      # files get mounted is controlled by
       # ATOM_BOOTSTRAP_FILE / ATOM_CALLOUTS_FILE in .env (host paths). The
       # in-container path atom reads is always /etc/atom/... and is fixed
       # here — flipping the .env path swaps the source without changing what
@@ -181,8 +181,8 @@ services:
       # ATOM_PKI_ENROLLMENT_TLS_* (mTLS material for the enrollment listener).
       - ${ATOM_PKI_CERTS_DIR:-./certs}:/certs:ro
       - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
-      - ${ATOM_BOOTSTRAP_FILE:-./bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
-      - ${ATOM_CALLOUTS_FILE:-./callout.yaml}:/etc/atom/callout.yaml:ro
+      - ${ATOM_BOOTSTRAP_FILE:-./config/demo/bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
+      - ${ATOM_CALLOUTS_FILE:-./config/demo/callouts.yaml}:/etc/atom/callout.yaml:ro
     ports:
       - "${ATOM_HTTP_PORT:-8080}:${ATOM_HTTP_PORT:-8080}"
       - "${ATOM_GRPC_PORT:-8081}:${ATOM_GRPC_PORT:-8081}"
@@ -333,8 +333,8 @@ services:
       # ATOM_PKI_ENROLLMENT_TLS_* (mTLS material for the enrollment listener).
       - ${ATOM_PKI_CERTS_DIR:-./certs}:/certs:ro
       - ${ATOM_EMAIL_TEMPLATES_HOST_DIR:-./email-templates}:/email-templates:ro
-      - ${ATOM_BOOTSTRAP_FILE:-./bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
-      - ${ATOM_CALLOUTS_FILE:-./callout.yaml}:/etc/atom/callout.yaml:ro
+      - ${ATOM_BOOTSTRAP_FILE:-./config/demo/bootstrap.yaml}:/etc/atom/bootstrap.yaml:ro
+      - ${ATOM_CALLOUTS_FILE:-./config/demo/callouts.yaml}:/etc/atom/callout.yaml:ro
     ports:
       - "${ATOM_DEV_HTTP_PORT:-8081}:${ATOM_DEV_HTTP_PORT:-8081}"
       - "${ATOM_DEV_GRPC_PORT:-18081}:${ATOM_DEV_GRPC_PORT:-18081}"
@@ -355,7 +355,7 @@ services:
   atom-ui:
     image: ${ATOM_UI_IMAGE:-ghcr.io/absmach/atom-ui:latest}
     build:
-      context: ./app
+      context: ./ui
     depends_on:
       - atom
     environment:
@@ -369,7 +369,7 @@ services:
       - atom-ui
 
   # Demo callout receiver — always ALLOWs and prints every request. See
-  # scripts/simple-callout-server.py. Both `atom` and `atom-dev` depend on
+  # examples/callouts/server.py. Both `atom` and `atom-dev` depend on
   # this service so `docker compose up` + `docker compose --profile dev up`
   # both boot cleanly. Watch it with:
   #   docker compose logs -f callout-server
@@ -378,7 +378,7 @@ services:
     container_name: atom-callout-server
     working_dir: /app
     volumes:
-      - ./scripts/simple-callout-server.py:/app/callout-server.py:ro
+      - ./examples/callouts/server.py:/app/callout-server.py:ro
     command: ["python3", "-u", "callout-server.py"]
     environment:
       PORT: ${ATOM_CALLOUT_SERVER_PORT:-9099}

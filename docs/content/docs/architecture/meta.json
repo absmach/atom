@@ -1,4 +1,4 @@
 {
   "title": "Architecture",
-  "pages": ["index", "data-model", "caching"]
+  "pages": ["index", "data-model", "caching", "pki-design", "enrollment-protocols"]
 }
