@@ -20,7 +20,7 @@ Are there extra conditions?
 |---|---|
 | `tenantId` | Tenant boundary for the rule. |
 | `scopeMode` | How broad the rule is. |
-| `objectKind` | Protected object category, such as `tenant`, `entity`, `resource`, `group`, `role`, `policy`, `credential`, `audit_log`, or `signing_key`. |
+| `objectKind` | Protected object category, such as `tenant`, `entity`, `resource`, `group`, `role`, `policy`, `credential`, `api_endpoint`, `audit_log`, or `signing_key`. |
 | `objectType` | More specific type, such as `resource:channel` or `entity:device`. |
 | `objectId` | Exact object ID when the rule targets one object. |
 | `groupId` | Object group ID when the rule targets objects in a group. |
@@ -45,6 +45,7 @@ tenant
 role
 policy
 credential
+api_endpoint
 audit_log
 signing_key
 ```
@@ -52,6 +53,11 @@ signing_key
 `objectType` is used for finer sub-kinds and is stored with a kind prefix, such
 as `entity:device` or `resource:channel`. Kinds without sub-kinds use
 `objectType = null`.
+
+Exact-object scopes use UUIDs from one database-enforced namespace shared by
+every UUID-addressable protected object. Profiles and individual audit-log rows
+are not exact-object targets; signing keys use textual `kid` identifiers and
+remain platform-scoped.
 
 ## Common Scope Modes
 

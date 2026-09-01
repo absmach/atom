@@ -37,19 +37,27 @@ pub async fn pool() -> PgPool {
 }
 
 /// Connect to the test Redis with `CacheConfig::default`'s production TTLs,
-/// overriding only `enabled`/`redis_url`. Deliberately *not* shortened: every
+/// overriding only mode, namespace, and Redis URL. Deliberately *not*
+/// shortened: every
 /// invalidation-correctness test asserts immediately, with no sleep, so a
 /// short TTL could only mask a missing invalidation as a pass.
 ///
 /// Assumes Redis is flushed between test binaries (see the `run_one` helper
-/// in `.github/workflows/rust.yml`) — entries keyed off fixed ids such as the
+/// in `.github/workflows/rust.yml`) and explicitly initializes the resulting
+/// empty namespace incarnation — entries keyed off fixed ids such as the
 /// seeded admin's would otherwise outlive the database they describe.
 pub async fn cache_client() -> CacheClient {
     let url = std::env::var("ATOM_TEST_REDIS_URL")
         .expect("ATOM_TEST_REDIS_URL must be set for cache-gated tests");
     let cfg = CacheConfig {
-        enabled: true,
+        mode: atom::config::CacheMode::Enabled,
         redis_url: url,
+        namespace: "integration-tests".into(),
+        initialize_namespace: true,
+        // Keep correctness tests independent of transient hosted-runner
+        // latency without weakening Atom's production cache deadlines.
+        connect_timeout_ms: 5_000,
+        op_timeout_ms: 1_000,
         ..CacheConfig::default()
     };
     CacheClient::connect(&cfg)

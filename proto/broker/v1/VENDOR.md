@@ -8,7 +8,7 @@ it directly, with no adapter service in between.
 | ---------- | --------------------------------- |
 | Source     | https://github.com/absmach/fluxmq |
 | Path       | `proto/auth/v1/auth.proto`        |
-| Pinned ref | see `REF` in this directory       |
+| Pinned ref | immutable commit in `REF`         |
 
 ## Why it is byte-identical
 
@@ -25,14 +25,17 @@ one that matters. Atom's own notes live in this file and in
 scripts/check-vendored-proto.sh
 ```
 
-CI runs the same script. It fetches the pinned ref from GitHub and diffs.
+CI runs the same script. It requires `REF` to contain a full 40-character
+commit SHA, fetches that immutable object from GitHub, and diffs it.
 
 ## When it fails
 
 A failure means upstream changed the contract Atom implements. That is
 information, not a chore — read the diff before syncing:
 
-- **Comments or new optional fields** — re-vendor, bump `REF`, done.
+- **Comments or new optional fields** — review compatibility, re-vendor, and
+  pin `REF` to the reviewed upstream commit. After v1, the frozen copy cannot
+  change in place even when the upstream change is wire-compatible.
 - **A changed `package` line** — the gRPC path a broker dials is derived from
   it, so this is a breaking wire change. Atom, the broker, and any adapter
   service must move together; see the deployment note in `AGENTS.md`.

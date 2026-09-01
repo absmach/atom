@@ -17,6 +17,7 @@ use async_graphql::Request;
 use atom::{
     audit::{self, AuditEvent, AuditMeta},
     auth::AuthContext,
+    authz::repo as authz_repo,
     config::Config,
     graphql::{build_schema, AtomSchema},
     keys,
@@ -154,6 +155,63 @@ async fn no_event_outbox_rows_are_written_when_events_are_not_configured() {
         payload.is_none(),
         "no event_outbox row should be written when EventsConfig::enabled() is false"
     );
+}
+
+/// Adding an existing applicability row is an idempotent replay, not a domain
+/// mutation. It must return the existing row without publishing a second
+/// `action_applicability.add` event.
+#[tokio::test]
+#[ignore]
+async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
+    let pool = common::pool().await;
+    let action_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+        .bind(action_id)
+        .bind(format!("m26-applicability-{action_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert action");
+
+    authz_repo::add_capability_applicability_with_audit(
+        &pool,
+        true,
+        Some(common::admin_id()),
+        action_id,
+        "resource".to_string(),
+        Some("m26-idempotent".to_string()),
+    )
+    .await
+    .expect("add action applicability");
+    authz_repo::add_capability_applicability_with_audit(
+        &pool,
+        true,
+        Some(common::admin_id()),
+        action_id,
+        "resource".to_string(),
+        Some("m26-idempotent".to_string()),
+    )
+    .await
+    .expect("replay action applicability add");
+
+    let event_count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM event_outbox
+           WHERE event = 'action_applicability.add'
+             AND (payload->>'target_id')::uuid = $1"#,
+    )
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count applicability events");
+    assert_eq!(
+        event_count, 1,
+        "an idempotent replay must not claim a second mutation occurred"
+    );
+
+    sqlx::query("DELETE FROM actions WHERE id = $1")
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("clean up action");
 }
 
 /// Installs a `BEFORE INSERT` trigger on `table` that raises for exactly one

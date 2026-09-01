@@ -694,7 +694,15 @@ pub async fn request_password_reset(
              AND e.kind = 'human'
              AND e.status = 'active'
              AND e.deleted_at IS NULL
-             AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))"#,
+             AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))
+             AND NOT EXISTS (
+                   SELECT 1
+                   FROM credentials c
+                   WHERE c.entity_id = e.id
+                     AND c.kind = 'password'
+                     AND c.status = 'active'
+                     AND c.managed_by = 'config'
+             )"#,
     )
     .bind(&email)
     .fetch_optional(pool)
@@ -789,6 +797,8 @@ pub async fn reset_password(
     {
         return Err(AppError::bad_request("invalid password reset token"));
     }
+    ensure_no_active_config_managed_credential_in_tx(&mut tx, entity_id, CredentialKind::Password)
+        .await?;
 
     // Every active session is about to be bulk-revoked below — enumerated
     // *inside* the transaction, right after the entity lock: `create_session`
@@ -808,21 +818,30 @@ pub async fn reset_password(
     .map(crate::cache::keys::session)
     .collect();
 
-    if let Some(cache) = cache {
-        cache
-            .begin(crate::cache::CacheCategory::Session, &session_keys)
-            .await?;
-    }
+    let cache_lease = match cache {
+        Some(cache) => Some(
+            cache
+                .begin(crate::cache::CacheCategory::Session, &session_keys)
+                .await?,
+        ),
+        None => None,
+    };
     let outcome =
         finish_password_reset_in_tx(&mut tx, token_id, entity_id, &email, password_hash).await;
     let outcome = match outcome {
         Ok(()) => tx.commit().await.map_err(db_err),
-        Err(err) => Err(err),
+        Err(err) => {
+            let original = err.to_string();
+            match tx.rollback().await {
+                Ok(()) => Err(err),
+                Err(rollback_err) => Err(AppError::Internal(anyhow::anyhow!(
+                    "password reset failed: {original}; rollback also failed: {rollback_err}"
+                ))),
+            }
+        }
     };
-    if let Some(cache) = cache {
-        cache
-            .end(crate::cache::CacheCategory::Session, &session_keys)
-            .await;
+    if let (Some(cache), Some(lease)) = (cache, cache_lease) {
+        cache.end(lease).await;
     }
     outcome
 }
@@ -2055,6 +2074,8 @@ pub async fn create_password_in_tx(
             "active entity {entity_id} not found"
         )));
     };
+    ensure_no_active_config_managed_credential_in_tx(tx, entity_id, CredentialKind::Password)
+        .await?;
     validate_password_for_kind(&kind, password)?;
     let hash = hash_secret(password.as_bytes())?;
     let id = Uuid::new_v4();
@@ -2083,10 +2104,12 @@ pub async fn change_own_password_in_tx(
             "active entity {entity_id} not found"
         )));
     };
+    ensure_no_active_config_managed_credential_in_tx(tx, entity_id, CredentialKind::Password)
+        .await?;
     validate_password_for_kind(&kind, new_password)?;
 
     let rows = sqlx::query(
-        r#"SELECT secret_hash, managed_by
+        r#"SELECT secret_hash
            FROM credentials
            WHERE entity_id = $1
              AND kind = $2
@@ -2195,6 +2218,8 @@ pub async fn create_shared_key_in_tx(
             "active entity {entity_id} not found"
         )));
     };
+    ensure_no_active_config_managed_credential_in_tx(tx, entity_id, CredentialKind::SharedKey)
+        .await?;
     if !CredentialKind::SharedKey.allowed_for(&kind) {
         return Err(AppError::bad_request(
             "shared keys cannot be created for human entities",
@@ -2243,6 +2268,48 @@ pub async fn create_shared_key_in_tx(
     })
 }
 
+/// Config ownership of password/shared-key credentials is an aggregate
+/// invariant: once one active row of a kind is config-managed, the API must
+/// not add a competing row or replace the configured secret. Callers must
+/// hold the entity lock first, which serializes the no-row case with bootstrap.
+async fn ensure_no_active_config_managed_credential_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+    kind: CredentialKind,
+) -> Result<(), AppError> {
+    let label = match kind {
+        CredentialKind::Password => "password",
+        CredentialKind::SharedKey => "shared_key",
+        CredentialKind::AccessToken | CredentialKind::Certificate => {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "config-managed singleton guard called for non-singleton credential kind"
+            )))
+        }
+    };
+    let managed_id: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id
+           FROM credentials
+           WHERE entity_id = $1
+             AND kind = $2
+             AND status = 'active'
+             AND managed_by = 'config'
+           ORDER BY id
+           LIMIT 1
+           FOR UPDATE"#,
+    )
+    .bind(entity_id)
+    .bind(kind)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if managed_id.is_some() {
+        return Err(AppError::conflict(format!(
+            "{label} credential is managed by the bootstrap config file and cannot be modified via the API"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn reveal_shared_key(
     pool: &PgPool,
     signing_keys: &SigningKeyConfig,
@@ -2252,19 +2319,12 @@ pub async fn reveal_shared_key(
     use sqlx::Row;
 
     // Reveal exposes the plaintext key. Config-managed rows must never leak
-    // that material, so this endpoint (unlike revoke) returns not_found for
-    // config-managed rows — even the existence of the credential must not be
-    // acknowledged through the reveal path.
-    let managed_by: Option<Option<String>> =
-        sqlx::query_scalar("SELECT managed_by FROM credentials WHERE id = $1")
-            .bind(credential_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?;
-    if !matches!(managed_by, Some(None)) {
-        return Err(AppError::not_found("shared key not found"));
-    }
-
+    // that material, so ownership is checked in the same locking statement
+    // that reads the ciphertext. `FOR SHARE OF c` waits for a concurrent
+    // bootstrap ownership stamp and makes Postgres re-check `managed_by` on
+    // the winning row version; a separate precheck would have an MVCC race.
+    // Return not_found so this path does not acknowledge that a protected
+    // credential exists.
     let row = sqlx::query(
         r#"SELECT c.expires_at,
                   c.status,
@@ -2279,9 +2339,11 @@ pub async fn reveal_shared_key(
            WHERE c.id = $1
              AND c.entity_id = $2
              AND c.kind = $3
+             AND c.managed_by IS NULL
              AND e.kind <> 'human'
              AND e.deleted_at IS NULL
-             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
+             AND (t.id IS NULL OR t.deleted_at IS NULL)
+           FOR SHARE OF c"#,
     )
     .bind(credential_id)
     .bind(entity_id)
@@ -2446,7 +2508,7 @@ pub async fn delete_entity(
         (crate::cache::CacheCategory::Session, &session_keys),
         (crate::cache::CacheCategory::Credential, &credential_keys),
     ];
-    crate::cache::invalidate::begin_all(cache, &groups).await?;
+    let leases = crate::cache::invalidate::begin_all(cache, &groups).await?;
     let outcome = super::repo::deactivate_and_finish_entity_deletion_in_tx(
         &mut tx,
         events_enabled,
@@ -2461,7 +2523,7 @@ pub async fn delete_entity(
                 pool,
                 tx,
                 cache,
-                &groups,
+                leases,
                 (),
                 crate::audit::AuditEvent {
                     actor_entity_id: deleted_by,
@@ -2476,7 +2538,7 @@ pub async fn delete_entity(
             .await
         }
         Err(err) => {
-            crate::cache::invalidate::end_all(cache, &groups).await;
+            crate::cache::invalidate::end_all(cache, leases).await;
             Err(err)
         }
     }

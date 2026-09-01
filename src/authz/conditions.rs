@@ -1,6 +1,58 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+pub const ABAC_CONTEXT_ROOTS: [&str; 5] = ["entity", "resource", "object", "tenant", "context"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConditionOperator {
+    Eq,
+    Neq,
+    In,
+    Contains,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+impl ConditionOperator {
+    const ALL: [Self; 8] = [
+        Self::Eq,
+        Self::Neq,
+        Self::In,
+        Self::Contains,
+        Self::Gt,
+        Self::Gte,
+        Self::Lt,
+        Self::Lte,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Neq => "neq",
+            Self::In => "in",
+            Self::Contains => "contains",
+            Self::Gt => "gt",
+            Self::Gte => "gte",
+            Self::Lt => "lt",
+            Self::Lte => "lte",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|operator| operator.as_str() == value)
+    }
+}
+
+pub fn abac_operator_names() -> impl Iterator<Item = &'static str> {
+    ConditionOperator::ALL
+        .into_iter()
+        .map(ConditionOperator::as_str)
+}
+
 /// Evaluate flat-map ABAC conditions against the evaluation context.
 /// Keys are dot-paths; all entries must match (AND logic).
 pub fn conditions_match(conditions: &Value, ctx: &Value) -> bool {
@@ -32,24 +84,29 @@ fn condition_value_matches(actual: &Value, expected: &Value) -> bool {
         return actual == expected;
     }
 
-    ops.iter().all(|(op, operand)| match op.as_str() {
-        "eq" => actual == operand,
-        "neq" => actual != operand,
-        "contains" => contains(actual, operand),
-        "in" => operand
-            .as_array()
-            .map(|items| items.iter().any(|item| item == actual))
-            .unwrap_or(false),
-        "gt" => compare(actual, operand).map(|o| o.is_gt()).unwrap_or(false),
-        "gte" => compare(actual, operand)
-            .map(|o| o.is_gt() || o.is_eq())
-            .unwrap_or(false),
-        "lt" => compare(actual, operand).map(|o| o.is_lt()).unwrap_or(false),
-        "lte" => compare(actual, operand)
-            .map(|o| o.is_lt() || o.is_eq())
-            .unwrap_or(false),
-        _ => false,
-    })
+    ops.iter()
+        .all(|(op, operand)| match ConditionOperator::parse(op) {
+            Some(ConditionOperator::Eq) => actual == operand,
+            Some(ConditionOperator::Neq) => actual != operand,
+            Some(ConditionOperator::Contains) => contains(actual, operand),
+            Some(ConditionOperator::In) => operand
+                .as_array()
+                .map(|items| items.iter().any(|item| item == actual))
+                .unwrap_or(false),
+            Some(ConditionOperator::Gt) => {
+                compare(actual, operand).map(|o| o.is_gt()).unwrap_or(false)
+            }
+            Some(ConditionOperator::Gte) => compare(actual, operand)
+                .map(|o| o.is_gt() || o.is_eq())
+                .unwrap_or(false),
+            Some(ConditionOperator::Lt) => {
+                compare(actual, operand).map(|o| o.is_lt()).unwrap_or(false)
+            }
+            Some(ConditionOperator::Lte) => compare(actual, operand)
+                .map(|o| o.is_lt() || o.is_eq())
+                .unwrap_or(false),
+            None => false,
+        })
 }
 
 fn contains(actual: &Value, operand: &Value) -> bool {
@@ -217,5 +274,31 @@ mod tests {
             }),
             &ctx
         ));
+    }
+
+    #[test]
+    fn v1_abac_contract_matches_runtime() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../api/v1/persisted-semantics.json"))
+                .expect("persisted-semantics contract");
+        let strings = |field: &str| {
+            contract["abac"][field]
+                .as_array()
+                .unwrap_or_else(|| panic!("missing ABAC contract {field}"))
+                .iter()
+                .map(|value| value.as_str().expect("ABAC string"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            abac_operator_names().collect::<Vec<_>>(),
+            strings("operators")
+        );
+        assert_eq!(ABAC_CONTEXT_ROOTS, strings("pathRoots").as_slice());
+        assert_eq!(contract["abac"]["conditionEntriesCombine"], "and");
+        assert_eq!(contract["abac"]["operatorEntriesCombine"], "and");
+        assert_eq!(contract["abac"]["emptyObjectMatches"], true);
+        assert_eq!(contract["abac"]["missingPathMatches"], false);
+        assert_eq!(contract["abac"]["unknownOperatorMatches"], false);
+        assert_eq!(contract["abac"]["nonObjectConditionsMatch"], false);
     }
 }

@@ -2811,6 +2811,7 @@ pub fn parse_object_kind(value: String, name: &str) -> async_graphql::Result<Obj
         "credential" => Ok(ObjectKind::Credential),
         "audit_log" => Ok(ObjectKind::AuditLog),
         "signing_key" => Ok(ObjectKind::SigningKey),
+        "api_endpoint" => Ok(ObjectKind::ApiEndpoint),
         _ => Err(async_graphql::Error::new(format!(
             "{name} must be a valid object kind"
         ))),

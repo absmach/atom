@@ -75,7 +75,7 @@ pub async fn send_templated_email(
         )));
     };
 
-    let raw = read_template(cfg, template)?;
+    let raw = read_template(cfg, template).await?;
     let parsed = parse_template(&raw)?;
     let subject = render(parsed.subject, vars)?;
     let body = render(parsed.body, vars)?;
@@ -120,15 +120,15 @@ pub async fn send_templated_email(
 
 /// Checks the operator override directory first, then falls back to the
 /// built-in default shipped at `DEFAULT_TEMPLATES_DIR`.
-fn read_template(cfg: &Config, template: EmailTemplate) -> Result<String, AppError> {
+async fn read_template(cfg: &Config, template: EmailTemplate) -> Result<String, AppError> {
     if let Some(dir) = &cfg.email_templates_dir {
         let override_path = Path::new(dir).join(template.file_name());
-        if let Ok(contents) = std::fs::read_to_string(&override_path) {
+        if let Ok(contents) = tokio::fs::read_to_string(&override_path).await {
             return Ok(contents);
         }
     }
     let default_path: PathBuf = Path::new(DEFAULT_TEMPLATES_DIR).join(template.file_name());
-    std::fs::read_to_string(&default_path).map_err(|e| {
+    tokio::fs::read_to_string(&default_path).await.map_err(|e| {
         AppError::Internal(anyhow::anyhow!(
             "read email template {}: {e}",
             default_path.display()
@@ -211,17 +211,19 @@ fn build_transport(smtp: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executo
 mod tests {
     use super::*;
 
-    #[test]
-    fn falls_back_to_default_template_when_no_override_dir_is_set() {
+    #[tokio::test]
+    async fn falls_back_to_default_template_when_no_override_dir_is_set() {
         let cfg = Config::for_tests();
-        let raw = read_template(&cfg, EmailTemplate::Verification).expect("default template");
+        let raw = read_template(&cfg, EmailTemplate::Verification)
+            .await
+            .expect("default template");
         let parsed = parse_template(&raw).expect("parse");
         assert_eq!(parsed.subject, "Verify your Atom account");
         assert_eq!(parsed.content_type, None);
     }
 
-    #[test]
-    fn override_file_takes_precedence_over_default() {
+    #[tokio::test]
+    async fn override_file_takes_precedence_over_default() {
         let dir = tempfile_dir();
         std::fs::write(
             dir.join("verification.tmpl"),
@@ -232,7 +234,9 @@ mod tests {
         let mut cfg = Config::for_tests();
         cfg.email_templates_dir = Some(dir.to_string_lossy().to_string());
 
-        let raw = read_template(&cfg, EmailTemplate::Verification).expect("overridden template");
+        let raw = read_template(&cfg, EmailTemplate::Verification)
+            .await
+            .expect("overridden template");
         let parsed = parse_template(&raw).expect("parse");
         assert_eq!(parsed.subject, "Custom subject");
         assert_eq!(parsed.content_type, Some("text/html"));
@@ -240,7 +244,9 @@ mod tests {
 
         // A template not present in the override dir still falls back to
         // the built-in default rather than failing.
-        let raw = read_template(&cfg, EmailTemplate::Invitation).expect("default falls back");
+        let raw = read_template(&cfg, EmailTemplate::Invitation)
+            .await
+            .expect("default falls back");
         let parsed = parse_template(&raw).expect("parse");
         assert_eq!(parsed.subject, "You have been invited");
 

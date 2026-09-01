@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "contract": "graphql-root-operation-auth-v1",
+  "compatibilityRule": "A root operation may not become less authenticated or change its authorization profile in v1. Tightening an existing gate can also break callers and requires explicit compatibility review.",
+  "rootOperations": {
+    "query": [
+      "health","session","tenants","tenant","tenantMembers","tenantAssignableEntities","tenantInvitations","myTenantRoles","myTenantInvitations","profiles","profile","profileVersions","ownedEntities","entity","entities","resourceKinds","resources","resource","apiEndpoints","apiEndpoint","apiEndpointExecutions","groups","group","groupMembers","entityGroups","childGroups","objectGroups","principalGroups","credentials","accessTokens","certificates","certificate","pkiAuthority","pkiAuthorities","authorizedObjectIds","roles","role","actions","actionApplicability","actionAssignmentRules","action","permissionBlocks","permissionBlock","roleAssignments","directPolicies","auditLogs","entityAuditLogs","orphanPolicies","expiringCredentials","systemStatus","signingKeys"
+    ],
+    "mutation": [
+      "login","signup","logout","refreshSession","createTenant","updateTenant","deleteTenant","restoreTenant","purgeTenant","enableTenant","disableTenant","freezeTenant","createTenantInvitation","acceptTenantInvitation","acceptTenantInvitationToken","rejectTenantInvitation","revokeTenantInvitation","removeTenantMember","addTenantMember","createProfile","createProfileVersion","updateProfile","updateProfileVersion","createEntity","updateEntity","deleteEntity","restoreEntity","purgeEntity","addEntityToObjectGroup","removeEntityFromObjectGroup","clearEntityObjectGroups","enableEntity","disableEntity","addOwnership","removeOwnership","createResource","updateResource","deleteResource","restoreResource","purgeResource","addResourceToObjectGroup","removeResourceFromObjectGroup","clearResourceObjectGroups","createApiEndpoint","updateApiEndpoint","enableApiEndpoint","disableApiEndpoint","createGroup","createObjectGroup","createPrincipalGroup","updateGroup","enableGroup","disableGroup","suspendGroup","setGroupParent","setObjectGroupParent","removeGroupParent","removeObjectGroupParent","deleteGroup","restoreGroup","purgeGroup","addGroupMember","removeGroupMember","changeOwnPassword","createPassword","createAccessToken","replaceAccessTokenPermissions","revokeAccessToken","createSharedKey","revealSharedKey","revokeCredential","issueGeneratedCertificateV2","issueCertificateFromCsrV2","renewCertificateFromCsrV2","renewGeneratedCertificateV2","revokeCertificateV2","revokeEntityCertificates","bulkRevokeCertificates","beginTenantAuthorityProvisioning","provisionTenantAuthorityAutomatically","beginAuthorityRetirement","completeAuthorityRetirement","createRole","updateRole","replaceRolePermissionBlocks","deleteRole","restoreRole","purgeRole","createAction","addActionApplicability","removeActionApplicability","createActionAssignmentRule","deleteActionAssignmentRule","updateAction","deleteAction","createPermissionBlock","deletePermissionBlock","createRoleAssignment","deleteRoleAssignment","createDirectPolicy","deleteDirectPolicy","authzCheck","authzExplain","authzBulkCheck","rotateSigningKeys"
+    ]
+  },
+  "authentication": {
+    "default": "required",
+    "public": ["health","login","signup"],
+    "sessionCredentialRequired": ["refreshSession"],
+    "requiredMeaning": "A valid Atom bearer/access token or trusted auth cookie must produce AuthContext before the resolver accesses protected data.",
+    "sessionCredentialRequiredMeaning": "Normal authentication plus a non-null JWT session id; API-key/access-token authentication is rejected for this operation."
+  },
+  "authorizationProfiles": {
+    "public": "No AuthContext. signup remains separately gated by ATOM_SELF_REGISTRATION_ENABLED.",
+    "authenticated_self_service": "The authenticated subject may act only on its own session, credentials, invitations, or memberships as checked by the resolver/service.",
+    "canonical_read_gate": "Authentication plus require_read_access, require_list_access, require_role_read, require_policy_read, owner/delegated read, or the canonical authorized-listing filter.",
+    "scoped_control_plane_gate": "Authentication plus an unconditional capability gate at the operation's platform, tenant, or object scope; object-specific decisions additionally use the PDP where applicable.",
+    "platform_manage": "Authentication plus unconditional manage at platform scope. Used for restore, purge, and platform hygiene operations.",
+    "authz_decision": "Authentication plus the self/delegated authz invocation rule, followed by the canonical PDP for the requested subject/action/object.",
+    "resolver_specific": "Authentication plus the resolver's frozen v1 combination of ownership, tenant membership, credential-ceiling, capability, and/or PDP checks. Focused high-risk groups are listed below; changing an unlisted gate still requires contract review."
+  },
+  "profileAssignments": {
+    "public": ["health","login","signup"],
+    "authenticated_self_service": ["logout","refreshSession","myTenantRoles","myTenantInvitations","acceptTenantInvitationToken","rejectTenantInvitation","changeOwnPassword"],
+    "canonical_read_gate": ["session","tenants","tenant","tenantMembers","tenantAssignableEntities","tenantInvitations","profiles","profile","profileVersions","ownedEntities","entity","entities","resourceKinds","resources","resource","apiEndpoints","apiEndpoint","apiEndpointExecutions","groups","group","groupMembers","entityGroups","childGroups","objectGroups","principalGroups","credentials","accessTokens","certificates","certificate","pkiAuthority","pkiAuthorities","roles","role","actions","actionApplicability","actionAssignmentRules","action","permissionBlocks","permissionBlock","roleAssignments","directPolicies","auditLogs","entityAuditLogs"],
+    "scoped_control_plane_gate": ["signingKeys","rotateSigningKeys"],
+    "platform_manage": ["restoreTenant","purgeTenant","restoreEntity","purgeEntity","restoreResource","purgeResource","restoreGroup","purgeGroup","restoreRole","purgeRole","createApiEndpoint","updateApiEndpoint","enableApiEndpoint","disableApiEndpoint","orphanPolicies","expiringCredentials","systemStatus"],
+    "authz_decision": ["authorizedObjectIds","authzCheck","authzExplain","authzBulkCheck"],
+    "resolver_specific": ["createTenant","updateTenant","deleteTenant","enableTenant","disableTenant","freezeTenant","createTenantInvitation","acceptTenantInvitation","revokeTenantInvitation","removeTenantMember","addTenantMember","createProfile","createProfileVersion","updateProfile","updateProfileVersion","createEntity","updateEntity","deleteEntity","addEntityToObjectGroup","removeEntityFromObjectGroup","clearEntityObjectGroups","enableEntity","disableEntity","addOwnership","removeOwnership","createResource","updateResource","deleteResource","addResourceToObjectGroup","removeResourceFromObjectGroup","clearResourceObjectGroups","createGroup","createObjectGroup","createPrincipalGroup","updateGroup","enableGroup","disableGroup","suspendGroup","setGroupParent","setObjectGroupParent","removeGroupParent","removeObjectGroupParent","deleteGroup","addGroupMember","removeGroupMember","createPassword","createAccessToken","replaceAccessTokenPermissions","revokeAccessToken","createSharedKey","revealSharedKey","revokeCredential","issueGeneratedCertificateV2","issueCertificateFromCsrV2","renewCertificateFromCsrV2","renewGeneratedCertificateV2","revokeCertificateV2","revokeEntityCertificates","bulkRevokeCertificates","beginTenantAuthorityProvisioning","provisionTenantAuthorityAutomatically","beginAuthorityRetirement","completeAuthorityRetirement","createRole","updateRole","replaceRolePermissionBlocks","deleteRole","createAction","addActionApplicability","removeActionApplicability","createActionAssignmentRule","deleteActionAssignmentRule","updateAction","deleteAction","createPermissionBlock","deletePermissionBlock","createRoleAssignment","deleteRoleAssignment","createDirectPolicy","deleteDirectPolicy"]
+  },
+  "delegatedAuthzInvocation": {
+    "operations": ["authorizedObjectIds","authzCheck","authzBulkCheck"],
+    "self": "An authenticated subject may check or list its own authorization without an invocation capability; the caller's scoped-token ceiling still applies.",
+    "delegated": "A check or authorized-object listing for another subject requires authz.check in the requested object's resolved tenant scope or at platform scope. policy.manage and manage are not substitutes.",
+    "tenantResolutionKinds": ["tenant","entity","resource","group","credential","role","policy","api_endpoint","platform"]
+  },
+  "focusedParity": [
+    "SDL root query/mutation names exactly match rootOperations and every operation appears in exactly one profileAssignments group.",
+    "health, login, and signup remain the only public operations.",
+    "refreshSession still requires AuthContext plus a session id.",
+    "Restore/purge operations, API endpoint administration, and signing-key administration retain explicit platform-manage gates.",
+    "Self authz checks/listings remain authenticated self-service; every delegated check/listing requires authz.check in the resolved tenant or at platform scope."
+  ],
+  "manualReviewRequired": "Resolver-specific ownership/action/scope arguments are reviewed from the named authorization helpers; the parity gate deliberately avoids whole-source hashes so compatible bug fixes remain possible."
+}

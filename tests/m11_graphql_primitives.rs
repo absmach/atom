@@ -168,6 +168,39 @@ async fn login_mutation_returns_token() {
 
 #[tokio::test]
 #[ignore]
+async fn session_query_requires_ownership_or_read_access() {
+    let pool = common::pool().await;
+    let (owner_id, _) = create_human(&pool).await;
+    let (unrelated_id, _) = create_human(&pool).await;
+    let session = repo::create_session(&pool, owner_id, 3600)
+        .await
+        .expect("create owner session");
+    let schema = build_schema(state(pool).await);
+    let query = format!(
+        "query {{ session(id: \"{}\") {{ id entityId }} }}",
+        session.id
+    );
+
+    let owner_response = schema.execute(authed_as(owner_id, query.clone())).await;
+    assert!(
+        owner_response.errors.is_empty(),
+        "owner must read its session: {:?}",
+        owner_response.errors
+    );
+    assert_eq!(
+        owner_response.data.into_json().expect("owner response")["session"]["entityId"],
+        owner_id.to_string()
+    );
+
+    let unrelated_response = schema.execute(authed_as(unrelated_id, query)).await;
+    assert!(
+        !unrelated_response.errors.is_empty(),
+        "an unrelated authenticated caller must not read another entity's session"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn change_own_password_requires_current_password() {
     let pool = common::pool().await;
     let (entity_id, name) = create_human(&pool).await;
@@ -288,7 +321,7 @@ async fn change_own_password_requires_current_password() {
 
 #[tokio::test]
 #[ignore]
-async fn change_own_password_preserves_config_managed_password() {
+async fn change_own_password_rejects_config_managed_password() {
     let pool = common::pool().await;
     let (entity_id, _) = create_human(&pool).await;
     let managed_password = "managed-password-123";
@@ -306,15 +339,16 @@ async fn change_own_password_preserves_config_managed_password() {
     .expect("insert managed password");
 
     let mut tx = pool.begin().await.expect("begin transaction");
-    service::change_own_password_in_tx(
+    let err = service::change_own_password_in_tx(
         &mut tx,
         entity_id,
         managed_password,
         "replacement-password-123",
     )
     .await
-    .expect("change password");
-    tx.commit().await.expect("commit password change");
+    .expect_err("config-managed password must reject API replacement");
+    assert!(matches!(err, atom::error::AppError::Conflict(_)));
+    tx.rollback().await.expect("roll back password change");
 
     let status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
         .bind(managed_id)
@@ -322,6 +356,14 @@ async fn change_own_password_preserves_config_managed_password() {
         .await
         .expect("managed password status");
     assert_eq!(status, "active");
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("active password count");
+    assert_eq!(active_count, 1);
 }
 
 #[tokio::test]

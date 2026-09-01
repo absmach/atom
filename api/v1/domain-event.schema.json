@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://absmach.github.io/atom/api/v1/domain-event.schema.json",
+  "title": "Atom v1 domain event",
+  "description": "The immutable schema_version=1 envelope delivered from Atom's transactional event outbox.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event",
+    "occurred_at",
+    "source",
+    "actor_entity_id",
+    "tenant_id",
+    "target_kind",
+    "target_id",
+    "outcome",
+    "details",
+    "request_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "event": {
+      "type": "string",
+      "minLength": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "const": "atom"
+    },
+    "actor_entity_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "tenant_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "target_kind": {
+      "type": ["string", "null"]
+    },
+    "target_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "outcome": {
+      "enum": ["allow", "deny", "error"]
+    },
+    "details": true,
+    "request_id": {
+      "type": ["string", "null"]
+    }
+  }
+}

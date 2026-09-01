@@ -358,9 +358,9 @@ impl EntityMutation {
                 ),
                 (crate::cache::CacheCategory::Grants, grants_keys.as_slice()),
             ];
-            crate::cache::invalidate::begin_all(cache, &groups).await?;
+            let leases = crate::cache::invalidate::begin_all(cache, &groups).await?;
             let result = update().await;
-            crate::cache::invalidate::end_all(cache, &groups).await;
+            crate::cache::invalidate::end_all(cache, leases).await;
             result
         }
         .await;

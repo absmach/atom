@@ -700,6 +700,16 @@ pub async fn serve(
     tls: Option<ServerTlsConfig>,
 ) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
+    if state.config.broker_auth.enabled
+        && state
+            .config
+            .grpc_tls
+            .as_ref()
+            .and_then(|configured| configured.client_ca_path.as_deref())
+            .is_none()
+    {
+        anyhow::bail!("broker auth cannot start without ATOM_GRPC_TLS_CLIENT_CA_PATH");
+    }
     tracing::info!("grpc listening on {addr}");
     let incoming = match TcpIncoming::from_listener(listener, true, None) {
         Ok(incoming) => incoming,
@@ -783,8 +793,8 @@ pub async fn serve(
             .grpc_tls
             .as_ref()
             .and_then(|tls| tls.client_ca_path.as_deref());
-        match client_ca {
-            Some(path) => tracing::info!(
+        if let Some(path) = client_ca {
+            tracing::info!(
                 client_ca = %path,
                 templates = ?state
                     .config
@@ -794,12 +804,7 @@ pub async fn serve(
                     .map(crate::broker_auth::TopicTemplate::as_str)
                     .collect::<Vec<_>>(),
                 "broker auth callout enabled"
-            ),
-            None => tracing::warn!(
-                "broker auth callout enabled without ATOM_GRPC_TLS_CLIENT_CA_PATH; \
-                 any client that can reach this port can authenticate and authorize \
-                 as any principal"
-            ),
+            );
         }
         router = router.add_service(BrokerAuthServiceServer::new(BrokerAuth::new(state.clone())));
     }

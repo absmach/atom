@@ -92,6 +92,15 @@ fn authed(query: impl Into<String>) -> Request {
     })
 }
 
+fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
+    Request::new(query).data(AuthContext {
+        entity_id,
+        tenant_id: None,
+        session_id: None,
+        ..Default::default()
+    })
+}
+
 #[tokio::test]
 #[ignore]
 async fn profiles_query_returns_seeded_entity_profiles() {
@@ -145,6 +154,40 @@ async fn profile_versions_query_returns_seeded_version() {
     let versions = data["profileVersions"].as_array().expect("versions array");
     assert_eq!(versions[0]["version"], 1);
     assert_eq!(versions[0]["status"], "active");
+}
+
+#[tokio::test]
+#[ignore]
+async fn unauthorized_profile_lookup_does_not_reveal_id_existence() {
+    let pool = common::pool().await;
+    let profile_id = seeded_client_profile(&pool).await;
+    let caller_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+    )
+    .bind(caller_id)
+    .bind(format!("profile-unprivileged-{caller_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert unprivileged caller");
+    let schema = build_schema(state(pool));
+
+    let existing = schema
+        .execute(authed_as(
+            caller_id,
+            format!(r#"{{ profile(id: "{profile_id}") {{ id }} }}"#),
+        ))
+        .await;
+    let missing = schema
+        .execute(authed_as(
+            caller_id,
+            format!(r#"{{ profile(id: "{}") {{ id }} }}"#, Uuid::new_v4()),
+        ))
+        .await;
+
+    assert_eq!(existing.errors.len(), 1);
+    assert_eq!(missing.errors.len(), 1);
+    assert_eq!(existing.errors[0].message, missing.errors[0].message);
 }
 
 #[tokio::test]

@@ -411,7 +411,7 @@ impl GroupMutation {
         };
         let details = serde_json::json!({});
         let status: Option<EntityStatus> = input.status.map(Into::into);
-        let status_changing = status.is_some();
+        let grants_metadata_changing = status.is_some() || input.name.is_some();
         let result = async {
             let existing = repo::get_group(&state.pool, id).await?;
             require_group_manage_app(&state.pool, &auth, id, existing.tenant_id).await?;
@@ -421,11 +421,11 @@ impl GroupMutation {
                 status,
                 attributes: input.attributes,
             };
-            // `subject_effective_grants`'s `subject_groups` CTE requires
-            // `status = 'active'` at every hop, so any status change (not
-            // just a move off "active") changes the recursive grant set for
-            // every member of this group's subtree.
-            if status_changing {
+            // `subject_effective_grants` embeds both the active group path and
+            // its names in EffectiveGrant.via. A status change alters which
+            // grants exist; a name-only change alters their cached metadata.
+            // Both therefore invalidate every member of this subtree.
+            if grants_metadata_changing {
                 // Locked (not just enumerated) — see
                 // `authz::repo::lock_group_closures_and_collect_member_ids`
                 // for why a concurrent `add_group_member` needs this to be
@@ -553,7 +553,8 @@ impl GroupMutation {
                 &state.pool,
                 |tx| {
                     Box::pin(async move {
-                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                        authz_repo::prepare_group_hierarchy_mutation_in_tx(tx, id, Some(parent_id))
+                            .await
                     })
                 },
                 |tx| {
@@ -642,7 +643,7 @@ impl GroupMutation {
                 &state.pool,
                 |tx| {
                     Box::pin(async move {
-                        authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
+                        authz_repo::prepare_group_hierarchy_mutation_in_tx(tx, id, None).await
                     })
                 },
                 |tx| {

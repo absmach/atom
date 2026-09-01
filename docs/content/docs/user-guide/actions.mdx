@@ -48,8 +48,8 @@ action even becomes relevant: an authorization check will not match a permission
 action doesn't have a corresponding applicability row for the target's kind/type.
 
 Columns: **Action**, **Object kind**, **Object type**, **Description**, **Created**. Atom
-seeds around 46 applicability rows spanning `entity`, `resource`, `group`, `tenant`, `role`,
-`policy`, `credential`, and `audit_log` object kinds.
+seeds applicability rows spanning `entity`, `resource`, `group`, `tenant`, `role`,
+`policy`, `credential`, `api_endpoint`, `audit_log`, and `signing_key` object kinds.
 
 ![Action Applicability list](/img/user-guide/actions/action-applicability-list.png)
 
@@ -59,7 +59,7 @@ Click **+ Create**.
 
 - **action_id** (required) — pick from existing actions.
 - **object_kind** (required) — `entity`, `resource`, `group`, `tenant`, `role`, `policy`,
-  `credential`, or `audit_log`.
+  `credential`, `api_endpoint`, `audit_log`, or `signing_key`.
 - **object_type** — optional namespaced value such as `entity:device` or `resource:channel`.
   Leave empty to apply the action to every sub-kind under **object_kind**.
 

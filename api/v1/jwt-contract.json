@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "tokenType": "JWT",
+  "serialization": "base64url(header).base64url(claims).base64url(ES256-signature)",
+  "header": {
+    "requiredProperties": ["typ", "alg", "kid"],
+    "issuedValues": {"typ": "JWT", "alg": "ES256"},
+    "kid": "Non-empty Atom signing-key id. Verification rejects missing, unknown, and retired key ids."
+  },
+  "claims": {
+    "issuedProperties": ["iss", "aud", "sub", "sid", "tid", "iat", "exp"],
+    "iss": "Exact configured issuer string; required and validated.",
+    "aud": "Exact configured audience string; required and validated.",
+    "sub": "Entity UUID in canonical hyphenated text form; required.",
+    "sid": "Session UUID in canonical hyphenated text form; required by Atom deserialization and online session validation.",
+    "tid": "Tenant UUID in canonical hyphenated text form, or JSON null for a platform entity. Issued tokens always carry the key; verification also accepts an omitted key as None through serde Option semantics.",
+    "iat": "Integer Unix timestamp in seconds; required by Atom deserialization.",
+    "exp": "Integer Unix timestamp in seconds; required and validated; issued as iat + configured expiry seconds."
+  },
+  "verifiedAlgorithm": "ES256",
+  "permissionsInToken": false,
+  "onlineChecksAfterSignature": [
+    "session id exists and is not revoked or expired",
+    "subject entity exists, is active, and is not soft-deleted",
+    "owning tenant, when present, is active and not soft-deleted"
+  ],
+  "compatibilityRule": "Do not rename, remove, repurpose, or change the nullability/type of an issued header or claim in v1. Optional new claims may be added only after consumer compatibility review; authorization permissions remain database-authoritative and must not be embedded."
+}

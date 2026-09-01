@@ -444,5 +444,307 @@ mod tests {
         }
         assert_eq!(value["event"], "resource.create");
         assert_eq!(value["schema_version"], 1);
+
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../api/v1/domain-event.schema.json"))
+                .expect("domain-event schema JSON");
+        let compiled = jsonschema::JSONSchema::compile(&schema).expect("domain-event schema");
+        assert!(
+            compiled.is_valid(&value),
+            "runtime payload must match v1 schema"
+        );
+
+        let mut invalid = value.clone();
+        invalid["schema_version"] = serde_json::json!(2);
+        assert!(!compiled.is_valid(&invalid));
+        let mut invalid = value.clone();
+        invalid["outcome"] = serde_json::json!("unknown");
+        assert!(!compiled.is_valid(&invalid));
+        let mut invalid = value;
+        invalid["unexpected"] = serde_json::json!(true);
+        assert!(!compiled.is_valid(&invalid));
+    }
+
+    #[test]
+    fn emitted_event_names_match_the_v1_catalog() {
+        use std::{
+            collections::{BTreeMap, BTreeSet},
+            fs,
+            path::Path,
+        };
+
+        fn rust_files(path: &Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in fs::read_dir(path).expect("read source directory") {
+                let entry = entry.expect("source entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, files);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+
+        fn literal_event_names(source: &str) -> Vec<String> {
+            source
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(source)
+                .lines()
+                .filter_map(|line| {
+                    let value = line.split_once("event: \"")?.1;
+                    let end = value.find('"')?;
+                    let value = &value[..end];
+                    value.contains('.').then(|| value.to_string())
+                })
+                .collect()
+        }
+
+        fn quoted_after<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+            let value = line.split_once(marker)?.1;
+            Some(&value[..value.find('"')?])
+        }
+
+        fn literal_event_targets(source: &str) -> BTreeMap<String, BTreeSet<Option<String>>> {
+            let mut result = BTreeMap::<String, BTreeSet<Option<String>>>::new();
+            let mut in_event = false;
+            let mut targets = BTreeSet::new();
+
+            for line in source
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(source)
+                .lines()
+            {
+                if line.contains("AuditEvent {") || line.contains("AuditMeta {") {
+                    in_event = true;
+                    targets.clear();
+                }
+                if !in_event {
+                    continue;
+                }
+                if line.contains("target_kind:") {
+                    if let Some(kind) = quoted_after(line, "Some(\"")
+                        .or_else(|| quoted_after(line, "target_kind: \""))
+                    {
+                        targets.insert(Some(kind.to_string()));
+                    } else if let Some(kind) = quoted_after(line, ".map(|_| \"") {
+                        targets.insert(Some(kind.to_string()));
+                        targets.insert(None);
+                    } else if line.contains("target_kind: None") {
+                        targets.insert(None);
+                    } else if line.contains("Some(OBJECT_KIND)") {
+                        targets.insert(Some("resource".to_string()));
+                    }
+                }
+                if let Some(event) = quoted_after(line, "event: \"") {
+                    result
+                        .entry(event.to_string())
+                        .or_default()
+                        .extend(targets.iter().cloned());
+                    in_event = false;
+                }
+            }
+            result
+        }
+
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../api/v1/domain-event-catalog.json"))
+                .expect("domain-event catalog JSON");
+        let events = catalog["events"].as_array().expect("event catalog array");
+        let catalog_names = events
+            .iter()
+            .map(|event| {
+                event["name"]
+                    .as_str()
+                    .expect("catalog event name")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        let catalog_targets = events
+            .iter()
+            .map(|event| {
+                let name = event["name"].as_str().expect("catalog event name");
+                let targets = event["targetKinds"]
+                    .as_array()
+                    .expect("catalog target-kind array")
+                    .iter()
+                    .map(|target| target.as_str().map(str::to_string))
+                    .collect::<BTreeSet<_>>();
+                (name.to_string(), targets)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            catalog_names.len(),
+            events.len(),
+            "event names must be unique"
+        );
+        assert_eq!(catalog_names.len(), 106, "review any v1 event-name change");
+
+        let outcomes = catalog["outcomeProfiles"]
+            .as_object()
+            .expect("outcome profiles");
+        let publications = catalog["publicationProfiles"]
+            .as_object()
+            .expect("publication profiles");
+        for event in events {
+            let target_kinds = event["targetKinds"].as_array().expect("target-kind array");
+            assert!(!target_kinds.is_empty(), "event target-kind set is empty");
+            assert!(target_kinds.iter().all(|kind| {
+                kind.is_null() || kind.as_str().is_some_and(|kind| !kind.is_empty())
+            }));
+            let outcome = event["outcomeProfile"]
+                .as_str()
+                .expect("outcome profile name");
+            assert!(outcomes.contains_key(outcome), "unknown outcome profile");
+            let publication = event["publicationProfile"]
+                .as_str()
+                .expect("publication profile name");
+            assert!(
+                publications.contains_key(publication),
+                "unknown publication profile"
+            );
+        }
+
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&source_root, &mut files);
+        let sources = files
+            .iter()
+            .map(|path| fs::read_to_string(path).expect("read Rust source"))
+            .collect::<Vec<_>>();
+        let mut runtime_names = sources
+            .iter()
+            .flat_map(|source| literal_event_names(source))
+            .collect::<BTreeSet<_>>();
+        let mut runtime_targets = BTreeMap::<String, BTreeSet<Option<String>>>::new();
+        for (event, targets) in sources
+            .iter()
+            .flat_map(|source| literal_event_targets(source))
+        {
+            runtime_targets.entry(event).or_default().extend(targets);
+        }
+
+        // These sites pass an event name through a helper or enqueue function
+        // rather than spelling it directly in an `AuditEvent.event` field.
+        let indirect = [
+            "certificate.authority_expiring",
+            "certificate.enroll_replayed",
+            "certificate.expiring",
+            "certificate.reenroll_replayed",
+            "entity.disable",
+            "entity.enable",
+            "entity.suspend",
+            "group.disable",
+            "group.enable",
+            "group.suspend",
+            "pki.authority.automated_provisioning_replayed",
+            "pki.authority.provisioned_automatically",
+            "pki.authority.provisioning_replayed",
+            "pki.authority.provisioning_started",
+            "pki.authority.retired",
+            "pki.authority.retirement_completion_replayed",
+            "pki.authority.retirement_start_replayed",
+            "pki.authority.retiring",
+            "tenant.disable",
+            "tenant.enable",
+            "tenant.freeze",
+            "tenant.status.update",
+        ];
+        let joined_sources = sources.join("\n");
+        let indirect_targets = [
+            ("certificate.authority_expiring", "pki_authority"),
+            ("certificate.enroll_replayed", "credential"),
+            ("certificate.expiring", "credential"),
+            ("certificate.reenroll_replayed", "credential"),
+            ("entity.disable", "entity"),
+            ("entity.enable", "entity"),
+            ("entity.suspend", "entity"),
+            ("group.disable", "group"),
+            ("group.enable", "group"),
+            ("group.suspend", "group"),
+            (
+                "pki.authority.automated_provisioning_replayed",
+                "pki_authority",
+            ),
+            ("pki.authority.provisioned_automatically", "pki_authority"),
+            ("pki.authority.provisioning_replayed", "pki_authority"),
+            ("pki.authority.provisioning_started", "pki_authority"),
+            ("pki.authority.retired", "pki_authority"),
+            (
+                "pki.authority.retirement_completion_replayed",
+                "pki_authority",
+            ),
+            ("pki.authority.retirement_start_replayed", "pki_authority"),
+            ("pki.authority.retiring", "pki_authority"),
+            ("tenant.disable", "tenant"),
+            ("tenant.enable", "tenant"),
+            ("tenant.freeze", "tenant"),
+            ("tenant.status.update", "tenant"),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        assert_eq!(indirect_targets.len(), indirect.len());
+        for name in indirect {
+            assert!(
+                joined_sources.contains(&format!("\"{name}\"")),
+                "indirect event {name} disappeared from runtime source"
+            );
+            runtime_names.insert(name.to_string());
+            runtime_targets
+                .entry(name.to_string())
+                .or_default()
+                .insert(Some(indirect_targets[name].to_string()));
+        }
+        assert_eq!(runtime_names, catalog_names);
+
+        // GraphQL and gRPC derive these targets from the request rather than
+        // spelling a literal beside the event. The engine's exhaustive object
+        // loader is the runtime authority for the accepted kinds; `platform`
+        // deliberately serializes as a null event target because it has no id.
+        let engine_source = include_str!("../authz/engine.rs");
+        for kind in ["resource", "tenant", "entity", "group", "credential"] {
+            assert!(engine_source.contains(&format!("\"{kind}\" =>")));
+        }
+        assert!(engine_source.contains("object_kind.as_deref() == Some(\"platform\")"));
+        assert!(include_str!("../broker_auth/service.rs")
+            .contains("const OBJECT_KIND: &str = \"resource\""));
+        for event in ["authz.check", "authz.explain"] {
+            runtime_targets.insert(
+                event.to_string(),
+                [
+                    Some("resource".to_string()),
+                    Some("tenant".to_string()),
+                    Some("entity".to_string()),
+                    Some("group".to_string()),
+                    Some("credential".to_string()),
+                    None,
+                ]
+                .into_iter()
+                .collect(),
+            );
+        }
+        assert_eq!(runtime_targets, catalog_targets);
+
+        let required = catalog["requiredDetails"]
+            .as_object()
+            .expect("required-detail contracts");
+        assert!(required.keys().all(|name| catalog_names.contains(name)));
+        assert_eq!(
+            required["entity.update"]["allow"],
+            serde_json::json!(["external_id"])
+        );
+        assert_eq!(
+            required["certificate.expiring"]["allow"],
+            serde_json::json!([
+                "issuer_id",
+                "credential_id",
+                "entity_id",
+                "tenant_id",
+                "window",
+                "window_at",
+                "expires_at"
+            ])
+        );
     }
 }

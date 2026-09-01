@@ -122,8 +122,8 @@
 | subject_id | [string](#string) |  |  |
 | action | [string](#string) |  | capability name, e.g. &#34;publish&#34; |
 | resource_id | [string](#string) |  | Legacy form: identifies a row in the `resources` table. Resolved with kind = `resources.kind`. Mutually exclusive with object_kind/object_id; if both are supplied, object_kind/object_id win. |
-| context | [CheckRequest.ContextEntry](#atom-v1-CheckRequest-ContextEntry) | repeated | Optional ABAC context — flat string key/value pairs injected into the evaluation context under the &#34;context&#34; key. Note: only string values are supported over gRPC; use REST for nested JSON. |
-| object_kind | [string](#string) |  | Explicit form: identifies any first-class protected object. Supported object_kind values: &#34;resource&#34; (same as resource_id) or &#34;tenant&#34; (resolved from the `tenants` table; kind = &#34;tenant&#34;). Both fields must be set together, or both empty. |
+| context | [CheckRequest.ContextEntry](#atom-v1-CheckRequest-ContextEntry) | repeated | Optional ABAC context — flat string key/value pairs injected into the evaluation context under the &#34;context&#34; key. Note: only string values are supported over gRPC; use the GraphQL authzCheck input when nested JSON context is required. |
+| object_kind | [string](#string) |  | Explicit form: identifies any first-class protected object. resource, tenant, entity, group, role, policy, credential, and api_endpoint require object_id. platform requires object_id to be empty. Supplying the explicit form takes precedence over the legacy resource_id field. |
 | object_id | [string](#string) |  |  |
 
 
@@ -287,19 +287,19 @@ UUIDs; the Check call is the authorization gate.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| ResolveAlias | [ResolveAliasRequest](#atom-v1-ResolveAliasRequest) | [ResolveAliasResponse](#atom-v1-ResolveAliasResponse) |  |
+| ResolveAlias | [ResolveAliasRequest](#atom-v1-ResolveAliasRequest) | [ResolveAliasResponse](#atom-v1-ResolveAliasResponse) | Requires authorization: Bearer &lt;JWT-or-Atom-access-token&gt; metadata. Alias resolution itself has no capability gate; callers must authorize the returned UUID separately with AuthzService.Check. |
 
 
 <a name="atom-v1-AuthService"></a>
 
 ### AuthService
-AuthService validates tokens and returns caller identity.
-Use this to authenticate incoming requests without decoding JWTs locally.
+AuthService validates tokens and delegated password/shared-key credentials.
+Use Authenticate to validate incoming tokens without decoding JWTs locally.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Authenticate | [AuthenticateRequest](#atom-v1-AuthenticateRequest) | [AuthenticateResponse](#atom-v1-AuthenticateResponse) |  |
-| AuthenticateCredential | [AuthenticateCredentialRequest](#atom-v1-AuthenticateCredentialRequest) | [AuthenticateCredentialResponse](#atom-v1-AuthenticateCredentialResponse) |  |
+| Authenticate | [AuthenticateRequest](#atom-v1-AuthenticateRequest) | [AuthenticateResponse](#atom-v1-AuthenticateResponse) | Requires no authorization metadata. The credential being authenticated is the token carried in the request body. |
+| AuthenticateCredential | [AuthenticateCredentialRequest](#atom-v1-AuthenticateCredentialRequest) | [AuthenticateCredentialResponse](#atom-v1-AuthenticateCredentialResponse) | Requires authorization: Bearer &lt;JWT-or-Atom-access-token&gt; metadata. The caller must hold authz.check for the selected tenant, or at platform scope when no tenant is selected. The plaintext target credential stays in the request body and is never treated as caller authentication. |
 
 
 <a name="atom-v1-AuthzService"></a>
@@ -310,7 +310,7 @@ Call this on every request to protected downstream resources.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Check | [CheckRequest](#atom-v1-CheckRequest) | [CheckResponse](#atom-v1-CheckResponse) |  |
+| Check | [CheckRequest](#atom-v1-CheckRequest) | [CheckResponse](#atom-v1-CheckResponse) | Requires authorization: Bearer &lt;JWT-or-Atom-access-token&gt; metadata. The caller must hold authz.check for the target tenant or platform; the subject being evaluated may be different from the caller. |
 
 
 <a name="atom-v1-CertificateService"></a>
@@ -321,8 +321,8 @@ runtime services that terminate mTLS outside Atom.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| ResolveCertificateV2 | [ResolveCertificateV2Request](#atom-v1-ResolveCertificateV2Request) | [ResolveCertificateV2Response](#atom-v1-ResolveCertificateV2Response) |  |
-| RevokeEntityCertificates | [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest) | [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse) |  |
+| ResolveCertificateV2 | [ResolveCertificateV2Request](#atom-v1-ResolveCertificateV2Request) | [ResolveCertificateV2Response](#atom-v1-ResolveCertificateV2Response) | ResolveCertificate was removed before v1; its RPC name is reserved by contract and must not be reused. Consumers use ResolveCertificateV2. Requires authorization: Bearer &lt;JWT-or-Atom-access-token&gt; metadata. The caller must hold authz.check for the resolved tenant or platform. |
+| RevokeEntityCertificates | [RevokeEntityCertificatesRequest](#atom-v1-RevokeEntityCertificatesRequest) | [RevokeEntityCertificatesResponse](#atom-v1-RevokeEntityCertificatesResponse) | Requires authorization: Bearer &lt;JWT-or-Atom-access-token&gt; metadata. The caller must hold manage on the target entity or its owning tenant. |
 
  
 

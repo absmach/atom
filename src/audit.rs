@@ -261,12 +261,11 @@ pub async fn commit_with_observation(
 pub(crate) async fn commit_observed_with_cache<T>(
     tx: sqlx::Transaction<'_, sqlx::Postgres>,
     cache: &crate::cache::CacheClient,
-    category: crate::cache::CacheCategory,
-    keys: &[String],
+    lease: crate::cache::CacheLease,
     value: T,
 ) -> Result<T, crate::error::AppError> {
     let commit_result = tx.commit().await.map_err(crate::error::AppError::Database);
-    cache.end(category, keys).await;
+    cache.end(lease).await;
     commit_result.map(|_| value)
 }
 
@@ -277,13 +276,13 @@ pub(crate) async fn commit_observed_with_cache<T>(
 pub(crate) async fn commit_observed_with_cache_groups<T>(
     tx: sqlx::Transaction<'_, sqlx::Postgres>,
     cache: &crate::cache::CacheClient,
-    groups: &[(crate::cache::CacheCategory, &[String])],
+    leases: Vec<crate::cache::CacheLease>,
     value: T,
     meta: &AuditMeta<'_>,
     details: &Value,
 ) -> Result<T, crate::error::AppError> {
     let commit_result = tx.commit().await.map_err(crate::error::AppError::Database);
-    crate::cache::invalidate::end_all(cache, groups).await;
+    crate::cache::invalidate::end_all(cache, leases).await;
     if commit_result.is_ok() {
         log_observe_allow(meta, details);
     }
@@ -297,12 +296,12 @@ pub(crate) async fn commit_observed_with_cache_and_audit<T>(
     pool: &PgPool,
     tx: sqlx::Transaction<'_, sqlx::Postgres>,
     cache: &crate::cache::CacheClient,
-    groups: &[(crate::cache::CacheCategory, &[String])],
+    leases: Vec<crate::cache::CacheLease>,
     value: T,
     event: AuditEvent<'_>,
 ) -> Result<T, crate::error::AppError> {
     let commit_result = tx.commit().await.map_err(crate::error::AppError::Database);
-    crate::cache::invalidate::end_all(cache, groups).await;
+    crate::cache::invalidate::end_all(cache, leases).await;
     if commit_result.is_ok() {
         write(
             pool,

@@ -34,9 +34,7 @@ GET  /auth/oauth/:provider/start
 GET  /auth/oauth/:provider/callback
 POST /auth/oauth/exchange
 GET  /.well-known/jwks.json
-GET  /certs/ca-chain
-GET  /certs/crl
-POST /certs/ocsp
+GET  /certs/trust-bundle.pem
 GET  /certs/issuers/{issuer_id}/crl
 POST /certs/issuers/{issuer_id}/ocsp
 ```
@@ -50,7 +48,7 @@ grant platform privileges.
 
 <Cards>
   <Card title="Credentials" href="/authentication/credentials" description="Password, API key, scoped access-token, and certificate credential management." />
-  <Card title="Certificates" href="/authentication/certificates" description="mTLS certificate issuance, CA files, CRL, OCSP, and runtime lookup." />
+  <Card title="Certificates" href="/authentication/certificates" description="Managed authorities, mTLS certificate issuance, trust distribution, CRL, OCSP, and runtime lookup." />
   <Card title="JWT Tokens" href="/authentication/jwt" description="Token claims, session binding, and verification." />
   <Card title="JWKS & Key Rotation" href="/authentication/jwks" description="ES256 signing keys, JWKS endpoint, and zero-downtime rotation." />
 </Cards>

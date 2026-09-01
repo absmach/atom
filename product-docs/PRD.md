@@ -600,6 +600,7 @@ The **kind** (`object_kind`) is the broad category. The canonical set is:
 - `role`
 - `policy`
 - `credential`
+- `api_endpoint`
 - `audit_log`
 - `signing_key`
 
@@ -610,7 +611,12 @@ The **type** (`object_type`) is the finer sub-kind, written as `<kind>:<sub-kind
 - entity sub-kinds: `entity:human`, `entity:device`, `entity:service`, `entity:workload`, `entity:application`
 - resource sub-kinds: `resource:channel`, `resource:<app-defined>`
 
-For kinds without sub-kinds (`group`, `tenant`, `role`, `policy`, `credential`, `audit_log`), `object_type` is null.
+For kinds without sub-kinds (`group`, `tenant`, `role`, `policy`, `credential`, `api_endpoint`, `audit_log`), `object_type` is null.
+
+Every UUID-addressable protected object shares one database-enforced UUID
+namespace. Soft-deleted objects keep their reservation until physical purge.
+Profiles and individual audit-log rows are not exact-object targets, while
+signing keys use textual `kid` identifiers and remain platform-scoped.
 
 The kind prefix on `object_type` is intentionally redundant with `object_kind` so that audit logs and explain output are self-describing. Bare values such as `device` or `channel` must not appear as stored object type values or in audit records.
 
@@ -896,7 +902,7 @@ Field meaning:
 - `tenant_id = <tenant>` means the rule applies only inside that tenant.
 - `entity_kind` is the kind of the subject receiving access.
 - `action_name` is the action being granted.
-- `object_kind` is the protected object type, such as `resource`, `entity`, `group`, `tenant`, `role`, `policy`, `credential`, `audit_log`, or `signing_key`.
+- `object_kind` is the protected object type, such as `resource`, `entity`, `group`, `tenant`, `role`, `policy`, `credential`, `api_endpoint`, `audit_log`, or `signing_key`.
 - `object_type` narrows the rule to a specific sub-kind such as `resource:channel` or `entity:device`. Always namespaced with its kind. Null means the rule applies to every sub-kind under the given `object_kind`.
 - `decision = allow` means the assignment is allowed.
 - `decision = deny` means the assignment is rejected.

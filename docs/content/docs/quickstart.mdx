@@ -242,12 +242,12 @@ Run `make help` for the current target list.
 For a versioned release, tag the exact clean commit and build both images:
 
 ```bash
-git tag v0.50.0
+git tag v1.0.0
 make release
 ```
 
-The result is `ghcr.io/absmach/atom:v0.50.0` and
-`ghcr.io/absmach/atom-ui:v0.50.0` in the local image store, with the local
+The result is `ghcr.io/absmach/atom:v1.0.0` and
+`ghcr.io/absmach/atom-ui:v1.0.0` in the local image store, with the local
 `:latest` tags moved onto the same images so `make up` runs what was just
 released. `make release` does not push; pushing the Git tag triggers the image
 workflow, which runs the Rust and Frontend suites first and then publishes both

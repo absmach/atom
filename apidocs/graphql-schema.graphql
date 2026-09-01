@@ -1023,7 +1023,7 @@ type ProfileVersion {
 type QueryRoot {
 	health: String!
 	session(id: ID!): Session!
-	tenants(id: String, q: String, name: String, alias: String, tags: String, status: TenantStatus, deleted: DeletedFilter, order: TenantOrderField, dir: SortDir, limit: Int, offset: Int): TenantList!
+	tenants(id: ID, idContains: String, q: String, name: String, alias: String, tags: String, status: TenantStatus, deleted: DeletedFilter, order: TenantOrderField, dir: SortDir, limit: Int, offset: Int): TenantList!
 	tenant(id: ID!): Tenant!
 	tenantMembers(tenantId: ID!, q: String, limit: Int, offset: Int): EntityList!
 	tenantAssignableEntities(tenantId: ID!, q: String!, limit: Int, offset: Int): EntityList!
@@ -1285,6 +1285,7 @@ type SystemStatus {
 	migrations: ComponentCheck!
 	signingKeys: ComponentCheck!
 	certificateIssuer: ComponentCheck!
+	cache: ComponentCheck!
 	dbPool: DbPoolStatus!
 	signingKeyState: SigningKeyState
 	auditRetention: AuditRetentionStatus!

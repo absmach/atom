@@ -418,23 +418,29 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
     // query, unchanged, then best-effort populate whichever entries missed.
     let snapshot = load_session_entity_tenant(&state.pool, session_id, entity_id).await?;
 
-    if let Lookup::Miss { version } = session_lookup {
+    if let Lookup::Miss { version, epoch } = session_lookup {
         let entry = SessionCacheEntry {
             entity_id,
             revoked_at: snapshot.revoked_at,
             expires_at: snapshot.expires_at,
         };
         cache
-            .try_populate(CacheCategory::Session, &session_key, version, &entry)
+            .try_populate(CacheCategory::Session, &session_key, version, epoch, &entry)
             .await;
     }
-    if let Lookup::Miss { version } = entity_lookup {
+    if let Lookup::Miss { version, epoch } = entity_lookup {
         let entry = EntityStatusCacheEntry {
             status: snapshot.entity_status.clone(),
             tenant_id: snapshot.entity_tenant_id,
         };
         cache
-            .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
+            .try_populate(
+                CacheCategory::EntityStatus,
+                &entity_key,
+                version,
+                epoch,
+                &entry,
+            )
             .await;
     }
     // `tenant_key` is derived from the token's `tid` claim, but
@@ -446,7 +452,8 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
     // active for everyone, off a request that `check_session_entity_tenant`
     // is about to reject anyway). Only populate when the version we observed
     // belongs to the key the payload actually describes.
-    if let (Some(tenant_key), Some(Lookup::Miss { version })) = (&tenant_key, tenant_lookup) {
+    if let (Some(tenant_key), Some(Lookup::Miss { version, epoch })) = (&tenant_key, tenant_lookup)
+    {
         if let (Some(entity_tenant_id), Some(tenant_status)) =
             (snapshot.entity_tenant_id, &snapshot.tenant_status)
         {
@@ -455,7 +462,13 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
                     status: tenant_status.clone(),
                 };
                 cache
-                    .try_populate(CacheCategory::TenantStatus, tenant_key, version, &entry)
+                    .try_populate(
+                        CacheCategory::TenantStatus,
+                        tenant_key,
+                        version,
+                        epoch,
+                        &entry,
+                    )
                     .await;
             }
         }
@@ -776,20 +789,26 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         // possibly stale copy; the payload below comes from `row`. Populate
         // only when the two agree, so entity A's key can never be given
         // entity B's status and tenant.
-        if let Lookup::Miss { version } = entity_lookup {
+        if let Lookup::Miss { version, epoch } = entity_lookup {
             if entity_key == cache_keys::entity_status(row.entity_id) {
                 let entry = EntityStatusCacheEntry {
                     status: row.entity_status.clone(),
                     tenant_id: row.tenant_id,
                 };
                 cache
-                    .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
+                    .try_populate(
+                        CacheCategory::EntityStatus,
+                        &entity_key,
+                        version,
+                        epoch,
+                        &entry,
+                    )
                     .await;
             }
         }
         if let (Some(tenant_id), Some(tenant_status)) = (row.tenant_id, &row.tenant_status) {
             let tenant_key = cache_keys::tenant_status(tenant_id);
-            if let Lookup::Miss { version } = cache
+            if let Lookup::Miss { version, epoch } = cache
                 .lookup::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, &tenant_key)
                 .await
             {
@@ -797,7 +816,13 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
                     status: tenant_status.clone(),
                 };
                 cache
-                    .try_populate(CacheCategory::TenantStatus, &tenant_key, version, &entry)
+                    .try_populate(
+                        CacheCategory::TenantStatus,
+                        &tenant_key,
+                        version,
+                        epoch,
+                        &entry,
+                    )
                     .await;
             }
         }
@@ -809,10 +834,16 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     // entity/tenant entries too (each with its own freshly-observed version).
     let row = load_credential_row(&state.pool, cred_id).await?;
 
-    if let Lookup::Miss { version } = credential_lookup {
+    if let Lookup::Miss { version, epoch } = credential_lookup {
         let entry = credential_cache_entry(&row);
         cache
-            .try_populate(CacheCategory::Credential, &credential_key, version, &entry)
+            .try_populate(
+                CacheCategory::Credential,
+                &credential_key,
+                version,
+                epoch,
+                &entry,
+            )
             .await;
     }
     // Both keys are already known from `row`, so their version reads go out
@@ -827,7 +858,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     let entity_raw = raw.next().unwrap_or_default();
     let tenant_raw = raw.next();
 
-    if let Lookup::Miss { version } = cache
+    if let Lookup::Miss { version, epoch } = cache
         .decode::<EntityStatusCacheEntry>(CacheCategory::EntityStatus, &entity_key, entity_raw)
         .await
     {
@@ -836,13 +867,19 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
             tenant_id: row.tenant_id,
         };
         cache
-            .try_populate(CacheCategory::EntityStatus, &entity_key, version, &entry)
+            .try_populate(
+                CacheCategory::EntityStatus,
+                &entity_key,
+                version,
+                epoch,
+                &entry,
+            )
             .await;
     }
     if let (Some(tenant_key), Some(tenant_raw), Some(tenant_status)) =
         (&tenant_key, tenant_raw, &row.tenant_status)
     {
-        if let Lookup::Miss { version } = cache
+        if let Lookup::Miss { version, epoch } = cache
             .decode::<TenantStatusCacheEntry>(CacheCategory::TenantStatus, tenant_key, tenant_raw)
             .await
         {
@@ -850,7 +887,13 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
                 status: tenant_status.clone(),
             };
             cache
-                .try_populate(CacheCategory::TenantStatus, tenant_key, version, &entry)
+                .try_populate(
+                    CacheCategory::TenantStatus,
+                    tenant_key,
+                    version,
+                    epoch,
+                    &entry,
+                )
                 .await;
         }
     }
@@ -1432,5 +1475,131 @@ where
         }
 
         Ok(RequireManage(auth))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jsonwebtoken::{Algorithm, Header};
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use super::{make_api_key, parse_api_key, Claims};
+
+    #[test]
+    fn api_key_encoding_matches_the_v1_persisted_contract() {
+        let contract: Value =
+            serde_json::from_str(include_str!("../api/v1/persisted-semantics.json"))
+                .expect("valid persisted-semantics contract");
+        let encodings = &contract["encodings"];
+        assert_eq!(encodings["apiKeyPrefix"], "atom_");
+        assert_eq!(
+            encodings["apiKeyCanonicalFormat"],
+            "atom_<32-lowercase-hex-credential-id>_<64-lowercase-hex-secret>"
+        );
+        assert_eq!(encodings["apiKeyAcceptedHexCase"], "case_insensitive");
+
+        let credential_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("UUID");
+        let secret = [0xabu8; 32];
+        let canonical = make_api_key(credential_id, &secret);
+        assert_eq!(
+            canonical,
+            "atom_00112233445566778899aabbccddeeff_abababababababababababababababababababababababababababababababab"
+        );
+        assert_eq!(parse_api_key(&canonical), Some((credential_id, secret)));
+        assert_eq!(
+            parse_api_key(&canonical.to_ascii_uppercase().replacen("ATOM_", "atom_", 1)),
+            Some((credential_id, secret))
+        );
+        assert!(parse_api_key("atom_0011_deadbeef").is_none());
+    }
+
+    #[test]
+    fn jwt_header_and_claim_serialization_match_the_v1_contract() {
+        use std::collections::BTreeSet;
+
+        let contract: Value = serde_json::from_str(include_str!("../api/v1/jwt-contract.json"))
+            .expect("valid JWT v1 contract");
+        let header = Header {
+            alg: Algorithm::ES256,
+            kid: Some("v1-signing-key".to_string()),
+            ..Header::default()
+        };
+        let serialized_header = serde_json::to_value(&header).expect("serialize JWT header");
+        let header_keys = serialized_header
+            .as_object()
+            .expect("JWT header object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let contract_header_keys = contract["header"]["requiredProperties"]
+            .as_array()
+            .expect("header property array")
+            .iter()
+            .map(|value| value.as_str().expect("header property").to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(header_keys, contract_header_keys);
+        assert_eq!(
+            serialized_header["typ"],
+            contract["header"]["issuedValues"]["typ"]
+        );
+        assert_eq!(
+            serialized_header["alg"],
+            contract["header"]["issuedValues"]["alg"]
+        );
+        assert_eq!(serialized_header["kid"], "v1-signing-key");
+
+        let entity_id =
+            Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("entity UUID");
+        let session_id =
+            Uuid::parse_str("10213243-5465-7687-98a9-bacbdcedfe0f").expect("session UUID");
+        let claims = Claims {
+            iss: "https://issuer.example".to_string(),
+            aud: "atom-consumer".to_string(),
+            sub: entity_id.to_string(),
+            sid: session_id.to_string(),
+            tid: None,
+            iat: 1_700_000_000,
+            exp: 1_700_003_600,
+        };
+        let serialized_claims = serde_json::to_value(&claims).expect("serialize JWT claims");
+        let claim_keys = serialized_claims
+            .as_object()
+            .expect("JWT claim object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let contract_claim_keys = contract["claims"]["issuedProperties"]
+            .as_array()
+            .expect("claim property array")
+            .iter()
+            .map(|value| value.as_str().expect("claim property").to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(claim_keys, contract_claim_keys);
+        assert_eq!(serialized_claims["sub"], entity_id.to_string());
+        assert_eq!(serialized_claims["sid"], session_id.to_string());
+        assert!(serialized_claims["tid"].is_null());
+        assert_eq!(
+            serialized_claims["exp"].as_u64().unwrap() - serialized_claims["iat"].as_u64().unwrap(),
+            3600
+        );
+        assert_eq!(contract["permissionsInToken"], false);
+
+        let auth_source = include_str!("auth.rs");
+        for required in [
+            "alg: Algorithm::ES256",
+            "kid: Some(signer.kid.clone())",
+            "let mut validation = Validation::new(Algorithm::ES256);",
+            "validation.set_required_spec_claims(&[\"exp\", \"iss\", \"aud\", \"sub\"]);",
+            "validation.set_issuer(&[issuer]);",
+            "validation.set_audience(&[audience]);",
+            "token missing kid claim",
+            "token signed with unknown or retired key",
+        ] {
+            assert!(
+                auth_source.contains(required),
+                "missing JWT semantic: {required}"
+            );
+        }
     }
 }

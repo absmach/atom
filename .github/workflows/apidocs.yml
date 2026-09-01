@@ -1,6 +1,7 @@
 name: API Docs
 
 on:
+  workflow_call:
   push:
     branches: [main]
     paths:
@@ -10,7 +11,9 @@ on:
       - "migrations/**"
       - "examples/export-graphql-schema.rs"
       - "scripts/check-v1-contracts.sh"
+      - "scripts/check-vendored-proto.sh"
       - "src/**"
+      - "tests/api_contract.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - "buf.yaml"
@@ -25,26 +28,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Install buf
-        uses: bufbuild/buf-action@v1
+        uses: bufbuild/buf-action@8c6a16e16f12ba20b6470afa9c2ba9b5ba8c97c3 # v1.5.0
         with:
+          version: "1.50.1"
           setup_only: true
 
       - name: buf lint
         run: buf lint
 
+      - name: Vendored broker proto matches the immutable upstream commit
+        run: scripts/check-vendored-proto.sh
+
       - name: Install Go (for protoc-gen-doc)
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: stable
+          go-version: "1.22.1"
           cache: false
 
       - name: Install protoc-gen-doc
-        run: go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@latest
+        run: go install github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc@v1.5.1
 
       - name: Generate proto docs
         run: buf generate
@@ -63,36 +70,44 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Install Redocly CLI
-        run: npm install -g @redocly/cli@latest
+        run: npm install -g @redocly/cli@2.49.0
 
       - name: Validate openapi.yaml
         run: redocly lint apidocs/openapi.yaml
 
   frozen-contracts:
-    name: Check GraphQL, migrations, and v1 freeze
+    name: Check HTTP, GraphQL, protobuf, migrations, and v1 freeze
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "33.0"
 
       - name: Install buf
-        uses: bufbuild/buf-action@v1
+        uses: bufbuild/buf-action@8c6a16e16f12ba20b6470afa9c2ba9b5ba8c97c3 # v1.5.0
         with:
+          version: "1.50.1"
           setup_only: true
+
+      - name: Check runtime-backed HTTP DTO, status, auth, and route contracts
+        run: |
+          cargo test --locked --lib contract_
+          cargo test --locked --test api_contract contract_
 
       - name: Check generated GraphQL SDL
         run: |

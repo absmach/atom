@@ -1,0 +1,360 @@
+{
+  "schemaVersion": 1,
+  "seededActions": [
+    "read",
+    "create",
+    "write",
+    "delete",
+    "revoke",
+    "rotate",
+    "publish",
+    "subscribe",
+    "execute",
+    "manage",
+    "policy.manage",
+    "role.manage",
+    "authz.check",
+    "pki.provision",
+    "pki.provision_automated"
+  ],
+  "enums": {
+    "actionAssignmentDecision": ["allow", "deny", "require_override"],
+    "auditOutcome": ["allow", "deny", "error"],
+    "credentialKind": ["password", "access_token", "certificate", "shared_key"],
+    "credentialStatus": ["active", "revocation_pending", "revoked"],
+    "deletedFilter": ["live", "deleted", "all"],
+    "effect": ["allow", "deny"],
+    "entityKind": ["human", "device", "service", "workload", "application"],
+    "entityOrderField": [
+      "created_at",
+      "updated_at",
+      "name",
+      "username",
+      "first_name",
+      "last_name",
+      "email",
+      "kind",
+      "status"
+    ],
+    "entityStatus": ["active", "inactive", "suspended"],
+    "grantKind": ["capability", "role"],
+    "groupOrderField": ["created_at", "updated_at", "name", "status"],
+    "objectKind": [
+      "entity",
+      "resource",
+      "group",
+      "tenant",
+      "role",
+      "policy",
+      "credential",
+      "api_endpoint",
+      "audit_log",
+      "signing_key"
+    ],
+    "resourceOrderField": ["created_at", "updated_at", "name", "kind"],
+    "scopeKind": [
+      "platform",
+      "tenant",
+      "object_kind",
+      "object_type",
+      "object",
+      "group_object_type",
+      "group_tree_object_type",
+      "group_child_kind",
+      "group_descendant_kind"
+    ],
+    "sortDir": ["asc", "desc"],
+    "subjectKind": ["entity", "group"],
+    "tenantOrderField": ["created_at", "updated_at", "name", "alias", "status"],
+    "tenantStatus": ["active", "inactive", "frozen", "deleted"]
+  },
+  "bootstrapScopeModes": [
+    "platform",
+    "tenant",
+    "object_kind",
+    "object_type",
+    "object",
+    "group_direct_objects",
+    "group_descendant_objects",
+    "group_child_groups",
+    "group_descendant_groups"
+  ],
+  "protectedObjectIdentity": {
+    "registryTable": "protected_object_ids",
+    "uuidSources": {
+      "tenant": ["tenants"],
+      "entity": ["entities"],
+      "resource": ["resources"],
+      "group": ["principal_groups", "object_groups"],
+      "role": ["roles"],
+      "credential": ["credentials"],
+      "policy": ["direct_policies", "role_assignments"],
+      "api_endpoint": ["api_endpoints"]
+    },
+    "namespace": "global_across_all_uuid_sources",
+    "v050SeedRemap": {
+      "sourceTable": "role_assignments",
+      "oldId": "00000000-0000-0000-0000-000000000001",
+      "newId": "00000000-0000-0000-0000-00000000000a",
+      "scopeReferenceTables": [
+        "permission_blocks",
+        "credential_permission_limits"
+      ],
+      "policyQualifiedReferences": "remapped_to_new_id",
+      "entityQualifiedReferences": "retained_on_old_id",
+      "unclassifiedOrInvalidObjectKind": "upgrade_blocked_as_ambiguous"
+    },
+    "softDeleteReservation": "retained",
+    "physicalDeleteReservation": "released_in_same_transaction",
+    "idMutation": "rejected",
+    "truncate": "rejected",
+    "nonExactTargets": ["profile", "audit_log", "signing_key"]
+  },
+  "authorizationTargets": {
+    "role": {
+      "readActions": ["read", "role.manage"],
+      "mutationActions": ["role.manage"]
+    },
+    "policy": {
+      "readActions": ["read", "policy.manage", "manage"],
+      "mutationActions": ["policy.manage"]
+    },
+    "api_endpoint": {
+      "readActions": ["read", "manage"],
+      "mutationActions": ["manage"],
+      "mutationScope": "platform",
+      "executionActions": ["execute", "manage"]
+    },
+    "listAuthorization": "canonical_grants_deny_overrides_allow_before_pagination",
+    "delegatedInvocation": "authz.check_in_resolved_tenant_or_platform",
+    "selfInvocation": "authenticated_without_authz.check"
+  },
+  "bootstrapReconciliation": {
+    "transaction": "one_locked_transaction_for_complete_document",
+    "concurrentMutationBarrier": "exclusive_relation_locks",
+    "cacheBarrier": "grants_dirty_until_commit_or_rollback",
+    "existingRows": "exact_normalized_semantic_match_required",
+    "capabilityApplicability": "exact_set_extra_rows_rejected",
+    "passwordAndSharedKey": "declared_credential_is_only_active_row_of_kind_and_matches_exactly",
+    "configOwnedCredentialSlot": "api_create_change_reset_reveal_and_target_mutation_rejected",
+    "revokedHistoricalConfigCredentialOwnsSlot": false
+  },
+  "persistedStrings": {
+    "profileObjectKind": ["entity", "resource", "group", "tenant", "credential"],
+    "profileEntityKind": ["human", "device", "service", "workload", "application"],
+    "profileNonEntityKindConstraint": "non_null_text",
+    "profileStatus": ["active", "deprecated", "disabled"],
+    "profileVersionStatus": ["draft", "active", "deprecated", "disabled"],
+    "tenantMembershipStatus": ["active", "invited", "suspended", "left"],
+    "groupType": ["object", "principal"],
+    "signingKeyAlgorithm": ["ES256"],
+    "signingKeyStatus": ["primary", "standby", "retired"],
+    "credentialRevocationProvenance": ["tenant_deleted", "entity_deleted", "manual"],
+    "permissionBlockScopeMode": [
+      "platform",
+      "tenant",
+      "object_kind",
+      "object_type",
+      "object",
+      "group",
+      "group_direct_objects",
+      "group_descendant_objects",
+      "group_child_groups",
+      "group_descendant_groups"
+    ],
+    "accessTokenCeilingScopeMode": [
+      "platform",
+      "tenant",
+      "object_kind",
+      "object_type",
+      "object"
+    ]
+  },
+  "credentialMetadata": {
+    "accessTokenKeys": ["name", "description"],
+    "accessTokenNameReadFallback": ["metadata.name", "identifier", "Access token"],
+    "accessTokenEmptyDescriptionReadsAs": null,
+    "sharedKeyKeys": ["description"],
+    "revocationKeys": ["revoked_at", "revocation_reason", "revoked_by_entity_id"],
+    "tenantRestoreClears": ["revoked_at", "revocation_reason"],
+    "revocationReasonValues": ["tenant_deleted", "entity_deleted", "manual"],
+    "manualRevocationOverwritesPriorProvenance": true
+  },
+  "pki": {
+    "authorityKind": [
+      "root",
+      "platform_intermediate",
+      "platform_leaf_issuer",
+      "tenant_intermediate"
+    ],
+    "authorityStatus": [
+      "provisioning",
+      "pending_signature",
+      "active",
+      "retiring",
+      "retired",
+      "revoked",
+      "expired",
+      "failed"
+    ],
+    "authorityKeyBackend": ["public_only", "encrypted_database", "pkcs11", "kms"],
+    "authorityProvisioningMode": ["imported", "offline", "automated", "config_bootstrap"],
+    "certificateRenewalKeyMode": ["csr", "generated"],
+    "enrollmentRateScopeKind": ["entity", "tenant"],
+    "lifecycleSubjectKind": ["credential", "authority"],
+    "lifecycleWindowKind": ["renewal", "expiry", "authority_expiry"],
+    "legacyIssuerMigration": {
+      "metadataKey": "issuer_migration",
+      "sentinel": "legacy_unmanaged",
+      "appliesToCredentialKind": "certificate",
+      "issuerId": null,
+      "revocationArtifactPolicy": "local_status_only_no_crl_or_ocsp"
+    },
+    "certificateMetadata": {
+      "serializedKeys": [
+        "certificate_pem",
+        "chain_pem",
+        "subject",
+        "dns_names",
+        "ip_addresses",
+        "issuer_kind",
+        "issuer_subject",
+        "issuer_serial_number",
+        "issuer_fingerprint_sha256",
+        "fingerprint_sha256",
+        "profile_id",
+        "profile_name",
+        "identity_uri",
+        "renewed_from_credential_id",
+        "renewal_threshold_seconds",
+        "renewal_due_at",
+        "not_before",
+        "not_after",
+        "issued_from_csr",
+        "revoked_at",
+        "revocation_reason"
+      ],
+      "revocationKeys": ["revoked_at", "revocation_reason", "revoked_by_entity_id"],
+      "reasonNormalization": "trim_then_ascii_lowercase",
+      "reasonSyntax": "1_to_64_ascii_alphanumeric_underscore_hyphen_or_dot",
+      "defaultReason": "unspecified",
+      "entityWideDefaultReason": "entity_revoked",
+      "renewalReplacementReason": "superseded",
+      "rfcReasonMappings": {
+        "key_compromise": "key_compromise",
+        "ca_compromise": "ca_compromise",
+        "affiliation_changed": "affiliation_changed",
+        "superseded": "superseded",
+        "cessation_of_operation": "cessation_of_operation",
+        "certificate_hold": "certificate_hold",
+        "remove_from_crl": "remove_from_crl",
+        "privilege_withdrawn": "privilege_withdrawn",
+        "aa_compromise": "aa_compromise"
+      },
+      "unknownReasonWireMapping": "unspecified"
+    },
+    "certificateProfile": {
+      "keyAlgorithm": ["ecdsa", "rsa", "ed25519"],
+      "keySizePolicy": {
+        "ecdsa": [256, 384],
+        "rsa": "integer_gte_2048_divisible_by_256",
+        "ed25519": [255]
+      },
+      "keyUsage": [
+        "digital_signature",
+        "content_commitment",
+        "key_encipherment",
+        "data_encipherment",
+        "key_agreement"
+      ],
+      "extendedKeyUsage": [
+        "server_auth",
+        "client_auth",
+        "code_signing",
+        "email_protection",
+        "time_stamping",
+        "ocsp_signing"
+      ],
+      "sanRuleMode": {
+        "dns": ["deny", "allowlist", "entity_template"],
+        "ip": ["deny", "allowlist"],
+        "email": ["deny", "allowlist"],
+        "uri": ["identity"]
+      },
+      "identityUriTemplate": "urn:atom:{scope}entity:{entity_id}",
+      "basicConstraints": {"ca": false, "path_len": null}
+    }
+  },
+  "callouts": {
+    "transport": ["http", "grpc"],
+    "httpMethod": ["POST", "GET"],
+    "surface": ["graphql", "grpc"],
+    "decision": ["allow", "deny"],
+    "onError": ["deny", "allow"],
+    "defaultOnError": "deny",
+    "defaultHttpMethod": "POST",
+    "defaultTimeoutMilliseconds": 500,
+    "chainEvaluation": "ordered_all_must_allow_fail_fast",
+    "actorScope": ["", "session", "access_token"],
+    "redactedFieldNamesCaseInsensitive": ["secret", "password", "key"]
+  },
+  "abac": {
+    "pathRoots": ["entity", "resource", "object", "tenant", "context"],
+    "operators": ["eq", "neq", "in", "contains", "gt", "gte", "lt", "lte"],
+    "conditionEntriesCombine": "and",
+    "operatorEntriesCombine": "and",
+    "emptyObjectMatches": true,
+    "missingPathMatches": false,
+    "unknownOperatorMatches": false,
+    "nonObjectConditionsMatch": false,
+    "comparisons": ["number", "rfc3339_timestamp"]
+  },
+  "customEndpoint": {
+    "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    "pathPrefix": "/api/custom/",
+    "forbiddenPathFragments": ["//", "..", "?", "#"],
+    "operationKinds": ["query", "mutation"],
+    "authModes": ["caller_context", "service_context"],
+    "serviceContextRequiresEntity": true,
+    "statuses": ["draft", "active", "disabled"],
+    "callableStatus": "active",
+    "executionStatuses": ["success", "error", "denied"],
+    "maxBodyBytes": 1048576,
+    "executionTimeoutMilliseconds": 5000,
+    "emptyBody": {},
+    "emptyVariablesMapping": "forward_body",
+    "missingVariableSource": "omit_target",
+    "variableTargetSyntax": "dot_path",
+    "variableSources": [
+      "$body",
+      "$body.<dot-path>",
+      "$query.<name>",
+      "$headers.<name>",
+      "$auth.entityId",
+      "$auth.entity_id",
+      "$auth.tenantId",
+      "$auth.tenant_id",
+      "$auth.sessionId",
+      "$auth.session_id",
+      "$path",
+      "$path.path"
+    ],
+    "nonSourceMappingValue": "literal",
+    "emptyResponseMapping": "return_graphql_data",
+    "responseSelectorPrefix": "$.",
+    "missingResponseSelector": "null",
+    "callerAuthentication": "bearer",
+    "callerActions": ["execute", "manage"],
+    "callerScopes": ["endpoint_object", "endpoint_tenant"],
+    "introspectionAllowed": false
+  },
+  "encodings": {
+    "apiKeyPrefix": "atom_",
+    "apiKeyCanonicalFormat": "atom_<32-lowercase-hex-credential-id>_<64-lowercase-hex-secret>",
+    "apiKeyAcceptedHexCase": "case_insensitive",
+    "sharedKeyCanonicalFormat": "atom_shared_<32-lowercase-hex-credential-id>_<64-lowercase-hex-secret>",
+    "configManagedMarker": "config",
+    "namespacedObjectType": "<object-kind>:<sub-kind>",
+    "groupScopeReference": "<group-uuid>:<namespaced-object-type-or-group>"
+  }
+}

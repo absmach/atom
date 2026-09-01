@@ -111,6 +111,7 @@ pub async fn readiness(state: &AppState) -> (StatusCode, Json<SystemStatus>) {
         &signing_keys,
         &grpc_ready,
         &certificate_issuer,
+        &cache,
     );
     let status = if ready {
         ComponentStatus::Ok
@@ -151,6 +152,7 @@ fn readiness_ok(
     signing_keys: &ComponentCheck,
     grpc_ready: &ComponentCheck,
     certificate_issuer: &ComponentCheck,
+    cache: &ComponentCheck,
 ) -> bool {
     matches!(&database.status, ComponentStatus::Ok)
         && matches!(&migrations.status, ComponentStatus::Ok)
@@ -158,6 +160,10 @@ fn readiness_ok(
         && matches!(&grpc_ready.status, ComponentStatus::Ok)
         && matches!(
             &certificate_issuer.status,
+            ComponentStatus::Ok | ComponentStatus::Disabled
+        )
+        && matches!(
+            &cache.status,
             ComponentStatus::Ok | ComponentStatus::Disabled
         )
 }
@@ -345,12 +351,10 @@ fn certificate_issuer_config_check(
     }
 }
 
-/// Never part of the hard readiness requirement (see `readiness_ok`) — caching
-/// is a performance optimization with a Postgres fallback for reads, so a down
-/// Redis must not fail `/health/ready`. While enabled, an unreachable Redis
-/// does refuse security-sensitive mutations (see `src/cache/mod.rs`); that
-/// distinction is noted in the message rather than folded into the readiness
-/// gate, which only concerns general request-serving availability.
+/// Part of full-API readiness whenever configured. Reads can fall back to
+/// Postgres, but prepare/enabled writers deliberately fail closed when Redis is
+/// unavailable; returning 200 would keep routing mutations to a replica that
+/// cannot serve the complete API.
 async fn cache_check(state: &AppState) -> ComponentCheck {
     let Some(cache) = &state.cache else {
         return ComponentCheck {
@@ -361,9 +365,31 @@ async fn cache_check(state: &AppState) -> ComponentCheck {
     match cache.ping().await {
         Ok(()) => ComponentCheck {
             status: ComponentStatus::Ok,
-            message: "cache reachable".to_string(),
+            message: "cache reachable with maxmemory-policy=noeviction".to_string(),
         },
-        Err(err) => ComponentCheck {
+        Err(crate::cache::CacheError::EvictionPolicy(policy)) => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!(
+                "cache maxmemory-policy is {policy}; noeviction is required for persistent mutation barriers"
+            ),
+        },
+        Err(crate::cache::CacheError::Topology(reason)) => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!("cache Redis topology is unsafe: {reason}"),
+        },
+        Err(
+            err @ (crate::cache::CacheError::NamespaceUninitialized
+            | crate::cache::CacheError::NamespaceInvalid
+            | crate::cache::CacheError::IncarnationChanged),
+        ) => ComponentCheck {
+            status: ComponentStatus::Error,
+            message: format!("cache namespace unsafe: {err}"),
+        },
+        Err(
+            err @ (crate::cache::CacheError::Timeout
+            | crate::cache::CacheError::Pool(_)
+            | crate::cache::CacheError::Redis(_)),
+        ) => ComponentCheck {
             status: ComponentStatus::Degraded,
             message: format!(
                 "cache unreachable: {err}; reads fall back to the database, but \
@@ -500,6 +526,7 @@ mod tests {
         let migrations = check(ComponentStatus::Ok);
         let signing_keys = check(ComponentStatus::Ok);
         let ca = check(ComponentStatus::Ok);
+        let cache = check(ComponentStatus::Disabled);
 
         assert!(!readiness_ok(
             &database,
@@ -507,6 +534,7 @@ mod tests {
             &signing_keys,
             &check(ComponentStatus::Degraded),
             &ca,
+            &cache,
         ));
         assert!(!readiness_ok(
             &database,
@@ -514,6 +542,7 @@ mod tests {
             &signing_keys,
             &check(ComponentStatus::Error),
             &ca,
+            &cache,
         ));
         assert!(readiness_ok(
             &database,
@@ -521,6 +550,28 @@ mod tests {
             &signing_keys,
             &check(ComponentStatus::Ok),
             &ca,
+            &cache,
+        ));
+    }
+
+    #[test]
+    fn readiness_blocks_when_configured_cache_is_unavailable() {
+        let ok = check(ComponentStatus::Ok);
+        assert!(!readiness_ok(
+            &ok,
+            &ok,
+            &ok,
+            &ok,
+            &check(ComponentStatus::Disabled),
+            &check(ComponentStatus::Degraded),
+        ));
+        assert!(readiness_ok(
+            &ok,
+            &ok,
+            &ok,
+            &ok,
+            &check(ComponentStatus::Disabled),
+            &check(ComponentStatus::Ok),
         ));
     }
 
@@ -533,6 +584,7 @@ mod tests {
             &ok,
             &ok,
             &check(ComponentStatus::Error),
+            &check(ComponentStatus::Disabled),
         ));
         // A deployment without an active PKI issuer stays ready — provisioning
         // and historical issuer rows report Disabled and do not block.
@@ -541,6 +593,7 @@ mod tests {
             &ok,
             &ok,
             &ok,
+            &check(ComponentStatus::Disabled),
             &check(ComponentStatus::Disabled),
         ));
     }
@@ -581,7 +634,14 @@ mod tests {
 
         assert!(matches!(status.status, ComponentStatus::Error));
         assert!(status.message.contains("CA key provider is not configured"));
-        assert!(!readiness_ok(&ok, &ok, &ok, &ok, &status));
+        assert!(!readiness_ok(
+            &ok,
+            &ok,
+            &ok,
+            &ok,
+            &status,
+            &check(ComponentStatus::Disabled),
+        ));
     }
 
     #[test]

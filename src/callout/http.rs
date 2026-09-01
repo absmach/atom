@@ -27,14 +27,14 @@ pub struct HttpCallout {
 }
 
 impl HttpCallout {
-    pub fn build(cfg: &EndpointConfig) -> Result<Self> {
+    pub async fn build(cfg: &EndpointConfig) -> Result<Self> {
         let http = match &cfg.transport {
             TransportConfig::Http(h) => h.clone(),
             TransportConfig::Grpc(_) => {
                 anyhow::bail!("HttpCallout::build called on a grpc endpoint");
             }
         };
-        let client = build_client(&http, cfg.tls.as_ref(), cfg.timeout_ms)?;
+        let client = build_client(&http, cfg.tls.as_ref(), cfg.timeout_ms).await?;
         Ok(Self {
             client,
             url: http.url.clone(),
@@ -87,7 +87,7 @@ impl HttpCallout {
     }
 }
 
-fn build_client(
+async fn build_client(
     http: &HttpTransportConfig,
     tls: Option<&TlsConfig>,
     timeout_ms: u64,
@@ -99,8 +99,9 @@ fn build_client(
             builder = builder.danger_accept_invalid_certs(true);
         }
         if let Some(ca_path) = &tls.ca_path {
-            let pem =
-                std::fs::read(ca_path).with_context(|| format!("read callout TLS CA {ca_path}"))?;
+            let pem = tokio::fs::read(ca_path)
+                .await
+                .with_context(|| format!("read callout TLS CA {ca_path}"))?;
             for cert in reqwest::Certificate::from_pem_bundle(&pem)
                 .with_context(|| format!("parse callout TLS CA {ca_path}"))?
             {
@@ -108,9 +109,11 @@ fn build_client(
             }
         }
         if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
-            let cert_pem = std::fs::read(cert_path)
+            let cert_pem = tokio::fs::read(cert_path)
+                .await
                 .with_context(|| format!("read callout mTLS cert {cert_path}"))?;
-            let key_pem = std::fs::read(key_path)
+            let key_pem = tokio::fs::read(key_path)
+                .await
                 .with_context(|| format!("read callout mTLS key {key_path}"))?;
             let mut identity_pem = cert_pem;
             identity_pem.push(b'\n');
@@ -203,13 +206,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_client_rejects_invalid_url() {
+    #[tokio::test]
+    async fn build_client_rejects_invalid_url() {
         let http = HttpTransportConfig {
             url: "not-a-url".to_string(),
             method: HttpMethod::Post,
             headers: Default::default(),
         };
-        assert!(build_client(&http, None, 500).is_err());
+        assert!(build_client(&http, None, 500).await.is_err());
     }
 }

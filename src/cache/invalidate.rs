@@ -13,7 +13,7 @@ use std::{future::Future, pin::Pin};
 
 use sqlx::{PgPool, Postgres, Transaction};
 
-use super::{CacheCategory, CacheClient};
+use super::{CacheCategory, CacheClient, CacheLease};
 use crate::error::{db_err, AppError};
 
 /// A boxed future borrowing the transaction it runs on — what
@@ -44,9 +44,9 @@ where
         return mutate().await;
     };
 
-    cache.begin(category, keys).await?;
+    let lease = cache.begin(category, keys).await?;
     let result = mutate().await;
-    cache.end(category, keys).await;
+    cache.end(lease).await;
     result
 }
 
@@ -83,19 +83,18 @@ where
 {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let keys = collect_keys(&mut tx).await?;
-    cache.begin(category, &keys).await?;
+    let lease = cache.begin(category, &keys).await?;
     let outcome = mutate(&mut tx).await;
     let outcome = match outcome {
         Ok(value) => {
-            let result =
-                crate::audit::commit_observed_with_cache(tx, cache, category, &keys, value).await;
+            let result = crate::audit::commit_observed_with_cache(tx, cache, lease, value).await;
             if let Ok(ref value) = result {
                 on_success(value);
             }
             result
         }
         Err(err) => {
-            cache.end(category, &keys).await;
+            cache.end(lease).await;
             Err(err)
         }
     };
@@ -109,33 +108,34 @@ where
 /// [`guarded_tx_mutation`] for the single-category case it covers; `begin_all`
 /// remains for mutations spanning several categories on one transaction.
 ///
-/// If a later group's barrier can't be established, the ones already
-/// established are cleared immediately rather than left to self-heal on their
-/// barrier TTL. Pair with [`end_all`], called unconditionally after the
+/// If a later group's barrier can't be established, cleanup is attempted for
+/// every requested group. Exact-token cleanup is a no-op where BEGIN did not
+/// execute, and prevents an ambiguous timeout from leaving an avoidable
+/// permanent barrier. Pair with [`end_all`], called unconditionally after the
 /// mutation regardless of outcome.
 pub async fn begin_all(
     cache: &CacheClient,
     groups: &[(CacheCategory, &[String])],
-) -> Result<(), AppError> {
+) -> Result<Vec<CacheLease>, AppError> {
     let mut established = Vec::with_capacity(groups.len());
     for &(category, keys) in groups {
         match cache.begin(category, keys).await {
-            Ok(()) => established.push((category, keys)),
+            Ok(lease) => established.push(lease),
             Err(err) => {
-                for (category, keys) in established {
-                    cache.end(category, keys).await;
+                for lease in established {
+                    cache.end(lease).await;
                 }
                 return Err(err);
             }
         }
     }
-    Ok(())
+    Ok(established)
 }
 
 /// Clears the barrier on every `(category, keys)` group established by a
 /// prior [`begin_all`] call. Always best-effort, mirroring [`CacheClient::end`].
-pub async fn end_all(cache: &CacheClient, groups: &[(CacheCategory, &[String])]) {
-    for &(category, keys) in groups {
-        cache.end(category, keys).await;
+pub async fn end_all(cache: &CacheClient, leases: Vec<CacheLease>) {
+    for lease in leases {
+        cache.end(lease).await;
     }
 }

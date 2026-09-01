@@ -597,6 +597,107 @@ async fn create_policy_and_authz_check_allow_and_deny() {
 
 #[tokio::test]
 #[ignore]
+async fn deleted_role_listing_accepts_platform_manage_without_role_read() {
+    let pool = common::pool().await;
+    let actor = entity(&pool, "human").await;
+    let role_id: Uuid =
+        sqlx::query_scalar("INSERT INTO roles (name, deleted_at) VALUES ($1, NOW()) RETURNING id")
+            .bind(format!("deleted-role-{role_id}", role_id = Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .expect("insert deleted role");
+    let manage_id = seeded_action(&pool, "manage").await;
+    let block_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
+           VALUES ('platform', 'allow', '{}'::jsonb)
+           RETURNING id"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert platform manage block");
+    sqlx::query(
+        "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(block_id)
+    .bind(manage_id)
+    .execute(&pool)
+    .await
+    .expect("attach manage action");
+    sqlx::query(
+        r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
+           VALUES ('entity', $1, $2)"#,
+    )
+    .bind(actor)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("grant platform manage");
+
+    let response = build_schema(state(pool))
+        .execute(authed_as(
+            actor,
+            "{ roles(deleted: deleted) { items { id } total } }",
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().expect("json data");
+    assert!(data["roles"]["items"]
+        .as_array()
+        .expect("role items")
+        .iter()
+        .any(|role| role["id"] == serde_json::json!(role_id.to_string())));
+}
+
+#[tokio::test]
+#[ignore]
+async fn role_lookup_masks_existence_but_preserves_admin_not_found() {
+    let pool = common::pool().await;
+    let outsider = entity(&pool, "human").await;
+    let role_id: Uuid = sqlx::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
+        .bind(format!("role-oracle-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("insert role");
+    let missing_id = Uuid::new_v4();
+    let schema = build_schema(state(pool));
+
+    for id in [role_id, missing_id] {
+        let response = schema
+            .execute(authed_as(
+                outsider,
+                format!("{{ role(id: \"{id}\") {{ id }} }}"),
+            ))
+            .await;
+        assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+        assert_eq!(response.errors[0].message, "forbidden");
+    }
+
+    let admin_missing = schema
+        .execute(authed(format!("{{ role(id: \"{missing_id}\") {{ id }} }}")))
+        .await;
+    assert_eq!(admin_missing.errors.len(), 1, "{:?}", admin_missing.errors);
+    assert_eq!(
+        admin_missing.errors[0].message,
+        format!("role {missing_id} not found")
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn role_and_assignment_lists_refuse_callers_without_read_capabilities() {
+    let pool = common::pool().await;
+    let outsider = entity(&pool, "human").await;
+    let schema = build_schema(state(pool));
+
+    for query in ["{ roles { total } }", "{ roleAssignments { total } }"] {
+        let response = schema.execute(authed_as(outsider, query)).await;
+        assert_eq!(response.errors.len(), 1, "{query}: {:?}", response.errors);
+        assert_eq!(response.errors[0].message, "forbidden");
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn policy_deletion_takes_effect_within_same_graphql_request() {
     let pool = common::pool().await;
     let actor = entity(&pool, "human").await;

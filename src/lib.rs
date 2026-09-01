@@ -31,6 +31,7 @@ pub mod mail;
 pub mod managed_by;
 pub mod metrics;
 pub mod models;
+pub mod protected_objects;
 pub mod purge;
 pub mod rate_limit;
 pub mod routes;

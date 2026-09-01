@@ -8,9 +8,11 @@ info:
 
     Administrative and domain operations are exposed through `POST /graphql`;
     the remaining HTTP routes are limited to authentication, health, JWKS,
-    public PKI artifacts, and configured custom endpoint execution. Atom also
-    exposes a separately versioned gRPC API described by
-    `proto/atom/v1/atom.proto`.
+    public PKI artifacts, and configured custom endpoint execution. The
+    optional native and RFC 7030 enrollment routes are served from a dedicated
+    TLS listener but remain part of this frozen HTTP contract. Atom also
+    exposes separately frozen gRPC contracts described by
+    `proto/atom/v1/atom.proto` and `proto/atom/v1/callout.proto`.
 
     Authenticated requests accept an ES256 JWT or Atom access token in the
     `Authorization: Bearer <token>` header. The GraphQL and session routes also
@@ -33,6 +35,8 @@ tags:
     description: Domain and administrative GraphQL operations
   - name: PKI artifacts
     description: Public trust, CRL, and OCSP publication endpoints
+  - name: PKI enrollment
+    description: Native and RFC 7030 enrollment on the optional dedicated TLS listener
   - name: Custom endpoints
     description: Operator-configured REST projections over GraphQL
 
@@ -51,6 +55,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SystemStatus"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "503":
           description: At least one required component is not ready
           content:
@@ -70,6 +76,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LiveStatus"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
 
   /health/ready:
     get:
@@ -83,6 +91,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SystemStatus"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "503":
           description: At least one required component is not ready
           content:
@@ -103,6 +113,8 @@ paths:
             text/plain:
               schema:
                 type: string
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "404":
           description: Metrics are disabled or unavailable in this build
 
@@ -118,6 +130,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Jwks"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /auth/public-config:
     get:
@@ -131,6 +147,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PublicAuthConfig"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /auth/signup:
     post:
@@ -154,8 +174,16 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -185,6 +213,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -214,6 +250,8 @@ paths:
                     enum: [true]
         "400":
           $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -233,6 +271,14 @@ paths:
           description: Request accepted whether or not the email exists
         "400":
           $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -256,6 +302,12 @@ paths:
           description: Request accepted whether or not the email exists
         "400":
           $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
         "429":
@@ -277,6 +329,16 @@ paths:
           description: Password reset; existing sessions and credentials are revoked
         "400":
           $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -304,6 +366,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -334,6 +398,10 @@ paths:
               schema:
                 type: string
                 format: uri
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /auth/oauth/exchange:
     post:
@@ -355,6 +423,14 @@ paths:
                 $ref: "#/components/schemas/LoginResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -387,6 +463,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /auth/introspect:
     get:
@@ -405,6 +485,10 @@ paths:
                 $ref: "#/components/schemas/IntrospectionResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /auth/session:
     get:
@@ -423,6 +507,10 @@ paths:
                 $ref: "#/components/schemas/CurrentSessionResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /auth/sessions/{id}:
     get:
@@ -441,12 +529,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /auth/keys/rotate:
     post:
@@ -463,6 +557,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /graphql:
     post:
@@ -491,10 +589,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GraphQLResponse"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -521,6 +625,10 @@ paths:
                 type: string
         "304":
           description: Cached representation remains current
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /certs/issuers/{issuer_id}/crl:
     get:
@@ -547,8 +655,14 @@ paths:
                 format: binary
         "304":
           description: Cached representation remains current
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /certs/issuers/{issuer_id}/ocsp:
     post:
@@ -572,6 +686,320 @@ paths:
               schema:
                 type: string
                 format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /pki/enroll:
+    servers:
+      - url: https://{host}:{port}
+        description: Dedicated Atom enrollment TLS listener
+        variables:
+          host:
+            default: localhost
+          port:
+            default: "8443"
+    post:
+      tags: [PKI enrollment]
+      operationId: enrollCertificate
+      summary: Enroll a certificate using an authenticated Atom identity
+      description: |
+        This route is mounted only when the dedicated enrollment TLS listener
+        is enabled. A cookie-authenticated request also requires a trusted
+        Origin or Referer because this is an unsafe method.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NativeEnrollmentRequest"
+      responses:
+        "200":
+          description: Certificate issued, or the idempotent result replayed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /pki/reenroll:
+    servers:
+      - url: https://{host}:{port}
+        description: Dedicated Atom enrollment TLS listener
+        variables:
+          host:
+            default: localhost
+          port:
+            default: "8443"
+    post:
+      tags: [PKI enrollment]
+      operationId: reenrollCertificate
+      summary: Renew a certificate by proving possession through mTLS
+      description: |
+        The client certificate must be presented and verified during the TLS
+        handshake. OpenAPI 3.0 has no native mutual-TLS security-scheme type;
+        `x-atom-client-certificate-required` is therefore part of the frozen
+        transport contract.
+      security: []
+      x-atom-client-certificate-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NativeEnrollmentRequest"
+      responses:
+        "200":
+          description: Certificate renewed, or the idempotent result replayed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /.well-known/est/cacerts:
+    servers:
+      - url: https://{host}:{port}
+        description: Dedicated Atom enrollment TLS listener
+        variables:
+          host:
+            default: localhost
+          port:
+            default: "8443"
+    get:
+      tags: [PKI enrollment]
+      operationId: estCaCerts
+      summary: Return the RFC 7030 CA certificate bundle
+      responses:
+        "200":
+          $ref: "#/components/responses/EstCertificates"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /.well-known/est/simpleenroll:
+    servers:
+      - url: https://{host}:{port}
+        description: Dedicated Atom enrollment TLS listener
+        variables:
+          host:
+            default: localhost
+          port:
+            default: "8443"
+    post:
+      tags: [PKI enrollment]
+      operationId: estSimpleEnroll
+      summary: Enroll a certificate using RFC 7030 simpleenroll
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/EstPkcs10Request"
+      responses:
+        "200":
+          $ref: "#/components/responses/EstCertificates"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/EstUnauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/EstUnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /.well-known/est/simplereenroll:
+    servers:
+      - url: https://{host}:{port}
+        description: Dedicated Atom enrollment TLS listener
+        variables:
+          host:
+            default: localhost
+          port:
+            default: "8443"
+    post:
+      tags: [PKI enrollment]
+      operationId: estSimpleReenroll
+      summary: Renew a certificate using RFC 7030 simple-reenroll and mTLS
+      description: |
+        The client certificate must be presented and verified during the TLS
+        handshake. No HTTP Authorization credential is used.
+      security: []
+      x-atom-client-certificate-required: true
+      requestBody:
+        $ref: "#/components/requestBodies/EstPkcs10Request"
+      responses:
+        "200":
+          $ref: "#/components/responses/EstCertificates"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/EstUnauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/EstUnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /.well-known/est/serverkeygen:
+    servers:
+      - url: https://{host}:{port}
+        description: Dedicated Atom enrollment TLS listener
+        variables:
+          host:
+            default: localhost
+          port:
+            default: "8443"
+    post:
+      tags: [PKI enrollment]
+      operationId: estServerKeygen
+      summary: Generate a one-time private key and enroll its certificate
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/EstPkcs10Request"
+      responses:
+        "200":
+          description: One-time PKCS#8 private key and issued certificate chain
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            multipart/mixed:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/EstUnauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/EstUnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /.well-known/est/csrattrs:
+    servers:
+      - url: https://{host}:{port}
+        description: Dedicated Atom enrollment TLS listener
+        variables:
+          host:
+            default: localhost
+          port:
+            default: "8443"
+    get:
+      tags: [PKI enrollment]
+      operationId: estCsrAttrs
+      summary: Return CSR attribute requirements for the authenticated identity
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        "200":
+          description: Base64-encoded DER CsrAttrs structure
+          headers:
+            Content-Transfer-Encoding:
+              schema:
+                type: string
+                enum: [base64]
+            Cache-Control:
+              schema:
+                type: string
+                enum: ["private, no-store"]
+          content:
+            application/csrattrs:
+              schema:
+                type: string
+                format: byte
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/EstUnauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /api/custom/{path}:
     parameters:
@@ -598,6 +1026,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
     post:
       tags: [Custom endpoints]
       operationId: executeCustomEndpointPost
@@ -617,6 +1051,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
     put:
       tags: [Custom endpoints]
       operationId: executeCustomEndpointPut
@@ -636,6 +1076,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
     patch:
       tags: [Custom endpoints]
       operationId: executeCustomEndpointPatch
@@ -655,6 +1101,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
     delete:
       tags: [Custom endpoints]
       operationId: executeCustomEndpointDelete
@@ -674,6 +1126,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
 components:
   securitySchemes:
@@ -681,6 +1139,10 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT or atom access token
+    basicAuth:
+      type: http
+      scheme: basic
+      description: EST username and password authentication
     cookieAuth:
       type: apiKey
       in: cookie
@@ -721,6 +1183,9 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+        text/plain:
+          schema:
+            type: string
     Unauthorized:
       description: Missing or invalid authentication
       content:
@@ -751,12 +1216,55 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+        text/plain:
+          schema:
+            type: string
+    RequestTimeout:
+      description: The listener's total request deadline expired
+    JsonUnsupportedMediaType:
+      description: Content-Type is missing or is not JSON
+      content:
+        text/plain:
+          schema:
+            type: string
     UnprocessableEntity:
       description: JSON body does not match the frozen request DTO
       content:
         text/plain:
           schema:
             type: string
+    EstUnauthorized:
+      description: Missing or invalid HTTP Basic, Bearer, or client-certificate authentication
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Basic realm="Atom EST"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    EstUnsupportedMediaType:
+      description: Content-Type is missing or is not application/pkcs10
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    EstCertificates:
+      description: Base64-encoded DER certs-only CMS containing the issued certificate chain
+      headers:
+        Content-Transfer-Encoding:
+          schema:
+            type: string
+            enum: [base64]
+        Cache-Control:
+          schema:
+            type: string
+      content:
+        "application/pkcs7-mime; smime-type=certs-only":
+          schema:
+            type: string
+            format: byte
     RateLimited:
       description: Rate limit exceeded
       headers:
@@ -780,6 +1288,13 @@ components:
       content:
         application/json:
           schema: {}
+    EstPkcs10Request:
+      required: true
+      content:
+        application/pkcs10:
+          schema:
+            type: string
+            format: byte
 
   schemas:
     Error:
@@ -879,7 +1394,7 @@ components:
     SystemStatus:
       type: object
       additionalProperties: false
-      required: [status, http_ready, grpc_ready, database, migrations, signing_keys, certificate_issuer, db_pool, signing_key_state, audit_retention, rate_limits]
+      required: [status, http_ready, grpc_ready, database, migrations, signing_keys, certificate_issuer, cache, db_pool, signing_key_state, audit_retention, rate_limits]
       properties:
         status:
           $ref: "#/components/schemas/ComponentStatus"
@@ -894,6 +1409,8 @@ components:
         signing_keys:
           $ref: "#/components/schemas/ComponentCheck"
         certificate_issuer:
+          $ref: "#/components/schemas/ComponentCheck"
+        cache:
           $ref: "#/components/schemas/ComponentCheck"
         db_pool:
           $ref: "#/components/schemas/DbPoolStatus"
@@ -959,7 +1476,7 @@ components:
     LoginResponse:
       type: object
       additionalProperties: false
-      required: [token, entity_id, session_id, expires_at, verification_required]
+      required: [token, entity_id, session_id, expires_at]
       properties:
         token: { type: string }
         entity_id: { type: string, format: uuid }
@@ -967,6 +1484,45 @@ components:
         expires_at: { type: string, format: date-time }
         email_verified: { type: boolean }
         verification_required: { type: boolean }
+
+    NativeEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [csr_pem, idempotency_key]
+      properties:
+        csr_pem:
+          type: string
+          description: PEM-encoded PKCS#10 certificate signing request
+        ttl_secs:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        idempotency_key:
+          type: string
+
+    EnrollmentResponse:
+      type: object
+      additionalProperties: false
+      required: [credential_id, entity_id, tenant_id, issuer_id, profile_id, profile_name, identity_uri, serial_number, certificate_pem, chain_pem, not_after, renewal_threshold_seconds, renewal_due_at, idempotent_replay]
+      properties:
+        credential_id: { type: string, format: uuid }
+        entity_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid, nullable: true }
+        issuer_id: { type: string, format: uuid }
+        profile_id: { type: string, format: uuid }
+        profile_name: { type: string }
+        identity_uri: { type: string, format: uri }
+        serial_number: { type: string }
+        certificate_pem: { type: string }
+        chain_pem: { type: string }
+        not_after: { type: string, format: date-time }
+        renewal_threshold_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        renewal_due_at: { type: string, format: date-time }
+        idempotent_replay: { type: boolean }
 
     SignupRequest:
       type: object
@@ -1060,6 +1616,9 @@ components:
         query: { type: string }
         operationName: { type: string, nullable: true }
         variables:
+          type: object
+          nullable: true
+        extensions:
           type: object
           nullable: true
 

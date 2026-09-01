@@ -54,7 +54,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Provision disposable SoftHSM PKCS#11 token
         run: |
@@ -77,9 +77,9 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install independent EST interoperability client
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.26.x'
+          go-version: "1.26.7"
           cache: false
 
       - name: Build pinned GlobalSign EST client
@@ -87,15 +87,16 @@ jobs:
           go install github.com/globalsign/est/cmd/estclient@v1.0.7
           echo "ATOM_EST_CLIENT=$(go env GOPATH)/bin/estclient" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
+          version: "33.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Atom implements a proto it does not own, and nothing rebuilds the
@@ -128,6 +129,12 @@ jobs:
             sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
           }
           psql "$MAINT_URL" -c "SELECT 1" >/dev/null
+          # Atom's exact-token mutation barriers require an ephemeral,
+          # standalone noeviction primary. The stock image defaults can drift,
+          # so make the test topology explicit before the first cache probe.
+          redis-cli -h localhost -p 6379 CONFIG SET save "" >/dev/null
+          redis-cli -h localhost -p 6379 CONFIG SET appendonly no >/dev/null
+          redis-cli -h localhost -p 6379 CONFIG SET maxmemory-policy noeviction >/dev/null
           redis-cli -h localhost -p 6379 PING >/dev/null
           run_one() {
             psql "$MAINT_URL" -c "DROP DATABASE IF EXISTS atom_test;" >/dev/null

@@ -1,8 +1,11 @@
 # Atom bootstrap configuration — demo for docker compose.
 #
 # Loaded by atom when ATOM_BOOTSTRAP_FILE points at it, once at startup right
-# after migrations. Idempotent: every record is keyed on a stable UUID and
-# inserted with ON CONFLICT DO NOTHING, so re-runs are no-ops.
+# after migrations. The complete document is reconciled under one advisory lock
+# and one database transaction, so every row/link commits together or all work
+# rolls back. Re-runs are idempotent: every record is keyed on a stable UUID and
+# accepted only when an existing row's normalized semantics match exactly, so
+# drift fails closed.
 #
 # Every row created (or claimed) from this file is stamped
 # `managed_by='config'`. The API rejects update/delete/revoke on those rows
@@ -26,6 +29,9 @@ entities:
   - id: 00000000-0000-0000-0000-000000000001
     kind: human
     name: admin
+    attributes:
+      role: admin
+      system: true
     credentials:
       - kind: password
         secret: "12345678"
@@ -45,6 +51,7 @@ entities:
   - id: 33333333-3333-3333-3333-333333333333
     kind: service
     name: bootstrap-ingest
+    tenant_id: 11111111-1111-1111-1111-111111111111
     credentials:
       - kind: access_token
         name: ingest
@@ -92,6 +99,11 @@ capabilities:
     applicability:
       - object_kind: resource
         object_type: resource:channel
+  - name: execute
+    description: Execute a command or action
+    applicability:
+      - object_kind: resource
+        object_type: resource:rule
 
 # --- Assignment guardrails ---------------------------------------------
 action_assignment_rules:
