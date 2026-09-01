@@ -2,9 +2,7 @@
 
 mod common;
 
-use atom::bootstrap::{
-    apply, BootstrapCapability, BootstrapConfig, BootstrapTenantDefaults,
-};
+use atom::bootstrap::{apply, BootstrapCapability, BootstrapConfig, BootstrapTenantDefaults};
 use atom::config::{Config, ADMIN_ENTITY_ID};
 use atom::models::tenant::CreateTenant;
 use atom::tenants::repo::create_tenant;
