@@ -35,6 +35,10 @@ use super::DomainEventPayload;
 #[error("{0}")]
 pub struct PublishError(pub String);
 
+fn returned_payload(data: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(data)
+}
+
 /// Delivers a batch of domain events to wherever they're consumed.
 /// Implementations must not panic; a delivery failure is reported per event
 /// so the outbox poller can retry failing rows without losing or duplicate-delivering
@@ -275,17 +279,31 @@ impl EventPublisher for AmqpPublisher {
             match confirm_res {
                 Ok(confirm) => match confirm.await {
                     Ok(Confirmation::Ack(None)) => results.push(Ok(())),
-                    Ok(Confirmation::Ack(Some(_))) => results.push(Err(PublishError(format!(
-                        "event {event_id} was returned as unroutable (no queue bound to routing key {:?}); the broker never stored it",
-                        self.routing_key
-                    )))),
+                    Ok(Confirmation::Ack(Some(returned))) => {
+                        let payload = returned_payload(&returned.data);
+                        tracing::warn!(
+                            %event_id,
+                            exchange = %returned.exchange,
+                            routing_key = %returned.routing_key,
+                            reply_code = ?returned.reply_code,
+                            reply_text = %returned.reply_text,
+                            payload = %payload,
+                            "AMQP broker returned an unroutable event"
+                        );
+                        results.push(Err(PublishError(format!(
+                            "event {event_id} was returned as unroutable (no queue bound to routing key {:?}); the broker never stored it",
+                            self.routing_key
+                        ))));
+                    }
                     Ok(Confirmation::Nack(_)) => results.push(Err(PublishError(format!(
                         "event {event_id} was nacked by the broker"
                     )))),
                     Ok(Confirmation::NotRequested) => results.push(Err(PublishError(format!(
                         "event {event_id}: broker did not confirm (publisher confirms not active)"
                     )))),
-                    Err(e) => results.push(Err(PublishError(format!("confirm event {event_id}: {e}")))),
+                    Err(e) => {
+                        results.push(Err(PublishError(format!("confirm event {event_id}: {e}"))))
+                    }
                 },
                 Err(err) => results.push(Err(err)),
             }
@@ -327,6 +345,21 @@ mod tests {
     async fn log_publisher_succeeds_on_empty_batch() {
         let publisher = LogPublisher;
         assert!(publisher.publish(&[]).await.is_ok());
+    }
+
+    #[test]
+    fn returned_json_payload_is_rendered_as_text() {
+        let payload = br#"{"event":"resource.create","outcome":"allow"}"#;
+
+        assert_eq!(
+            returned_payload(payload),
+            r#"{"event":"resource.create","outcome":"allow"}"#
+        );
+    }
+
+    #[test]
+    fn returned_non_utf8_payload_is_rendered_without_panicking() {
+        assert_eq!(returned_payload(&[b'{', 0xff, b'}']), "{�}");
     }
 
     #[tokio::test]
