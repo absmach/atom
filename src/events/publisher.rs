@@ -21,11 +21,13 @@
 
 use axum::async_trait;
 use lapin::{
+    message::BasicReturnMessage,
     options::{BasicPublishOptions, ConfirmSelectOptions, ExchangeDeclareOptions},
     tcp::{OwnedIdentity, OwnedTLSConfig},
     types::FieldTable,
     BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, ExchangeKind,
 };
+use uuid::Uuid;
 
 use crate::config::EventsConfig;
 
@@ -37,6 +39,47 @@ pub struct PublishError(pub String);
 
 fn returned_payload(data: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(data)
+}
+
+fn log_returned_message(event_id: Uuid, confirmation: &'static str, returned: &BasicReturnMessage) {
+    let payload = returned_payload(&returned.data);
+    tracing::warn!(
+        %event_id,
+        %confirmation,
+        exchange = %returned.exchange,
+        routing_key = %returned.routing_key,
+        reply_code = ?returned.reply_code,
+        reply_text = %returned.reply_text,
+        payload = %payload,
+        "AMQP broker returned an unroutable event"
+    );
+}
+
+fn confirmation_result(
+    event_id: Uuid,
+    routing_key: &str,
+    confirmation: Confirmation,
+) -> Result<(), PublishError> {
+    match confirmation {
+        Confirmation::Ack(None) => Ok(()),
+        Confirmation::Ack(Some(returned)) => {
+            log_returned_message(event_id, "ack", &returned);
+            Err(PublishError(format!(
+                "event {event_id} was returned as unroutable (no queue bound to routing key {routing_key:?}); the broker never stored it"
+            )))
+        }
+        Confirmation::Nack(returned) => {
+            if let Some(returned) = returned {
+                log_returned_message(event_id, "nack", &returned);
+            }
+            Err(PublishError(format!(
+                "event {event_id} was nacked by the broker"
+            )))
+        }
+        Confirmation::NotRequested => Err(PublishError(format!(
+            "event {event_id}: broker did not confirm (publisher confirms not active)"
+        ))),
+    }
 }
 
 /// Delivers a batch of domain events to wherever they're consumed.
@@ -278,29 +321,11 @@ impl EventPublisher for AmqpPublisher {
         for (event_id, confirm_res) in pending {
             match confirm_res {
                 Ok(confirm) => match confirm.await {
-                    Ok(Confirmation::Ack(None)) => results.push(Ok(())),
-                    Ok(Confirmation::Ack(Some(returned))) => {
-                        let payload = returned_payload(&returned.data);
-                        tracing::warn!(
-                            %event_id,
-                            exchange = %returned.exchange,
-                            routing_key = %returned.routing_key,
-                            reply_code = ?returned.reply_code,
-                            reply_text = %returned.reply_text,
-                            payload = %payload,
-                            "AMQP broker returned an unroutable event"
-                        );
-                        results.push(Err(PublishError(format!(
-                            "event {event_id} was returned as unroutable (no queue bound to routing key {:?}); the broker never stored it",
-                            self.routing_key
-                        ))));
-                    }
-                    Ok(Confirmation::Nack(_)) => results.push(Err(PublishError(format!(
-                        "event {event_id} was nacked by the broker"
-                    )))),
-                    Ok(Confirmation::NotRequested) => results.push(Err(PublishError(format!(
-                        "event {event_id}: broker did not confirm (publisher confirms not active)"
-                    )))),
+                    Ok(confirmation) => results.push(confirmation_result(
+                        event_id,
+                        &self.routing_key,
+                        confirmation,
+                    )),
                     Err(e) => {
                         results.push(Err(PublishError(format!("confirm event {event_id}: {e}"))))
                     }
@@ -315,7 +340,40 @@ impl EventPublisher for AmqpPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lapin::message::Delivery;
+    use std::{
+        io::Write,
+        sync::{Arc, Mutex},
+    };
     use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture buffer lock").write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || SharedWriter(Arc::clone(&writer_output)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        let bytes = output.lock().expect("capture buffer lock").clone();
+        String::from_utf8(bytes).expect("tracing output is UTF-8")
+    }
 
     fn sample_event() -> DomainEventPayload {
         DomainEventPayload {
@@ -360,6 +418,38 @@ mod tests {
     #[test]
     fn returned_non_utf8_payload_is_rendered_without_panicking() {
         assert_eq!(returned_payload(&[b'{', 0xff, b'}']), "{�}");
+    }
+
+    #[test]
+    fn nack_returned_message_logs_decoded_payload_and_metadata() {
+        let event_id = Uuid::new_v4();
+        let payload = br#"{"event":"resource.create","outcome":"allow"}"#.to_vec();
+        let returned = BasicReturnMessage {
+            delivery: Delivery::mock(
+                0,
+                "atom.events".into(),
+                "atom.events".into(),
+                false,
+                payload,
+            ),
+            reply_code: 312,
+            reply_text: "NO_ROUTE".into(),
+        };
+
+        let output = capture_logs(|| {
+            let error =
+                confirmation_result(event_id, "atom.events", Confirmation::Nack(Some(returned)))
+                    .expect_err("the broker nack must fail publication");
+            assert!(error.0.contains("nacked by the broker"));
+        });
+
+        assert!(output.contains("AMQP broker returned an unroutable event"));
+        assert!(output.contains("confirmation=nack"));
+        assert!(output.contains("exchange=atom.events"));
+        assert!(output.contains("routing_key=atom.events"));
+        assert!(output.contains("reply_code=312"));
+        assert!(output.contains("reply_text=NO_ROUTE"));
+        assert!(output.contains(r#"payload={"event":"resource.create","outcome":"allow"}"#));
     }
 
     #[tokio::test]
