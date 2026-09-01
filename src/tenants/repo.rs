@@ -8,7 +8,9 @@ use crate::{
     identity::service::{hash_secret, verify_secret},
     models::{
         entity::{Entity, EntityList},
-        enums::{EntityStatus, InvitationState, SortDir, SubjectKind, TenantOrderField, TenantStatus},
+        enums::{
+            EntityStatus, InvitationState, SortDir, SubjectKind, TenantOrderField, TenantStatus,
+        },
         policy::CreateRoleAssignment,
         tenant::{
             CreateTenant, CreateTenantInvitation, ListTenantInvitations, ListTenants, Tenant,
