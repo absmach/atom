@@ -6960,7 +6960,7 @@ pub(crate) async fn load_authz_entity_object(
                             FROM group_entity_parents gep
                             WHERE gep.entity_id = e.id), '{}'::uuid[]) AS parent_group_ids
            FROM entities e
-           WHERE e.id = $1 AND e.status <> 'inactive' AND e.deleted_at IS NULL"#,
+           WHERE e.id = $1 AND e.deleted_at IS NULL"#,
     )
     .bind(entity_id)
     .fetch_optional(pool)
@@ -6981,7 +6981,7 @@ pub(crate) async fn load_authz_group_object(
                       AS parent_group_ids
            FROM groups g
            LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.id = $1 AND g.status <> 'inactive' AND g.deleted_at IS NULL"#,
+           WHERE g.id = $1 AND g.deleted_at IS NULL"#,
     )
     .bind(group_id)
     .fetch_optional(pool)
