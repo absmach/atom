@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "app/**"
+      - "ui/**"
       - "docs/**"
       - ".github/workflows/frontend.yml"
   # Pushes to main and release tags run this through the image workflow, which
@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [app, docs]
+        project: [ui, docs]
 
     defaults:
       run:
@@ -51,11 +51,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Lint Atom UI
-        if: matrix.project == 'app'
+        if: matrix.project == 'ui'
         run: pnpm lint
 
       - name: Test Atom UI
-        if: matrix.project == 'app'
+        if: matrix.project == 'ui'
         run: pnpm test
 
       - name: Build
