@@ -16,6 +16,9 @@ RUN --mount=type=cache,target=/pnpm-store,sharing=locked \
 
 FROM deps AS builder
 COPY . .
+# `public/` holds no tracked assets yet, and git cannot carry an empty
+# directory, so create it here: the runner stage copies it unconditionally.
+RUN mkdir -p public
 # The Next build reads .next/cache to reuse compiled webpack modules across
 # builds. Mounting a cache there turns incremental builds into seconds.
 RUN --mount=type=cache,target=/app/.next/cache,sharing=locked \
