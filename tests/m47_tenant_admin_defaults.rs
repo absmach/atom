@@ -3,8 +3,8 @@
 mod common;
 
 use atom::bootstrap::{
-    apply, BootstrapActionAssignmentRule, BootstrapCapability,
-    BootstrapCapabilityApplicability, BootstrapConfig, BootstrapTenantDefaults,
+    apply, BootstrapActionAssignmentRule, BootstrapCapability, BootstrapCapabilityApplicability,
+    BootstrapConfig, BootstrapTenantDefaults,
 };
 use atom::config::{Config, ADMIN_ENTITY_ID};
 use atom::models::enums::{ActionAssignmentDecision, EntityKind, ObjectKind};
