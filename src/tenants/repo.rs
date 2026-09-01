@@ -77,6 +77,18 @@ pub struct TenantAdminBootstrap {
     pub scope_ref: String,
 }
 
+pub const TENANT_ADMIN_BASE_CAPABILITIES: [&str; 9] = [
+    "manage",
+    "read",
+    "write",
+    "delete",
+    "publish",
+    "subscribe",
+    "execute",
+    "policy.manage",
+    "role.manage",
+];
+
 #[derive(Debug, Clone)]
 pub struct TenantRoleAssignmentSummary {
     pub role_id: Uuid,
@@ -93,20 +105,10 @@ pub fn tenant_admin_bootstrap(tenant_id: Uuid, creator_id: Uuid) -> TenantAdminB
         tenant_id,
         creator_id,
         role_name: "tenant-admin",
-        capabilities: [
-            "manage",
-            "read",
-            "write",
-            "delete",
-            "publish",
-            "subscribe",
-            "execute",
-            "policy.manage",
-            "role.manage",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
+        capabilities: TENANT_ADMIN_BASE_CAPABILITIES
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         scope_ref: tenant_id.to_string(),
     }
 }
@@ -301,6 +303,15 @@ async fn bootstrap_tenant_admin(
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
+
+    crate::guardrails::validate_role_assignment_on_connection(
+        &mut **tx,
+        Some(plan.tenant_id),
+        SubjectKind::Entity,
+        plan.creator_id,
+        role_id,
+    )
+    .await?;
 
     let missing_names: Vec<String> = sqlx::query_scalar(
         r#"SELECT required.name

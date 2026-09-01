@@ -1120,10 +1120,10 @@ async fn apply_in_tx(
     for capability in &cfg.capabilities {
         ensure_capability(tx, capability).await?;
     }
-    reconcile_tenant_admin_defaults(tx, &cfg.tenant_defaults).await?;
     for rule in &cfg.action_assignment_rules {
         ensure_action_assignment_rule(tx, rule).await?;
     }
+    reconcile_tenant_admin_defaults(tx, &cfg.tenant_defaults).await?;
     for block in &cfg.permission_blocks {
         ensure_permission_block(tx, block).await?;
     }
@@ -1166,23 +1166,6 @@ async fn reconcile_tenant_admin_defaults(
         );
     }
 
-    sqlx::query(
-        r#"DELETE FROM permission_block_actions pba
-           USING role_permission_blocks rpb, roles r, tenant_admin_default_actions old
-           WHERE pba.permission_block_id = rpb.permission_block_id
-             AND rpb.role_id = r.id
-             AND r.managed_by = 'system:tenant-admin'
-             AND pba.action_id = old.action_id
-             AND NOT EXISTS (
-                 SELECT 1 FROM actions a
-                 WHERE a.id = old.action_id AND a.name = ANY($1::text[])
-             )"#,
-    )
-    .bind(&capabilities)
-    .execute(&mut **tx)
-    .await
-    .context("failed to remove obsolete tenant-admin defaults")?;
-
     sqlx::query("DELETE FROM tenant_admin_default_actions")
         .execute(&mut **tx)
         .await
@@ -1196,18 +1179,118 @@ async fn reconcile_tenant_admin_defaults(
     .await
     .context("failed to persist tenant-admin defaults")?;
 
-    sqlx::query(
-        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-           SELECT rpb.permission_block_id, defaults.action_id
-           FROM roles r
-           JOIN role_permission_blocks rpb ON rpb.role_id = r.id
-           CROSS JOIN tenant_admin_default_actions defaults
-           WHERE r.managed_by = 'system:tenant-admin'
-           ON CONFLICT DO NOTHING"#,
+    let mut desired_capabilities = crate::tenants::repo::TENANT_ADMIN_BASE_CAPABILITIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .chain(capabilities)
+        .collect::<Vec<_>>();
+    desired_capabilities.sort();
+    desired_capabilities.dedup();
+
+    let roles = sqlx::query(
+        r#"SELECT id, tenant_id
+           FROM roles
+           WHERE managed_by = 'system:tenant-admin' AND deleted_at IS NULL
+           ORDER BY id"#,
     )
-    .execute(&mut **tx)
+    .fetch_all(&mut **tx)
     .await
-    .context("failed to reconcile existing tenant-admin roles")?;
+    .context("failed to enumerate system tenant-admin roles")?;
+
+    for role in roles {
+        let role_id: Uuid = role.try_get("id")?;
+        let tenant_id: Uuid = role.try_get("tenant_id")?;
+        let current_block_id: Option<Uuid> = sqlx::query_scalar(
+            r#"SELECT pb.id
+               FROM role_permission_blocks rpb
+               JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+               WHERE rpb.role_id = $1
+                 AND pb.managed_by = 'system:tenant-admin'
+               ORDER BY pb.id
+               LIMIT 1"#,
+        )
+        .bind(role_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .with_context(|| format!("failed to inspect tenant-admin role {role_id}"))?;
+
+        let current_names: Vec<String> = match current_block_id {
+            Some(block_id) => sqlx::query_scalar(
+                r#"SELECT a.name
+                   FROM permission_block_actions pba
+                   JOIN actions a ON a.id = pba.action_id
+                   WHERE pba.permission_block_id = $1
+                   ORDER BY a.name"#,
+            )
+            .bind(block_id)
+            .fetch_all(&mut **tx)
+            .await
+            .with_context(|| format!("failed to inspect tenant-admin block {block_id}"))?,
+            None => Vec::new(),
+        };
+        if current_names == desired_capabilities {
+            continue;
+        }
+
+        let replacement_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO permission_blocks
+                  (tenant_id, scope_mode, effect, conditions, managed_by)
+               VALUES ($1, 'tenant', 'allow', '{}'::jsonb, 'system:tenant-admin')
+               RETURNING id"#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await
+        .with_context(|| format!("failed to create replacement block for role {role_id}"))?;
+        sqlx::query(
+            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+               SELECT $1, id FROM actions WHERE name = ANY($2::text[])"#,
+        )
+        .bind(replacement_id)
+        .bind(&desired_capabilities)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("failed to populate replacement block {replacement_id}"))?;
+
+        crate::guardrails::validate_role_permission_block_links(tx, role_id, &[replacement_id])
+            .await
+            .map_err(|err| anyhow!("tenant-admin role {role_id}: {err}"))?;
+
+        sqlx::query(
+            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+               VALUES ($1, $2)"#,
+        )
+        .bind(role_id)
+        .bind(replacement_id)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("failed to link replacement block {replacement_id}"))?;
+
+        if let Some(block_id) = current_block_id {
+            sqlx::query(
+                "DELETE FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2",
+            )
+            .bind(role_id)
+            .bind(block_id)
+            .execute(&mut **tx)
+            .await
+            .with_context(|| format!("failed to unlink old tenant-admin block {block_id}"))?;
+            sqlx::query(
+                r#"DELETE FROM permission_blocks pb
+                   WHERE pb.id = $1
+                     AND NOT EXISTS (
+                         SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM direct_policies WHERE permission_block_id = pb.id
+                     )"#,
+            )
+            .bind(block_id)
+            .execute(&mut **tx)
+            .await
+            .with_context(|| format!("failed to garbage-collect old block {block_id}"))?;
+        }
+    }
 
     Ok(())
 }
