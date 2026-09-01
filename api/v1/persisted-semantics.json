@@ -122,6 +122,7 @@
     "api_endpoint": {
       "readActions": ["read", "manage"],
       "mutationActions": ["manage"],
+      "mutationScope": "platform",
       "executionActions": ["execute", "manage"]
     },
     "listAuthorization": "canonical_grants_deny_overrides_allow_before_pagination",

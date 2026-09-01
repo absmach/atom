@@ -594,6 +594,13 @@ mod contract_tests {
             contract_strings(&contract["seededActions"])
         );
 
+        let endpoint_authorization = &contract["authorizationTargets"]["api_endpoint"];
+        assert_eq!(
+            contract_strings(&endpoint_authorization["mutationActions"]),
+            ["manage"]
+        );
+        assert_eq!(endpoint_authorization["mutationScope"], "platform");
+
         let persisted = &contract["persistedStrings"];
         assert_eq!(
             contract_strings(&persisted["profileObjectKind"]),
@@ -1726,6 +1733,15 @@ callouts:
             (
                 include_str!("../graphql/policies.rs"),
                 &["restore_role", "purge_role"][..],
+            ),
+            (
+                include_str!("../graphql/api_endpoints.rs"),
+                &[
+                    "create_api_endpoint",
+                    "update_api_endpoint",
+                    "enable_api_endpoint",
+                    "disable_api_endpoint",
+                ][..],
             ),
         ] {
             for name in names {

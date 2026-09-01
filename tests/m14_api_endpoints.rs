@@ -10,13 +10,18 @@ mod common;
 use async_graphql::Request as GraphqlRequest;
 use atom::{
     api_endpoints::repo as api_endpoint_repo,
-    auth::{encode_jwt, AuthContext},
+    auth::{encode_jwt, has_capability_in_scope, has_global_manage, AuthContext, Scope},
     authz::repo as authz_repo,
     config::Config,
     graphql::build_schema,
     identity::repo as identity_repo,
     keys::{self, ActiveKeys},
-    models::api_endpoint::{CreateApiEndpoint, ListApiEndpoints, UpdateApiEndpoint},
+    models::{
+        api_endpoint::{CreateApiEndpoint, ListApiEndpoints, UpdateApiEndpoint},
+        enums::{Effect, SubjectKind},
+        policy::{CreatePermissionBlock, CreateRoleAssignment},
+        role::CreateRole,
+    },
     routes::create_router,
     state::AppState,
 };
@@ -95,6 +100,75 @@ fn endpoint_req(key: &str, path: &str, graphql: &str) -> CreateApiEndpoint {
         response_mapping: json!({}),
         status: Some("draft".into()),
     }
+}
+
+async fn tenant_manager(pool: &PgPool) -> (Uuid, Uuid) {
+    let tenant_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+        .bind(tenant_id)
+        .bind(format!("endpoint-tenant-{tenant_id}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+
+    let entity_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO entities (id, kind, name, tenant_id, status) \
+         VALUES ($1, 'human', $2, $3, 'active')",
+    )
+    .bind(entity_id)
+    .bind(format!("endpoint-manager-{entity_id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert tenant manager");
+
+    let manage_action_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
+        .fetch_one(pool)
+        .await
+        .expect("seeded manage action");
+    let role = authz_repo::create_role(
+        pool,
+        CreateRole {
+            name: format!("endpoint-manager-{entity_id}"),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("create tenant-manager role");
+    let block = authz_repo::create_permission_block(
+        pool,
+        CreatePermissionBlock {
+            tenant_id: Some(tenant_id),
+            scope_mode: "tenant".into(),
+            object_kind: None,
+            object_type: None,
+            object_id: None,
+            group_id: None,
+            effect: Effect::Allow,
+            conditions: json!({}),
+            action_ids: vec![manage_action_id],
+        },
+    )
+    .await
+    .expect("create tenant-manage block");
+    authz_repo::replace_role_permission_block_links(pool, role.id, &[block.id])
+        .await
+        .expect("link tenant-manage block");
+    authz_repo::create_role_assignment(
+        pool,
+        CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: entity_id,
+            role_id: role.id,
+        },
+    )
+    .await
+    .expect("assign tenant-manager role");
+
+    (tenant_id, entity_id)
 }
 
 #[tokio::test]
@@ -419,19 +493,29 @@ async fn graphql_management_api_creates_lists_updates_enables_and_disables_endpo
 
 #[tokio::test]
 #[ignore]
-async fn service_context_creation_requires_super_admin() {
+async fn service_context_management_requires_platform_admin() {
     let pool = common::pool().await;
     let schema = build_schema(state(pool.clone(), active_keys(&pool).await));
     let suffix = Uuid::new_v4();
-    let ordinary_entity_id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO entities (kind, name, status, attributes)
-           VALUES ('human', $1, 'active', '{}')
-           RETURNING id"#,
+    let (tenant_id, tenant_manager_id) = tenant_manager(&pool).await;
+    let tenant_manager_auth = AuthContext {
+        entity_id: tenant_manager_id,
+        tenant_id: Some(tenant_id),
+        session_id: None,
+        ..Default::default()
+    };
+    assert!(has_capability_in_scope(
+        &pool,
+        &tenant_manager_auth,
+        "manage",
+        Scope::Tenant(tenant_id),
     )
-    .bind(format!("endpoint-non-admin-{suffix}"))
-    .fetch_one(&pool)
     .await
-    .expect("ordinary entity");
+    .expect("check tenant manage"));
+    assert!(!has_global_manage(&pool, &tenant_manager_auth)
+        .await
+        .expect("check platform manage"));
+    let rejected_key = format!("endpoint_service_rejected_{suffix}");
 
     let response = schema
         .execute(
@@ -439,28 +523,135 @@ async fn service_context_creation_requires_super_admin() {
                 r#"
                 mutation {{
                   createApiEndpoint(input: {{
-                    key: "endpoint_service_{suffix}",
+                    tenantId: "{tenant_id}",
+                    key: "{rejected_key}",
                     name: "Service endpoint",
                     method: "POST",
                     path: "/api/custom/service-{suffix}",
                     operationKind: "query",
                     graphql: "{{ health }}",
                     authMode: "service_context",
-                    serviceEntityId: "{ordinary_entity_id}"
+                    serviceEntityId: "{}"
                   }}) {{ id }}
                 }}
-                "#
+                "#,
+                common::admin_id()
             ))
-            .data(AuthContext {
-                entity_id: ordinary_entity_id,
-                tenant_id: None,
-                session_id: None,
-                ..Default::default()
-            }),
+            .data(tenant_manager_auth),
         )
         .await;
 
-    assert!(!response.errors.is_empty());
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+    assert_eq!(response.errors[0].message, "forbidden");
+    let rejected_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM api_endpoints WHERE key = $1")
+            .bind(&rejected_key)
+            .fetch_one(&pool)
+            .await
+            .expect("count rejected endpoint");
+    assert_eq!(rejected_count, 0);
+
+    let caller_path = format!("/api/custom/caller-transition-{suffix}");
+    let mut caller_req = endpoint_req(
+        &format!("endpoint_caller_transition_{suffix}"),
+        &caller_path,
+        "{ health }",
+    );
+    caller_req.tenant_id = Some(tenant_id);
+    let caller_endpoint =
+        api_endpoint_repo::create_api_endpoint(&pool, caller_req, Some(common::admin_id()))
+            .await
+            .expect("create caller-context endpoint");
+    let transition = schema
+        .execute(authed_as(
+            tenant_manager_id,
+            format!(
+                r#"mutation {{ updateApiEndpoint(id: "{}", input: {{ authMode: "service_context", serviceEntityId: "{}" }}) {{ id }} }}"#,
+                caller_endpoint.id,
+                common::admin_id()
+            ),
+        ))
+        .await;
+    assert_eq!(transition.errors.len(), 1, "{:?}", transition.errors);
+    assert_eq!(transition.errors[0].message, "forbidden");
+    let unchanged_caller = api_endpoint_repo::get_api_endpoint(&pool, caller_endpoint.id)
+        .await
+        .expect("load unchanged caller-context endpoint");
+    assert_eq!(unchanged_caller.auth_mode, "caller_context");
+    assert_eq!(unchanged_caller.service_entity_id, None);
+
+    let create = schema
+        .execute(authed(format!(
+            r#"
+            mutation {{
+              createApiEndpoint(input: {{
+                tenantId: "{tenant_id}",
+                key: "endpoint_service_trusted_{suffix}",
+                name: "Trusted service endpoint",
+                method: "POST",
+                path: "/api/custom/service-trusted-{suffix}",
+                operationKind: "query",
+                graphql: "{{ health }}",
+                authMode: "service_context",
+                serviceEntityId: "{}"
+              }}) {{ id authMode serviceEntityId status }}
+            }}
+            "#,
+            common::admin_id()
+        )))
+        .await;
+    assert!(create.errors.is_empty(), "{:?}", create.errors);
+    let created = create.data.into_json().expect("create json");
+    let endpoint_id = created["createApiEndpoint"]["id"]
+        .as_str()
+        .expect("endpoint id")
+        .parse::<Uuid>()
+        .expect("endpoint UUID");
+    assert_eq!(created["createApiEndpoint"]["authMode"], "service_context");
+    assert_eq!(
+        created["createApiEndpoint"]["serviceEntityId"],
+        common::admin_id().to_string()
+    );
+
+    for mutation in [
+        format!(
+            r#"mutation {{ updateApiEndpoint(id: "{endpoint_id}", input: {{ graphql: "query Changed {{ health }}" }}) {{ id }} }}"#
+        ),
+        format!(r#"mutation {{ enableApiEndpoint(id: "{endpoint_id}") {{ id }} }}"#),
+        format!(r#"mutation {{ disableApiEndpoint(id: "{endpoint_id}") {{ id }} }}"#),
+    ] {
+        let denied = schema.execute(authed_as(tenant_manager_id, mutation)).await;
+        assert_eq!(denied.errors.len(), 1, "{:?}", denied.errors);
+        assert_eq!(denied.errors[0].message, "forbidden");
+    }
+
+    let unchanged = api_endpoint_repo::get_api_endpoint(&pool, endpoint_id)
+        .await
+        .expect("load unchanged endpoint");
+    assert_eq!(unchanged.graphql, "{ health }");
+    assert_eq!(unchanged.status, "draft");
+
+    let update = schema
+        .execute(authed(format!(
+            r#"mutation {{ updateApiEndpoint(id: "{endpoint_id}", input: {{ graphql: "query Trusted {{ health }}" }}) {{ graphql }} }}"#
+        )))
+        .await;
+    assert!(update.errors.is_empty(), "{:?}", update.errors);
+    assert_eq!(
+        update.data.into_json().expect("update json")["updateApiEndpoint"]["graphql"],
+        "query Trusted { health }"
+    );
+
+    let enable = schema
+        .execute(authed(format!(
+            r#"mutation {{ enableApiEndpoint(id: "{endpoint_id}") {{ status }} }}"#
+        )))
+        .await;
+    assert!(enable.errors.is_empty(), "{:?}", enable.errors);
+    assert_eq!(
+        enable.data.into_json().expect("enable json")["enableApiEndpoint"]["status"],
+        "active"
+    );
 }
 
 #[tokio::test]

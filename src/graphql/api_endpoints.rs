@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::{
     api_endpoints::repo as api_endpoint_repo,
-    auth::{require_any_capability, scope_for_tenant},
+    auth::{require_capability, Scope},
     authz::{engine::require_any_on_object_or_platform_if_missing, repo as authz_repo},
     models::api_endpoint::{
         CreateApiEndpoint, ListApiEndpointExecutions, ListApiEndpoints, UpdateApiEndpoint,
@@ -128,12 +128,7 @@ impl ApiEndpointMutation {
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
         let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
         let result = async {
-            require_any_capability(
-                &state.pool,
-                &auth,
-                &[("manage", scope_for_tenant(tenant_id))],
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
             api_endpoint_repo::create_api_endpoint_with_audit(
                 &state.pool,
                 state.config.events.enabled(),
@@ -190,14 +185,7 @@ impl ApiEndpointMutation {
         let endpoint_id = parse_id(id, "id")?;
         let service_entity_id = parse_optional_id(input.service_entity_id, "serviceEntityId")?;
         let result = async {
-            require_any_on_object_or_platform_if_missing(
-                &state.pool,
-                &auth,
-                "api_endpoint",
-                endpoint_id,
-                &["manage"],
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
             api_endpoint_repo::update_api_endpoint_with_audit(
                 &state.pool,
                 state.config.events.enabled(),
@@ -248,14 +236,7 @@ impl ApiEndpointMutation {
         let state = ctx.data::<AppState>()?;
         let endpoint_id = parse_id(id, "id")?;
         let result = async {
-            require_any_on_object_or_platform_if_missing(
-                &state.pool,
-                &auth,
-                "api_endpoint",
-                endpoint_id,
-                &["manage"],
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
             api_endpoint_repo::enable_api_endpoint_with_audit(
                 &state.pool,
                 state.config.events.enabled(),
@@ -289,14 +270,7 @@ impl ApiEndpointMutation {
         let state = ctx.data::<AppState>()?;
         let endpoint_id = parse_id(id, "id")?;
         let result = async {
-            require_any_on_object_or_platform_if_missing(
-                &state.pool,
-                &auth,
-                "api_endpoint",
-                endpoint_id,
-                &["manage"],
-            )
-            .await?;
+            require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
             api_endpoint_repo::disable_api_endpoint_with_audit(
                 &state.pool,
                 state.config.events.enabled(),

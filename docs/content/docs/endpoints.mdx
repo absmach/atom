@@ -93,13 +93,14 @@ Use this for privileged operations that should be available to less-privileged c
 ## Caller action requirement
 
 `api_endpoint` is a first-class protected object kind. Endpoint reads and
-management therefore use the same deny-overrides-allow PDP as other protected
-objects: `read` or `manage` controls visibility, `manage` controls updates and
-status changes, and `execute` or `manage` controls invocation. Tenant and
-platform scopes inherit normally; exact and `object_kind = api_endpoint`
-grants provide least-privilege administration. List queries apply these grants
-before pagination, so an exact deny cannot leak an endpoint through a broader
-tenant listing.
+invocation therefore use the same deny-overrides-allow PDP as other protected
+objects: `read` or `manage` controls visibility, and `execute` or `manage`
+controls invocation. Tenant and platform scopes inherit normally; exact and
+`object_kind = api_endpoint` grants provide least-privilege access. List
+queries apply these grants before pagination, so an exact deny cannot leak an
+endpoint through a broader tenant listing. Management mutations remain
+platform-admin only because a `service_context` endpoint delegates the selected
+service entity's authority to its callers.
 
 Regardless of `authMode`, the HTTP caller must hold one of the following actions before the endpoint executes:
 
