@@ -19,6 +19,13 @@
 # Secrets are declared inline (just like ADMIN_SECRET) — protect this file:
 # mount it as a secret, keep it out of version control, restrict its mode.
 
+# --- Tenant defaults -----------------------------------------------------
+# Extra capabilities granted to the Atom-created tenant-admin role for new
+# and existing tenants. Each name must be built in or declared below.
+tenant_defaults:
+  admin_capabilities:
+    - alarm.acknowledge
+
 # --- Tenants (domains) ---------------------------------------------------
 tenants:
   - id: 33333333-3333-3333-3333-333333333333
@@ -87,6 +94,11 @@ object_groups:
 # v1 does not assign product meanings to these names. Declare applicability
 # before any permission block uses a product-specific action.
 capabilities:
+  - name: alarm.acknowledge
+    description: Acknowledge an alarm
+    applicability:
+      - object_kind: resource
+        object_type: resource:alarm
   - name: publish
     description: Publish messages to a channel
     applicability:

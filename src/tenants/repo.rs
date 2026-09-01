@@ -73,9 +73,21 @@ pub struct TenantAdminBootstrap {
     pub tenant_id: Uuid,
     pub creator_id: Uuid,
     pub role_name: &'static str,
-    pub capabilities: [&'static str; 9],
+    pub capabilities: Vec<String>,
     pub scope_ref: String,
 }
+
+pub const TENANT_ADMIN_BASE_CAPABILITIES: [&str; 9] = [
+    "manage",
+    "read",
+    "write",
+    "delete",
+    "publish",
+    "subscribe",
+    "execute",
+    "policy.manage",
+    "role.manage",
+];
 
 #[derive(Debug, Clone)]
 pub struct TenantRoleAssignmentSummary {
@@ -93,17 +105,10 @@ pub fn tenant_admin_bootstrap(tenant_id: Uuid, creator_id: Uuid) -> TenantAdminB
         tenant_id,
         creator_id,
         role_name: "tenant-admin",
-        capabilities: [
-            "manage",
-            "read",
-            "write",
-            "delete",
-            "publish",
-            "subscribe",
-            "execute",
-            "policy.manage",
-            "role.manage",
-        ],
+        capabilities: TENANT_ADMIN_BASE_CAPABILITIES
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         scope_ref: tenant_id.to_string(),
     }
 }
@@ -240,9 +245,23 @@ async fn bootstrap_tenant_admin(
     use sqlx::Row;
 
     let role_id = Uuid::new_v4();
+    let configured_capabilities: Vec<String> = sqlx::query_scalar(
+        r#"SELECT a.name
+           FROM tenant_admin_default_actions defaults
+           JOIN actions a ON a.id = defaults.action_id
+           ORDER BY a.name"#,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let mut capabilities = plan.capabilities;
+    capabilities.extend(configured_capabilities);
+    capabilities.sort();
+    capabilities.dedup();
+
     sqlx::query(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, 'Default tenant administration role')"#,
+        r#"INSERT INTO roles (id, name, tenant_id, description, managed_by)
+           VALUES ($1, $2, $3, 'Default tenant administration role', 'system:tenant-admin')"#,
     )
     .bind(role_id)
     .bind(plan.role_name)
@@ -252,8 +271,9 @@ async fn bootstrap_tenant_admin(
     .map_err(db_err)?;
 
     let permission_block_id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, effect, conditions)
-           VALUES ($1, 'tenant', 'allow', '{}'::jsonb)
+        r#"INSERT INTO permission_blocks
+              (tenant_id, scope_mode, effect, conditions, managed_by)
+           VALUES ($1, 'tenant', 'allow', '{}'::jsonb, 'system:tenant-admin')
            RETURNING id"#,
     )
     .bind(plan.tenant_id)
@@ -269,7 +289,7 @@ async fn bootstrap_tenant_admin(
            ON CONFLICT DO NOTHING"#,
     )
     .bind(permission_block_id)
-    .bind(plan.capabilities.as_slice())
+    .bind(&capabilities)
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -284,6 +304,15 @@ async fn bootstrap_tenant_admin(
     .await
     .map_err(db_err)?;
 
+    crate::guardrails::validate_role_assignment_on_connection(
+        tx,
+        Some(plan.tenant_id),
+        SubjectKind::Entity,
+        plan.creator_id,
+        role_id,
+    )
+    .await?;
+
     let missing_names: Vec<String> = sqlx::query_scalar(
         r#"SELECT required.name
            FROM unnest($1::text[]) AS required(name)
@@ -294,7 +323,7 @@ async fn bootstrap_tenant_admin(
            )
            ORDER BY required.name"#,
     )
-    .bind(plan.capabilities.as_slice())
+    .bind(&capabilities)
     .bind(permission_block_id)
     .fetch_all(&mut **tx)
     .await
@@ -2266,7 +2295,10 @@ mod tests {
                 "role.manage"
             ]
         );
-        assert!(!plan.capabilities.contains(&"tenant.manage"));
+        assert!(!plan
+            .capabilities
+            .iter()
+            .any(|capability| capability == "tenant.manage"));
     }
 
     #[tokio::test]

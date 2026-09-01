@@ -1,0 +1,822 @@
+{
+  "$defs": {
+    "ActionAssignmentDecision": {
+      "enum": [
+        "allow",
+        "deny",
+        "require_override"
+      ],
+      "type": "string"
+    },
+    "BootstrapActionAssignmentRule": {
+      "additionalProperties": false,
+      "description": "A guardrail rule. Same shape as the `action_assignment_rules` row, minus\nthe auto-generated id.",
+      "properties": {
+        "action_name": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/ActionAssignmentDecision"
+        },
+        "entity_kind": {
+          "$ref": "#/$defs/EntityKind"
+        },
+        "is_absolute": {
+          "default": false,
+          "type": "boolean"
+        },
+        "object_kind": {
+          "$ref": "#/$defs/ObjectKind"
+        },
+        "object_type": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tenant_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entity_kind",
+        "action_name",
+        "object_kind",
+        "decision"
+      ],
+      "type": "object"
+    },
+    "BootstrapCapability": {
+      "additionalProperties": false,
+      "description": "A capability (action) to ensure exists. Keyed on `name` (the unique column\non `actions`), so re-running the bootstrap file is a no-op. The optional\n`applicability` block lists object kinds/types this action can target;\nits declared set must exactly match any persisted applicability rows.",
+      "properties": {
+        "applicability": {
+          "items": {
+            "$ref": "#/$defs/BootstrapCapabilityApplicability"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "BootstrapCapabilityApplicability": {
+      "additionalProperties": false,
+      "properties": {
+        "object_kind": {
+          "$ref": "#/$defs/ObjectKind"
+        },
+        "object_type": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "object_kind"
+      ],
+      "type": "object"
+    },
+    "BootstrapCredential": {
+      "description": "A credential to ensure exists for an entity. The secret material is declared\ninline, exactly like the existing `ADMIN_SECRET` env var — protect the file\naccordingly (mount it as a secret, keep it out of version control).",
+      "oneOf": [
+        {
+          "description": "A password credential. Validated against the configured strength policy.",
+          "properties": {
+            "kind": {
+              "const": "password",
+              "type": "string"
+            },
+            "secret": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "secret"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A retrievable machine shared key. Only valid for non-human entities. The\nkey must be supplied explicitly so bootstrap stays deterministic (an\nauto-generated key would be lost, never surfaced to the operator).",
+          "properties": {
+            "description": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "shared_key",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A pre-provisioned unscoped access token (`atom_<id_hex>_<secret_hex>`).\nThe operator generates the token once (e.g. from `openssl rand`) and\nsplices the same value into both this YAML *and* the env file consumed\nby downstream services — so `docker compose up` needs no round-trip\nbetween an atom-bootstrap init container and services waiting on it.\nThe credential row is stamped `managed_by='config'`, so the API refuses\nto mutate or revoke it. List/read responses still expose its non-secret\nmetadata and the managed marker so clients can present it as read-only.",
+          "properties": {
+            "description": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "access_token",
+              "type": "string"
+            },
+            "name": {
+              "description": "Human label for the token, surfaced in audit logs.",
+              "type": "string"
+            },
+            "token": {
+              "description": "Full `atom_<id_hex>_<secret_hex>` token string.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "token",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BootstrapDirectPolicy": {
+      "additionalProperties": false,
+      "description": "Grants a permission block directly to a subject.",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "permission_block_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "subject": {
+          "$ref": "#/$defs/BootstrapSubject"
+        },
+        "tenant_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "permission_block_id"
+      ],
+      "type": "object"
+    },
+    "BootstrapEntity": {
+      "additionalProperties": false,
+      "description": "An entity, together with its credentials.",
+      "properties": {
+        "alias": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attributes": {
+          "default": null
+        },
+        "credentials": {
+          "items": {
+            "$ref": "#/$defs/BootstrapCredential"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "Stable UUID — the key we upsert on. Use the well-known seed UUIDs to\nattach credentials to the pre-seeded `admin`/`example-service` entities.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EntityKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/EntityStatus",
+          "default": "active"
+        },
+        "tenant_id": {
+          "default": null,
+          "description": "Owning tenant. `None` places the entity at platform scope.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name"
+      ],
+      "type": "object"
+    },
+    "BootstrapGroup": {
+      "additionalProperties": false,
+      "description": "A principal (subject) group and its entity members.",
+      "properties": {
+        "attributes": {
+          "default": null
+        },
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "members": {
+          "default": [],
+          "description": "Entity IDs that belong to this group.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tenant_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "BootstrapObjectGroup": {
+      "additionalProperties": false,
+      "description": "An object group: groups entities and/or resources so a single permission\nblock can scope to all of them (and, via `parent`, to descendant groups).\nMembership is many-to-many: an entity or resource may belong to several\nobject groups. Membership rows require a tenant, so a group with members\nmust declare `tenant_id`.",
+      "properties": {
+        "attributes": {
+          "default": null
+        },
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entities": {
+          "default": [],
+          "description": "Entity IDs that belong to this group.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent": {
+          "default": null,
+          "description": "Parent object group (this group becomes its child in the hierarchy).",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resources": {
+          "default": [],
+          "description": "Resource IDs that belong to this group.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tenant_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "BootstrapPermissionBlock": {
+      "additionalProperties": false,
+      "description": "A permission block: scope + actions + effect + conditions. Shared — link it\nto roles (`roles[].permission_blocks`) and/or grant it directly to subjects\n(`direct_policies[].permission_block_id`).",
+      "properties": {
+        "actions": {
+          "default": [],
+          "description": "Action names (e.g. `read`, `publish`). Resolved to seeded action IDs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "conditions": {
+          "default": null
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect",
+          "default": "allow"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/BootstrapScope"
+        }
+      },
+      "required": [
+        "id",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "BootstrapResource": {
+      "additionalProperties": false,
+      "description": "A protected resource object (e.g. a `channel`). `kind` is a free-form label.",
+      "properties": {
+        "alias": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attributes": {
+          "default": null
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner_id": {
+          "default": null,
+          "description": "Optional owning entity.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tenant_id": {
+          "default": null,
+          "description": "Owning tenant. `None` places the resource at platform scope.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "BootstrapRole": {
+      "additionalProperties": false,
+      "description": "A role, optionally linked to permission blocks defined above.",
+      "properties": {
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "permission_blocks": {
+          "default": [],
+          "description": "IDs of permission blocks to attach to this role.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tenant_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "BootstrapRoleAssignment": {
+      "additionalProperties": false,
+      "description": "Grants a role to a subject.",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "role_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "subject": {
+          "$ref": "#/$defs/BootstrapSubject"
+        },
+        "tenant_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "role_id"
+      ],
+      "type": "object"
+    },
+    "BootstrapScope": {
+      "additionalProperties": false,
+      "description": "Scope of a permission block. Which fields are required depends on `mode`;\n[`BootstrapScope::validate`] mirrors the database CHECK constraint so a bad\ncombination is rejected before insert.",
+      "properties": {
+        "group_id": {
+          "default": null,
+          "description": "Object group the block scopes to (required by the `group_*` modes).",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/ScopeMode"
+        },
+        "object_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "object_kind": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "object_type": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tenant_id": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "BootstrapSubject": {
+      "additionalProperties": false,
+      "description": "The subject of an assignment or direct policy.",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubjectKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "BootstrapTenant": {
+      "additionalProperties": false,
+      "description": "A tenant (domain). `None` `tenant_id` on other records means platform scope.",
+      "properties": {
+        "alias": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attributes": {
+          "default": null
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TenantStatus",
+          "default": "active"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "BootstrapTenantDefaults": {
+      "additionalProperties": false,
+      "description": "Defaults for RBAC objects Atom creates for every tenant.",
+      "properties": {
+        "admin_capabilities": {
+          "default": [],
+          "description": "Additional capabilities granted to the system-created `tenant-admin`\nrole. Capabilities must exist in Atom's built-in or declared vocabulary.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Effect": {
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "EntityKind": {
+      "enum": [
+        "human",
+        "device",
+        "service",
+        "workload",
+        "application"
+      ],
+      "type": "string"
+    },
+    "EntityStatus": {
+      "enum": [
+        "active",
+        "inactive",
+        "suspended"
+      ],
+      "type": "string"
+    },
+    "ObjectKind": {
+      "description": "Canonical set of protected object kinds. Used for `object_kind` columns in\npolicy scopes, guardrail rules, and authorization checks.",
+      "enum": [
+        "entity",
+        "resource",
+        "group",
+        "tenant",
+        "role",
+        "policy",
+        "credential",
+        "api_endpoint",
+        "audit_log",
+        "signing_key"
+      ],
+      "type": "string"
+    },
+    "ScopeMode": {
+      "description": "Permission-block scope modes. The `group_*` modes scope a block to the\nmembers (or descendant groups) of an object group, referenced by\n`scope.group_id`.",
+      "oneOf": [
+        {
+          "enum": [
+            "platform",
+            "tenant",
+            "object_kind",
+            "object_type",
+            "object"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "group_direct_objects",
+          "description": "A namespaced object type among the direct entity/resource members of the\nobject group (needs `object_kind` + `object_type`).",
+          "type": "string"
+        },
+        {
+          "const": "group_descendant_objects",
+          "description": "Like `group_direct_objects`, extended to descendant groups.",
+          "type": "string"
+        },
+        {
+          "const": "group_child_groups",
+          "description": "Direct child groups of the object group.",
+          "type": "string"
+        },
+        {
+          "const": "group_descendant_groups",
+          "description": "Descendant groups of the object group.",
+          "type": "string"
+        }
+      ]
+    },
+    "SubjectKind": {
+      "enum": [
+        "entity",
+        "group"
+      ],
+      "type": "string"
+    },
+    "TenantStatus": {
+      "enum": [
+        "active",
+        "inactive",
+        "frozen",
+        "deleted"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Root of the bootstrap document. Every section is optional.",
+  "properties": {
+    "action_assignment_rules": {
+      "description": "Guardrail rules constraining which entity kinds may perform which\nactions on which object kinds — the platform-wide \"device cannot manage\nresources\" style rails.",
+      "items": {
+        "$ref": "#/$defs/BootstrapActionAssignmentRule"
+      },
+      "type": "array"
+    },
+    "capabilities": {
+      "description": "Additional action names (capabilities) beyond the built-in vocabulary,\ne.g. product-specific verbs like `publish` or `alarm.acknowledge`. Each\nentry may also declare the object kinds/types it applies to.",
+      "items": {
+        "$ref": "#/$defs/BootstrapCapability"
+      },
+      "type": "array"
+    },
+    "direct_policies": {
+      "items": {
+        "$ref": "#/$defs/BootstrapDirectPolicy"
+      },
+      "type": "array"
+    },
+    "entities": {
+      "items": {
+        "$ref": "#/$defs/BootstrapEntity"
+      },
+      "type": "array"
+    },
+    "groups": {
+      "items": {
+        "$ref": "#/$defs/BootstrapGroup"
+      },
+      "type": "array"
+    },
+    "object_groups": {
+      "items": {
+        "$ref": "#/$defs/BootstrapObjectGroup"
+      },
+      "type": "array"
+    },
+    "permission_blocks": {
+      "items": {
+        "$ref": "#/$defs/BootstrapPermissionBlock"
+      },
+      "type": "array"
+    },
+    "resources": {
+      "items": {
+        "$ref": "#/$defs/BootstrapResource"
+      },
+      "type": "array"
+    },
+    "role_assignments": {
+      "items": {
+        "$ref": "#/$defs/BootstrapRoleAssignment"
+      },
+      "type": "array"
+    },
+    "roles": {
+      "items": {
+        "$ref": "#/$defs/BootstrapRole"
+      },
+      "type": "array"
+    },
+    "tenant_defaults": {
+      "$ref": "#/$defs/BootstrapTenantDefaults",
+      "description": "Defaults applied whenever Atom creates tenant-owned system RBAC."
+    },
+    "tenants": {
+      "items": {
+        "$ref": "#/$defs/BootstrapTenant"
+      },
+      "type": "array"
+    }
+  },
+  "title": "BootstrapConfig",
+  "type": "object"
+}

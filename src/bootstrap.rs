@@ -92,6 +92,9 @@ pub const MANAGED_BY_CONFIG: &str = "config";
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
+    /// Defaults applied whenever Atom creates tenant-owned system RBAC.
+    #[serde(default)]
+    pub tenant_defaults: BootstrapTenantDefaults,
     #[serde(default)]
     pub tenants: Vec<BootstrapTenant>,
     #[serde(default)]
@@ -120,6 +123,16 @@ pub struct BootstrapConfig {
     /// resources" style rails.
     #[serde(default)]
     pub action_assignment_rules: Vec<BootstrapActionAssignmentRule>,
+}
+
+/// Defaults for RBAC objects Atom creates for every tenant.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapTenantDefaults {
+    /// Additional capabilities granted to the system-created `tenant-admin`
+    /// role. Capabilities must exist in Atom's built-in or declared vocabulary.
+    #[serde(default)]
+    pub admin_capabilities: Vec<String>,
 }
 
 /// A tenant (domain). `None` `tenant_id` on other records means platform scope.
@@ -632,6 +645,17 @@ impl BootstrapConfig {
             }
         }
 
+        let mut seen_admin_capabilities = HashSet::new();
+        for capability in &self.tenant_defaults.admin_capabilities {
+            let name = capability.trim();
+            if name.is_empty() {
+                bail!("tenant_defaults.admin_capabilities contains an empty name");
+            }
+            if !seen_admin_capabilities.insert(name.to_string()) {
+                bail!("duplicate tenant-admin default capability {name}");
+            }
+        }
+
         let mut seen_rules = HashSet::new();
         for rule in &self.action_assignment_rules {
             let action = rule.action_name.trim();
@@ -768,11 +792,25 @@ fn parse(contents: &str) -> Result<BootstrapConfig> {
 }
 
 /// Generates the structural JSON Schema frozen as
-/// `api/v1/bootstrap.schema.json`. YAML is a superset transport for the same
-/// object model, so the schema is also the canonical bootstrap-YAML contract.
+/// `api/v1/bootstrap.schema.json`. Fields added after v1 are removed from this
+/// compatibility artifact; use [`v2_json_schema`] for the current contract.
 pub fn v1_json_schema() -> Result<Value> {
+    let mut schema = v2_json_schema()?;
+    let _ = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.remove("tenant_defaults"));
+    let _ = schema
+        .get_mut("$defs")
+        .and_then(Value::as_object_mut)
+        .and_then(|definitions| definitions.remove("BootstrapTenantDefaults"));
+    Ok(schema)
+}
+
+/// Generates the current bootstrap contract, including tenant defaults.
+pub fn v2_json_schema() -> Result<Value> {
     serde_json::to_value(schemars::schema_for!(BootstrapConfig))
-        .context("failed to serialize the bootstrap v1 JSON Schema")
+        .context("failed to serialize the bootstrap v2 JSON Schema")
 }
 
 /// Refuse a v0.50 -> v1 migration when migration 025 would have to choose an
@@ -1000,7 +1038,7 @@ pub async fn apply_with_cache(
                object_group_resources, actions, action_applicability,
                action_assignment_rules, permission_blocks, permission_block_actions,
                roles, role_permission_blocks, role_assignments, direct_policies,
-               protected_object_ids
+               protected_object_ids, tenant_admin_default_actions
            IN EXCLUSIVE MODE"#,
     )
     .execute(&mut *tx)
@@ -1085,6 +1123,7 @@ async fn apply_in_tx(
     for rule in &cfg.action_assignment_rules {
         ensure_action_assignment_rule(tx, rule).await?;
     }
+    reconcile_tenant_admin_defaults(tx, &cfg.tenant_defaults).await?;
     for block in &cfg.permission_blocks {
         ensure_permission_block(tx, block).await?;
     }
@@ -1097,6 +1136,162 @@ async fn apply_in_tx(
     for policy in &cfg.direct_policies {
         ensure_direct_policy(tx, policy).await?;
     }
+    Ok(())
+}
+
+async fn reconcile_tenant_admin_defaults(
+    tx: &mut Transaction<'_, Postgres>,
+    defaults: &BootstrapTenantDefaults,
+) -> Result<()> {
+    let capabilities = defaults
+        .admin_capabilities
+        .iter()
+        .map(|name| name.trim().to_string())
+        .collect::<Vec<_>>();
+
+    let missing: Vec<String> = sqlx::query_scalar(
+        r#"SELECT requested.name
+           FROM unnest($1::text[]) AS requested(name)
+           WHERE NOT EXISTS (SELECT 1 FROM actions WHERE actions.name = requested.name)
+           ORDER BY requested.name"#,
+    )
+    .bind(&capabilities)
+    .fetch_all(&mut **tx)
+    .await
+    .context("failed to validate tenant-admin default capabilities")?;
+    if !missing.is_empty() {
+        bail!(
+            "unknown tenant_defaults.admin_capabilities: {}",
+            missing.join(", ")
+        );
+    }
+
+    sqlx::query("DELETE FROM tenant_admin_default_actions")
+        .execute(&mut **tx)
+        .await
+        .context("failed to replace tenant-admin defaults")?;
+    sqlx::query(
+        r#"INSERT INTO tenant_admin_default_actions (action_id)
+           SELECT id FROM actions WHERE name = ANY($1::text[])"#,
+    )
+    .bind(&capabilities)
+    .execute(&mut **tx)
+    .await
+    .context("failed to persist tenant-admin defaults")?;
+
+    let mut desired_capabilities = crate::tenants::repo::TENANT_ADMIN_BASE_CAPABILITIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .chain(capabilities)
+        .collect::<Vec<_>>();
+    desired_capabilities.sort();
+    desired_capabilities.dedup();
+
+    let roles = sqlx::query(
+        r#"SELECT id, tenant_id
+           FROM roles
+           WHERE managed_by = 'system:tenant-admin' AND deleted_at IS NULL
+           ORDER BY id"#,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .context("failed to enumerate system tenant-admin roles")?;
+
+    for role in roles {
+        let role_id: Uuid = role.try_get("id")?;
+        let tenant_id: Uuid = role.try_get("tenant_id")?;
+        let current_block_id: Option<Uuid> = sqlx::query_scalar(
+            r#"SELECT pb.id
+               FROM role_permission_blocks rpb
+               JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+               WHERE rpb.role_id = $1
+                 AND pb.managed_by = 'system:tenant-admin'
+               ORDER BY pb.id
+               LIMIT 1"#,
+        )
+        .bind(role_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .with_context(|| format!("failed to inspect tenant-admin role {role_id}"))?;
+
+        let current_names: Vec<String> = match current_block_id {
+            Some(block_id) => sqlx::query_scalar(
+                r#"SELECT a.name
+                   FROM permission_block_actions pba
+                   JOIN actions a ON a.id = pba.action_id
+                   WHERE pba.permission_block_id = $1
+                   ORDER BY a.name"#,
+            )
+            .bind(block_id)
+            .fetch_all(&mut **tx)
+            .await
+            .with_context(|| format!("failed to inspect tenant-admin block {block_id}"))?,
+            None => Vec::new(),
+        };
+        if current_names == desired_capabilities {
+            continue;
+        }
+
+        let replacement_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO permission_blocks
+                  (tenant_id, scope_mode, effect, conditions, managed_by)
+               VALUES ($1, 'tenant', 'allow', '{}'::jsonb, 'system:tenant-admin')
+               RETURNING id"#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await
+        .with_context(|| format!("failed to create replacement block for role {role_id}"))?;
+        sqlx::query(
+            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+               SELECT $1, id FROM actions WHERE name = ANY($2::text[])"#,
+        )
+        .bind(replacement_id)
+        .bind(&desired_capabilities)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("failed to populate replacement block {replacement_id}"))?;
+
+        crate::guardrails::validate_role_permission_block_links(tx, role_id, &[replacement_id])
+            .await
+            .map_err(|err| anyhow!("tenant-admin role {role_id}: {err}"))?;
+
+        sqlx::query(
+            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+               VALUES ($1, $2)"#,
+        )
+        .bind(role_id)
+        .bind(replacement_id)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("failed to link replacement block {replacement_id}"))?;
+
+        if let Some(block_id) = current_block_id {
+            sqlx::query(
+                "DELETE FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2",
+            )
+            .bind(role_id)
+            .bind(block_id)
+            .execute(&mut **tx)
+            .await
+            .with_context(|| format!("failed to unlink old tenant-admin block {block_id}"))?;
+            sqlx::query(
+                r#"DELETE FROM permission_blocks pb
+                   WHERE pb.id = $1
+                     AND NOT EXISTS (
+                         SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM direct_policies WHERE permission_block_id = pb.id
+                     )"#,
+            )
+            .bind(block_id)
+            .execute(&mut **tx)
+            .await
+            .with_context(|| format!("failed to garbage-collect old block {block_id}"))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -3292,6 +3487,28 @@ object_groups:
     }
 
     #[test]
+    fn tenant_admin_defaults_parse_and_reject_duplicates() {
+        let yaml = r#"
+tenant_defaults:
+  admin_capabilities: [alarm.acknowledge, alarm.silence]
+"#;
+        let cfg = parse(yaml).expect("tenant defaults");
+        assert_eq!(
+            cfg.tenant_defaults.admin_capabilities,
+            ["alarm.acknowledge", "alarm.silence"]
+        );
+
+        let duplicate = r#"
+tenant_defaults:
+  admin_capabilities: [alarm.acknowledge, alarm.acknowledge]
+"#;
+        let err = parse(duplicate).expect_err("duplicate tenant-admin default");
+        assert!(err
+            .to_string()
+            .contains("duplicate tenant-admin default capability"));
+    }
+
+    #[test]
     fn resource_requires_kind() {
         let yaml = r#"
 resources:
@@ -3312,8 +3529,17 @@ resources:
     }
 
     #[test]
+    fn generated_v2_schema_matches_the_current_artifact() {
+        let generated = v2_json_schema().expect("generate bootstrap schema");
+        let committed: Value =
+            serde_json::from_str(include_str!("../api/v2/bootstrap.schema.json"))
+                .expect("committed bootstrap schema");
+        assert_eq!(generated, committed);
+    }
+
+    #[test]
     fn example_and_unknown_field_policy_match_the_v1_schema() {
-        let schema: Value = serde_json::from_str(include_str!("../api/v1/bootstrap.schema.json"))
+        let schema: Value = serde_json::from_str(include_str!("../api/v2/bootstrap.schema.json"))
             .expect("committed bootstrap schema");
         let compiled = jsonschema::JSONSchema::compile(&schema).expect("compile bootstrap schema");
 
