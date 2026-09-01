@@ -92,6 +92,9 @@ pub const MANAGED_BY_CONFIG: &str = "config";
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
+    /// Defaults applied whenever Atom creates tenant-owned system RBAC.
+    #[serde(default)]
+    pub tenant_defaults: BootstrapTenantDefaults,
     #[serde(default)]
     pub tenants: Vec<BootstrapTenant>,
     #[serde(default)]
@@ -120,6 +123,16 @@ pub struct BootstrapConfig {
     /// resources" style rails.
     #[serde(default)]
     pub action_assignment_rules: Vec<BootstrapActionAssignmentRule>,
+}
+
+/// Defaults for RBAC objects Atom creates for every tenant.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapTenantDefaults {
+    /// Additional capabilities granted to the system-created `tenant-admin`
+    /// role. Capabilities must exist in Atom's built-in or declared vocabulary.
+    #[serde(default)]
+    pub admin_capabilities: Vec<String>,
 }
 
 /// A tenant (domain). `None` `tenant_id` on other records means platform scope.
@@ -632,6 +645,17 @@ impl BootstrapConfig {
             }
         }
 
+        let mut seen_admin_capabilities = HashSet::new();
+        for capability in &self.tenant_defaults.admin_capabilities {
+            let name = capability.trim();
+            if name.is_empty() {
+                bail!("tenant_defaults.admin_capabilities contains an empty name");
+            }
+            if !seen_admin_capabilities.insert(name.to_string()) {
+                bail!("duplicate tenant-admin default capability {name}");
+            }
+        }
+
         let mut seen_rules = HashSet::new();
         for rule in &self.action_assignment_rules {
             let action = rule.action_name.trim();
@@ -1000,7 +1024,7 @@ pub async fn apply_with_cache(
                object_group_resources, actions, action_applicability,
                action_assignment_rules, permission_blocks, permission_block_actions,
                roles, role_permission_blocks, role_assignments, direct_policies,
-               protected_object_ids
+               protected_object_ids, tenant_admin_default_actions
            IN EXCLUSIVE MODE"#,
     )
     .execute(&mut *tx)
@@ -1082,6 +1106,7 @@ async fn apply_in_tx(
     for capability in &cfg.capabilities {
         ensure_capability(tx, capability).await?;
     }
+    reconcile_tenant_admin_defaults(tx, &cfg.tenant_defaults).await?;
     for rule in &cfg.action_assignment_rules {
         ensure_action_assignment_rule(tx, rule).await?;
     }
@@ -1097,6 +1122,79 @@ async fn apply_in_tx(
     for policy in &cfg.direct_policies {
         ensure_direct_policy(tx, policy).await?;
     }
+    Ok(())
+}
+
+async fn reconcile_tenant_admin_defaults(
+    tx: &mut Transaction<'_, Postgres>,
+    defaults: &BootstrapTenantDefaults,
+) -> Result<()> {
+    let capabilities = defaults
+        .admin_capabilities
+        .iter()
+        .map(|name| name.trim().to_string())
+        .collect::<Vec<_>>();
+
+    let missing: Vec<String> = sqlx::query_scalar(
+        r#"SELECT requested.name
+           FROM unnest($1::text[]) AS requested(name)
+           WHERE NOT EXISTS (SELECT 1 FROM actions WHERE actions.name = requested.name)
+           ORDER BY requested.name"#,
+    )
+    .bind(&capabilities)
+    .fetch_all(&mut **tx)
+    .await
+    .context("failed to validate tenant-admin default capabilities")?;
+    if !missing.is_empty() {
+        bail!(
+            "unknown tenant_defaults.admin_capabilities: {}",
+            missing.join(", ")
+        );
+    }
+
+    sqlx::query(
+        r#"DELETE FROM permission_block_actions pba
+           USING role_permission_blocks rpb, roles r, tenant_admin_default_actions old
+           WHERE pba.permission_block_id = rpb.permission_block_id
+             AND rpb.role_id = r.id
+             AND r.managed_by = 'system:tenant-admin'
+             AND pba.action_id = old.action_id
+             AND NOT EXISTS (
+                 SELECT 1 FROM actions a
+                 WHERE a.id = old.action_id AND a.name = ANY($1::text[])
+             )"#,
+    )
+    .bind(&capabilities)
+    .execute(&mut **tx)
+    .await
+    .context("failed to remove obsolete tenant-admin defaults")?;
+
+    sqlx::query("DELETE FROM tenant_admin_default_actions")
+        .execute(&mut **tx)
+        .await
+        .context("failed to replace tenant-admin defaults")?;
+    sqlx::query(
+        r#"INSERT INTO tenant_admin_default_actions (action_id)
+           SELECT id FROM actions WHERE name = ANY($1::text[])"#,
+    )
+    .bind(&capabilities)
+    .execute(&mut **tx)
+    .await
+    .context("failed to persist tenant-admin defaults")?;
+
+    sqlx::query(
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+           SELECT rpb.permission_block_id, defaults.action_id
+           FROM roles r
+           JOIN role_permission_blocks rpb ON rpb.role_id = r.id
+           CROSS JOIN tenant_admin_default_actions defaults
+           WHERE r.managed_by = 'system:tenant-admin'
+           ON CONFLICT DO NOTHING"#,
+    )
+    .execute(&mut **tx)
+    .await
+    .context("failed to reconcile existing tenant-admin roles")?;
+
     Ok(())
 }
 
@@ -3289,6 +3387,28 @@ object_groups:
 "#;
         let err = parse(yaml).expect_err("self parent");
         assert!(err.to_string().contains("cannot be its own parent"));
+    }
+
+    #[test]
+    fn tenant_admin_defaults_parse_and_reject_duplicates() {
+        let yaml = r#"
+tenant_defaults:
+  admin_capabilities: [alarm.acknowledge, alarm.silence]
+"#;
+        let cfg = parse(yaml).expect("tenant defaults");
+        assert_eq!(
+            cfg.tenant_defaults.admin_capabilities,
+            ["alarm.acknowledge", "alarm.silence"]
+        );
+
+        let duplicate = r#"
+tenant_defaults:
+  admin_capabilities: [alarm.acknowledge, alarm.acknowledge]
+"#;
+        let err = parse(duplicate).expect_err("duplicate tenant-admin default");
+        assert!(err
+            .to_string()
+            .contains("duplicate tenant-admin default capability"));
     }
 
     #[test]
