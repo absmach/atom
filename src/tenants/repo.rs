@@ -8,7 +8,9 @@ use crate::{
     identity::service::{hash_secret, verify_secret},
     models::{
         entity::{Entity, EntityList},
-        enums::{InvitationState, SortDir, SubjectKind, TenantOrderField, TenantStatus},
+        enums::{
+            EntityStatus, InvitationState, SortDir, SubjectKind, TenantOrderField, TenantStatus,
+        },
         policy::CreateRoleAssignment,
         tenant::{
             CreateTenant, CreateTenantInvitation, ListTenantInvitations, ListTenants, Tenant,
@@ -1457,12 +1459,15 @@ pub async fn list_tenant_members(
     pool: &PgPool,
     tenant_id: Uuid,
     q: Option<String>,
+    id: Option<String>,
+    status: Option<EntityStatus>,
     limit: i64,
     offset: i64,
 ) -> Result<EntityList, AppError> {
     let limit = limit.clamp(1, 100);
     let offset = offset.max(0);
     let q = search_pattern(q);
+    let id = search_pattern(id);
 
     let items = sqlx::query_as::<_, Entity>(
         r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
@@ -1475,6 +1480,8 @@ pub async fn list_tenant_members(
              AND e.deleted_at IS NULL
              AND e.kind = 'human'
              AND ($2::text IS NULL OR e.name ILIKE $2 OR e.attributes::text ILIKE $2)
+             AND ($5::text IS NULL OR e.id::text ILIKE $5)
+             AND ($6::text IS NULL OR e.status::text = $6)
            ORDER BY e.created_at DESC
            LIMIT $3 OFFSET $4"#,
     )
@@ -1482,6 +1489,8 @@ pub async fn list_tenant_members(
     .bind(q.clone())
     .bind(limit)
     .bind(offset)
+    .bind(id.clone())
+    .bind(status.clone())
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
@@ -1494,10 +1503,14 @@ pub async fn list_tenant_members(
              AND tm.status = 'active'
              AND e.deleted_at IS NULL
              AND e.kind = 'human'
-             AND ($2::text IS NULL OR e.name ILIKE $2 OR e.attributes::text ILIKE $2)"#,
+             AND ($2::text IS NULL OR e.name ILIKE $2 OR e.attributes::text ILIKE $2)
+             AND ($3::text IS NULL OR e.id::text ILIKE $3)
+             AND ($4::text IS NULL OR e.status::text = $4)"#,
     )
     .bind(tenant_id)
     .bind(q)
+    .bind(id)
+    .bind(status)
     .fetch_one(pool)
     .await
     .map_err(db_err)?;

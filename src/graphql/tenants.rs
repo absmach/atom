@@ -17,11 +17,12 @@ use crate::{
 use super::{
     auth::{gql_error, require_any_capability, require_auth},
     types::{
-        parse_deleted_filter, parse_id, parse_invitation_state, parse_optional_id,
-        parse_optional_tenant_status, parse_sort_dir, parse_tenant_order, CreateTenantInput,
-        CreateTenantInvitationInput, EntityList, GqlDeletedFilter, GqlInvitationState, GqlSortDir,
-        GqlTenantOrderField, GqlTenantStatus, InvitationTokenInput, Tenant, TenantInvitation,
-        TenantInvitationList, TenantList, UpdateTenantInput,
+        parse_deleted_filter, parse_id, parse_invitation_state, parse_optional_entity_status,
+        parse_optional_id, parse_optional_tenant_status, parse_sort_dir, parse_tenant_order,
+        CreateTenantInput, CreateTenantInvitationInput, EntityList, GqlDeletedFilter,
+        GqlEntityStatus, GqlInvitationState, GqlSortDir, GqlTenantOrderField, GqlTenantStatus,
+        InvitationTokenInput, Tenant, TenantInvitation, TenantInvitationList, TenantList,
+        UpdateTenantInput,
     },
 };
 
@@ -106,11 +107,14 @@ impl TenantQuery {
         Ok(tenant.into())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn tenant_members(
         &self,
         ctx: &Context<'_>,
         tenant_id: ID,
         q: Option<String>,
+        id: Option<String>,
+        status: Option<GqlEntityStatus>,
         limit: Option<i32>,
         offset: Option<i32>,
     ) -> Result<EntityList> {
@@ -131,6 +135,8 @@ impl TenantQuery {
             &state.pool,
             tenant_id,
             q,
+            id,
+            parse_optional_entity_status(status),
             limit.map(i64::from).unwrap_or(20),
             offset.map(i64::from).unwrap_or(0),
         )
