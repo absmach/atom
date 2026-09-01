@@ -632,6 +632,20 @@
       ],
       "type": "object"
     },
+    "BootstrapTenantDefaults": {
+      "additionalProperties": false,
+      "description": "Defaults for RBAC objects Atom creates for every tenant.",
+      "properties": {
+        "admin_capabilities": {
+          "description": "Additional capabilities granted to the system-created `tenant-admin`\nrole. Capabilities must exist in Atom's built-in or declared vocabulary.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "Effect": {
       "enum": [
         "allow",
@@ -790,6 +804,10 @@
         "$ref": "#/$defs/BootstrapRole"
       },
       "type": "array"
+    },
+    "tenant_defaults": {
+      "$ref": "#/$defs/BootstrapTenantDefaults",
+      "description": "Defaults applied whenever Atom creates tenant-owned system RBAC."
     },
     "tenants": {
       "items": {
