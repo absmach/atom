@@ -3,14 +3,14 @@
 ## Status: Draft
 ## Date: 2026-04-24
 
-This document is supporting background for query and search requirements. The source of truth is [Atom Product Requirements Document](./PRD.md), and authorization terminology is defined in [Atom Access Model Simplification](./11-access-model-simplification.md).
+This document is supporting background for query and search requirements. The source of truth is [Atom Product Requirements Document](../../content/docs/reference/product-requirements.mdx), and authorization terminology is defined in [Atom Access Model Simplification](../../content/docs/reference/access-model.mdx).
 
 For non-technical onboarding and diagrams, use the rendered docs source:
 
-- [Atom in Simple Words](../docs/content/docs/simple-words.mdx)
-- [Architecture diagrams](../docs/content/docs/architecture/index.mdx)
-- [Certificate flow](../docs/content/docs/authentication/certificates.mdx)
-- [Magistrala on Atom](../docs/content/docs/magistrala-on-atom.mdx)
+- [Atom in Simple Words](../../content/docs/simple-words.mdx)
+- [Architecture diagrams](../../content/docs/architecture/index.mdx)
+- [Certificate flow](../../content/docs/authentication/certificates.mdx)
+- [Magistrala on Atom](../../content/docs/magistrala-on-atom.mdx)
 
 ---
 
@@ -114,7 +114,7 @@ No schema changes required.
 
 Each endpoint is specified in its own document:
 
-> Note: the access model was simplified after several endpoint drafts were written. [Atom access model](./11-access-model-simplification.md) is authoritative. Endpoint drafts marked as legacy must be rewritten before implementation to use roles, permission blocks, assignments, Object Groups, and Principal Groups.
+> Note: the access model was simplified after several endpoint drafts were written. [Atom access model](../../content/docs/reference/access-model.mdx) is authoritative. Endpoint drafts marked as legacy must be rewritten before implementation to use roles, permission blocks, assignments, Object Groups, and Principal Groups.
 
 1. [POST /authz/explain](./01-authz-explain.md)
 2. [GET /entities/:id/access](./02-entity-access.md)
@@ -126,5 +126,5 @@ Each endpoint is specified in its own document:
 8. [Entity effective actions](./08-effective-actions.md)
 9. [Admin hygiene endpoints](./09-admin-hygiene.md)
 10. [Building Magistrala on Atom](./10-magistrala-on-atom.md)
-11. [Atom access model](./11-access-model-simplification.md)
-12. [Atom certificates](./12-certificates.md)
+11. [Atom access model](../../content/docs/reference/access-model.mdx)
+12. [Atom certificates](../../content/docs/reference/certificate-lifecycle.mdx)

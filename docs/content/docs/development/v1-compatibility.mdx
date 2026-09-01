@@ -43,7 +43,7 @@ data meanings remain compatible. A necessary contract change belongs in a new
 versioned API rather than an edit to v1.
 
 `bootstrap.schema.json` is generated from the Rust bootstrap DTOs and checked
-byte-for-value in unit tests; `bootstrap.example.yaml` must satisfy both that
+byte-for-value in unit tests; `config/examples/bootstrap.yaml` must satisfy both that
 schema and the runtime's cross-field validation. The schema is the structural
 contract, while `persisted-semantics.json` pins stored and behavioral
 vocabularies that JSON Schema cannot infer. Config-managed access tokens remain

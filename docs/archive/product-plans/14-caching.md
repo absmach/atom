@@ -3,7 +3,7 @@
 ## Status: Active v1
 ## Date: 2026-07-31
 
-This document describes Atom's Redis-backed cache for authentication and authorization inputs. The source of truth for overall product requirements is [Atom Product Requirements Document](./PRD.md), and authorization terminology is defined in [Atom access model](./11-access-model-simplification.md).
+This document describes Atom's Redis-backed cache for authentication and authorization inputs. The source of truth for overall product requirements is [Atom Product Requirements Document](../../content/docs/reference/product-requirements.mdx), and authorization terminology is defined in [Atom access model](../../content/docs/reference/access-model.mdx).
 
 ---
 
@@ -46,10 +46,10 @@ Six categories, each keyed by a UUID under the `atom:v1:` namespace.
 | `CredentialCeiling` | `atom:v1:cred_ceiling:<uuid>` | `CredentialCeiling` | Scoped-token permission cap. |
 | `Grants` | `atom:v1:grants:<subject_uuid>` | `Vec<EffectiveGrant>` | The user's full flattened permission list. |
 
-DTOs are defined in [`src/cache/entries.rs`](../src/cache/entries.rs). Key builders in [`src/cache/keys.rs`](../src/cache/keys.rs).
+DTOs are defined in [`src/cache/entries.rs`](../../../src/cache/entries.rs). Key builders in [`src/cache/keys.rs`](../../../src/cache/keys.rs).
 Payloads are positional MessagePack. Their exact v1 bytes, including enum
 spellings and optional-field encodings, are frozen in
-[`api/v1/cache-wire-v1.json`](../api/v1/cache-wire-v1.json) and checked against
+[`api/v1/cache-wire-v1.json`](../../../api/v1/cache-wire-v1.json) and checked against
 the runtime serializers. Any incompatible payload change requires a new logical
 key version and rollout plan.
 
@@ -58,7 +58,7 @@ The entity and tenant DTOs deliberately carry **no `deleted_at` field**. Both mi
 ### What is *not* cached
 
 - **Passwords** — never used on the request path. Used only during `/login`, which mints a JWT; the JWT then uses the `Session` cache.
-- **Plaintext API-key secrets** — only the hash used to verify them. See `CredentialCacheEntry` in [`src/cache/entries.rs`](../src/cache/entries.rs).
+- **Plaintext API-key secrets** — only the hash used to verify them. See `CredentialCacheEntry` in [`src/cache/entries.rs`](../../../src/cache/entries.rs).
 - **The authorization decision itself** — the PDP evaluates conditions per request against fresh (or freshly cached) grants.
 - **Audit writes** — always go to Postgres.
 
@@ -94,11 +94,11 @@ flowchart TD
     PDP --> Done
 ```
 
-- JWT auth: [`src/auth.rs`](../src/auth.rs) around `auth_from_jwt`.
-- API-key auth: [`src/auth.rs`](../src/auth.rs) around `auth_from_api_key`.
-- Grants load: [`src/auth.rs`](../src/auth.rs) `AuthContext::effective_grants` and [`src/authz/engine.rs`](../src/authz/engine.rs) inside `load_decision_context`.
+- JWT auth: [`src/auth.rs`](../../../src/auth.rs) around `auth_from_jwt`.
+- API-key auth: [`src/auth.rs`](../../../src/auth.rs) around `auth_from_api_key`.
+- Grants load: [`src/auth.rs`](../../../src/auth.rs) `AuthContext::effective_grants` and [`src/authz/engine.rs`](../../../src/authz/engine.rs) inside `load_decision_context`.
 
-The auth hot path batches the keys it can into **one atomic Lua round trip on a single pooled connection**, via `CacheClient::lookup_many` + `CacheClient::decode` — see [`src/cache/mod.rs`](../src/cache/mod.rs). Issued one at a time these would be three pool acquisitions and three serial round trips, each bounded by `op_timeout`, before any request work started.
+The auth hot path batches the keys it can into **one atomic Lua round trip on a single pooled connection**, via `CacheClient::lookup_many` + `CacheClient::decode` — see [`src/cache/mod.rs`](../../../src/cache/mod.rs). Issued one at a time these would be three pool acquisitions and three serial round trips, each bounded by `op_timeout`, before any request work started.
 
 Only keys with no data dependency on each other can share a round trip:
 
@@ -216,28 +216,28 @@ Which mutation invalidates which category:
 
 | Mutation | Invalidates | Where |
 |---|---|---|
-| Logout | `Session` | [`src/identity/handlers.rs`](../src/identity/handlers.rs) |
-| Password reset | `Session` (bulk, per active session) | [`src/identity/service.rs`](../src/identity/service.rs) |
-| Entity update | `EntityStatus` | [`src/graphql/entities.rs`](../src/graphql/entities.rs) |
-| Entity activate / deactivate | `EntityStatus` | [`src/identity/handlers.rs`](../src/identity/handlers.rs) |
-| Entity delete | `EntityStatus` + `Session` + `Credential` | [`src/graphql/entities.rs`](../src/graphql/entities.rs) |
-| Entity restore | `EntityStatus` | [`src/graphql/entities.rs`](../src/graphql/entities.rs) |
-| Tenant update | `TenantStatus` | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
-| Tenant delete | `TenantStatus` + child `Session`s | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
-| Tenant restore | `TenantStatus` + reactivated `Credential`s | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
-| Tenant create | `Grants` (of the creator) | [`src/graphql/tenants.rs`](../src/graphql/tenants.rs) |
-| Credential revoke / rotate | `Credential` | [`src/graphql/credentials.rs`](../src/graphql/credentials.rs), [`src/identity/handlers.rs`](../src/identity/handlers.rs) |
-| Credential scope change | `CredentialCeiling` | [`src/graphql/credentials.rs`](../src/graphql/credentials.rs) |
-| Role assignment (create / delete) | `Grants` for each affected subject | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
-| Direct policy (create / delete) | `Grants` for the subject | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
-| Role permission-block change | `Grants` for every assignee of the role | [`src/graphql/policies.rs`](../src/graphql/policies.rs) |
-| Group membership change (REST or GraphQL) | `Grants` for every member of the group closure | [`src/graphql/groups.rs`](../src/graphql/groups.rs), [`src/identity/handlers.rs`](../src/identity/handlers.rs) |
+| Logout | `Session` | [`src/identity/handlers.rs`](../../../src/identity/handlers.rs) |
+| Password reset | `Session` (bulk, per active session) | [`src/identity/service.rs`](../../../src/identity/service.rs) |
+| Entity update | `EntityStatus` | [`src/graphql/entities.rs`](../../../src/graphql/entities.rs) |
+| Entity activate / deactivate | `EntityStatus` | [`src/identity/handlers.rs`](../../../src/identity/handlers.rs) |
+| Entity delete | `EntityStatus` + `Session` + `Credential` | [`src/graphql/entities.rs`](../../../src/graphql/entities.rs) |
+| Entity restore | `EntityStatus` | [`src/graphql/entities.rs`](../../../src/graphql/entities.rs) |
+| Tenant update | `TenantStatus` | [`src/graphql/tenants.rs`](../../../src/graphql/tenants.rs) |
+| Tenant delete | `TenantStatus` + child `Session`s | [`src/graphql/tenants.rs`](../../../src/graphql/tenants.rs) |
+| Tenant restore | `TenantStatus` + reactivated `Credential`s | [`src/graphql/tenants.rs`](../../../src/graphql/tenants.rs) |
+| Tenant create | `Grants` (of the creator) | [`src/graphql/tenants.rs`](../../../src/graphql/tenants.rs) |
+| Credential revoke / rotate | `Credential` | [`src/graphql/credentials.rs`](../../../src/graphql/credentials.rs), [`src/identity/handlers.rs`](../../../src/identity/handlers.rs) |
+| Credential scope change | `CredentialCeiling` | [`src/graphql/credentials.rs`](../../../src/graphql/credentials.rs) |
+| Role assignment (create / delete) | `Grants` for each affected subject | [`src/graphql/policies.rs`](../../../src/graphql/policies.rs) |
+| Direct policy (create / delete) | `Grants` for the subject | [`src/graphql/policies.rs`](../../../src/graphql/policies.rs) |
+| Role permission-block change | `Grants` for every assignee of the role | [`src/graphql/policies.rs`](../../../src/graphql/policies.rs) |
+| Group membership change (REST or GraphQL) | `Grants` for every member of the group closure | [`src/graphql/groups.rs`](../../../src/graphql/groups.rs), [`src/identity/handlers.rs`](../../../src/identity/handlers.rs) |
 
 Tenant creation is on this list because `create_tenant` bootstraps a tenant-admin role, role assignment, and membership for the creator in the same transaction — it grows the creator's own grant set, and the capability gate immediately above it has just warmed that exact key.
 
 `purgeTenant` performs **no** cache invalidation. It is reachable only for an already-soft-deleted tenant, and the soft delete invalidated `TenantStatus` and the members' sessions, so the tenant is already denied at the lifecycle check that runs before grant matching. Residual `Grants` entries naming the purged tenant are therefore inert rather than dangerous — but this rests on the soft delete having run first, and is worth revisiting if purge ever becomes reachable directly.
 
-The REST paths (`delete_entity`, `add_group_member`, `remove_group_member`) invalidate through the same helpers as the GraphQL resolvers — entity deletion is consolidated into a single service entry point at [`src/identity/service.rs`](../src/identity/service.rs), and both group-member handlers wrap their mutation in `guarded_mutation`.
+The REST paths (`delete_entity`, `add_group_member`, `remove_group_member`) invalidate through the same helpers as the GraphQL resolvers — entity deletion is consolidated into a single service entry point at [`src/identity/service.rs`](../../../src/identity/service.rs), and both group-member handlers wrap their mutation in `guarded_mutation`.
 
 ### Race-safe enumeration
 
@@ -245,8 +245,8 @@ Group and role invalidations must enumerate **who is affected** (every entity in
 
 To close this, the enumeration functions lock the relevant rows `FOR UPDATE` inside the caller's transaction:
 
-- [`lock_group_closures_and_collect_grants_keys`](../src/authz/repo.rs) — locks every group in the closure of the given roots (id-sorted, so it cannot deadlock against itself), then returns the affected `grants` keys.
-- [`lock_role_and_collect_grants_keys`](../src/authz/repo.rs) — locks the role row, then locks the closure of every group assigned to it.
+- [`lock_group_closures_and_collect_grants_keys`](../../../src/authz/repo.rs) — locks every group in the closure of the given roots (id-sorted, so it cannot deadlock against itself), then returns the affected `grants` keys.
+- [`lock_role_and_collect_grants_keys`](../../../src/authz/repo.rs) — locks the role row, then locks the closure of every group assigned to it.
 
 Callers pair these with `guarded_tx_mutation` (see below) rather than `guarded_mutation`, because the enumeration must happen inside the same open transaction as the mutation itself.
 
@@ -266,7 +266,7 @@ crate::cache::cached_or_load(
 ).await?
 ```
 
-Defined at [`src/cache/mod.rs`](../src/cache/mod.rs) `cached_or_load`. Tolerant of `cache: None` — falls through to `loader`.
+Defined at [`src/cache/mod.rs`](../../../src/cache/mod.rs) `cached_or_load`. Tolerant of `cache: None` — falls through to `loader`.
 
 ### Writing (single category, single call site)
 
@@ -279,7 +279,7 @@ crate::cache::invalidate::guarded_mutation(
 ).await?
 ```
 
-Defined at [`src/cache/invalidate.rs`](../src/cache/invalidate.rs) `guarded_mutation`.
+Defined at [`src/cache/invalidate.rs`](../../../src/cache/invalidate.rs) `guarded_mutation`.
 
 ### Writing (single-category, mutation owns a `Transaction`)
 
@@ -297,7 +297,7 @@ crate::cache::invalidate::guarded_tx_mutation(
 ).await?
 ```
 
-Defined at [`src/cache/invalidate.rs`](../src/cache/invalidate.rs) `guarded_tx_mutation`. Callers hold the `cache: None` fallback themselves because the uncached path is usually a different repo function (typically the non-`_in_tx` variant that opens its own transaction).
+Defined at [`src/cache/invalidate.rs`](../../../src/cache/invalidate.rs) `guarded_tx_mutation`. Callers hold the `cache: None` fallback themselves because the uncached path is usually a different repo function (typically the non-`_in_tx` variant that opens its own transaction).
 
 ### Writing (multi-category, mutation owns a `Transaction`)
 
@@ -351,7 +351,7 @@ outcome?
 
 ## Configuration
 
-Set via environment variables — see [`.env.example`](../.env.example) for the full list.
+Set via environment variables — see [`.env.example`](../../../.env.example) for the full list.
 
 | Variable | Meaning |
 |---|---|
@@ -371,7 +371,7 @@ Set via environment variables — see [`.env.example`](../.env.example) for the 
 | `ATOM_CACHE_TTL_CREDENTIAL_CEILING_SECS` | TTL for `CredentialCeiling` entries. |
 | `ATOM_CACHE_TTL_GRANTS_SECS` | TTL for `Grants` entries. |
 
-Config struct: [`src/config.rs`](../src/config.rs) `CacheConfig` / `CacheTtlConfig`.
+Config struct: [`src/config.rs`](../../../src/config.rs) `CacheConfig` / `CacheTtlConfig`.
 
 Every `ATOM_CACHE_TTL_*` value must be greater than zero and no more than **86400 seconds (24h)**. Clean hashes and their payloads expire normally. Dirty hashes, the namespace incarnation, and the mutation epoch are persistent. The epoch prevents an old reader that observed version zero from succeeding after a mutation after a clean hash expires.
 
@@ -415,7 +415,7 @@ under this full-drain/fresh-namespace maintenance procedure.
 
 ## Metrics
 
-All cache operations emit metrics through [`src/metrics.rs`](../src/metrics.rs):
+All cache operations emit metrics through [`src/metrics.rs`](../../../src/metrics.rs):
 
 | Metric | Labels | Values |
 |---|---|---|
@@ -433,10 +433,10 @@ The populate metric splits `applied` (the write took) from `stale` (rejected by 
 
 The cache client (Redis pool, Lua scripts, barrier, timeouts, metrics) is fully generic. Only the **registry** of categories is centralised. To add a new one:
 
-1. Add a variant to `CacheCategory` in [`src/cache/mod.rs`](../src/cache/mod.rs), plus cases in `as_str()` and `ttl()`.
-2. Add a `<name>_secs: u64` field to `CacheTtlConfig` in [`src/config.rs`](../src/config.rs), and a matching env var.
-3. Add a key builder to [`src/cache/keys.rs`](../src/cache/keys.rs).
-4. (Optional) add a DTO to [`src/cache/entries.rs`](../src/cache/entries.rs) — the client is generic over any `Serialize + DeserializeOwned` type, so a bespoke DTO is only needed if the DB row shape is not directly usable.
+1. Add a variant to `CacheCategory` in [`src/cache/mod.rs`](../../../src/cache/mod.rs), plus cases in `as_str()` and `ttl()`.
+2. Add a `<name>_secs: u64` field to `CacheTtlConfig` in [`src/config.rs`](../../../src/config.rs), and a matching env var.
+3. Add a key builder to [`src/cache/keys.rs`](../../../src/cache/keys.rs).
+4. (Optional) add a DTO to [`src/cache/entries.rs`](../../../src/cache/entries.rs) — the client is generic over any `Serialize + DeserializeOwned` type, so a bespoke DTO is only needed if the DB row shape is not directly usable.
 5. At each read site: call `cached_or_load(cache, CacheCategory::<New>, &keys::<new>(id), || loader)`.
 6. At each write site that could affect the entry: wrap the mutation in `guarded_mutation` — or `guarded_tx_mutation` if the affected keys can only be enumerated under the mutation's own locks, or `begin_all` / `end_all` if the mutation spans several categories on one open `Transaction`.
 
@@ -450,17 +450,17 @@ The design is deliberately explicit — the enum is not `Other(String)` — beca
 
 ## Testing
 
-- **Barrier semantics (Redis-gated unit tests):** [`src/cache/mod.rs`](../src/cache/mod.rs) `#[cfg(test)] mod tests`. Covers the read-before-mutation race, the read-during-dirty-window race, and that a corrupt-payload cleanup leaves a concurrent barrier intact.
-- **End-to-end invalidation matrix:** [`tests/m25_cache_invalidation.rs`](../tests/m25_cache_invalidation.rs). Covers every mutation → invalidation pairing listed above, plus the cross-key poisoning and enumeration races.
+- **Barrier semantics (Redis-gated unit tests):** [`src/cache/mod.rs`](../../../src/cache/mod.rs) `#[cfg(test)] mod tests`. Covers the read-before-mutation race, the read-during-dirty-window race, and that a corrupt-payload cleanup leaves a concurrent barrier intact.
+- **End-to-end invalidation matrix:** [`tests/m25_cache_invalidation.rs`](../../../tests/m25_cache_invalidation.rs). Covers every mutation → invalidation pairing listed above, plus the cross-key poisoning and enumeration races.
 
 Both suites are `#[ignore]` and require `ATOM_TEST_REDIS_URL`; run with `cargo test -- --include-ignored`.
 
-Redis must be **flushed between test binaries**, alongside the per-binary database recreate — see `run_one` in [`.github/workflows/rust.yml`](../.github/workflows/rust.yml). The test cache helper explicitly initializes a fresh incarnation afterward. The suite caches under keys derived from the fixed seeded admin id, so without a flush the admin's grant expansion outlives the database it was derived from and a later binary authorizes against a tenant graph that no longer exists.
+Redis must be **flushed between test binaries**, alongside the per-binary database recreate — see `run_one` in [`.github/workflows/rust.yml`](../../../.github/workflows/rust.yml). The test cache helper explicitly initializes a fresh incarnation afterward. The suite caches under keys derived from the fixed seeded admin id, so without a flush the admin's grant expansion outlives the database it was derived from and a later binary authorizes against a tenant graph that no longer exists.
 
 ---
 
 ## Related Documents
 
-- [Atom Product Requirements Document](./PRD.md)
-- [Atom access model](./11-access-model-simplification.md)
-- [Scoped Access Tokens](./13-access-tokens.md)
+- [Atom Product Requirements Document](../../content/docs/reference/product-requirements.mdx)
+- [Atom access model](../../content/docs/reference/access-model.mdx)
+- [Scoped Access Tokens](../../content/docs/reference/access-tokens.mdx)

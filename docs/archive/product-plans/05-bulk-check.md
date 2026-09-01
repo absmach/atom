@@ -4,7 +4,7 @@
 
 Bulk check evaluates many actions for the same subject/object using the same effective Permission Block set.
 
-Authoritative model: [Atom access model](./11-access-model-simplification.md).
+Authoritative model: [Atom access model](../../content/docs/reference/access-model.mdx).
 
 ---
 

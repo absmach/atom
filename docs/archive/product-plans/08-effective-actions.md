@@ -4,7 +4,7 @@
 
 This query lists the effective actions an entity receives and shows the source paths.
 
-Authoritative model: [Atom access model](./11-access-model-simplification.md).
+Authoritative model: [Atom access model](../../content/docs/reference/access-model.mdx).
 
 ---
 

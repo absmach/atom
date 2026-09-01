@@ -41,6 +41,10 @@ This starts (building the images the first time, then reusing them):
 - Atom Next UI at `http://localhost:3005`
 - Postgres at `127.0.0.1:5432`
 
+When upgrading an existing checkout, `make up` automatically updates the two
+legacy demo paths in `.env` to their current locations under `config/demo/`.
+Custom paths are never changed.
+
 After changing backend or UI code, rebuild with `make build` (or
 `make atom-build` / `make ui-build`) before `make up`.
 

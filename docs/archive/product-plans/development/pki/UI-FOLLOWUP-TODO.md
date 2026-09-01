@@ -11,11 +11,11 @@ The PKI backend stays authoritative; every UI action here calls the same GraphQL
 - Sidebar **Operations** panel: every query and mutation, grouped by domain (PKI Authorities, Certificates, Tenants, Entities, Authorization, Identity & Sessions, Groups, Resources, Audit & Health, Other). Search filters across name + description. Click any entry to load a runnable template with arg stubs and inline arg-type hints.
 - Sidebar **Types** panel (renamed from Schema): OBJECT / INPUT_OBJECT / ENUM / SCALAR reference.
 - Sidebar **Starter Operations**: unchanged curated queries.
-- Docs: [graphql-explorer.md](../graphql-explorer.md).
+- Docs: [GraphQL explorer](../../../../content/docs/development/graphql-explorer.mdx).
 
 Files:
-- [app/components/playground/graphql-playground.tsx](../../../app/components/playground/graphql-playground.tsx)
-- [app/app/(admin)/playground/page.tsx](../../../app/app/(admin)/playground/page.tsx)
+- [ui/components/playground/graphql-playground.tsx](../../../../../ui/components/playground/graphql-playground.tsx)
+- [ui/app/(admin)/playground/page.tsx](<../../../../../ui/app/(admin)/playground/page.tsx>)
 
 ### Certificates section under `/pki/*`
 - Nav group **PKI** added to the admin sidebar with three entries: Authorities, Certificates, PKI Actions.
@@ -28,8 +28,8 @@ Files:
   - **Retire Authority** — two-step `beginAuthorityRetirement` → `completeAuthorityRetirement` with a safety checkbox.
 
 Shared components:
-- [app/components/pki/badges.tsx](../../../app/components/pki/badges.tsx) — `AuthorityStatusBadge`, `AuthorityKindBadge`, `CertificateStatusBadge`.
-- [app/components/pki/pem-viewer.tsx](../../../app/components/pki/pem-viewer.tsx) — copyable + downloadable PEM view.
+- [ui/components/pki/badges.tsx](../../../../../ui/components/pki/badges.tsx) — `AuthorityStatusBadge`, `AuthorityKindBadge`, `CertificateStatusBadge`.
+- [ui/components/pki/pem-viewer.tsx](../../../../../ui/components/pki/pem-viewer.tsx) — copyable + downloadable PEM view.
 
 ## Phase 1 additions (just shipped)
 
@@ -46,7 +46,7 @@ Shared components:
 - **Bulk Revoke tab** — matches the actual `bulkRevokeCertificates` schema (scope selectors: tenant / issuer / principal group + reason + batch limit) with an explicit safety checkbox that names the reason.
 - **Generate & Issue tab** — WebCrypto (`ECDSA_P256` or `RSA_2048`) generates a keypair in the browser, `@peculiar/x509` produces a PKCS#10 CSR, the CSR is submitted for issuance, and the freshly-generated private key is offered as a one-time download (never sent server-side). SAN DNS entries deferred — use "Issue from CSR" for those.
 - **Retire Authority wizard** — 4-step flow: **Impact** (explains the effect) → **Confirm** (target ID + explicit "I have a replacement" checkbox) → **Begin** → **Complete**, with status badges surfacing the authority's real state between steps.
-- **Tenant-admin surface** — confirmed to work as-is: [app/(admin)/layout.tsx](../../../app/app/(admin)/layout.tsx) only enforces session validity (not platform-admin scope). Per-operation authorization is enforced backend-side by the GraphQL resolvers. Any authenticated tenant admin can navigate to `/tenants/[id]/certificates`; operations they cannot perform surface a Forbidden GraphQL error.
+- **Tenant-admin surface** — confirmed to work as-is: [ui/app/(admin)/layout.tsx](<../../../../../ui/app/(admin)/layout.tsx>) only enforces session validity (not platform-admin scope). Per-operation authorization is enforced backend-side by the GraphQL resolvers. Any authenticated tenant admin can navigate to `/tenants/[id]/certificates`; operations they cannot perform surface a Forbidden GraphQL error.
 
 ## Nothing remaining
 

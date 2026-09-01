@@ -3317,7 +3317,7 @@ resources:
             .expect("committed bootstrap schema");
         let compiled = jsonschema::JSONSchema::compile(&schema).expect("compile bootstrap schema");
 
-        let example_yaml = include_str!("../bootstrap.example.yaml");
+        let example_yaml = include_str!("../config/examples/bootstrap.yaml");
         parse(example_yaml).expect("example must satisfy runtime validation");
         let example: Value = serde_yaml::from_str(example_yaml).expect("example YAML");
         assert!(

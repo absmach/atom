@@ -13,7 +13,7 @@ import "google/protobuf/struct.proto";
 // Multiple endpoints may be chained in config; atom calls them in order and
 // fails fast on the first non-ALLOW response.
 //
-// See docs in AGENTS.md and config/examples/callouts.yaml for configuration.
+// See docs in AGENTS.md and callouts.example.yaml for the config-side view.
 service CalloutService {
   rpc Check(CalloutServiceCheckRequest) returns (CalloutServiceCheckResponse);
 }

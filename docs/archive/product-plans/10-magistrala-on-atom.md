@@ -20,7 +20,7 @@ The rule is:
 
 This is not a translation layer. Magistrala is built on Atom's native primitives.
 
-See also: [Atom access model](./11-access-model-simplification.md).
+See also: [Atom access model](../../content/docs/reference/access-model.mdx).
 
 ---
 

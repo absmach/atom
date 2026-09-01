@@ -4,7 +4,7 @@
 
 This query explains one authorization decision using the simplified access model.
 
-Authoritative model: [Atom access model](./11-access-model-simplification.md).
+Authoritative model: [Atom access model](../../content/docs/reference/access-model.mdx).
 
 ---
 

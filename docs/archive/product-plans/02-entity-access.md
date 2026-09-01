@@ -4,7 +4,7 @@
 
 This query answers what a subject can access by expanding effective Permission Blocks.
 
-Authoritative model: [Atom access model](./11-access-model-simplification.md).
+Authoritative model: [Atom access model](../../content/docs/reference/access-model.mdx).
 
 ---
 

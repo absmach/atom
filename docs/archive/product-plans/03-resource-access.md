@@ -4,7 +4,7 @@
 
 This query answers who can access one protected object.
 
-Authoritative model: [Atom access model](./11-access-model-simplification.md).
+Authoritative model: [Atom access model](../../content/docs/reference/access-model.mdx).
 
 ---
 
