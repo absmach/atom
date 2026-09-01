@@ -305,7 +305,7 @@ async fn bootstrap_tenant_admin(
     .map_err(db_err)?;
 
     crate::guardrails::validate_role_assignment_on_connection(
-        &mut **tx,
+        tx,
         Some(plan.tenant_id),
         SubjectKind::Entity,
         plan.creator_id,
