@@ -195,20 +195,22 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
                 object_type: None,
             }],
         }],
-        action_assignment_rules: vec![BootstrapActionAssignmentRule {
-            tenant_id: Some(denied_tenant),
-            entity_kind: EntityKind::Human,
-            action_name: denied_capability,
-            object_kind: ObjectKind::Tenant,
-            object_type: None,
-            decision: ActionAssignmentDecision::Deny,
-            is_absolute: false,
-        }],
         ..Default::default()
     };
     apply(&pool, &signing_keys, &denied_cfg)
         .await
-        .expect("install tenant-scoped denial");
+        .expect("install tenant-admin default");
+    sqlx::query(
+        r#"
+        INSERT INTO action_assignment_rules
+            (entity_kind, action_name, object_kind, decision, is_absolute)
+        VALUES ('human', $1, 'tenant', 'deny', false)
+        "#,
+    )
+    .bind(&denied_capability)
+    .execute(&pool)
+    .await
+    .expect("install global denial for future tenant creation");
     let err = create_tenant(
         &pool,
         CreateTenant {
