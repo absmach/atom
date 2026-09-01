@@ -637,6 +637,7 @@
       "description": "Defaults for RBAC objects Atom creates for every tenant.",
       "properties": {
         "admin_capabilities": {
+          "default": [],
           "description": "Additional capabilities granted to the system-created `tenant-admin`\nrole. Capabilities must exist in Atom's built-in or declared vocabulary.",
           "items": {
             "type": "string"
