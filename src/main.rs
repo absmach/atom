@@ -32,9 +32,6 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    bootstrap::preflight_product_applicability(&pool, bootstrap_cfg.as_ref()).await?;
-    bootstrap::preflight_legacy_email_uniqueness(&pool).await?;
-    atom::protected_objects::preflight_global_protected_object_ids(&pool).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 

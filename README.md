@@ -119,8 +119,9 @@ pnpm build
 
 ## API contracts
 
-Atom treats its public API and released migrations as compatibility surfaces.
-Do not edit released migrations or frozen v1 contracts in place.
+Atom treats its public API as a compatibility surface. The launch baseline is
+the single `migrations/001_initial.sql`; once Atom is deployed, preserve it and
+add forward-only migrations for schema changes.
 
 ```bash
 make proto

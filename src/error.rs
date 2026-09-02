@@ -186,7 +186,7 @@ pub fn db_err(e: sqlx::Error) -> AppError {
 }
 
 /// The partial unique index backing entity `external_id` uniqueness
-/// (`migrations/010_entity_external_id.sql`). Postgres reports the index name as
+/// (`migrations/001_initial.sql`). Postgres reports the index name as
 /// the violated constraint, which is what lets a 23505 be attributed to
 /// `external_id` rather than to `name` or `alias`.
 const ENTITY_EXTERNAL_ID_INDEX: &str = "idx_entities_external_id";

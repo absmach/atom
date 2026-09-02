@@ -8,11 +8,10 @@
 mod common;
 
 use atom::bootstrap::{
-    apply, preflight_legacy_email_uniqueness, BootstrapActionAssignmentRule, BootstrapCapability,
-    BootstrapCapabilityApplicability, BootstrapConfig, BootstrapCredential, BootstrapDirectPolicy,
-    BootstrapEntity, BootstrapGroup, BootstrapObjectGroup, BootstrapPermissionBlock,
-    BootstrapResource, BootstrapRole, BootstrapRoleAssignment, BootstrapScope, BootstrapSubject,
-    BootstrapTenant, ScopeMode,
+    apply, BootstrapActionAssignmentRule, BootstrapCapability, BootstrapCapabilityApplicability,
+    BootstrapConfig, BootstrapCredential, BootstrapDirectPolicy, BootstrapEntity, BootstrapGroup,
+    BootstrapObjectGroup, BootstrapPermissionBlock, BootstrapResource, BootstrapRole,
+    BootstrapRoleAssignment, BootstrapScope, BootstrapSubject, BootstrapTenant, ScopeMode,
 };
 use atom::config::Config;
 use atom::models::enums::{
@@ -51,81 +50,6 @@ async fn single_connection_pool() -> sqlx::PgPool {
         .expect("apply migrations");
     pool
 }
-
-#[tokio::test]
-#[ignore]
-async fn v1_upgrade_preflight_rejects_case_insensitive_legacy_email_collisions() {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    // One physical connection keeps the temporary legacy schema visible when
-    // the public preflight acquires its connection.
-    let p = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .expect("preflight pool");
-    let mut conn = p.acquire().await.expect("preflight connection");
-    sqlx::query("CREATE TEMP TABLE _sqlx_migrations (version bigint, success boolean)")
-        .execute(&mut *conn)
-        .await
-        .expect("temporary migration table");
-    sqlx::query(
-        r#"CREATE TEMP TABLE entities (
-               id uuid PRIMARY KEY,
-               kind text NOT NULL,
-               attributes jsonb NOT NULL DEFAULT '{}',
-               deleted_at timestamptz
-           )"#,
-    )
-    .execute(&mut *conn)
-    .await
-    .expect("temporary entities table");
-    sqlx::query(
-        r#"CREATE TEMP TABLE entity_emails (
-               entity_id uuid NOT NULL,
-               email text NOT NULL,
-               deleted_at timestamptz
-           )"#,
-    )
-    .execute(&mut *conn)
-    .await
-    .expect("temporary email table");
-    let first = Uuid::new_v4();
-    let second = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind) VALUES ($1, 'human'), ($2, 'human')")
-        .bind(first)
-        .bind(second)
-        .execute(&mut *conn)
-        .await
-        .expect("legacy entities");
-    sqlx::query(
-        "INSERT INTO entity_emails (entity_id, email) VALUES ($1, 'Legacy@Example.com'), ($2, 'legacy@example.com')",
-    )
-    .bind(first)
-    .bind(second)
-    .execute(&mut *conn)
-    .await
-    .expect("legacy collision");
-    drop(conn);
-
-    let err = preflight_legacy_email_uniqueness(&p)
-        .await
-        .expect_err("collision must block migration");
-    assert!(err.to_string().contains("legacy@example.com"));
-    assert!(err.to_string().contains(&first.to_string()));
-    assert!(err.to_string().contains(&second.to_string()));
-    assert!(err.to_string().contains("did not modify"));
-
-    let mut conn = p.acquire().await.expect("preflight connection");
-    sqlx::query("INSERT INTO _sqlx_migrations (version, success) VALUES (25, true)")
-        .execute(&mut *conn)
-        .await
-        .expect("mark migration applied");
-    drop(conn);
-    preflight_legacy_email_uniqueness(&p)
-        .await
-        .expect("already-applied migration must be a no-op");
-}
-
 fn credentials_config(human: Uuid, service: Uuid) -> BootstrapConfig {
     BootstrapConfig {
         entities: vec![

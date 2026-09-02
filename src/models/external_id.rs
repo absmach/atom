@@ -6,7 +6,7 @@
 //! and constrains to a lowercase slug.
 //!
 //! Two decisions, mirrored by CHECK constraints in
-//! `migrations/010_entity_external_id.sql`: **case-sensitive** (`ABC123` and
+//! `migrations/001_initial.sql`: **case-sensitive** (`ABC123` and
 //! `abc123` are different entities — vendor schemes may distinguish case, and
 //! folding is irreversible once two devices have merged) and **trimmed**
 //! (edge whitespace is a transport artifact; interior whitespace is kept).

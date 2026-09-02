@@ -66,12 +66,6 @@ v1. It is a deployment contract, not a public request API.
   the fleet. Never leave the initializer enabled in steady state: a restarting
   process must not silently initialize a flushed namespace while old processes
   may still be alive.
-- A stopped-writer v0.50 upgrade using a fresh/empty namespace may use enabled
-  mode directly: initialize the namespace with one enabled v1 replica as
-  described above, then start the remaining enabled replicas. For rolling
-  transitions or any overlap, deploy every writer in prepare mode before any
-  reader enters enabled mode. Disable in reverse order. Never mix enabled
-  readers with v0.50 or disabled writers.
 - Mutation tokens are persistent and exact-identity. END consumes only its own
   token. Cancellation, crash, or failed END leaves a permanent dirty barrier
   and forces Postgres fallback. Atom requires one dedicated, standalone,
