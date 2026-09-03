@@ -137,7 +137,32 @@
     "capabilityApplicability": "exact_set_extra_rows_rejected",
     "passwordAndSharedKey": "declared_credential_is_only_active_row_of_kind_and_matches_exactly",
     "configOwnedCredentialSlot": "api_create_change_reset_reveal_and_target_mutation_rejected",
-    "revokedHistoricalConfigCredentialOwnsSlot": false
+    "revokedHistoricalConfigCredentialOwnsSlot": false,
+    "tenantAdminDefaults": {
+      "field": "tenant_defaults.admin_capabilities",
+      "baseCapabilities": [
+        "manage",
+        "read",
+        "write",
+        "delete",
+        "publish",
+        "subscribe",
+        "execute",
+        "policy.manage",
+        "role.manage"
+      ],
+      "effectiveCapabilities": "base_union_configured",
+      "targets": "existing_and_future_system_tenant_admin_roles",
+      "unknownCapability": "startup_rejected"
+    }
+  },
+  "managedBy": {
+    "apiManaged": null,
+    "configOwned": "config",
+    "systemTenantAdmin": "system:tenant-admin",
+    "systemTenantAdminTables": ["roles", "permission_blocks"],
+    "apiMutationRejectedMarkers": ["config"],
+    "bootstrapReconciledMarkers": ["system:tenant-admin"]
   },
   "persistedStrings": {
     "profileObjectKind": ["entity", "resource", "group", "tenant", "credential"],

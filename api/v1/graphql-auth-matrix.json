@@ -41,12 +41,32 @@
     "delegated": "A check or authorized-object listing for another subject requires authz.check in the requested object's resolved tenant scope or at platform scope. policy.manage and manage are not substitutes.",
     "tenantResolutionKinds": ["tenant","entity","resource","group","credential","role","policy","api_endpoint","platform"]
   },
+  "entityMutationAuthorization": {
+    "operations": ["updateEntity","deleteEntity"],
+    "selfTargetBypass": false,
+    "updateSourceAnyOf": [
+      {"action": "manage", "scope": "target_object"},
+      {"action": "manage", "scope": "source_tenant_or_platform"},
+      {"action": "write", "scope": "source_tenant_or_platform"}
+    ],
+    "deleteSourceAnyOf": [
+      {"action": "manage", "scope": "target_object"},
+      {"action": "manage", "scope": "source_tenant_or_platform"}
+    ],
+    "tenantMoveDestinationAnyOf": [
+      {"action": "manage", "scope": "destination_tenant"},
+      {"action": "write", "scope": "destination_tenant"}
+    ],
+    "scopedCredentialCeiling": "enforced",
+    "authorizationSnapshotMustMatchMutation": true
+  },
   "focusedParity": [
     "SDL root query/mutation names exactly match rootOperations and every operation appears in exactly one profileAssignments group.",
     "health, login, and signup remain the only public operations.",
     "refreshSession still requires AuthContext plus a session id.",
     "Restore/purge operations, API endpoint administration, and signing-key administration retain explicit platform-manage gates.",
-    "Self authz checks/listings remain authenticated self-service; every delegated check/listing requires authz.check in the resolved tenant or at platform scope."
+    "Self authz checks/listings remain authenticated self-service; every delegated check/listing requires authz.check in the resolved tenant or at platform scope.",
+    "Entity update/delete have no self-target bypass, honor scoped-credential ceilings, and tenant moves require both source and destination authority against a mutation-consistent tenant snapshot."
   ],
   "manualReviewRequired": "Resolver-specific ownership/action/scope arguments are reviewed from the named authorization helpers; the parity gate deliberately avoids whole-source hashes so compatible bug fixes remain possible."
 }

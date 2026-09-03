@@ -275,15 +275,9 @@ impl CalloutsConfig {
     /// Load `callouts.yaml` from disk, apply env overrides, then build.
     /// `None` when `ATOM_CALLOUTS_ENABLED=false` or the file is missing/unset.
     pub async fn load_from_env() -> Result<Self> {
-        if let Ok(v) = std::env::var("ATOM_CALLOUTS_ENABLED") {
-            let enabled = matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            );
-            if !enabled {
-                tracing::info!("callouts disabled (ATOM_CALLOUTS_ENABLED=false)");
-                return Ok(Self::empty());
-            }
+        if !crate::config::env_bool_default("ATOM_CALLOUTS_ENABLED", true)? {
+            tracing::info!("callouts disabled (ATOM_CALLOUTS_ENABLED=false)");
+            return Ok(Self::empty());
         }
         let path = match std::env::var("ATOM_CALLOUTS_FILE") {
             Ok(v) if !v.trim().is_empty() => v,

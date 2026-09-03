@@ -332,7 +332,22 @@
   },
   "parsing": {
     "booleanTruthyValues": ["1", "true", "yes", "on"],
-    "booleanFalseRule": "Any present value other than a case-insensitive truthy value is false.",
+    "booleanFalseValues": ["0", "false", "no", "off"],
+    "booleanRule": "Values are trimmed and matched case-insensitively. Any other present value, including blank, fails startup.",
+    "uuidOverrides": {
+      "variables": ["ADMIN_ENTITY_ID", "ATOM_SERVICE_ENTITY_ID"],
+      "rule": "A configured value must be a valid UUID; malformed or blank values fail startup instead of selecting the reserved default identity."
+    },
+    "positiveAuthLifetimeSeconds": {
+      "variables": [
+        "JWT_EXPIRY_SECS",
+        "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+        "ATOM_INVITATION_EXPIRY_SECS",
+        "ATOM_OAUTH_STATE_EXPIRY_SECS",
+        "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS"
+      ],
+      "rule": "A configured value must be a positive u64 whose duration and expiration timestamp are representable; malformed, zero, or out-of-range values fail startup."
+    },
     "blankAsUnset": [
       "ATOM_BOOTSTRAP_FILE",
       "ATOM_CACHE_MODE",
@@ -372,7 +387,7 @@
     {
       "primary": "ATOM_CACHE_MODE",
       "deprecatedAlias": "ATOM_CACHE_ENABLED",
-      "rule": "When mode is absent, a truthy alias selects enabled and any other present alias selects disabled. When both are present, enabled/true and disabled/false are accepted; all other combinations fail startup."
+      "rule": "When mode is absent, an explicit true alias selects enabled and an explicit false alias selects disabled. Blank or invalid alias values fail startup. When both are present, enabled/true and disabled/false are accepted; all other combinations fail startup."
     }
   ],
   "activationAndFailFastConditions": [

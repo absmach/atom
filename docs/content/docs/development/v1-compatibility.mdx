@@ -46,13 +46,22 @@ versioned API rather than an edit to v1.
 byte-for-value in unit tests; `config/examples/bootstrap.yaml` must satisfy both that
 schema and the runtime's cross-field validation. The schema is the structural
 contract, while `persisted-semantics.json` pins stored and behavioral
-vocabularies that JSON Schema cannot infer. Config-managed access tokens remain
-visible through credential/token listings as non-secret metadata with
-`managedBy = "config"`; mutation/revocation endpoints reject them so rotation
-stays in the bootstrap file. The domain-event schema rejects unknown envelope
-fields and versions other than `1`; the catalog separately prevents silent
-event renames and pins consumer-required detail keys. Other event detail keys
-remain additive.
+vocabularies that JSON Schema cannot infer. The optional
+`tenant_defaults.admin_capabilities` list extends the fixed tenant-admin base
+capabilities for existing and future Atom-created tenant administration roles;
+every listed capability must be built in or declared in the same bootstrap
+document.
+
+`managedBy` is a provenance string, not a Boolean. `"config"` means the row is
+owned by the bootstrap file and mutation endpoints reject changes so rotation
+stays in that file. `"system:tenant-admin"` appears only on Atom-created tenant
+administration roles and their permission blocks; it lets bootstrap reconcile
+`tenant_defaults`, but does not itself block an otherwise-authorized API
+mutation. `null` identifies an ordinary API-managed row. Config-managed access
+tokens remain visible through credential/token listings as non-secret metadata.
+The domain-event schema rejects unknown envelope fields and versions other than
+`1`; the catalog separately prevents silent event renames and pins
+consumer-required detail keys. Other event detail keys remain additive.
 
 The password-reset request contains only `email`. Atom always constructs its
 link from `ATOM_PASSWORD_RESET_REDIRECT`; callers cannot select a redirect.

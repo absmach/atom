@@ -6,7 +6,7 @@ use crate::{
     auth::{AuthContext, Scope},
     authz::{engine, repo as authz_repo},
     error::AppError,
-    identity::repo,
+    identity::{repo, service as identity_service},
     models::{
         access::AuthorizedObjectIdsQuery,
         entity as entity_model,
@@ -307,62 +307,25 @@ impl EntityMutation {
         };
         let details = serde_json::json!({ "updated_fields": updated_fields });
 
-        let result = async {
-            let existing = repo::get_entity(&state.pool, id).await?;
-            if auth.entity_id != id {
-                crate::auth::require_any_capability(
-                    &state.pool,
-                    &auth,
-                    &[
-                        ("manage", Scope::Object(id)),
-                        ("manage", scope_for_tenant(existing.tenant_id)),
-                        ("write", scope_for_tenant(existing.tenant_id)),
-                    ],
-                )
-                .await?;
-            }
-
-            let update = || {
-                repo::update_entity_with_audit(
-                    &state.pool,
-                    state.config.events.enabled(),
-                    Some(auth.entity_id),
-                    id,
-                    entity_model::UpdateEntity {
-                        name: input.name,
-                        kind: parse_optional_entity_kind(input.kind),
-                        alias: input.alias.into(),
-                        external_id: input.external_id.into(),
-                        tenant_id,
-                        profile_id,
-                        profile_version_id,
-                        status: input.status.map(Into::into),
-                        attributes: input.attributes,
-                    },
-                    "entity.update",
-                    details.clone(),
-                )
-            };
-            let Some(cache) = state.cache.as_deref() else {
-                return update().await;
-            };
-            // Entity kind, tenant, and active status all affect the canonical
-            // grant expansion, so keep both cache categories behind one
-            // barrier for the complete mutation.
-            let entity_status_keys = [crate::cache::keys::entity_status(id)];
-            let grants_keys = [crate::cache::keys::grants(id)];
-            let groups = [
-                (
-                    crate::cache::CacheCategory::EntityStatus,
-                    entity_status_keys.as_slice(),
-                ),
-                (crate::cache::CacheCategory::Grants, grants_keys.as_slice()),
-            ];
-            let leases = crate::cache::invalidate::begin_all(cache, &groups).await?;
-            let result = update().await;
-            crate::cache::invalidate::end_all(cache, leases).await;
-            result
-        }
+        let result = identity_service::update_entity_authorized(
+            &state.pool,
+            state.cache.as_deref(),
+            state.config.events.enabled(),
+            &auth,
+            id,
+            entity_model::UpdateEntity {
+                name: input.name,
+                kind: parse_optional_entity_kind(input.kind),
+                alias: input.alias.into(),
+                external_id: input.external_id.into(),
+                tenant_id,
+                profile_id,
+                profile_version_id,
+                status: input.status.map(Into::into),
+                attributes: input.attributes,
+            },
+            details.clone(),
+        )
         .await;
 
         if let Err(ref err) = result {
@@ -392,28 +355,13 @@ impl EntityMutation {
         };
         let details = serde_json::json!({});
 
-        let result = async {
-            let existing = repo::get_entity(&state.pool, id).await?;
-            if auth.entity_id != id {
-                crate::auth::require_any_capability(
-                    &state.pool,
-                    &auth,
-                    &[
-                        ("manage", Scope::Object(id)),
-                        ("manage", scope_for_tenant(existing.tenant_id)),
-                    ],
-                )
-                .await?;
-            }
-            crate::identity::service::delete_entity(
-                &state.pool,
-                state.cache.as_deref(),
-                state.config.events.enabled(),
-                id,
-                Some(auth.entity_id),
-            )
-            .await
-        }
+        let result = identity_service::delete_entity_authorized(
+            &state.pool,
+            state.cache.as_deref(),
+            state.config.events.enabled(),
+            &auth,
+            id,
+        )
         .await;
 
         if let Err(ref err) = result {

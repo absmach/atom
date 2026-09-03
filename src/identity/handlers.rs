@@ -408,19 +408,14 @@ pub async fn update_entity(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateEntity>,
 ) -> Result<impl IntoResponse, AppError> {
-    let existing = repo::get_entity(&state.pool, id).await?;
-    require_capability(
+    let entity = service::update_entity_authorized(
         &state.pool,
-        &auth,
-        "manage",
-        scope_for_tenant(existing.tenant_id),
-    )
-    .await?;
-    let entity = crate::cache::invalidate::guarded_mutation(
         state.cache.as_deref(),
-        crate::cache::CacheCategory::EntityStatus,
-        std::slice::from_ref(&crate::cache::keys::entity_status(id)),
-        || repo::update_entity(&state.pool, id, req),
+        state.config.events.enabled(),
+        &auth,
+        id,
+        req,
+        serde_json::json!({ "transport": "rest" }),
     )
     .await?;
     Ok(Json(entity))
@@ -431,22 +426,12 @@ pub async fn delete_entity(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    if auth.entity_id != id {
-        let existing = repo::get_entity(&state.pool, id).await?;
-        require_capability(
-            &state.pool,
-            &auth,
-            "manage",
-            scope_for_tenant(existing.tenant_id),
-        )
-        .await?;
-    }
-    service::delete_entity(
+    service::delete_entity_authorized(
         &state.pool,
         state.cache.as_deref(),
         state.config.events.enabled(),
+        &auth,
         id,
-        Some(auth.entity_id),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)

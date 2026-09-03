@@ -16,13 +16,14 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    auth::encode_jwt,
+    auth::{encode_jwt, require_any_capability, scope_for_tenant, AuthContext, Scope as AuthScope},
     config::{Config, OidcProviderConfig, SigningKeyConfig},
     crypto,
     error::{db_err, AppError},
     keys::LoadedKey,
     mail,
     models::{
+        entity::{Entity, UpdateEntity},
         enums::{AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus},
         session::{
             LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
@@ -56,6 +57,24 @@ pub fn verify_secret(secret: &[u8], hash: &str) -> bool {
 }
 
 const DEFAULT_MIN_PASSWORD_CHARS: usize = 12;
+
+fn checked_expiration_from_now(setting: &str, expiry_secs: u64) -> Result<DateTime<Utc>, AppError> {
+    let seconds = i64::try_from(expiry_secs).map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "{setting} is too large to represent as a duration"
+        ))
+    })?;
+    let duration = Duration::try_seconds(seconds).ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "{setting} is too large to represent as a duration"
+        ))
+    })?;
+    Utc::now().checked_add_signed(duration).ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "{setting} is too large to represent as an expiration time"
+        ))
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct CredentialAuthentication {
@@ -492,7 +511,10 @@ fn prepare_signup_human(cfg: &Config, req: SignupRequest) -> Result<PreparedSign
     let password_hash = hash_secret(req.password.as_bytes())?;
     let (token_id, token_secret, token) = new_secret_token("atomv");
     let token_hash = hash_secret(token_secret.as_bytes())?;
-    let expires_at = Utc::now() + Duration::seconds(cfg.email_verification_expiry_secs as i64);
+    let expires_at = checked_expiration_from_now(
+        "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+        cfg.email_verification_expiry_secs,
+    )?;
 
     Ok(PreparedSignup {
         entity_id: Uuid::new_v4(),
@@ -656,7 +678,10 @@ pub async fn resend_verification(pool: &PgPool, cfg: &Config, email: &str) -> Re
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
     let (token_id, token_secret, token) = new_secret_token("atomv");
     let token_hash = hash_secret(token_secret.as_bytes())?;
-    let expires_at = Utc::now() + Duration::seconds(cfg.email_verification_expiry_secs as i64);
+    let expires_at = checked_expiration_from_now(
+        "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+        cfg.email_verification_expiry_secs,
+    )?;
 
     sqlx::query(
         r#"INSERT INTO email_verification_tokens
@@ -919,7 +944,10 @@ pub async fn oauth_start(
     .bind(pkce_verifier.secret())
     .bind(nonce.secret())
     .bind(return_to.as_deref())
-    .bind(Utc::now() + Duration::seconds(cfg.oauth_state_expiry_secs as i64))
+    .bind(checked_expiration_from_now(
+        "ATOM_OAUTH_STATE_EXPIRY_SECS",
+        cfg.oauth_state_expiry_secs,
+    )?)
     .execute(pool)
     .await
     .map_err(db_err)?;
@@ -1850,7 +1878,10 @@ async fn create_exchange_code(
     .bind(code_id)
     .bind(entity_id)
     .bind(code_hash)
-    .bind(Utc::now() + Duration::seconds(expiry_secs as i64))
+    .bind(checked_expiration_from_now(
+        "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
+        expiry_secs,
+    )?)
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -2447,6 +2478,78 @@ fn make_shared_key(cred_id: Uuid) -> String {
     )
 }
 
+/// Authorize and update an entity through the one service-layer entry point
+/// used by GraphQL. Self-targeting is deliberately not special: every caller,
+/// including a scoped access token, must satisfy the same ceiling-aware source
+/// gate. Moving the entity additionally requires authority in the destination
+/// tenant.
+pub async fn update_entity_authorized(
+    pool: &PgPool,
+    cache: Option<&crate::cache::CacheClient>,
+    events_enabled: bool,
+    auth: &AuthContext,
+    id: Uuid,
+    req: UpdateEntity,
+    audit_details: Value,
+) -> Result<Entity, AppError> {
+    let existing = super::repo::get_entity(pool, id).await?;
+    require_any_capability(
+        pool,
+        auth,
+        &[
+            ("manage", AuthScope::Object(id)),
+            ("manage", scope_for_tenant(existing.tenant_id)),
+            ("write", scope_for_tenant(existing.tenant_id)),
+        ],
+    )
+    .await?;
+
+    if let Some(destination_tenant_id) = req
+        .tenant_id
+        .filter(|destination| Some(*destination) != existing.tenant_id)
+    {
+        let destination_scope = AuthScope::Tenant(destination_tenant_id);
+        require_any_capability(
+            pool,
+            auth,
+            &[("manage", destination_scope), ("write", destination_scope)],
+        )
+        .await?;
+    }
+
+    let mutate = || {
+        super::repo::update_entity_with_expected_tenant_and_audit(
+            pool,
+            events_enabled,
+            auth.entity_id,
+            id,
+            existing.tenant_id,
+            req,
+            audit_details,
+        )
+    };
+    let Some(cache) = cache else {
+        return mutate().await;
+    };
+
+    // Entity kind, tenant, and active status all affect authorization and
+    // authentication. Keep both cache categories behind one barrier for the
+    // complete transaction.
+    let entity_status_keys = [crate::cache::keys::entity_status(id)];
+    let grants_keys = [crate::cache::keys::grants(id)];
+    let groups = [
+        (
+            crate::cache::CacheCategory::EntityStatus,
+            entity_status_keys.as_slice(),
+        ),
+        (crate::cache::CacheCategory::Grants, grants_keys.as_slice()),
+    ];
+    let leases = crate::cache::invalidate::begin_all(cache, &groups).await?;
+    let result = mutate().await;
+    crate::cache::invalidate::end_all(cache, leases).await;
+    result
+}
+
 /// Soft-deletes an entity with a cache barrier spanning the whole
 /// transaction. The one entry point for entity deletion on every caller
 /// (REST and GraphQL alike), so no caller can under-invalidate.
@@ -2466,16 +2569,73 @@ pub async fn delete_entity(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    delete_entity_with_expected_tenant(pool, cache, events_enabled, id, deleted_by, None).await
+}
+
+/// Ceiling-aware, authorized entity deletion. Like updates, deleting oneself
+/// carries no implicit authority: the caller must hold the normal object or
+/// tenant manage grant.
+pub async fn delete_entity_authorized(
+    pool: &PgPool,
+    cache: Option<&crate::cache::CacheClient>,
+    events_enabled: bool,
+    auth: &AuthContext,
+    id: Uuid,
+) -> Result<(), AppError> {
+    let existing = super::repo::get_entity(pool, id).await?;
+    require_any_capability(
+        pool,
+        auth,
+        &[
+            ("manage", AuthScope::Object(id)),
+            ("manage", scope_for_tenant(existing.tenant_id)),
+        ],
+    )
+    .await?;
+    delete_entity_with_expected_tenant(
+        pool,
+        cache,
+        events_enabled,
+        id,
+        Some(auth.entity_id),
+        Some(existing.tenant_id),
+    )
+    .await
+}
+
+async fn delete_entity_with_expected_tenant(
+    pool: &PgPool,
+    cache: Option<&crate::cache::CacheClient>,
+    events_enabled: bool,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+    expected_tenant_id: Option<Option<Uuid>>,
+) -> Result<(), AppError> {
     super::repo::ensure_not_config_managed_entity(pool, id).await?;
     let Some(cache) = cache else {
-        return super::repo::delete_entity_with_audit(
-            pool,
-            events_enabled,
-            deleted_by,
-            id,
-            deleted_by,
-        )
-        .await;
+        return match expected_tenant_id {
+            Some(expected_tenant_id) => {
+                super::repo::delete_entity_with_expected_tenant_and_audit(
+                    pool,
+                    events_enabled,
+                    deleted_by,
+                    id,
+                    deleted_by,
+                    expected_tenant_id,
+                )
+                .await
+            }
+            None => {
+                super::repo::delete_entity_with_audit(
+                    pool,
+                    events_enabled,
+                    deleted_by,
+                    id,
+                    deleted_by,
+                )
+                .await
+            }
+        };
     };
 
     let mut tx = pool.begin().await.map_err(db_err)?;
@@ -2487,8 +2647,17 @@ pub async fn delete_entity(
     // window where a concurrent request keeps taking full cache hits on the
     // pre-delete entity/session/credential entries and runs past the point
     // this delete commits.
-    let (session_ids, credential_ids) =
-        super::repo::lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
+    let (session_ids, credential_ids) = match expected_tenant_id {
+        Some(expected_tenant_id) => {
+            super::repo::lock_entity_and_collect_revocation_ids_for_tenant_in_tx(
+                &mut tx,
+                id,
+                expected_tenant_id,
+            )
+            .await?
+        }
+        None => super::repo::lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?,
+    };
     let session_keys: Vec<String> = session_ids
         .iter()
         .copied()
