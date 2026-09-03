@@ -43,6 +43,9 @@ pub struct Config {
     pub jwt_expiry_secs: u64,
     pub jwt_issuer: String,
     pub jwt_audience: String,
+    /// Rotating opaque refresh tokens (issue #100). Off by default; see
+    /// [`RefreshTokenConfig`].
+    pub refresh_tokens: RefreshTokenConfig,
     /// UUID of the seeded admin entity. Defaults to the well-known seed UUID.
     pub admin_entity_id: Uuid,
     /// If set, the admin entity's password credential is created on first boot.
@@ -520,6 +523,28 @@ impl Default for AuditRetentionConfig {
     }
 }
 
+/// Rotating opaque refresh tokens (issue #100). Off by default so existing
+/// GraphQL/REST login clients see byte-identical behavior until a deployment
+/// opts in. `access_token_expiry_secs` defaults to `JWT_EXPIRY_SECS` so
+/// enabling the flag alone changes nothing about the JWT lifetime — only
+/// `refresh_token_expiry_secs` (the family's absolute deadline) is new.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshTokenConfig {
+    pub enabled: bool,
+    pub refresh_token_expiry_secs: u64,
+    pub access_token_expiry_secs: u64,
+}
+
+impl RefreshTokenConfig {
+    pub(crate) fn default_with(access_token_expiry_secs: u64) -> Self {
+        Self {
+            enabled: false,
+            refresh_token_expiry_secs: 2_592_000,
+            access_token_expiry_secs,
+        }
+    }
+}
+
 /// Physical purge of soft-deleted rows. Disabled by default: for an identity/
 /// authorization system, keeping tombstones indefinitely (and purging only on a
 /// deliberate, explicit decision) is the safe default — "never" until opted in.
@@ -937,6 +962,9 @@ impl Config {
                 );
             }
         }
+        let jwt_expiry_secs = env_positive_lifetime_secs("JWT_EXPIRY_SECS", 3_600)?;
+        let refresh_tokens =
+            refresh_tokens_from_env(jwt_expiry_secs, signing_keys.key_encryption_key.is_some())?;
         Ok(Config {
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
             db_pool: db_pool_from_env()?,
@@ -965,11 +993,12 @@ impl Config {
             metrics: MetricsConfig {
                 enabled: env_bool_default("ATOM_METRICS_ENABLED", true)?,
             },
-            jwt_expiry_secs: env_positive_lifetime_secs("JWT_EXPIRY_SECS", 3_600)?,
+            jwt_expiry_secs,
             jwt_issuer: std::env::var("ATOM_JWT_ISSUER")
                 .unwrap_or_else(|_| public_base_url.trim_end_matches('/').to_string()),
             jwt_audience: std::env::var("ATOM_JWT_AUDIENCE")
                 .unwrap_or_else(|_| "magistrala".to_string()),
+            refresh_tokens,
             admin_entity_id: env_parse("ADMIN_ENTITY_ID", ADMIN_ENTITY_ID)?,
             admin_secret: std::env::var("ADMIN_SECRET").ok(),
             service_secret: std::env::var("ATOM_SERVICE_SECRET").ok(),
@@ -1072,6 +1101,7 @@ impl Config {
             jwt_expiry_secs: 3600,
             jwt_issuer: "http://localhost:8080".to_string(),
             jwt_audience: "magistrala".to_string(),
+            refresh_tokens: RefreshTokenConfig::default_with(3600),
             admin_entity_id: ADMIN_ENTITY_ID,
             admin_secret: None,
             service_secret: None,
@@ -1536,6 +1566,30 @@ fn audit_retention_from_env() -> Result<AuditRetentionConfig> {
     }
     if cfg.cleanup_batch_size <= 0 {
         anyhow::bail!("ATOM_AUDIT_CLEANUP_BATCH_SIZE must be greater than zero");
+    }
+    Ok(cfg)
+}
+
+fn refresh_tokens_from_env(jwt_expiry_secs: u64, kek_present: bool) -> Result<RefreshTokenConfig> {
+    let default = RefreshTokenConfig::default_with(jwt_expiry_secs);
+    let cfg = RefreshTokenConfig {
+        enabled: env_bool_default("ATOM_REFRESH_TOKENS_ENABLED", default.enabled)?,
+        refresh_token_expiry_secs: env_positive_lifetime_secs(
+            "ATOM_REFRESH_TOKEN_EXPIRY_SECS",
+            default.refresh_token_expiry_secs,
+        )?,
+        access_token_expiry_secs: env_positive_lifetime_secs(
+            "ATOM_ACCESS_TOKEN_EXPIRY_SECS",
+            default.access_token_expiry_secs,
+        )?,
+    };
+    if cfg.refresh_token_expiry_secs <= cfg.access_token_expiry_secs {
+        anyhow::bail!(
+            "ATOM_REFRESH_TOKEN_EXPIRY_SECS must be greater than ATOM_ACCESS_TOKEN_EXPIRY_SECS"
+        );
+    }
+    if cfg.enabled && !kek_present {
+        anyhow::bail!("ATOM_REFRESH_TOKENS_ENABLED=true requires ATOM_KEY_ENCRYPTION_KEY");
     }
     Ok(cfg)
 }
@@ -2561,6 +2615,70 @@ mod tests {
     }
 
     #[test]
+    fn refresh_tokens_default_to_disabled_and_inherit_jwt_expiry() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let cfg = Config::from_env().expect("config");
+        assert!(!cfg.refresh_tokens.enabled);
+        assert_eq!(cfg.refresh_tokens.access_token_expiry_secs, 3_600);
+        assert_eq!(cfg.refresh_tokens.refresh_token_expiry_secs, 2_592_000);
+
+        std::env::set_var("JWT_EXPIRY_SECS", "900");
+        let cfg = Config::from_env().expect("config with custom JWT_EXPIRY_SECS");
+        assert_eq!(cfg.refresh_tokens.access_token_expiry_secs, 900);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn refresh_tokens_reject_zero_and_reversed_lifetimes() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        std::env::set_var("ATOM_REFRESH_TOKEN_EXPIRY_SECS", "0");
+        let err = Config::from_env().expect_err("zero refresh lifetime");
+        assert!(err.to_string().contains("ATOM_REFRESH_TOKEN_EXPIRY_SECS"));
+        std::env::remove_var("ATOM_REFRESH_TOKEN_EXPIRY_SECS");
+
+        std::env::set_var("ATOM_ACCESS_TOKEN_EXPIRY_SECS", "0");
+        let err = Config::from_env().expect_err("zero access lifetime");
+        assert!(err.to_string().contains("ATOM_ACCESS_TOKEN_EXPIRY_SECS"));
+        std::env::remove_var("ATOM_ACCESS_TOKEN_EXPIRY_SECS");
+
+        std::env::set_var("ATOM_ACCESS_TOKEN_EXPIRY_SECS", "3600");
+        std::env::set_var("ATOM_REFRESH_TOKEN_EXPIRY_SECS", "3600");
+        let err = Config::from_env().expect_err("refresh lifetime must exceed access lifetime");
+        assert!(err.to_string().contains(
+            "ATOM_REFRESH_TOKEN_EXPIRY_SECS must be greater than ATOM_ACCESS_TOKEN_EXPIRY_SECS"
+        ));
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn refresh_tokens_enabled_requires_key_encryption_key() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        std::env::set_var("ATOM_REFRESH_TOKENS_ENABLED", "true");
+        let err = Config::from_env().expect_err("enabling without a KEK must fail closed");
+        assert!(err.to_string().contains("ATOM_REFRESH_TOKENS_ENABLED"));
+
+        std::env::set_var(
+            "ATOM_KEY_ENCRYPTION_KEY",
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        );
+        let cfg = Config::from_env().expect("config with KEK present");
+        assert!(cfg.refresh_tokens.enabled);
+
+        clear_hardening_env();
+    }
+
+    #[test]
     fn pkcs11_configuration_is_operator_only_and_fail_closed() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         clear_hardening_env();
@@ -2782,6 +2900,9 @@ mod tests {
             "ADMIN_ENTITY_ID",
             "ATOM_SERVICE_ENTITY_ID",
             "JWT_EXPIRY_SECS",
+            "ATOM_REFRESH_TOKENS_ENABLED",
+            "ATOM_REFRESH_TOKEN_EXPIRY_SECS",
+            "ATOM_ACCESS_TOKEN_EXPIRY_SECS",
             "ATOM_LOG_LEVEL",
             "ATOM_LOG_FORMAT",
             "ATOM_DB_MAX_CONNECTIONS",

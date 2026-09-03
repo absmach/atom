@@ -16,8 +16,8 @@ use crate::{
             SubjectKind, TenantOrderField, TenantStatus,
         },
         group as group_model, policy as policy_model, profile as profile_model,
-        resource as resource_model, role as role_model, session as session_model,
-        tenant as tenant_model, token as token_model,
+        refresh_token as refresh_token_model, resource as resource_model, role as role_model,
+        session as session_model, tenant as tenant_model, token as token_model,
     },
     state::AppState,
 };
@@ -410,6 +410,72 @@ impl LoginResponse {
 
     async fn verification_required(&self) -> bool {
         self.0.verification_required
+    }
+
+    /// Compatibility alias for `token` — always equal to it (issue #100).
+    async fn access_token(&self) -> &str {
+        &self.0.access_token
+    }
+
+    async fn access_token_expires_at(&self) -> String {
+        timestamp(self.0.access_token_expires_at)
+    }
+
+    /// Plaintext refresh token, shown only in this response. `null` unless
+    /// `ATOM_REFRESH_TOKENS_ENABLED=true`.
+    async fn refresh_token(&self) -> Option<&str> {
+        self.0.refresh_token.as_deref()
+    }
+
+    /// Also the refresh-token family's absolute deadline.
+    async fn refresh_token_expires_at(&self) -> Option<String> {
+        self.0.refresh_token_expires_at.map(timestamp)
+    }
+}
+
+/// Input for the `refreshToken` mutation (issue #100).
+#[derive(InputObject)]
+pub struct RefreshTokenInput {
+    pub refresh_token: String,
+}
+
+pub struct TokenPairResponse(pub refresh_token_model::TokenPairResponse);
+
+#[Object]
+impl TokenPairResponse {
+    /// Compatibility alias for `accessToken` — always equal to it.
+    async fn token(&self) -> &str {
+        &self.0.token
+    }
+
+    async fn access_token(&self) -> &str {
+        &self.0.access_token
+    }
+
+    async fn refresh_token(&self) -> &str {
+        &self.0.refresh_token
+    }
+
+    async fn access_token_expires_at(&self) -> String {
+        timestamp(self.0.access_token_expires_at)
+    }
+
+    async fn refresh_token_expires_at(&self) -> String {
+        timestamp(self.0.refresh_token_expires_at)
+    }
+
+    async fn entity_id(&self) -> ID {
+        id(self.0.entity_id)
+    }
+
+    async fn session_id(&self) -> ID {
+        id(self.0.session_id)
+    }
+}
+
+impl From<refresh_token_model::TokenPairResponse> for TokenPairResponse {
+    fn from(response: refresh_token_model::TokenPairResponse) -> Self {
+        TokenPairResponse(response)
     }
 }
 

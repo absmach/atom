@@ -743,13 +743,38 @@ type LoginResponse {
 	expiresAt: String!
 	emailVerified: Boolean
 	verificationRequired: Boolean!
+	"""
+	Compatibility alias for `token` — always equal to it (issue #100).
+	"""
+	accessToken: String!
+	accessTokenExpiresAt: String!
+	"""
+	Plaintext refresh token, shown only in this response. `null` unless
+	`ATOM_REFRESH_TOKENS_ENABLED=true`.
+	"""
+	refreshToken: String
+	"""
+	Also the refresh-token family's absolute deadline.
+	"""
+	refreshTokenExpiresAt: String
 }
 
 type MutationRoot {
 	login(input: LoginInput!): LoginResponse!
 	signup(input: SignupInput!): SignupResponse!
 	logout: Boolean!
-	refreshSession: LoginResponse!
+	"""
+	Exchange a refresh token for a new access JWT + rotated refresh
+	token, per issue #100. Deliberately does not call `require_auth`:
+	this must work with no `AuthContext` in scope, since the client
+	sends no Authorization header at all — an expired JWT would
+	otherwise be rejected by `graphql_handler`'s request wrapper before
+	this resolver ever runs, see `src/graphql/mod.rs`. The refresh token
+	itself is the authentication mechanism, verified inside
+	`service::exchange_refresh_token`.
+	"""
+	refreshToken(input: RefreshTokenInput!): TokenPairResponse!
+	refreshSession: LoginResponse! @deprecated(reason: "Use refreshToken instead. This mutation still requires a valid (non-expired) access JWT and will be removed in a future breaking release.")
 	createTenant(input: CreateTenantInput!): Tenant!
 	updateTenant(id: ID!, input: UpdateTenantInput!): Tenant!
 	deleteTenant(id: ID!): Boolean!
@@ -1113,6 +1138,13 @@ type RateLimitStatus {
 	trustedProxyCidrs: [String!]!
 }
 
+"""
+Input for the `refreshToken` mutation (issue #100).
+"""
+input RefreshTokenInput {
+	refreshToken: String!
+}
+
 input RemoveActionApplicabilityInput {
 	actionId: ID!
 	objectKind: String!
@@ -1367,6 +1399,19 @@ enum TenantStatus {
 	deleted
 }
 
+type TokenPairResponse {
+	"""
+	Compatibility alias for `accessToken` — always equal to it.
+	"""
+	token: String!
+	accessToken: String!
+	refreshToken: String!
+	accessTokenExpiresAt: String!
+	refreshTokenExpiresAt: String!
+	entityId: ID!
+	sessionId: ID!
+}
+
 input UpdateActionInput {
 	name: String
 	description: String
@@ -1439,6 +1484,10 @@ input UpdateTenantInput {
 	attributes: JSON
 }
 
+"""
+Marks an element of a GraphQL schema as no longer supported.
+"""
+directive @deprecated(reason: String = "No longer supported") on FIELD_DEFINITION | ARGUMENT_DEFINITION | INPUT_FIELD_DEFINITION | ENUM_VALUE
 """
 Directs the executor to include this field or fragment only when the `if` argument is true.
 """

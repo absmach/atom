@@ -178,12 +178,12 @@ mod tests {
                 {
                   __schema {
                     queryType {
-                      fields {
+                      fields(includeDeprecated: true) {
                         name
                       }
                     }
                     mutationType {
-                      fields {
+                      fields(includeDeprecated: true) {
                         name
                       }
                     }

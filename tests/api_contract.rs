@@ -431,6 +431,10 @@ fn contract_public_runtime_dtos_validate_against_openapi_components() {
         expires_at: instant,
         email_verified: Some(true),
         verification_required: true,
+        access_token: "signed-token".into(),
+        access_token_expires_at: instant,
+        refresh_token: Some("atom_rt_refresh-token".into()),
+        refresh_token_expires_at: Some(instant),
     };
     assert_runtime_value_matches_component(&document, "LoginResponse", &login, true);
 
@@ -441,14 +445,24 @@ fn contract_public_runtime_dtos_validate_against_openapi_components() {
         expires_at: instant,
         email_verified: None,
         verification_required: false,
+        access_token: "signed-token".into(),
+        access_token_expires_at: instant,
+        refresh_token: None,
+        refresh_token_expires_at: None,
     })
     .expect("LoginResponse serializes");
     assert!(omitted_login_fields.get("email_verified").is_none());
     assert!(omitted_login_fields.get("verification_required").is_none());
+    assert!(omitted_login_fields.get("refresh_token").is_none());
+    assert!(omitted_login_fields
+        .get("refresh_token_expires_at")
+        .is_none());
     let login_required =
         string_set(&document["components"]["schemas"]["LoginResponse"]["required"]);
     assert!(!login_required.contains("email_verified"));
     assert!(!login_required.contains("verification_required"));
+    assert!(!login_required.contains("refresh_token"));
+    assert!(!login_required.contains("refresh_token_expires_at"));
     assert_runtime_value_matches_component_value(
         &document,
         "LoginResponse",

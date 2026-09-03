@@ -94,6 +94,12 @@ pub enum HotPathAuditKind {
     AuthzCheck,
     AuthLogin,
     AuthCredentialAuthenticate,
+    /// Ordinary (non-mutating) refresh-token exchange denials — malformed,
+    /// unknown, expired, wrong-secret, or lifecycle-inactive. The two
+    /// outcomes that actually mutate state (successful rotation, and
+    /// replay-triggered revocation) go through `commit_with_audit` instead,
+    /// atomically with their transaction.
+    AuthRefresh,
 }
 
 impl HotPathAuditKind {
@@ -102,6 +108,7 @@ impl HotPathAuditKind {
             Self::AuthzCheck => "authz_check",
             Self::AuthLogin => "auth_login",
             Self::AuthCredentialAuthenticate => "auth_credential_authenticate",
+            Self::AuthRefresh => "auth_refresh",
         }
     }
 }
