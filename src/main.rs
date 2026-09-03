@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         .await;
     audit::spawn_retention_cleanup(state.clone());
     purge::spawn_purge_cleanup(state.clone());
+    purge::spawn_refresh_token_cleanup(state.clone());
     events::spawn_event_publisher(state.clone());
     certs::lifecycle::spawn(state.clone());
 

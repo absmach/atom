@@ -1394,7 +1394,7 @@ callouts:
         );
         assert_eq!(
             artifact_names.len(),
-            162,
+            165,
             "review any deployment API addition"
         );
 
@@ -1466,6 +1466,8 @@ callouts:
                 "ATOM_INVITATION_EXPIRY_SECS",
                 "ATOM_OAUTH_STATE_EXPIRY_SECS",
                 "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
+                "ATOM_REFRESH_TOKEN_EXPIRY_SECS",
+                "ATOM_ACCESS_TOKEN_EXPIRY_SECS",
             ]
             .map(str::to_string)
         );
@@ -1617,6 +1619,21 @@ callouts:
         assert_eq!(default("ATOM_PURGE_RETENTION_DAYS"), purge.retention_days);
         assert_eq!(default("ATOM_PURGE_INTERVAL_SECS"), purge.interval_secs);
         assert_eq!(default("ATOM_PURGE_BATCH_SIZE"), purge.batch_size);
+
+        // `access_token_expiry_secs` defaults to `JWT_EXPIRY_SECS` (3600).
+        let refresh_tokens = crate::config::RefreshTokenConfig::default_with(3600);
+        assert_eq!(
+            default("ATOM_REFRESH_TOKENS_ENABLED"),
+            refresh_tokens.enabled
+        );
+        assert_eq!(
+            default("ATOM_REFRESH_TOKEN_EXPIRY_SECS"),
+            refresh_tokens.refresh_token_expiry_secs
+        );
+        assert_eq!(
+            default("ATOM_ACCESS_TOKEN_EXPIRY_SECS"),
+            refresh_tokens.access_token_expiry_secs
+        );
 
         let rate = crate::config::RateLimitConfig::default();
         assert_eq!(default("ATOM_RATE_LIMIT_ENABLED"), rate.enabled);
@@ -1814,7 +1831,7 @@ callouts:
         assert_eq!(all, assignments.into_iter().collect());
         assert_eq!(
             contract_strings(&artifact["authentication"]["public"]),
-            ["health", "login", "signup"].map(str::to_string)
+            ["health", "login", "signup", "refreshToken"].map(str::to_string)
         );
 
         let auth_source = include_str!("../graphql/auth.rs");
@@ -1824,6 +1841,13 @@ callouts:
                 "public resolver {public} acquired authentication"
             );
         }
+        // `refreshToken` in the SDL/contract is `refresh_token` as a Rust fn
+        // name (async-graphql's camelCase rendering), unlike the three
+        // single-word names above where both forms coincide.
+        assert!(
+            !function_section(auth_source, "refresh_token").contains("require_auth(ctx)"),
+            "public resolver refresh_token acquired authentication"
+        );
         assert!(function_section(auth_source, "logout").contains("require_auth(ctx)?"));
         let refresh = function_section(auth_source, "refresh_session");
         assert!(refresh.contains("require_auth(ctx)?"));

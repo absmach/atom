@@ -69,6 +69,51 @@ pub fn spawn_purge_cleanup(state: AppState) {
     });
 }
 
+/// Bounded cleanup of expired refresh-token history (issue #100), gated on
+/// `ATOM_REFRESH_TOKENS_ENABLED` — independent of the unrelated soft-delete
+/// `ATOM_PURGE_ENABLED` flag above, but reusing its `interval_secs`/
+/// `batch_size` for cadence rather than adding new knobs for a single small
+/// job. Only ever deletes rows whose `family_expires_at` has already passed
+/// (see `identity::refresh_tokens::purge_expired`), so replay detection
+/// stays available for the whole life of a family.
+pub fn spawn_refresh_token_cleanup(state: AppState) {
+    let refresh_cfg = state.config.refresh_tokens;
+    if !refresh_cfg.enabled {
+        return;
+    }
+    let interval_secs = state.config.purge.interval_secs;
+    let batch_size = state.config.purge.batch_size;
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            match crate::identity::refresh_tokens::purge_expired(&state.pool, batch_size).await {
+                Ok(0) => {}
+                Ok(deleted_rows) => {
+                    audit::write(
+                        &state.pool,
+                        state.config.events.enabled(),
+                        audit::AuditEvent {
+                            actor_entity_id: None,
+                            tenant_id: None,
+                            target_kind: None,
+                            target_id: None,
+                            event: "auth.refresh.cleanup",
+                            outcome: AuditOutcome::Allow,
+                            details: serde_json::json!({ "deleted_rows": deleted_rows }),
+                        },
+                    )
+                    .await;
+                }
+                Err(err) => tracing::warn!("refresh token cleanup failed: {err}"),
+            }
+        }
+    });
+}
+
 /// Physically delete one bounded batch of tombstoned rows per table.
 ///
 /// A transaction-scoped advisory lock ensures only one application replica

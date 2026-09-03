@@ -13,7 +13,8 @@ use crate::{
 use crate::models::session::SignupRequest;
 
 use super::types::{
-    parse_id, parse_optional_id, LoginInput, LoginResponse, Session, SignupInput, SignupResponse,
+    parse_id, parse_optional_id, LoginInput, LoginResponse, RefreshTokenInput, Session,
+    SignupInput, SignupResponse, TokenPairResponse,
 };
 
 #[derive(Default)]
@@ -147,6 +148,68 @@ impl AuthMutation {
         Ok(true)
     }
 
+    /// Exchange a refresh token for a new access JWT + rotated refresh
+    /// token, per issue #100. Deliberately does not call `require_auth`:
+    /// this must work with no `AuthContext` in scope, since the client
+    /// sends no Authorization header at all — an expired JWT would
+    /// otherwise be rejected by `graphql_handler`'s request wrapper before
+    /// this resolver ever runs, see `src/graphql/mod.rs`. The refresh token
+    /// itself is the authentication mechanism, verified inside
+    /// `service::exchange_refresh_token`.
+    async fn refresh_token(
+        &self,
+        ctx: &Context<'_>,
+        input: RefreshTokenInput,
+    ) -> Result<TokenPairResponse> {
+        let state = ctx.data::<AppState>()?;
+        let signer = {
+            let keys = state.keys.read().await;
+            crate::auth::JwtSigner::from_key(&keys.primary).map_err(gql_error)?
+        };
+
+        // The session id to guard is only known once the token id resolves
+        // to a row; a concurrent exchange of the same token or a concurrent
+        // logout is still made safe by the row locks inside
+        // `exchange_refresh_token` itself — this pre-read only decides which
+        // cache entries the barrier below covers (see
+        // `identity::refresh_tokens::session_id_for_refresh_token`).
+        let candidate_session_id = match crate::auth::parse_refresh_token(&input.refresh_token) {
+            Some((token_id, _)) => service::session_id_for_refresh_token(&state.pool, token_id)
+                .await
+                .map_err(gql_error)?,
+            None => None,
+        };
+
+        let exchange = || {
+            service::exchange_refresh_token(
+                &state.pool,
+                &state.config,
+                &signer,
+                &input.refresh_token,
+            )
+        };
+
+        let response = match candidate_session_id {
+            Some(session_id) => {
+                crate::cache::invalidate::guarded_mutation(
+                    state.cache.as_deref(),
+                    crate::cache::CacheCategory::Session,
+                    std::slice::from_ref(&crate::cache::keys::session(session_id)),
+                    exchange,
+                )
+                .await
+            }
+            None => exchange().await,
+        }
+        .map_err(gql_error)?;
+
+        Ok(response.into())
+    }
+
+    #[graphql(
+        deprecation = "Use refreshToken instead. This mutation still requires a valid \
+        (non-expired) access JWT and will be removed in a future breaking release."
+    )]
     async fn refresh_session(&self, ctx: &Context<'_>) -> Result<LoginResponse> {
         let auth = require_auth(ctx)?;
         let session_id = auth.session_id.ok_or_else(|| {
