@@ -585,10 +585,7 @@ mod contract_tests {
         }
 
         let contract = contract();
-        let mut runtime_actions = seeded_actions(include_str!("../../migrations/001_initial.sql"));
-        runtime_actions.extend(seeded_actions(include_str!(
-            "../../migrations/012_pki_ca_provisioning.sql"
-        )));
+        let runtime_actions = seeded_actions(include_str!("../../migrations/001_initial.sql"));
         assert_eq!(
             runtime_actions,
             contract_strings(&contract["seededActions"])
@@ -636,7 +633,7 @@ mod contract_tests {
         let tenant_repo = include_str!("../tenants/repo.rs");
         let bootstrap = include_str!("../bootstrap.rs");
         let managed_by_guard = include_str!("../managed_by.rs");
-        let tenant_admin_migration = include_str!("../../migrations/027_tenant_admin_defaults.sql");
+        let tenant_admin_migration = include_str!("../../migrations/001_initial.sql");
         assert!(tenant_repo.contains("'system:tenant-admin'"));
         assert!(bootstrap.contains("managed_by = 'system:tenant-admin'"));
         assert!(managed_by_guard.contains("value == \"config\""));
@@ -737,14 +734,10 @@ mod contract_tests {
         );
         assert!(profile_resolver
             .contains("Some(\"draft\" | \"active\" | \"deprecated\" | \"disabled\") | None"));
-        assert!(
-            include_str!("../../migrations/018_pki_runtime_resolver_v2.sql")
-                .contains("status IN ('active', 'revoked')")
-        );
-        assert!(
-            include_str!("../../migrations/018_pki_runtime_resolver_v2.sql")
-                .contains("kind = 'certificate' AND status = 'revocation_pending'")
-        );
+        assert!(include_str!("../../migrations/001_initial.sql")
+            .contains("status IN ('active', 'revoked')"));
+        assert!(include_str!("../../migrations/001_initial.sql")
+            .contains("kind = 'certificate' AND status = 'revocation_pending'"));
     }
 
     #[test]
@@ -977,7 +970,7 @@ mod contract_tests {
             ["identity"]
         );
 
-        let authority_sql = include_str!("../../migrations/011_pki_authorities.sql");
+        let authority_sql = include_str!("../../migrations/001_initial.sql");
         for value in contract_strings(&pki["authorityKind"])
             .into_iter()
             .chain(contract_strings(&pki["authorityStatus"]))
@@ -985,15 +978,14 @@ mod contract_tests {
         {
             assert!(authority_sql.contains(&format!("'{value}'")));
         }
-        assert!(include_str!("../../migrations/024_pki_config_bootstrap_provisioning_mode.sql")
-            .contains("CHECK (provisioning_mode IN ('imported', 'offline', 'automated', 'config_bootstrap'))"));
-        assert!(
-            include_str!("../../migrations/015_pki_certificate_renewal.sql")
-                .contains("CHECK (key_mode IN ('csr', 'generated'))")
-        );
-        assert!(include_str!("../../migrations/019_pki_enrollment.sql")
+        assert!(include_str!("../../migrations/001_initial.sql").contains(
+            "CHECK (provisioning_mode IN ('imported', 'offline', 'automated', 'config_bootstrap'))"
+        ));
+        assert!(include_str!("../../migrations/001_initial.sql")
+            .contains("CHECK (key_mode IN ('csr', 'generated'))"));
+        assert!(include_str!("../../migrations/001_initial.sql")
             .contains("CHECK (scope_kind IN ('entity', 'tenant'))"));
-        let lifecycle = include_str!("../../migrations/020_pki_lifecycle_automation.sql");
+        let lifecycle = include_str!("../../migrations/001_initial.sql");
         assert!(lifecycle.contains("CHECK (subject_kind IN ('credential', 'authority'))"));
         for value in contract_strings(&pki["lifecycleWindowKind"]) {
             assert!(lifecycle.contains(&format!("'{value}'")));
@@ -1008,20 +1000,16 @@ mod contract_tests {
             legacy_issuer["revocationArtifactPolicy"],
             "local_status_only_no_crl_or_ocsp"
         );
-        let authority_migration = include_str!("../../migrations/011_pki_authorities.sql");
+        let authority_migration = include_str!("../../migrations/001_initial.sql");
         assert!(authority_migration.contains("'{issuer_migration}'"));
         assert!(authority_migration.contains("'\"legacy_unmanaged\"'::jsonb"));
         assert!(authority_migration
             .contains("metadata->>'issuer_migration' IS NOT DISTINCT FROM 'legacy_unmanaged'"));
-        for migration in [
-            include_str!("../../migrations/016_pki_certificate_revocation.sql"),
-            include_str!("../../migrations/017_pki_issuer_crls.sql"),
-            include_str!("../../migrations/022_pki_durable_revocation_evidence.sql"),
-        ] {
+        for migration in [include_str!("../../migrations/001_initial.sql")] {
             assert!(migration.contains("metadata->>'issuer_migration' = 'legacy_unmanaged'"));
         }
 
-        let profile_sql = include_str!("../../migrations/013_pki_certificate_profiles.sql");
+        let profile_sql = include_str!("../../migrations/001_initial.sql");
         for value in contract_strings(&profile["keyUsage"])
             .into_iter()
             .chain(contract_strings(&profile["extendedKeyUsage"]))
