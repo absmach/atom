@@ -9,6 +9,7 @@ pub mod external_id;
 pub mod group;
 pub mod policy;
 pub mod profile;
+pub mod refresh_token;
 pub mod resource;
 pub mod role;
 pub mod session;

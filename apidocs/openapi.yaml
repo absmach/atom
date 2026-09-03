@@ -1476,7 +1476,7 @@ components:
     LoginResponse:
       type: object
       additionalProperties: false
-      required: [token, entity_id, session_id, expires_at]
+      required: [token, entity_id, session_id, expires_at, access_token, access_token_expires_at]
       properties:
         token: { type: string }
         entity_id: { type: string, format: uuid }
@@ -1484,6 +1484,14 @@ components:
         expires_at: { type: string, format: date-time }
         email_verified: { type: boolean }
         verification_required: { type: boolean }
+        # issue #100: access_token/access_token_expires_at always mirror
+        # token/expires_at (compatibility aliases). refresh_token and
+        # refresh_token_expires_at are present only when
+        # ATOM_REFRESH_TOKENS_ENABLED=true.
+        access_token: { type: string }
+        access_token_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_token_expires_at: { type: string, format: date-time }
 
     NativeEnrollmentRequest:
       type: object
