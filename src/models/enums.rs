@@ -633,7 +633,7 @@ mod contract_tests {
         let tenant_repo = include_str!("../tenants/repo.rs");
         let bootstrap = include_str!("../bootstrap.rs");
         let managed_by_guard = include_str!("../managed_by.rs");
-        let tenant_admin_migration = include_str!("../../migrations/027_tenant_admin_defaults.sql");
+        let tenant_admin_migration = include_str!("../../migrations/001_initial.sql");
         assert!(tenant_repo.contains("'system:tenant-admin'"));
         assert!(bootstrap.contains("managed_by = 'system:tenant-admin'"));
         assert!(managed_by_guard.contains("value == \"config\""));
