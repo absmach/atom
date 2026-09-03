@@ -792,25 +792,10 @@ fn parse(contents: &str) -> Result<BootstrapConfig> {
 }
 
 /// Generates the structural JSON Schema frozen as
-/// `api/v1/bootstrap.schema.json`. Fields added after v1 are removed from this
-/// compatibility artifact; use [`v2_json_schema`] for the current contract.
+/// `api/v1/bootstrap.schema.json`.
 pub fn v1_json_schema() -> Result<Value> {
-    let mut schema = v2_json_schema()?;
-    let _ = schema
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-        .and_then(|properties| properties.remove("tenant_defaults"));
-    let _ = schema
-        .get_mut("$defs")
-        .and_then(Value::as_object_mut)
-        .and_then(|definitions| definitions.remove("BootstrapTenantDefaults"));
-    Ok(schema)
-}
-
-/// Generates the current bootstrap contract, including tenant defaults.
-pub fn v2_json_schema() -> Result<Value> {
     serde_json::to_value(schemars::schema_for!(BootstrapConfig))
-        .context("failed to serialize the bootstrap v2 JSON Schema")
+        .context("failed to serialize the bootstrap v1 JSON Schema")
 }
 
 /// Refuse a v0.50 -> v1 migration when migration 025 would have to choose an
@@ -3529,17 +3514,8 @@ resources:
     }
 
     #[test]
-    fn generated_v2_schema_matches_the_current_artifact() {
-        let generated = v2_json_schema().expect("generate bootstrap schema");
-        let committed: Value =
-            serde_json::from_str(include_str!("../api/v2/bootstrap.schema.json"))
-                .expect("committed bootstrap schema");
-        assert_eq!(generated, committed);
-    }
-
-    #[test]
     fn example_and_unknown_field_policy_match_the_v1_schema() {
-        let schema: Value = serde_json::from_str(include_str!("../api/v2/bootstrap.schema.json"))
+        let schema: Value = serde_json::from_str(include_str!("../api/v1/bootstrap.schema.json"))
             .expect("committed bootstrap schema");
         let compiled = jsonschema::JSONSchema::compile(&schema).expect("compile bootstrap schema");
 

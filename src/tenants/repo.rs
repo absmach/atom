@@ -62,6 +62,24 @@ pub struct CreatedInvitation {
     pub email: Option<String>,
 }
 
+fn checked_invitation_expiration(expiry_secs: u64) -> Result<DateTime<Utc>, AppError> {
+    let seconds = i64::try_from(expiry_secs).map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "ATOM_INVITATION_EXPIRY_SECS is too large to represent as a duration"
+        ))
+    })?;
+    let duration = Duration::try_seconds(seconds).ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "ATOM_INVITATION_EXPIRY_SECS is too large to represent as a duration"
+        ))
+    })?;
+    Utc::now().checked_add_signed(duration).ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "ATOM_INVITATION_EXPIRY_SECS is too large to represent an invitation expiration"
+        ))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct PurgedTenant {
     pub id: Uuid,
@@ -1287,7 +1305,7 @@ pub async fn create_invitation(
     // otherwise legitimate invitee.
     let (_, token_secret, _) = new_secret_token("atomi");
     let token_hash = hash_secret(token_secret.as_bytes())?;
-    let expires_at = Utc::now() + Duration::seconds(expiry_secs as i64);
+    let expires_at = checked_invitation_expiration(expiry_secs)?;
 
     let invitation = sqlx::query_as::<_, TenantInvitation>(&format!(
         r#"WITH updated AS (

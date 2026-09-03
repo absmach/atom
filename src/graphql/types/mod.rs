@@ -1039,7 +1039,9 @@ impl Role {
         self.0.updated_at.map(timestamp)
     }
 
-    /// `"config"` when provisioned from the bootstrap YAML.
+    /// `"config"` for bootstrap-owned roles; `"system:tenant-admin"` for the
+    /// Atom-created tenant administration role. Only `"config"` makes the row
+    /// immutable through the API.
     async fn managed_by(&self) -> Option<&str> {
         self.0.managed_by.as_deref()
     }
@@ -1483,7 +1485,9 @@ impl PermissionBlock {
         timestamp(self.0.updated_at)
     }
 
-    /// `"config"` when provisioned from the bootstrap YAML.
+    /// `"config"` for bootstrap-owned blocks; `"system:tenant-admin"` for the
+    /// block attached to Atom-created tenant administration roles. Only
+    /// `"config"` makes the row immutable through the API.
     async fn managed_by(&self) -> Option<&str> {
         self.0.managed_by.as_deref()
     }

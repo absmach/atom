@@ -601,6 +601,47 @@ mod contract_tests {
         );
         assert_eq!(endpoint_authorization["mutationScope"], "platform");
 
+        let tenant_admin = &contract["bootstrapReconciliation"]["tenantAdminDefaults"];
+        assert_eq!(tenant_admin["field"], "tenant_defaults.admin_capabilities");
+        assert_eq!(
+            tenant_admin["baseCapabilities"],
+            serde_json::json!(crate::tenants::repo::TENANT_ADMIN_BASE_CAPABILITIES)
+        );
+        assert_eq!(
+            tenant_admin["effectiveCapabilities"],
+            "base_union_configured"
+        );
+        assert_eq!(
+            tenant_admin["targets"],
+            "existing_and_future_system_tenant_admin_roles"
+        );
+        assert_eq!(tenant_admin["unknownCapability"], "startup_rejected");
+
+        let managed_by = &contract["managedBy"];
+        assert!(managed_by["apiManaged"].is_null());
+        assert_eq!(managed_by["configOwned"], "config");
+        assert_eq!(managed_by["systemTenantAdmin"], "system:tenant-admin");
+        assert_eq!(
+            managed_by["systemTenantAdminTables"],
+            serde_json::json!(["roles", "permission_blocks"])
+        );
+        assert_eq!(
+            managed_by["apiMutationRejectedMarkers"],
+            serde_json::json!(["config"])
+        );
+        assert_eq!(
+            managed_by["bootstrapReconciledMarkers"],
+            serde_json::json!(["system:tenant-admin"])
+        );
+        let tenant_repo = include_str!("../tenants/repo.rs");
+        let bootstrap = include_str!("../bootstrap.rs");
+        let managed_by_guard = include_str!("../managed_by.rs");
+        let tenant_admin_migration = include_str!("../../migrations/027_tenant_admin_defaults.sql");
+        assert!(tenant_repo.contains("'system:tenant-admin'"));
+        assert!(bootstrap.contains("managed_by = 'system:tenant-admin'"));
+        assert!(managed_by_guard.contains("value == \"config\""));
+        assert!(tenant_admin_migration.contains("'config', 'system:tenant-admin'"));
+
         let persisted = &contract["persistedStrings"];
         assert_eq!(
             contract_strings(&persisted["profileObjectKind"]),
@@ -1378,6 +1419,63 @@ callouts:
         let callout_source = production_prefix(include_str!("../callout/config.rs"));
 
         let default = |name: &str| &artifact["effectiveDefaults"][name];
+        assert_eq!(
+            default("ADMIN_ENTITY_ID").as_str(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(
+            default("ATOM_SERVICE_ENTITY_ID").as_str(),
+            Some("00000000-0000-0000-0000-000000000003")
+        );
+        assert_eq!(
+            crate::config::ADMIN_ENTITY_ID.to_string(),
+            "00000000-0000-0000-0000-000000000001"
+        );
+        assert_eq!(
+            crate::config::SERVICE_ENTITY_ID.to_string(),
+            "00000000-0000-0000-0000-000000000003"
+        );
+        assert_eq!(default("JWT_EXPIRY_SECS"), 3_600);
+        assert_eq!(default("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS"), 86_400);
+        assert_eq!(default("ATOM_INVITATION_EXPIRY_SECS"), 604_800);
+        assert_eq!(default("ATOM_OAUTH_STATE_EXPIRY_SECS"), 600);
+        assert_eq!(default("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS"), 300);
+
+        let parsing = &artifact["parsing"];
+        assert_eq!(
+            contract_strings(&parsing["booleanTruthyValues"]),
+            ["1", "true", "yes", "on"].map(str::to_string)
+        );
+        assert_eq!(
+            contract_strings(&parsing["booleanFalseValues"]),
+            ["0", "false", "no", "off"].map(str::to_string)
+        );
+        assert!(parsing["booleanRule"]
+            .as_str()
+            .expect("boolean parsing rule")
+            .contains("including blank, fails startup"));
+        assert_eq!(
+            contract_strings(&parsing["uuidOverrides"]["variables"]),
+            ["ADMIN_ENTITY_ID", "ATOM_SERVICE_ENTITY_ID"].map(str::to_string)
+        );
+        assert_eq!(
+            contract_strings(&parsing["positiveAuthLifetimeSeconds"]["variables"]),
+            [
+                "JWT_EXPIRY_SECS",
+                "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+                "ATOM_INVITATION_EXPIRY_SECS",
+                "ATOM_OAUTH_STATE_EXPIRY_SECS",
+                "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
+            ]
+            .map(str::to_string)
+        );
+        assert!(config_source.contains("\"1\" | \"true\" | \"yes\" | \"on\" => Ok(true)"));
+        assert!(config_source.contains("\"0\" | \"false\" | \"no\" | \"off\" => Ok(false)"));
+        assert!(config_source.contains("env_parse(\"ADMIN_ENTITY_ID\", ADMIN_ENTITY_ID)?"));
+        assert!(config_source.contains("env_parse(\"ATOM_SERVICE_ENTITY_ID\", SERVICE_ENTITY_ID)?"));
+        assert!(config_source.contains("env_positive_lifetime_secs(\"JWT_EXPIRY_SECS\", 3_600)?"));
+        assert!(callout_source.contains("env_bool_default(\"ATOM_CALLOUTS_ENABLED\", true)?"));
+
         let db = crate::config::DbPoolConfig::default();
         assert_eq!(default("ATOM_DB_MAX_CONNECTIONS"), db.max_connections);
         assert_eq!(default("ATOM_DB_MIN_CONNECTIONS"), db.min_connections);
@@ -1665,6 +1763,24 @@ callouts:
             tail.split("\n    async fn ").next().unwrap_or(tail)
         }
 
+        fn top_level_async_function_section<'a>(source: &'a str, name: &str) -> &'a str {
+            let markers = [
+                format!("pub async fn {name}"),
+                format!("pub(crate) async fn {name}"),
+                format!("async fn {name}"),
+            ];
+            let tail = markers
+                .iter()
+                .find_map(|marker| source.split_once(marker).map(|(_, tail)| tail))
+                .unwrap_or_else(|| panic!("missing top-level function {name}"));
+            ["\npub async fn ", "\npub(crate) async fn ", "\nasync fn "]
+                .into_iter()
+                .filter_map(|marker| tail.find(marker))
+                .min()
+                .map(|end| &tail[..end])
+                .unwrap_or(tail)
+        }
+
         let artifact: serde_json::Value =
             serde_json::from_str(include_str!("../../api/v1/graphql-auth-matrix.json"))
                 .expect("GraphQL auth registry");
@@ -1769,5 +1885,72 @@ callouts:
             contract_strings(&artifact["delegatedAuthzInvocation"]["operations"]),
             ["authorizedObjectIds", "authzCheck", "authzBulkCheck"].map(str::to_string)
         );
+
+        let entity_authorization = &artifact["entityMutationAuthorization"];
+        assert_eq!(
+            entity_authorization,
+            &serde_json::json!({
+                "operations": ["updateEntity", "deleteEntity"],
+                "selfTargetBypass": false,
+                "updateSourceAnyOf": [
+                    {"action": "manage", "scope": "target_object"},
+                    {"action": "manage", "scope": "source_tenant_or_platform"},
+                    {"action": "write", "scope": "source_tenant_or_platform"}
+                ],
+                "deleteSourceAnyOf": [
+                    {"action": "manage", "scope": "target_object"},
+                    {"action": "manage", "scope": "source_tenant_or_platform"}
+                ],
+                "tenantMoveDestinationAnyOf": [
+                    {"action": "manage", "scope": "destination_tenant"},
+                    {"action": "write", "scope": "destination_tenant"}
+                ],
+                "scopedCredentialCeiling": "enforced",
+                "authorizationSnapshotMustMatchMutation": true
+            })
+        );
+
+        let entity_resolvers = include_str!("../graphql/entities.rs");
+        let update_resolver = function_section(entity_resolvers, "update_entity");
+        assert!(update_resolver.contains("identity_service::update_entity_authorized"));
+        assert!(!update_resolver.contains("auth.entity_id == id"));
+        assert!(!update_resolver.contains("auth.entity_id != id"));
+        let delete_resolver = function_section(entity_resolvers, "delete_entity");
+        assert!(delete_resolver.contains("identity_service::delete_entity_authorized"));
+        assert!(!delete_resolver.contains("auth.entity_id == id"));
+        assert!(!delete_resolver.contains("auth.entity_id != id"));
+
+        let identity_service = include_str!("../identity/service.rs");
+        let update_service =
+            top_level_async_function_section(identity_service, "update_entity_authorized");
+        for gate in [
+            "(\"manage\", AuthScope::Object(id))",
+            "(\"manage\", scope_for_tenant(existing.tenant_id))",
+            "(\"write\", scope_for_tenant(existing.tenant_id))",
+            "(\"manage\", destination_scope)",
+            "(\"write\", destination_scope)",
+        ] {
+            assert!(update_service.contains(gate), "missing update gate {gate}");
+        }
+        assert!(update_service.contains("update_entity_with_expected_tenant_and_audit"));
+        assert!(update_service.contains("existing.tenant_id"));
+        assert!(!update_service.contains("auth.entity_id == id"));
+        assert!(!update_service.contains("auth.entity_id != id"));
+
+        let delete_service =
+            top_level_async_function_section(identity_service, "delete_entity_authorized");
+        for gate in [
+            "(\"manage\", AuthScope::Object(id))",
+            "(\"manage\", scope_for_tenant(existing.tenant_id))",
+        ] {
+            assert!(delete_service.contains(gate), "missing delete gate {gate}");
+        }
+        assert!(delete_service.contains("Some(existing.tenant_id)"));
+        assert!(!delete_service.contains("auth.entity_id == id"));
+        assert!(!delete_service.contains("auth.entity_id != id"));
+
+        let identity_repo = include_str!("../identity/repo.rs");
+        assert!(identity_repo.contains("expected_tenant_id.is_some_and"));
+        assert!(identity_repo.contains("entity tenant changed after authorization"));
     }
 }

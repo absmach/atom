@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::{Duration, Utc};
 use ipnet::IpNet;
 use serde::Deserialize;
 use std::{fmt, str::FromStr};
@@ -953,7 +954,7 @@ impl Config {
                 hot_path_allow_db_enabled: env_bool_default(
                     "ATOM_AUDIT_HOT_PATH_ALLOW_DB_ENABLED",
                     AuditPolicyConfig::default().hot_path_allow_db_enabled,
-                ),
+                )?,
             },
             audit_retention: audit_retention_from_env()?,
             purge: purge_from_env()?,
@@ -962,33 +963,25 @@ impl Config {
             body_limits: body_limits_from_env()?,
             graphql_limits: graphql_limits_from_env()?,
             metrics: MetricsConfig {
-                enabled: env_bool_default("ATOM_METRICS_ENABLED", true),
+                enabled: env_bool_default("ATOM_METRICS_ENABLED", true)?,
             },
-            jwt_expiry_secs: std::env::var("JWT_EXPIRY_SECS")
-                .unwrap_or_else(|_| "3600".to_string())
-                .parse()
-                .unwrap_or(3600),
+            jwt_expiry_secs: env_positive_lifetime_secs("JWT_EXPIRY_SECS", 3_600)?,
             jwt_issuer: std::env::var("ATOM_JWT_ISSUER")
                 .unwrap_or_else(|_| public_base_url.trim_end_matches('/').to_string()),
             jwt_audience: std::env::var("ATOM_JWT_AUDIENCE")
                 .unwrap_or_else(|_| "magistrala".to_string()),
-            admin_entity_id: std::env::var("ADMIN_ENTITY_ID")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(ADMIN_ENTITY_ID),
+            admin_entity_id: env_parse("ADMIN_ENTITY_ID", ADMIN_ENTITY_ID)?,
             admin_secret: std::env::var("ADMIN_SECRET").ok(),
             service_secret: std::env::var("ATOM_SERVICE_SECRET").ok(),
-            service_entity_id: std::env::var("ATOM_SERVICE_ENTITY_ID")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(SERVICE_ENTITY_ID),
+            service_entity_id: env_parse("ATOM_SERVICE_ENTITY_ID", SERVICE_ENTITY_ID)?,
             bootstrap_file: nonempty_env("ATOM_BOOTSTRAP_FILE"),
-            self_registration_enabled: env_bool_default("ATOM_SELF_REGISTRATION_ENABLED", true),
-            dev_allow_unverified_email_login: env_bool("ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN"),
+            self_registration_enabled: env_bool_default("ATOM_SELF_REGISTRATION_ENABLED", true)?,
+            dev_allow_unverified_email_login: env_bool("ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN")?,
             cors_allowed_origins: parse_cors_allowed_origins(&public_base_url),
-            auth_cookie_secure: std::env::var("ATOM_AUTH_COOKIE_SECURE")
-                .map(|_| env_bool("ATOM_AUTH_COOKIE_SECURE"))
-                .unwrap_or_else(|_| public_base_url.starts_with("https://")),
+            auth_cookie_secure: env_bool_default(
+                "ATOM_AUTH_COOKIE_SECURE",
+                public_base_url.starts_with("https://"),
+            )?,
             auth_cookie_domain: std::env::var("ATOM_AUTH_COOKIE_DOMAIN")
                 .ok()
                 .map(|value| value.trim().to_string())
@@ -1006,16 +999,28 @@ impl Config {
             oidc_providers: parse_oidc_providers()?,
             smtp: smtp_from_env(),
             email_templates_dir: nonempty_env("ATOM_EMAIL_TEMPLATES_DIR"),
-            email_verification_expiry_secs: env_u64("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS", 86_400),
-            invitation_expiry_secs: env_u64("ATOM_INVITATION_EXPIRY_SECS", 604_800),
-            oauth_state_expiry_secs: env_u64("ATOM_OAUTH_STATE_EXPIRY_SECS", 600),
-            auth_exchange_code_expiry_secs: env_u64("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", 300),
+            email_verification_expiry_secs: env_positive_lifetime_secs(
+                "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+                86_400,
+            )?,
+            invitation_expiry_secs: env_positive_lifetime_secs(
+                "ATOM_INVITATION_EXPIRY_SECS",
+                604_800,
+            )?,
+            oauth_state_expiry_secs: env_positive_lifetime_secs(
+                "ATOM_OAUTH_STATE_EXPIRY_SECS",
+                600,
+            )?,
+            auth_exchange_code_expiry_secs: env_positive_lifetime_secs(
+                "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
+                300,
+            )?,
             login_failure_limit: env_positive_i64("ATOM_LOGIN_FAILURE_LIMIT", 5)?,
             login_failure_window_secs: env_positive_i64("ATOM_LOGIN_FAILURE_WINDOW_SECS", 15 * 60)?,
             pki_generated_key_issuance_enabled: env_bool_default(
                 "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",
                 false,
-            ),
+            )?,
             pki_root_cert_path: nonempty_env("ATOM_PKI_ROOT_CERT_PATH"),
             pki_platform_intermediate_cert_path: nonempty_env(
                 "ATOM_PKI_PLATFORM_INTERMEDIATE_CERT_PATH",
@@ -1135,23 +1140,30 @@ pub enum SmtpTls {
     Tls,
 }
 
-fn env_bool(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| parse_env_bool(&value))
-        .unwrap_or(false)
+fn env_bool(name: &str) -> Result<bool> {
+    env_bool_default(name, false)
 }
 
-fn env_bool_default(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .map(|value| parse_env_bool(&value))
-        .unwrap_or(default)
+pub(crate) fn env_bool_default(name: &str, default: bool) -> Result<bool> {
+    Ok(env_optional_bool(name)?.unwrap_or(default))
 }
 
-fn parse_env_bool(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+fn env_optional_bool(name: &str) -> Result<Option<bool>> {
+    match std::env::var(name) {
+        Ok(value) => parse_env_bool(name, &value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must be valid Unicode")
+        }
+    }
+}
+
+fn parse_env_bool(name: &str, value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("{name} must be one of true, false, 1, 0, yes, no, on, or off"),
+    }
 }
 
 fn env_parse<T>(name: &str, default: T) -> Result<T>
@@ -1163,7 +1175,10 @@ where
         Ok(value) => value
             .parse()
             .map_err(|err| anyhow::anyhow!("{name} must be a valid value: {err}")),
-        Err(_) => Ok(default),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must be valid Unicode")
+        }
     }
 }
 
@@ -1175,11 +1190,19 @@ fn env_positive_i64(name: &str, default: i64) -> Result<i64> {
     Ok(value)
 }
 
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+fn env_positive_lifetime_secs(name: &str, default: u64) -> Result<u64> {
+    let value = env_parse(name, default)?;
+    if value == 0 {
+        anyhow::bail!("{name} must be greater than zero");
+    }
+    let seconds = i64::try_from(value)
+        .with_context(|| format!("{name} is too large to represent as a duration"))?;
+    let duration = Duration::try_seconds(seconds)
+        .with_context(|| format!("{name} is too large to represent as a duration"))?;
+    Utc::now()
+        .checked_add_signed(duration)
+        .with_context(|| format!("{name} is too large to represent as an expiration time"))?;
+    Ok(value)
 }
 
 fn db_pool_from_env() -> Result<DbPoolConfig> {
@@ -1269,14 +1292,14 @@ fn cache_from_env() -> Result<CacheConfig> {
         mode: cache_mode_from_env()?,
         redis_url: std::env::var("ATOM_CACHE_REDIS_URL").unwrap_or_default(),
         namespace: nonempty_env("ATOM_CACHE_NAMESPACE").unwrap_or_default(),
-        initialize_namespace: env_bool_default("ATOM_CACHE_INITIALIZE_NAMESPACE", false),
+        initialize_namespace: env_bool_default("ATOM_CACHE_INITIALIZE_NAMESPACE", false)?,
         pool_max_size: env_parse("ATOM_CACHE_POOL_MAX_SIZE", default.pool_max_size)?,
         connect_timeout_ms: env_parse("ATOM_CACHE_CONNECT_TIMEOUT_MS", default.connect_timeout_ms)?,
         op_timeout_ms: env_parse("ATOM_CACHE_OP_TIMEOUT_MS", default.op_timeout_ms)?,
         fail_fast_on_startup: env_bool_default(
             "ATOM_CACHE_FAIL_FAST_ON_STARTUP",
             default.fail_fast_on_startup,
-        ),
+        )?,
         ttl: CacheTtlConfig {
             session_secs: env_parse("ATOM_CACHE_TTL_SESSION_SECS", default_ttl.session_secs)?,
             entity_status_secs: env_parse(
@@ -1346,8 +1369,7 @@ fn cache_mode_from_env() -> Result<CacheMode> {
     let explicit_mode = nonempty_env("ATOM_CACHE_MODE")
         .map(|value| CacheMode::from_env_value(&value))
         .transpose()?;
-    let legacy_enabled =
-        nonempty_env("ATOM_CACHE_ENABLED").map(|_| env_bool_default("ATOM_CACHE_ENABLED", false));
+    let legacy_enabled = env_optional_bool("ATOM_CACHE_ENABLED")?;
 
     match (explicit_mode, legacy_enabled) {
         (Some(mode), Some(enabled)) => {
@@ -1385,7 +1407,7 @@ fn signing_keys_from_env() -> Result<SigningKeyConfig> {
         allow_plaintext_signing_keys: env_bool_default(
             "ATOM_ALLOW_PLAINTEXT_SIGNING_KEYS",
             default.allow_plaintext_signing_keys,
-        ),
+        )?,
     })
 }
 
@@ -1498,7 +1520,7 @@ fn parse_secret_key_env(name: &str) -> Result<Option<SecretBytes>> {
 fn audit_retention_from_env() -> Result<AuditRetentionConfig> {
     let default = AuditRetentionConfig::default();
     let cfg = AuditRetentionConfig {
-        enabled: env_bool_default("ATOM_AUDIT_RETENTION_ENABLED", default.enabled),
+        enabled: env_bool_default("ATOM_AUDIT_RETENTION_ENABLED", default.enabled)?,
         days: env_parse("ATOM_AUDIT_RETENTION_DAYS", default.days)?,
         cleanup_interval_secs: env_parse(
             "ATOM_AUDIT_CLEANUP_INTERVAL_SECS",
@@ -1521,7 +1543,7 @@ fn audit_retention_from_env() -> Result<AuditRetentionConfig> {
 fn purge_from_env() -> Result<PurgeConfig> {
     let default = PurgeConfig::default();
     let cfg = PurgeConfig {
-        enabled: env_bool_default("ATOM_PURGE_ENABLED", default.enabled),
+        enabled: env_bool_default("ATOM_PURGE_ENABLED", default.enabled)?,
         retention_days: env_parse("ATOM_PURGE_RETENTION_DAYS", default.retention_days)?,
         interval_secs: env_parse("ATOM_PURGE_INTERVAL_SECS", default.interval_secs)?,
         batch_size: env_parse("ATOM_PURGE_BATCH_SIZE", default.batch_size)?,
@@ -1543,7 +1565,7 @@ fn purge_from_env() -> Result<PurgeConfig> {
 fn rate_limits_from_env() -> Result<RateLimitConfig> {
     let default = RateLimitConfig::default();
     let cfg = RateLimitConfig {
-        enabled: env_bool_default("ATOM_RATE_LIMIT_ENABLED", default.enabled),
+        enabled: env_bool_default("ATOM_RATE_LIMIT_ENABLED", default.enabled)?,
         auth_routes: rate_limit_policy_from_env(
             "ATOM_HTTP_RATE_LIMIT_AUTH_ROUTES",
             "ATOM_HTTP_RATE_LIMIT_AUTH_WINDOW_SECS",
@@ -1685,7 +1707,7 @@ fn graphql_limits_from_env() -> Result<GraphqlLimitConfig> {
         introspection_enabled: env_bool_default(
             "ATOM_GRAPHQL_INTROSPECTION_ENABLED",
             default.introspection_enabled,
-        ),
+        )?,
     };
     if cfg.max_depth == 0 {
         anyhow::bail!("ATOM_GRAPHQL_MAX_DEPTH must be greater than zero");
@@ -1725,7 +1747,7 @@ fn grpc_tls_from_env() -> Result<Option<GrpcTlsConfig>> {
 
 fn broker_auth_from_env() -> Result<BrokerAuthConfig> {
     let defaults = BrokerAuthConfig::default();
-    let enabled = env_bool_default("ATOM_BROKER_AUTH_ENABLED", defaults.enabled);
+    let enabled = env_bool_default("ATOM_BROKER_AUTH_ENABLED", defaults.enabled)?;
     if !enabled {
         return Ok(defaults);
     }
@@ -1764,7 +1786,7 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
         );
     }
     let default = EnrollmentConfig::default();
-    let enabled = env_bool_default("ATOM_PKI_ENROLLMENT_ENABLED", default.enabled);
+    let enabled = env_bool_default("ATOM_PKI_ENROLLMENT_ENABLED", default.enabled)?;
     let cert_path = nonempty_env("ATOM_PKI_ENROLLMENT_TLS_CERT_PATH");
     let key_path = nonempty_env("ATOM_PKI_ENROLLMENT_TLS_KEY_PATH");
     let tls = match (cert_path, key_path) {
@@ -1814,7 +1836,7 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
         http_keep_alive: env_bool_default(
             "ATOM_PKI_ENROLLMENT_HTTP_KEEP_ALIVE",
             default.http_keep_alive,
-        ),
+        )?,
         trust_bundle_refresh_secs: env_parse(
             "ATOM_PKI_ENROLLMENT_TRUST_REFRESH_SECS",
             default.trust_bundle_refresh_secs,
@@ -1876,7 +1898,7 @@ fn enrollment_from_env() -> Result<EnrollmentConfig> {
 fn pki_lifecycle_from_env() -> Result<PkiLifecycleConfig> {
     let default = PkiLifecycleConfig::default();
     let cfg = PkiLifecycleConfig {
-        enabled: env_bool_default("ATOM_PKI_LIFECYCLE_ENABLED", default.enabled),
+        enabled: env_bool_default("ATOM_PKI_LIFECYCLE_ENABLED", default.enabled)?,
         interval_secs: env_parse("ATOM_PKI_LIFECYCLE_INTERVAL_SECS", default.interval_secs)?,
         batch_size: env_parse("ATOM_PKI_LIFECYCLE_BATCH_SIZE", default.batch_size)?,
         expiry_warning_secs: env_parse(
@@ -1981,7 +2003,10 @@ fn public_url(public_base_url: &str, path: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use super::{public_url, CacheMode, Config, LogFormat, PkiCaProvisioningBackend};
+    use super::{
+        parse_env_bool, public_url, CacheMode, Config, LogFormat, PkiCaProvisioningBackend,
+        ADMIN_ENTITY_ID, SERVICE_ENTITY_ID,
+    };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1995,6 +2020,24 @@ mod tests {
             public_url("https://atom.example", "/invitations/accept"),
             "https://atom.example/invitations/accept"
         );
+    }
+
+    #[test]
+    fn deployment_booleans_require_explicit_values() {
+        for value in ["1", "true", "yes", "on", " TRUE ", "YeS"] {
+            assert!(parse_env_bool("ATOM_TEST_BOOLEAN", value).expect("true value"));
+        }
+        for value in ["0", "false", "no", "off", " FALSE ", "nO"] {
+            assert!(!parse_env_bool("ATOM_TEST_BOOLEAN", value).expect("false value"));
+        }
+        for (name, value) in [
+            ("ATOM_CALLOUTS_ENABLED", ""),
+            ("ATOM_CACHE_ENABLED", "   "),
+            ("ATOM_METRICS_ENABLED", "truthy"),
+        ] {
+            let error = parse_env_bool(name, value).expect_err("invalid boolean");
+            assert!(error.to_string().contains(name));
+        }
     }
 
     #[test]
@@ -2037,10 +2080,82 @@ mod tests {
             "managed generated-key issuance must default off"
         );
         assert!(cfg.rate_limits.enabled);
+        assert_eq!(cfg.jwt_expiry_secs, 3_600);
+        assert_eq!(cfg.admin_entity_id, ADMIN_ENTITY_ID);
+        assert_eq!(cfg.service_entity_id, SERVICE_ENTITY_ID);
+        assert_eq!(cfg.email_verification_expiry_secs, 86_400);
+        assert_eq!(cfg.invitation_expiry_secs, 604_800);
+        assert_eq!(cfg.oauth_state_expiry_secs, 600);
+        assert_eq!(cfg.auth_exchange_code_expiry_secs, 300);
         assert!(
             !cfg.graphql_limits.introspection_enabled,
             "GraphQL introspection must default off"
         );
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn identity_overrides_and_auth_lifetimes_are_strictly_parsed() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        let _admin_guard =
+            EnvVarGuard::set("ADMIN_ENTITY_ID", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        let _service_guard = EnvVarGuard::set(
+            "ATOM_SERVICE_ENTITY_ID",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        );
+        let _jwt_guard = EnvVarGuard::set("JWT_EXPIRY_SECS", "7200");
+        let _verification_guard = EnvVarGuard::set("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS", "120");
+        let _invitation_guard = EnvVarGuard::set("ATOM_INVITATION_EXPIRY_SECS", "240");
+        let _oauth_guard = EnvVarGuard::set("ATOM_OAUTH_STATE_EXPIRY_SECS", "360");
+        let _exchange_guard = EnvVarGuard::set("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", "480");
+
+        let cfg = Config::from_env().expect("strict identity and lifetime config");
+        assert_eq!(
+            cfg.admin_entity_id,
+            uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("admin UUID")
+        );
+        assert_eq!(
+            cfg.service_entity_id,
+            uuid::Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").expect("service UUID")
+        );
+        assert_eq!(cfg.jwt_expiry_secs, 7_200);
+        assert_eq!(cfg.email_verification_expiry_secs, 120);
+        assert_eq!(cfg.invitation_expiry_secs, 240);
+        assert_eq!(cfg.oauth_state_expiry_secs, 360);
+        assert_eq!(cfg.auth_exchange_code_expiry_secs, 480);
+
+        clear_hardening_env();
+    }
+
+    #[test]
+    fn invalid_identity_overrides_and_auth_lifetimes_fail_config() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_hardening_env();
+        let _db_guard = DatabaseUrlGuard::set();
+
+        for (name, value) in [
+            ("ADMIN_ENTITY_ID", "not-a-uuid"),
+            ("ATOM_SERVICE_ENTITY_ID", ""),
+            ("JWT_EXPIRY_SECS", "not-a-number"),
+            ("JWT_EXPIRY_SECS", "0"),
+            ("JWT_EXPIRY_SECS", "18446744073709551615"),
+            ("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS", "0"),
+            ("ATOM_INVITATION_EXPIRY_SECS", "0"),
+            ("ATOM_OAUTH_STATE_EXPIRY_SECS", "0"),
+            ("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", "0"),
+        ] {
+            let value_guard = EnvVarGuard::set(name, value);
+            let error = Config::from_env().expect_err("invalid deployment config");
+            assert!(
+                error.to_string().contains(name),
+                "error for {name} did not identify the variable: {error}"
+            );
+            drop(value_guard);
+        }
 
         clear_hardening_env();
     }
@@ -2289,9 +2404,17 @@ mod tests {
 
         std::env::set_var("ATOM_CACHE_MODE", "enabled");
         std::env::set_var("ATOM_CACHE_ENABLED", "");
+        let err = Config::from_env().expect_err("blank legacy alias");
+        assert!(err.to_string().contains("ATOM_CACHE_ENABLED"));
+
+        std::env::remove_var("ATOM_CACHE_MODE");
+        std::env::set_var("ATOM_CACHE_ENABLED", " OFF ");
         assert_eq!(
-            Config::from_env().expect("blank legacy alias").cache.mode,
-            CacheMode::Enabled
+            Config::from_env()
+                .expect("explicit false legacy alias")
+                .cache
+                .mode,
+            CacheMode::Disabled
         );
 
         clear_hardening_env();
@@ -2656,6 +2779,9 @@ mod tests {
 
     fn clear_hardening_env() {
         for name in [
+            "ADMIN_ENTITY_ID",
+            "ATOM_SERVICE_ENTITY_ID",
+            "JWT_EXPIRY_SECS",
             "ATOM_LOG_LEVEL",
             "ATOM_LOG_FORMAT",
             "ATOM_DB_MAX_CONNECTIONS",
@@ -2689,6 +2815,14 @@ mod tests {
             "ATOM_AUDIT_RETENTION_ENABLED",
             "ATOM_AUDIT_CLEANUP_INTERVAL_SECS",
             "ATOM_AUDIT_CLEANUP_BATCH_SIZE",
+            "ATOM_METRICS_ENABLED",
+            "ATOM_SELF_REGISTRATION_ENABLED",
+            "ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN",
+            "ATOM_AUTH_COOKIE_SECURE",
+            "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+            "ATOM_INVITATION_EXPIRY_SECS",
+            "ATOM_OAUTH_STATE_EXPIRY_SECS",
+            "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
             "ATOM_LOGIN_FAILURE_LIMIT",
             "ATOM_LOGIN_FAILURE_WINDOW_SECS",
             "ATOM_PKI_GENERATED_KEY_ISSUANCE_ENABLED",

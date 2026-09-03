@@ -375,10 +375,74 @@ pub async fn update_entity_with_audit(
     event_name: &str,
     audit_details: Value,
 ) -> Result<Entity, AppError> {
+    update_entity_with_audit_inner(
+        pool,
+        id,
+        req,
+        EntityUpdateAudit {
+            events_enabled,
+            actor_id,
+            expected_tenant_id: None,
+            event_name,
+            details: audit_details,
+        },
+    )
+    .await
+}
+
+/// Update an entity only while it still belongs to the tenant against which
+/// the caller was authorized. The resolver/service authorization happens
+/// before this transaction; re-checking the snapshot under the entity row lock
+/// prevents a concurrent move from carrying that authorization into another
+/// tenant.
+pub(crate) async fn update_entity_with_expected_tenant_and_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Uuid,
+    id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+    req: UpdateEntity,
+    audit_details: Value,
+) -> Result<Entity, AppError> {
+    update_entity_with_audit_inner(
+        pool,
+        id,
+        req,
+        EntityUpdateAudit {
+            events_enabled,
+            actor_id: Some(actor_id),
+            expected_tenant_id: Some(expected_tenant_id),
+            event_name: "entity.update",
+            details: audit_details,
+        },
+    )
+    .await
+}
+
+struct EntityUpdateAudit<'a> {
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    expected_tenant_id: Option<Option<Uuid>>,
+    event_name: &'a str,
+    details: Value,
+}
+
+async fn update_entity_with_audit_inner(
+    pool: &PgPool,
+    id: Uuid,
+    mut req: UpdateEntity,
+    audit: EntityUpdateAudit<'_>,
+) -> Result<Entity, AppError> {
+    let EntityUpdateAudit {
+        events_enabled,
+        actor_id,
+        expected_tenant_id,
+        event_name,
+        details: audit_details,
+    } = audit;
     let attributes = req.attributes.clone().map(normalize_attributes);
     if let Some(attrs) = attributes.as_ref() {
         reject_parent_group_attribute(attrs)?;
-        validate_existing_entity_attributes(pool, id, attrs).await?;
     }
 
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
@@ -399,6 +463,11 @@ pub async fn update_entity_with_audit(
     let Some(current_tenant_id) = current_tenant_id else {
         return Err(AppError::not_found(format!("entity {id} not found")));
     };
+    if expected_tenant_id.is_some_and(|expected| expected != current_tenant_id) {
+        return Err(AppError::conflict(
+            "entity tenant changed after authorization; retry the update",
+        ));
+    }
     let mut tenant_ids = [current_tenant_id, req.tenant_id]
         .into_iter()
         .flatten()
@@ -408,8 +477,8 @@ pub async fn update_entity_with_audit(
     for tenant_id in tenant_ids {
         crate::tenants::repo::lock_active_tenant(&mut tx, tenant_id).await?;
     }
-    let locked: Option<EntityKind> = sqlx::query_scalar(
-        r#"SELECT kind FROM entities
+    let locked: Option<(EntityKind, Option<Uuid>, Option<Uuid>, Value)> = sqlx::query_as(
+        r#"SELECT kind, profile_id, profile_version_id, attributes FROM entities
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
              AND deleted_at IS NULL
@@ -420,10 +489,49 @@ pub async fn update_entity_with_audit(
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    let Some(current_kind) = locked else {
+    let Some((current_kind, current_profile_id, current_profile_version_id, current_attributes)) =
+        locked
+    else {
+        if expected_tenant_id.is_some() {
+            return Err(AppError::conflict(
+                "entity changed after authorization; retry the update",
+            ));
+        }
         return Err(AppError::not_found(format!("entity {id} not found")));
     };
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "entities", id).await?;
+    if req.kind.is_some()
+        || req.profile_id.is_some()
+        || req.profile_version_id.is_some()
+        || attributes.is_some()
+    {
+        let profile_changed = req
+            .profile_id
+            .is_some_and(|profile_id| Some(profile_id) != current_profile_id);
+        let proposed_profile_version_id = if profile_changed {
+            req.profile_version_id
+        } else {
+            req.profile_version_id.or(current_profile_version_id)
+        };
+        let validated_profile_version_id = validate_proposed_entity_profile_in_tx(
+            &mut tx,
+            ProposedEntityProfile {
+                kind: req.kind.as_ref().unwrap_or(&current_kind),
+                profile_id: req.profile_id.or(current_profile_id),
+                profile_version_id: proposed_profile_version_id,
+                attributes: attributes.as_ref().unwrap_or(&current_attributes),
+                profile_changed,
+            },
+        )
+        .await?;
+        // `profileId` without `profileVersionId` follows create semantics:
+        // bind the active/latest version of the new profile. Persist the
+        // normalized id, rather than validating one version and leaving the
+        // previous profile's id in the row.
+        if profile_changed && req.profile_version_id.is_none() {
+            req.profile_version_id = validated_profile_version_id;
+        }
+    }
     let sync_email = req.kind.as_ref().is_some_and(|kind| kind != &current_kind)
         || req
             .attributes
@@ -868,26 +976,107 @@ async fn resolve_entity_profile(
     Ok((kind, Some(profile_id), Some(version.id)))
 }
 
-async fn validate_existing_entity_attributes(
-    pool: &PgPool,
-    id: Uuid,
-    attributes: &Value,
-) -> Result<(), AppError> {
-    let schema = sqlx::query_scalar::<_, Value>(
-        r#"SELECT pv.json_schema
-           FROM entities e
-           JOIN profile_versions pv ON pv.id = e.profile_version_id
-           WHERE e.id = $1"#,
+struct ProposedEntityProfile<'a> {
+    kind: &'a EntityKind,
+    profile_id: Option<Uuid>,
+    profile_version_id: Option<Uuid>,
+    attributes: &'a Value,
+    profile_changed: bool,
+}
+
+/// Validate the state the UPDATE will actually persist, after the entity row
+/// is locked and on the same transaction. In particular, a request that
+/// changes a profile and attributes together must be checked against the new
+/// profile version, not the entity's pre-update version. The share locks keep
+/// that profile metadata stable until the entity write commits.
+async fn validate_proposed_entity_profile_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    proposed: ProposedEntityProfile<'_>,
+) -> Result<Option<Uuid>, AppError> {
+    let Some(profile_id) = proposed.profile_id else {
+        if proposed.profile_version_id.is_some() {
+            return Err(AppError::bad_request(
+                "profile_version_id requires profile_id",
+            ));
+        }
+        return Ok(None);
+    };
+
+    let profile: Option<(String, String, String)> = sqlx::query_as(
+        r#"SELECT object_kind, kind, status
+           FROM profiles
+           WHERE id = $1
+           FOR SHARE"#,
     )
-    .bind(id)
-    .fetch_optional(pool)
+    .bind(profile_id)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
-
-    if let Some(schema) = schema {
-        schema::validate_json_schema(&schema, attributes)?;
+    let Some((object_kind, profile_kind, profile_status)) = profile else {
+        return Err(AppError::not_found(format!(
+            "profile {profile_id} not found"
+        )));
+    };
+    if object_kind != "entity" {
+        return Err(AppError::bad_request(format!(
+            "profile {profile_id} is for object_kind '{object_kind}', not 'entity'"
+        )));
     }
-    Ok(())
+    if proposed.profile_changed && profile_status != "active" {
+        return Err(AppError::bad_request(format!(
+            "profile {profile_id} is not active"
+        )));
+    }
+    let expected_kind = entity_kind_from_profile(&profile_kind)?;
+    if proposed.kind != &expected_kind {
+        return Err(AppError::bad_request(format!(
+            "profile kind '{}' conflicts with requested entity kind '{}'",
+            profile_kind,
+            entity_kind_as_str(proposed.kind)
+        )));
+    }
+
+    let profile_version_id = match proposed.profile_version_id {
+        Some(profile_version_id) => profile_version_id,
+        None if proposed.profile_changed => sqlx::query_scalar(
+            r#"SELECT id
+               FROM profile_versions
+               WHERE profile_id = $1 AND status = 'active'
+               ORDER BY version DESC
+               LIMIT 1
+               FOR SHARE"#,
+        )
+        .bind(profile_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            AppError::bad_request(format!("profile {profile_id} has no active version"))
+        })?,
+        None => return Ok(None),
+    };
+    let version: Option<(Uuid, Value)> = sqlx::query_as(
+        r#"SELECT profile_id, json_schema
+           FROM profile_versions
+           WHERE id = $1
+           FOR SHARE"#,
+    )
+    .bind(profile_version_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let Some((version_profile_id, json_schema)) = version else {
+        return Err(AppError::not_found(format!(
+            "profile version {profile_version_id} not found"
+        )));
+    };
+    if version_profile_id != profile_id {
+        return Err(AppError::bad_request(format!(
+            "profile_version_id {profile_version_id} does not belong to profile_id {profile_id}"
+        )));
+    }
+    schema::validate_json_schema(&json_schema, proposed.attributes)?;
+    Ok(Some(profile_version_id))
 }
 
 fn normalize_attributes(attributes: Value) -> Value {
@@ -1127,6 +1316,26 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
 ) -> Result<(Vec<Uuid>, Vec<Uuid>), AppError> {
+    lock_entity_and_collect_revocation_ids_in_tx_inner(tx, id, None).await
+}
+
+/// Locked deletion preflight for an already-authorized entity snapshot. See
+/// [`update_entity_with_expected_tenant_and_audit`]: this closes the same
+/// authorization-to-mutation race for deletion without acquiring another pool
+/// connection while this transaction is open.
+pub(crate) async fn lock_entity_and_collect_revocation_ids_for_tenant_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+) -> Result<(Vec<Uuid>, Vec<Uuid>), AppError> {
+    lock_entity_and_collect_revocation_ids_in_tx_inner(tx, id, Some(expected_tenant_id)).await
+}
+
+async fn lock_entity_and_collect_revocation_ids_in_tx_inner(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    expected_tenant_id: Option<Option<Uuid>>,
+) -> Result<(Vec<Uuid>, Vec<Uuid>), AppError> {
     // Discover ownership without locking, then take the canonical tenant ->
     // entity order. The locked ownership check below is the serialization
     // point with bootstrap's final `managed_by='config'` stamp.
@@ -1139,7 +1348,21 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("entity {id} not found")));
     };
-    crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
+    if expected_tenant_id.is_some_and(|expected| expected != tenant_id) {
+        return Err(AppError::conflict(
+            "entity tenant changed after authorization; retry the deletion",
+        ));
+    }
+    if expected_tenant_id.is_some() {
+        // The authorized API path may mutate only inside an active tenant.
+        // Taking this lifecycle-aware lock in the mutation transaction also
+        // serializes the delete against a concurrent freeze/disable/delete.
+        crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
+    } else {
+        // Internal cleanup/test callers retain the lifecycle-neutral behavior
+        // they had before the authorized service entry point was introduced.
+        crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
+    }
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "entities", id).await?;
     let locked = sqlx::query(
         r#"SELECT id FROM entities
@@ -1154,6 +1377,11 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     .await
     .map_err(db_err)?;
     if locked.is_none() {
+        if expected_tenant_id.is_some() {
+            return Err(AppError::conflict(
+                "entity changed after authorization; retry the deletion",
+            ));
+        }
         return Err(AppError::not_found(format!("entity {id} not found")));
     }
 
@@ -1302,8 +1530,38 @@ pub async fn delete_entity_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
+    delete_entity_with_audit_inner(pool, events_enabled, actor_id, id, deleted_by, None).await
+}
+
+pub(crate) async fn delete_entity_with_expected_tenant_and_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+    expected_tenant_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    delete_entity_with_audit_inner(
+        pool,
+        events_enabled,
+        actor_id,
+        id,
+        deleted_by,
+        Some(expected_tenant_id),
+    )
+    .await
+}
+
+async fn delete_entity_with_audit_inner(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Option<Uuid>,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+    expected_tenant_id: Option<Option<Uuid>>,
+) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
+    lock_entity_and_collect_revocation_ids_in_tx_inner(&mut tx, id, expected_tenant_id).await?;
     let (tenant_id, details) = deactivate_and_finish_entity_deletion_in_tx(
         &mut tx,
         events_enabled,
@@ -1504,6 +1762,24 @@ pub async fn purge_entity(pool: &PgPool, id: Uuid) -> Result<Option<Uuid>, AppEr
 
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
+fn checked_session_expiration(expiry_secs: u64) -> Result<DateTime<Utc>, AppError> {
+    let seconds = i64::try_from(expiry_secs).map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "JWT_EXPIRY_SECS is too large to represent as a duration"
+        ))
+    })?;
+    let duration = Duration::try_seconds(seconds).ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "JWT_EXPIRY_SECS is too large to represent as a duration"
+        ))
+    })?;
+    Utc::now().checked_add_signed(duration).ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "JWT_EXPIRY_SECS is too large to represent as a session expiration"
+        ))
+    })
+}
+
 pub async fn create_session(
     pool: &PgPool,
     entity_id: Uuid,
@@ -1526,7 +1802,7 @@ pub(crate) async fn create_session_in_tx(
     expiry_secs: u64,
 ) -> Result<Session, AppError> {
     let id = Uuid::new_v4();
-    let expires_at: DateTime<Utc> = Utc::now() + Duration::seconds(expiry_secs as i64);
+    let expires_at = checked_session_expiration(expiry_secs)?;
 
     sqlx::query_as::<_, Session>(
         r#"INSERT INTO sessions (id, entity_id, expires_at)
@@ -1547,7 +1823,7 @@ pub(crate) async fn refresh_session_in_tx(
     entity_id: Uuid,
     expiry_secs: u64,
 ) -> Result<Session, AppError> {
-    let expires_at: DateTime<Utc> = Utc::now() + Duration::seconds(expiry_secs as i64);
+    let expires_at = checked_session_expiration(expiry_secs)?;
 
     sqlx::query_as::<_, Session>(
         r#"UPDATE sessions

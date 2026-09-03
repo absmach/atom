@@ -135,7 +135,21 @@ pub fn encode_jwt_with(
         ..Header::default()
     };
 
-    let now = Utc::now().timestamp() as usize;
+    let now = usize::try_from(Utc::now().timestamp()).map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "current time cannot be represented in JWT NumericDate"
+        ))
+    })?;
+    let expiry_secs = usize::try_from(expiry_secs).map_err(|_| {
+        AppError::Internal(anyhow::anyhow!(
+            "JWT_EXPIRY_SECS cannot be represented in JWT NumericDate"
+        ))
+    })?;
+    let expires_at = now.checked_add(expiry_secs).ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "JWT_EXPIRY_SECS is too large to represent the JWT expiration"
+        ))
+    })?;
     let claims = Claims {
         iss: issuer.to_string(),
         aud: audience.to_string(),
@@ -143,7 +157,7 @@ pub fn encode_jwt_with(
         sid: session_id.to_string(),
         tid: tenant_id.map(|t| t.to_string()),
         iat: now,
-        exp: now + expiry_secs as usize,
+        exp: expires_at,
     };
 
     encode(&header, &claims, &signer.key)
