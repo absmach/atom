@@ -39,10 +39,7 @@ fn profile_fields_only(req: &UpdateEntity) -> bool {
         && req.profile_id.is_none()
         && req.profile_version_id.is_none()
         && req.status.is_none()
-        && req
-            .attributes
-            .as_ref()
-            .is_none_or(profile_attributes_only)
+        && req.attributes.as_ref().is_none_or(profile_attributes_only)
 }
 
 fn merge_profile_attributes(existing: &Value, update: Value) -> Result<Value, AppError> {
