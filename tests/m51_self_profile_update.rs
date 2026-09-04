@@ -123,13 +123,12 @@ async fn session_user_can_edit_own_global_profile_without_platform_manage() {
         "operations"
     );
 
-    let persisted: (String, serde_json::Value, Option<Uuid>) = sqlx::query_as(
-        "SELECT name, attributes, tenant_id FROM entities WHERE id = $1",
-    )
-    .bind(caller)
-    .fetch_one(&pool)
-    .await
-    .expect("updated entity");
+    let persisted: (String, serde_json::Value, Option<Uuid>) =
+        sqlx::query_as("SELECT name, attributes, tenant_id FROM entities WHERE id = $1")
+            .bind(caller)
+            .fetch_one(&pool)
+            .await
+            .expect("updated entity");
     assert_eq!(persisted.0, "alice-updated");
     assert_eq!(persisted.1["last_name"], "Updated");
     assert_eq!(persisted.1["department"], "operations");
@@ -174,13 +173,12 @@ async fn self_profile_path_does_not_authorize_entity_administration() {
         assert_forbidden(&response, context);
     }
 
-    let persisted: (String, Option<Uuid>, serde_json::Value) = sqlx::query_as(
-        "SELECT status::text, tenant_id, attributes FROM entities WHERE id = $1",
-    )
-    .bind(caller)
-    .fetch_one(&pool)
-    .await
-    .expect("entity after denied updates");
+    let persisted: (String, Option<Uuid>, serde_json::Value) =
+        sqlx::query_as("SELECT status::text, tenant_id, attributes FROM entities WHERE id = $1")
+            .bind(caller)
+            .fetch_one(&pool)
+            .await
+            .expect("entity after denied updates");
     assert_eq!(persisted.0, "active");
     assert_eq!(persisted.1, None);
     assert_eq!(persisted.2["department"], "operations");
