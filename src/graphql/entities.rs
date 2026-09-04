@@ -6,7 +6,7 @@ use crate::{
     auth::{AuthContext, Scope},
     authz::{engine, repo as authz_repo},
     error::AppError,
-    identity::{repo, service as identity_service},
+    identity::{repo, self_profile, service as identity_service},
     models::{
         access::AuthorizedObjectIdsQuery,
         entity as entity_model,
@@ -306,27 +306,44 @@ impl EntityMutation {
             event: "entity.update",
         };
         let details = serde_json::json!({ "updated_fields": updated_fields });
+        let update = entity_model::UpdateEntity {
+            name: input.name,
+            kind: parse_optional_entity_kind(input.kind),
+            alias: input.alias.into(),
+            external_id: input.external_id.into(),
+            tenant_id,
+            profile_id,
+            profile_version_id,
+            status: input.status.map(Into::into),
+            attributes: input.attributes,
+        };
 
-        let result = identity_service::update_entity_authorized(
+        let result = match self_profile::try_update(
             &state.pool,
             state.cache.as_deref(),
             state.config.events.enabled(),
             &auth,
             id,
-            entity_model::UpdateEntity {
-                name: input.name,
-                kind: parse_optional_entity_kind(input.kind),
-                alias: input.alias.into(),
-                external_id: input.external_id.into(),
-                tenant_id,
-                profile_id,
-                profile_version_id,
-                status: input.status.map(Into::into),
-                attributes: input.attributes,
-            },
+            update,
             details.clone(),
         )
-        .await;
+        .await
+        {
+            Ok(self_profile::SelfProfileUpdate::Updated(entity)) => Ok(entity),
+            Ok(self_profile::SelfProfileUpdate::NotApplicable(update)) => {
+                identity_service::update_entity_authorized(
+                    &state.pool,
+                    state.cache.as_deref(),
+                    state.config.events.enabled(),
+                    &auth,
+                    id,
+                    update,
+                    details.clone(),
+                )
+                .await
+            }
+            Err(err) => Err(err),
+        };
 
         if let Err(ref err) = result {
             audit::observe_error(
