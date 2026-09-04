@@ -67,7 +67,8 @@ async fn global_human(pool: &PgPool) -> Uuid {
     .bind(serde_json::json!({
         "first_name": "Old",
         "last_name": "Name",
-        "email": format!("old-{id}@example.test")
+        "email": format!("old-{id}@example.test"),
+        "department": "operations"
     }))
     .execute(pool)
     .await
@@ -117,6 +118,10 @@ async fn session_user_can_edit_own_global_profile_without_platform_manage() {
     assert!(data["updateEntity"]["tenantId"].is_null());
     assert_eq!(data["updateEntity"]["attributes"]["first_name"], "Alice");
     assert_eq!(data["updateEntity"]["attributes"]["email"], email);
+    assert_eq!(
+        data["updateEntity"]["attributes"]["department"],
+        "operations"
+    );
 
     let persisted: (String, serde_json::Value, Option<Uuid>) = sqlx::query_as(
         "SELECT name, attributes, tenant_id FROM entities WHERE id = $1",
@@ -127,6 +132,7 @@ async fn session_user_can_edit_own_global_profile_without_platform_manage() {
     .expect("updated entity");
     assert_eq!(persisted.0, "alice-updated");
     assert_eq!(persisted.1["last_name"], "Updated");
+    assert_eq!(persisted.1["department"], "operations");
     assert_eq!(persisted.2, None);
 }
 
@@ -177,5 +183,5 @@ async fn self_profile_path_does_not_authorize_entity_administration() {
     .expect("entity after denied updates");
     assert_eq!(persisted.0, "active");
     assert_eq!(persisted.1, None);
-    assert!(persisted.2.get("department").is_none());
+    assert_eq!(persisted.2["department"], "operations");
 }
