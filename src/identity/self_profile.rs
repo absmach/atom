@@ -20,15 +20,15 @@ pub(crate) enum SelfProfileUpdate {
     NotApplicable(UpdateEntity),
 }
 
-const SELF_PROFILE_ATTRIBUTE_KEYS: [&str; 4] = ["first_name", "last_name", "email", "picture"];
-
 fn profile_attributes_only(attributes: &Value) -> bool {
     let Value::Object(attributes) = attributes else {
         return false;
     };
-    attributes
-        .keys()
-        .all(|key| SELF_PROFILE_ATTRIBUTE_KEYS.contains(&key.as_str()))
+    attributes.iter().all(|(key, value)| match key.as_str() {
+        "first_name" | "last_name" | "email" => value.is_string(),
+        "picture" => value.is_string() || value.is_null(),
+        _ => false,
+    })
 }
 
 fn profile_fields_only(req: &UpdateEntity) -> bool {
@@ -43,6 +43,25 @@ fn profile_fields_only(req: &UpdateEntity) -> bool {
             .attributes
             .as_ref()
             .is_none_or(profile_attributes_only)
+}
+
+fn merge_profile_attributes(existing: &Value, update: Value) -> Result<Value, AppError> {
+    let Value::Object(update) = update else {
+        return Err(AppError::bad_request(
+            "self profile attributes must be a JSON object",
+        ));
+    };
+    let mut merged = match existing {
+        Value::Object(existing) => existing.clone(),
+        Value::Null => serde_json::Map::new(),
+        _ => {
+            return Err(AppError::bad_request(
+                "existing human profile attributes must be a JSON object",
+            ))
+        }
+    };
+    merged.extend(update);
+    Ok(Value::Object(merged))
 }
 
 /// Attempt the authenticated human self-profile path used by `updateEntity`.
@@ -64,7 +83,7 @@ pub(crate) async fn try_update(
     events_enabled: bool,
     auth: &AuthContext,
     id: Uuid,
-    req: UpdateEntity,
+    mut req: UpdateEntity,
     audit_details: Value,
 ) -> Result<SelfProfileUpdate, AppError> {
     if id != auth.entity_id
@@ -78,6 +97,10 @@ pub(crate) async fn try_update(
     let existing = super::repo::get_entity(pool, id).await?;
     if existing.kind != EntityKind::Human || existing.tenant_id.is_some() {
         return Ok(SelfProfileUpdate::NotApplicable(req));
+    }
+
+    if let Some(attributes) = req.attributes.take() {
+        req.attributes = Some(merge_profile_attributes(&existing.attributes, attributes)?);
     }
 
     let mutate = || {
@@ -145,8 +168,31 @@ mod tests {
             "department": "platform-admin"
         })))));
 
+        assert!(!profile_fields_only(&update(Some(json!({
+            "email": {"unexpected": "shape"}
+        })))));
+
         let mut unsafe_update = update(None);
         unsafe_update.status = Some(crate::models::enums::EntityStatus::Suspended);
         assert!(!profile_fields_only(&unsafe_update));
+    }
+
+    #[test]
+    fn profile_attribute_merge_preserves_non_profile_metadata() {
+        let merged = merge_profile_attributes(
+            &json!({
+                "department": "operations",
+                "first_name": "Old"
+            }),
+            json!({
+                "first_name": "New",
+                "picture": null
+            }),
+        )
+        .expect("merge");
+
+        assert_eq!(merged["department"], "operations");
+        assert_eq!(merged["first_name"], "New");
+        assert!(merged["picture"].is_null());
     }
 }
