@@ -67,7 +67,10 @@ pub(crate) async fn try_update(
     req: UpdateEntity,
     audit_details: Value,
 ) -> Result<SelfProfileUpdate, AppError> {
-    if id != auth.entity_id || auth.session_id.is_none() || auth.scoped || !profile_fields_only(&req)
+    if id != auth.entity_id
+        || auth.session_id.is_none()
+        || auth.scoped
+        || !profile_fields_only(&req)
     {
         return Ok(SelfProfileUpdate::NotApplicable(req));
     }
@@ -136,13 +139,11 @@ mod tests {
             "last_name": "Example",
             "email": "alice@example.test",
             "picture": "https://example.test/alice.png"
-        })))))
-        ;
+        })))));
 
         assert!(!profile_fields_only(&update(Some(json!({
             "department": "platform-admin"
-        })))))
-        ;
+        })))));
 
         let mut unsafe_update = update(None);
         unsafe_update.status = Some(crate::models::enums::EntityStatus::Suspended);
