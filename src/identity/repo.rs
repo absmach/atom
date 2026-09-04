@@ -386,6 +386,7 @@ pub async fn update_entity_with_audit(
             event_name,
             details: audit_details,
         },
+        EntityAttributeUpdateMode::Replace,
     )
     .await
 }
@@ -415,6 +416,39 @@ pub(crate) async fn update_entity_with_expected_tenant_and_audit(
             event_name: "entity.update",
             details: audit_details,
         },
+        EntityAttributeUpdateMode::Replace,
+    )
+    .await
+}
+
+/// Update the safe self-service profile surface while merging its attribute
+/// patch against the entity row locked by the mutation transaction.
+///
+/// The caller performs the request/session eligibility check. This function
+/// re-checks the target's global-human shape under the row lock so a concurrent
+/// administrative change cannot turn the self-service path into an update of a
+/// different entity kind or scope.
+pub(crate) async fn update_self_profile_with_expected_tenant_and_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Uuid,
+    id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+    req: UpdateEntity,
+    audit_details: Value,
+) -> Result<Entity, AppError> {
+    update_entity_with_audit_inner(
+        pool,
+        id,
+        req,
+        EntityUpdateAudit {
+            events_enabled,
+            actor_id: Some(actor_id),
+            expected_tenant_id: Some(expected_tenant_id),
+            event_name: "entity.update",
+            details: audit_details,
+        },
+        EntityAttributeUpdateMode::MergeSelfProfile,
     )
     .await
 }
@@ -427,11 +461,27 @@ struct EntityUpdateAudit<'a> {
     details: Value,
 }
 
+#[derive(Clone, Copy)]
+enum EntityAttributeUpdateMode {
+    Replace,
+    MergeSelfProfile,
+}
+
+#[derive(sqlx::FromRow)]
+struct LockedEntityUpdate {
+    kind: EntityKind,
+    name: String,
+    profile_id: Option<Uuid>,
+    profile_version_id: Option<Uuid>,
+    attributes: Value,
+}
+
 async fn update_entity_with_audit_inner(
     pool: &PgPool,
     id: Uuid,
     mut req: UpdateEntity,
     audit: EntityUpdateAudit<'_>,
+    attribute_mode: EntityAttributeUpdateMode,
 ) -> Result<Entity, AppError> {
     let EntityUpdateAudit {
         events_enabled,
@@ -440,11 +490,6 @@ async fn update_entity_with_audit_inner(
         event_name,
         details: audit_details,
     } = audit;
-    let attributes = req.attributes.clone().map(normalize_attributes);
-    if let Some(attrs) = attributes.as_ref() {
-        reject_parent_group_attribute(attrs)?;
-    }
-
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
@@ -452,6 +497,26 @@ async fn update_entity_with_audit_inner(
     let external_id = crate::models::external_id::validate_external_id_update(req.external_id)?;
     let external_id_is_set = external_id.is_some();
     let external_id = external_id.flatten();
+
+    // Preserve validation precedence for administrative updates: malformed
+    // replacement attributes must fail before the row lock/config-managed
+    // guard. Self-profile patches are merged only after locking the current
+    // row, but validate the incoming patch rather than inherited legacy keys.
+    let replacement_attributes = match attribute_mode {
+        EntityAttributeUpdateMode::Replace => {
+            let attributes = req.attributes.clone().map(normalize_attributes);
+            if let Some(attributes) = attributes.as_ref() {
+                reject_parent_group_attribute(attributes)?;
+            }
+            attributes
+        }
+        EntityAttributeUpdateMode::MergeSelfProfile => {
+            if let Some(attributes) = req.attributes.as_ref() {
+                reject_parent_group_attribute(attributes)?;
+            }
+            None
+        }
+    };
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let current_tenant_id: Option<Option<Uuid>> =
@@ -477,8 +542,8 @@ async fn update_entity_with_audit_inner(
     for tenant_id in tenant_ids {
         crate::tenants::repo::lock_active_tenant(&mut tx, tenant_id).await?;
     }
-    let locked: Option<(EntityKind, Option<Uuid>, Option<Uuid>, Value)> = sqlx::query_as(
-        r#"SELECT kind, profile_id, profile_version_id, attributes FROM entities
+    let locked = sqlx::query_as::<_, LockedEntityUpdate>(
+        r#"SELECT kind, name, profile_id, profile_version_id, attributes FROM entities
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
              AND deleted_at IS NULL
@@ -489,9 +554,7 @@ async fn update_entity_with_audit_inner(
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    let Some((current_kind, current_profile_id, current_profile_version_id, current_attributes)) =
-        locked
-    else {
+    let Some(locked) = locked else {
         if expected_tenant_id.is_some() {
             return Err(AppError::conflict(
                 "entity changed after authorization; retry the update",
@@ -499,7 +562,59 @@ async fn update_entity_with_audit_inner(
         }
         return Err(AppError::not_found(format!("entity {id} not found")));
     };
+    let LockedEntityUpdate {
+        kind: current_kind,
+        name: current_name,
+        profile_id: current_profile_id,
+        profile_version_id: current_profile_version_id,
+        attributes: current_attributes,
+    } = locked;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "entities", id).await?;
+    if matches!(attribute_mode, EntityAttributeUpdateMode::MergeSelfProfile)
+        && (current_kind != EntityKind::Human || current_tenant_id.is_some())
+    {
+        return Err(AppError::conflict(
+            "entity changed after self-profile eligibility check; retry the update",
+        ));
+    }
+
+    if matches!(attribute_mode, EntityAttributeUpdateMode::MergeSelfProfile) {
+        if let Some(name) = req.name.as_deref().filter(|name| *name != current_name) {
+            // Name-only login without a tenant selector fails when more than one
+            // live entity has the identifier. Serialize competing self-service
+            // choices and refuse to create that ambiguity.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(name)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            let name_in_use: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM entities
+                    WHERE id <> $1 AND name = $2 AND deleted_at IS NULL
+                )",
+            )
+            .bind(id)
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            if name_in_use {
+                return Err(AppError::conflict(
+                    "name is already in use by another entity; choose a different name",
+                ));
+            }
+        }
+    }
+
+    let attributes = match attribute_mode {
+        EntityAttributeUpdateMode::Replace => replacement_attributes,
+        EntityAttributeUpdateMode::MergeSelfProfile => req
+            .attributes
+            .clone()
+            .map(|attributes| merge_profile_attributes(&current_attributes, attributes))
+            .transpose()?,
+    };
     if req.kind.is_some()
         || req.profile_id.is_some()
         || req.profile_version_id.is_some()
@@ -1085,6 +1200,31 @@ fn normalize_attributes(attributes: Value) -> Value {
     } else {
         attributes
     }
+}
+
+fn merge_profile_attributes(existing: &Value, update: Value) -> Result<Value, AppError> {
+    let Value::Object(update) = update else {
+        return Err(AppError::bad_request(
+            "self profile attributes must be a JSON object",
+        ));
+    };
+    let mut merged = match existing {
+        Value::Object(existing) => existing.clone(),
+        Value::Null => serde_json::Map::new(),
+        _ => {
+            return Err(AppError::bad_request(
+                "existing human profile attributes must be a JSON object",
+            ))
+        }
+    };
+    for (key, value) in update {
+        if value.is_null() {
+            merged.remove(&key);
+        } else {
+            merged.insert(key, value);
+        }
+    }
+    Ok(Value::Object(merged))
 }
 
 pub(crate) async fn sync_entity_email_from_attrs_in_tx(

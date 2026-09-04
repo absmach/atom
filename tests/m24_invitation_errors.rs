@@ -52,6 +52,16 @@ async fn add_email(pool: &PgPool, entity_id: Uuid, email: &str) {
     .expect("insert entity email");
 }
 
+async fn add_unverified_email(pool: &PgPool, entity_id: Uuid, email: &str) {
+    sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+        .bind(Uuid::new_v4())
+        .bind(entity_id)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("insert unverified entity email");
+}
+
 async fn insert_user_invitation(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -215,6 +225,106 @@ async fn invitation_token_accept_reports_state_specific_errors() {
         tenant_repo::accept_invitation_token(&pool, &token, other).await,
         "invitation does not belong to this user",
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn email_invitation_token_proves_and_records_address_ownership() {
+    let pool = common::pool().await;
+    let inviter = make_entity(&pool, &format!("verified-inviter-{}", Uuid::new_v4())).await;
+    let claimant = make_entity(&pool, &format!("verified-claimant-{}", Uuid::new_v4())).await;
+    let email = format!("verified-{}@example.test", Uuid::new_v4());
+    add_unverified_email(&pool, claimant, &email).await;
+    let tenant = make_tenant(&pool, &format!("verified-tenant-{}", Uuid::new_v4())).await;
+    let (invitation_id, token) = create_email_invitation(&pool, tenant, inviter, &email).await;
+
+    let bound_invitee: Option<Uuid> =
+        sqlx::query_scalar("SELECT invitee_user_id FROM tenant_invitations WHERE id = $1")
+            .bind(invitation_id)
+            .fetch_one(&pool)
+            .await
+            .expect("invitation binding");
+    assert_eq!(
+        bound_invitee, None,
+        "an unverified address must not bind an invitation to an entity"
+    );
+
+    let hidden = tenant_repo::list_user_invitations(
+        &pool,
+        claimant,
+        ListTenantInvitations {
+            limit: 100,
+            offset: 0,
+            state: Some(InvitationState::Pending),
+        },
+    )
+    .await
+    .expect("list invitations for unverified address");
+    assert_eq!(hidden.total, 0);
+    assert!(hidden.items.is_empty());
+
+    assert_err_contains(
+        tenant_repo::accept_invitation(&pool, tenant, claimant).await,
+        "tenant invitation not found",
+    );
+    assert_err_contains(
+        tenant_repo::accept_invitation_token(&pool, &replace_token_secret(&token), claimant).await,
+        "invalid invitation token",
+    );
+    let still_unverified: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
+            .bind(claimant)
+            .fetch_one(&pool)
+            .await
+            .expect("verification state after invalid token");
+    assert!(still_unverified.is_none());
+
+    let accepted_tenant = tenant_repo::accept_invitation_token(&pool, &token, claimant)
+        .await
+        .expect("mailbox token proves the claimant owns the address");
+    assert_eq!(accepted_tenant, tenant);
+
+    let verified_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
+            .bind(claimant)
+            .fetch_one(&pool)
+            .await
+            .expect("verification timestamp after token acceptance");
+    assert!(verified_at.is_some());
+
+    let accepted_by: Option<Uuid> = sqlx::query_scalar(
+        "SELECT accepted_by FROM tenant_invitations WHERE id = $1 AND invitee_user_id = $2",
+    )
+    .bind(invitation_id)
+    .bind(claimant)
+    .fetch_one(&pool)
+    .await
+    .expect("accepted invitation binding");
+    assert_eq!(accepted_by, Some(claimant));
+
+    let second_tenant =
+        make_tenant(&pool, &format!("verified-second-tenant-{}", Uuid::new_v4())).await;
+    let (second_invitation_id, _) =
+        create_email_invitation(&pool, second_tenant, inviter, &email).await;
+
+    let visible = tenant_repo::list_user_invitations(
+        &pool,
+        claimant,
+        ListTenantInvitations {
+            limit: 100,
+            offset: 0,
+            state: Some(InvitationState::Pending),
+        },
+    )
+    .await
+    .expect("list invitations for verified address");
+    assert_eq!(visible.total, 1);
+    assert_eq!(visible.items.len(), 1);
+    assert_eq!(visible.items[0].id, second_invitation_id);
+
+    tenant_repo::accept_invitation(&pool, second_tenant, claimant)
+        .await
+        .expect("verified address accepts invitation");
 }
 
 #[tokio::test]

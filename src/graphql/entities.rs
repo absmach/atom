@@ -306,6 +306,17 @@ impl EntityMutation {
             event: "entity.update",
         };
         let details = serde_json::json!({ "updated_fields": updated_fields });
+        let update = entity_model::UpdateEntity {
+            name: input.name,
+            kind: parse_optional_entity_kind(input.kind),
+            alias: input.alias.into(),
+            external_id: input.external_id.into(),
+            tenant_id,
+            profile_id,
+            profile_version_id,
+            status: input.status.map(Into::into),
+            attributes: input.attributes,
+        };
 
         let result = identity_service::update_entity_authorized(
             &state.pool,
@@ -313,17 +324,7 @@ impl EntityMutation {
             state.config.events.enabled(),
             &auth,
             id,
-            entity_model::UpdateEntity {
-                name: input.name,
-                kind: parse_optional_entity_kind(input.kind),
-                alias: input.alias.into(),
-                external_id: input.external_id.into(),
-                tenant_id,
-                profile_id,
-                profile_version_id,
-                status: input.status.map(Into::into),
-                attributes: input.attributes,
-            },
+            update,
             details.clone(),
         )
         .await;
