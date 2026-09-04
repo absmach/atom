@@ -1454,7 +1454,7 @@ pub async fn list_user_invitations(
                OR EXISTS (
                    SELECT 1 FROM entity_emails ee
                    WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
-                     AND ee.deleted_at IS NULL
+                     AND ee.verified_at IS NOT NULL AND ee.deleted_at IS NULL
                )
            )
              AND (
@@ -1482,7 +1482,7 @@ pub async fn list_user_invitations(
                OR EXISTS (
                    SELECT 1 FROM entity_emails ee
                    WHERE ee.entity_id = $1 AND lower(ee.email) = lower(ti.invitee_email)
-                     AND ee.deleted_at IS NULL
+                     AND ee.verified_at IS NOT NULL AND ee.deleted_at IS NULL
                )
            )
              AND (
@@ -2118,7 +2118,7 @@ async fn invitation_row_for_invitee(
                   OR EXISTS (
                       SELECT 1 FROM entity_emails ee
                       WHERE ee.entity_id = $2 AND lower(ee.email) = lower(ti.invitee_email)
-                        AND ee.deleted_at IS NULL
+                        AND ee.verified_at IS NOT NULL AND ee.deleted_at IS NULL
                   ))
            ORDER BY ti.created_at DESC
            LIMIT 1
@@ -2182,7 +2182,9 @@ async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, 
     sqlx::query_scalar(
         r#"SELECT entity_id
            FROM entity_emails
-           WHERE lower(email) = lower($1) AND deleted_at IS NULL"#,
+           WHERE lower(email) = lower($1)
+             AND verified_at IS NOT NULL
+             AND deleted_at IS NULL"#,
     )
     .bind(email)
     .fetch_optional(pool)
@@ -2208,7 +2210,9 @@ async fn entity_has_email(
     sqlx::query_scalar(
         r#"SELECT EXISTS (
                SELECT 1 FROM entity_emails
-               WHERE entity_id = $1 AND lower(email) = lower($2) AND deleted_at IS NULL
+               WHERE entity_id = $1 AND lower(email) = lower($2)
+                 AND verified_at IS NOT NULL
+                 AND deleted_at IS NULL
            )"#,
     )
     .bind(entity_id)

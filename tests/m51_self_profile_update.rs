@@ -183,3 +183,63 @@ async fn self_profile_path_does_not_authorize_entity_administration() {
     assert_eq!(persisted.1, None);
     assert_eq!(persisted.2["department"], "operations");
 }
+
+#[tokio::test]
+#[ignore]
+async fn self_profile_update_preserves_concurrent_admin_attributes() {
+    let pool = common::pool().await;
+    let caller = global_human(&pool).await;
+    let schema = build_schema(state(pool.clone()));
+
+    let mut admin_tx = pool.begin().await.expect("begin admin update");
+    sqlx::query("UPDATE entities SET attributes = attributes || $2 WHERE id = $1")
+        .bind(caller)
+        .bind(serde_json::json!({ "department": "security" }))
+        .execute(&mut *admin_tx)
+        .await
+        .expect("stage concurrent admin attributes");
+
+    let mut update = tokio::spawn(async move {
+        schema
+            .execute(session_as(
+                caller,
+                format!(
+                    r#"mutation {{
+                        updateEntity(
+                            id: "{caller}",
+                            input: {{ attributes: {{ picture: "new-picture.png" }} }}
+                        ) {{
+                            attributes
+                        }}
+                    }}"#
+                ),
+            ))
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut update)
+            .await
+            .is_err(),
+        "self-profile update must wait for the entity row lock"
+    );
+    admin_tx.commit().await.expect("commit admin update");
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+        .await
+        .expect("self-profile update should finish after lock release")
+        .expect("self-profile update task");
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+
+    let attributes: serde_json::Value =
+        sqlx::query_scalar("SELECT attributes FROM entities WHERE id = $1")
+            .bind(caller)
+            .fetch_one(&pool)
+            .await
+            .expect("updated attributes");
+    assert_eq!(attributes["picture"], "new-picture.png");
+    assert_eq!(
+        attributes["department"], "security",
+        "self-profile patch must preserve the admin's newer metadata"
+    );
+}

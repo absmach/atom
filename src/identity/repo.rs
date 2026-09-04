@@ -386,6 +386,7 @@ pub async fn update_entity_with_audit(
             event_name,
             details: audit_details,
         },
+        EntityAttributeUpdateMode::Replace,
     )
     .await
 }
@@ -415,6 +416,39 @@ pub(crate) async fn update_entity_with_expected_tenant_and_audit(
             event_name: "entity.update",
             details: audit_details,
         },
+        EntityAttributeUpdateMode::Replace,
+    )
+    .await
+}
+
+/// Update the safe self-service profile surface while merging its attribute
+/// patch against the entity row locked by the mutation transaction.
+///
+/// The caller performs the request/session eligibility check. This function
+/// re-checks the target's global-human shape under the row lock so a concurrent
+/// administrative change cannot turn the self-service path into an update of a
+/// different entity kind or scope.
+pub(crate) async fn update_self_profile_with_expected_tenant_and_audit(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Uuid,
+    id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+    req: UpdateEntity,
+    audit_details: Value,
+) -> Result<Entity, AppError> {
+    update_entity_with_audit_inner(
+        pool,
+        id,
+        req,
+        EntityUpdateAudit {
+            events_enabled,
+            actor_id: Some(actor_id),
+            expected_tenant_id: Some(expected_tenant_id),
+            event_name: "entity.update",
+            details: audit_details,
+        },
+        EntityAttributeUpdateMode::MergeSelfProfile,
     )
     .await
 }
@@ -427,11 +461,17 @@ struct EntityUpdateAudit<'a> {
     details: Value,
 }
 
+enum EntityAttributeUpdateMode {
+    Replace,
+    MergeSelfProfile,
+}
+
 async fn update_entity_with_audit_inner(
     pool: &PgPool,
     id: Uuid,
     mut req: UpdateEntity,
     audit: EntityUpdateAudit<'_>,
+    attribute_mode: EntityAttributeUpdateMode,
 ) -> Result<Entity, AppError> {
     let EntityUpdateAudit {
         events_enabled,
@@ -440,11 +480,6 @@ async fn update_entity_with_audit_inner(
         event_name,
         details: audit_details,
     } = audit;
-    let attributes = req.attributes.clone().map(normalize_attributes);
-    if let Some(attrs) = attributes.as_ref() {
-        reject_parent_group_attribute(attrs)?;
-    }
-
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
@@ -500,6 +535,26 @@ async fn update_entity_with_audit_inner(
         return Err(AppError::not_found(format!("entity {id} not found")));
     };
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "entities", id).await?;
+    if matches!(attribute_mode, EntityAttributeUpdateMode::MergeSelfProfile)
+        && (current_kind != EntityKind::Human || current_tenant_id.is_some())
+    {
+        return Err(AppError::conflict(
+            "entity changed after self-profile eligibility check; retry the update",
+        ));
+    }
+    let attributes = req
+        .attributes
+        .clone()
+        .map(|attributes| match attribute_mode {
+            EntityAttributeUpdateMode::Replace => Ok(normalize_attributes(attributes)),
+            EntityAttributeUpdateMode::MergeSelfProfile => {
+                merge_profile_attributes(&current_attributes, attributes)
+            }
+        })
+        .transpose()?;
+    if let Some(attrs) = attributes.as_ref() {
+        reject_parent_group_attribute(attrs)?;
+    }
     if req.kind.is_some()
         || req.profile_id.is_some()
         || req.profile_version_id.is_some()
@@ -1085,6 +1140,25 @@ fn normalize_attributes(attributes: Value) -> Value {
     } else {
         attributes
     }
+}
+
+fn merge_profile_attributes(existing: &Value, update: Value) -> Result<Value, AppError> {
+    let Value::Object(update) = update else {
+        return Err(AppError::bad_request(
+            "self profile attributes must be a JSON object",
+        ));
+    };
+    let mut merged = match existing {
+        Value::Object(existing) => existing.clone(),
+        Value::Null => serde_json::Map::new(),
+        _ => {
+            return Err(AppError::bad_request(
+                "existing human profile attributes must be a JSON object",
+            ))
+        }
+    };
+    merged.extend(update);
+    Ok(Value::Object(merged))
 }
 
 pub(crate) async fn sync_entity_email_from_attrs_in_tx(

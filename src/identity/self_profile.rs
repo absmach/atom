@@ -42,25 +42,6 @@ fn profile_fields_only(req: &UpdateEntity) -> bool {
         && req.attributes.as_ref().is_none_or(profile_attributes_only)
 }
 
-fn merge_profile_attributes(existing: &Value, update: Value) -> Result<Value, AppError> {
-    let Value::Object(update) = update else {
-        return Err(AppError::bad_request(
-            "self profile attributes must be a JSON object",
-        ));
-    };
-    let mut merged = match existing {
-        Value::Object(existing) => existing.clone(),
-        Value::Null => serde_json::Map::new(),
-        _ => {
-            return Err(AppError::bad_request(
-                "existing human profile attributes must be a JSON object",
-            ))
-        }
-    };
-    merged.extend(update);
-    Ok(Value::Object(merged))
-}
-
 /// Attempt the authenticated human self-profile path used by `updateEntity`.
 ///
 /// Human identities are global (`tenant_id = NULL`) even when they administer
@@ -80,7 +61,7 @@ pub(crate) async fn try_update(
     events_enabled: bool,
     auth: &AuthContext,
     id: Uuid,
-    mut req: UpdateEntity,
+    req: UpdateEntity,
     audit_details: Value,
 ) -> Result<SelfProfileUpdate, AppError> {
     if id != auth.entity_id
@@ -96,12 +77,8 @@ pub(crate) async fn try_update(
         return Ok(SelfProfileUpdate::NotApplicable(req));
     }
 
-    if let Some(attributes) = req.attributes.take() {
-        req.attributes = Some(merge_profile_attributes(&existing.attributes, attributes)?);
-    }
-
     let mutate = || {
-        super::repo::update_entity_with_expected_tenant_and_audit(
+        super::repo::update_self_profile_with_expected_tenant_and_audit(
             pool,
             events_enabled,
             auth.entity_id,
@@ -172,24 +149,5 @@ mod tests {
         let mut unsafe_update = update(None);
         unsafe_update.status = Some(crate::models::enums::EntityStatus::Suspended);
         assert!(!profile_fields_only(&unsafe_update));
-    }
-
-    #[test]
-    fn profile_attribute_merge_preserves_non_profile_metadata() {
-        let merged = merge_profile_attributes(
-            &json!({
-                "department": "operations",
-                "first_name": "Old"
-            }),
-            json!({
-                "first_name": "New",
-                "picture": null
-            }),
-        )
-        .expect("merge");
-
-        assert_eq!(merged["department"], "operations");
-        assert_eq!(merged["first_name"], "New");
-        assert!(merged["picture"].is_null());
     }
 }
