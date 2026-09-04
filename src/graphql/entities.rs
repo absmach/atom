@@ -6,7 +6,7 @@ use crate::{
     auth::{AuthContext, Scope},
     authz::{engine, repo as authz_repo},
     error::AppError,
-    identity::{repo, self_profile, service as identity_service},
+    identity::{repo, service as identity_service},
     models::{
         access::AuthorizedObjectIdsQuery,
         entity as entity_model,
@@ -318,7 +318,7 @@ impl EntityMutation {
             attributes: input.attributes,
         };
 
-        let result = match self_profile::try_update(
+        let result = identity_service::update_entity_authorized(
             &state.pool,
             state.cache.as_deref(),
             state.config.events.enabled(),
@@ -327,23 +327,7 @@ impl EntityMutation {
             update,
             details.clone(),
         )
-        .await
-        {
-            Ok(self_profile::SelfProfileUpdate::Updated(entity)) => Ok(entity),
-            Ok(self_profile::SelfProfileUpdate::NotApplicable(update)) => {
-                identity_service::update_entity_authorized(
-                    &state.pool,
-                    state.cache.as_deref(),
-                    state.config.events.enabled(),
-                    &auth,
-                    id,
-                    update,
-                    details.clone(),
-                )
-                .await
-            }
-            Err(err) => Err(err),
-        };
+        .await;
 
         if let Err(ref err) = result {
             audit::observe_error(

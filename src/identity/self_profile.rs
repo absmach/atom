@@ -6,10 +6,21 @@ use crate::{
     auth::AuthContext,
     error::AppError,
     models::{
-        entity::{Entity, UpdateEntity},
+        entity::{validate_entity_name, Entity, UpdateEntity},
         enums::EntityKind,
     },
 };
+
+/// The complete entity-column surface available to the self-profile path.
+pub(crate) const SELF_PROFILE_ENTITY_FIELDS: &[&str] = &["name"];
+
+/// The complete JSON attribute surface available to the self-profile path.
+/// Email is deliberately excluded: changing a login/recovery identifier needs
+/// a separate verify-before-apply workflow.
+pub(crate) const SELF_PROFILE_ATTRIBUTE_FIELDS: &[&str] = &["first_name", "last_name", "picture"];
+
+/// Setting one of these attributes to GraphQL `null` removes the stored key.
+pub(crate) const SELF_PROFILE_CLEARABLE_ATTRIBUTE_FIELDS: &[&str] = SELF_PROFILE_ATTRIBUTE_FIELDS;
 
 /// Result of attempting the narrow authenticated self-profile path.
 ///
@@ -24,15 +35,17 @@ fn profile_attributes_only(attributes: &Value) -> bool {
     let Value::Object(attributes) = attributes else {
         return false;
     };
-    attributes.iter().all(|(key, value)| match key.as_str() {
-        "first_name" | "last_name" | "email" => value.is_string(),
-        "picture" => value.is_string() || value.is_null(),
-        _ => false,
+    attributes.iter().all(|(key, value)| {
+        SELF_PROFILE_ATTRIBUTE_FIELDS.contains(&key.as_str())
+            && (value.is_string()
+                || (value.is_null()
+                    && SELF_PROFILE_CLEARABLE_ATTRIBUTE_FIELDS.contains(&key.as_str())))
     })
 }
 
 fn profile_fields_only(req: &UpdateEntity) -> bool {
-    req.kind.is_none()
+    (req.name.is_none() || SELF_PROFILE_ENTITY_FIELDS.contains(&"name"))
+        && req.kind.is_none()
         && req.alias.is_none()
         && req.external_id.is_none()
         && req.tenant_id.is_none()
@@ -61,7 +74,7 @@ pub(crate) async fn try_update(
     events_enabled: bool,
     auth: &AuthContext,
     id: Uuid,
-    req: UpdateEntity,
+    mut req: UpdateEntity,
     audit_details: Value,
 ) -> Result<SelfProfileUpdate, AppError> {
     if id != auth.entity_id
@@ -75,6 +88,10 @@ pub(crate) async fn try_update(
     let existing = super::repo::get_entity(pool, id).await?;
     if existing.kind != EntityKind::Human || existing.tenant_id.is_some() {
         return Ok(SelfProfileUpdate::NotApplicable(req));
+    }
+
+    if let Some(name) = req.name.as_deref() {
+        req.name = Some(validate_entity_name(name)?);
     }
 
     let mutate = || {
@@ -134,8 +151,11 @@ mod tests {
         assert!(profile_fields_only(&update(Some(json!({
             "first_name": "Alice",
             "last_name": "Example",
-            "email": "alice@example.test",
-            "picture": "https://example.test/alice.png"
+            "picture": null
+        })))));
+
+        assert!(!profile_fields_only(&update(Some(json!({
+            "email": "alice@example.test"
         })))));
 
         assert!(!profile_fields_only(&update(Some(json!({
@@ -143,7 +163,7 @@ mod tests {
         })))));
 
         assert!(!profile_fields_only(&update(Some(json!({
-            "email": {"unexpected": "shape"}
+            "picture": {"unexpected": "shape"}
         })))));
 
         let mut unsafe_update = update(None);

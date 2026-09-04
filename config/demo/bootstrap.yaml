@@ -104,7 +104,6 @@ capabilities:
     applicability:
       - object_kind: resource
         object_type: resource:rule
-      - object_kind: api_endpoint
 
 # --- Assignment guardrails ---------------------------------------------
 action_assignment_rules:

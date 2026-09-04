@@ -461,9 +461,19 @@ struct EntityUpdateAudit<'a> {
     details: Value,
 }
 
+#[derive(Clone, Copy)]
 enum EntityAttributeUpdateMode {
     Replace,
     MergeSelfProfile,
+}
+
+#[derive(sqlx::FromRow)]
+struct LockedEntityUpdate {
+    kind: EntityKind,
+    name: String,
+    profile_id: Option<Uuid>,
+    profile_version_id: Option<Uuid>,
+    attributes: Value,
 }
 
 async fn update_entity_with_audit_inner(
@@ -487,6 +497,26 @@ async fn update_entity_with_audit_inner(
     let external_id = crate::models::external_id::validate_external_id_update(req.external_id)?;
     let external_id_is_set = external_id.is_some();
     let external_id = external_id.flatten();
+
+    // Preserve validation precedence for administrative updates: malformed
+    // replacement attributes must fail before the row lock/config-managed
+    // guard. Self-profile patches are merged only after locking the current
+    // row, but validate the incoming patch rather than inherited legacy keys.
+    let replacement_attributes = match attribute_mode {
+        EntityAttributeUpdateMode::Replace => {
+            let attributes = req.attributes.clone().map(normalize_attributes);
+            if let Some(attributes) = attributes.as_ref() {
+                reject_parent_group_attribute(attributes)?;
+            }
+            attributes
+        }
+        EntityAttributeUpdateMode::MergeSelfProfile => {
+            if let Some(attributes) = req.attributes.as_ref() {
+                reject_parent_group_attribute(attributes)?;
+            }
+            None
+        }
+    };
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     let current_tenant_id: Option<Option<Uuid>> =
@@ -512,8 +542,8 @@ async fn update_entity_with_audit_inner(
     for tenant_id in tenant_ids {
         crate::tenants::repo::lock_active_tenant(&mut tx, tenant_id).await?;
     }
-    let locked: Option<(EntityKind, Option<Uuid>, Option<Uuid>, Value)> = sqlx::query_as(
-        r#"SELECT kind, profile_id, profile_version_id, attributes FROM entities
+    let locked = sqlx::query_as::<_, LockedEntityUpdate>(
+        r#"SELECT kind, name, profile_id, profile_version_id, attributes FROM entities
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
              AND deleted_at IS NULL
@@ -524,9 +554,7 @@ async fn update_entity_with_audit_inner(
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    let Some((current_kind, current_profile_id, current_profile_version_id, current_attributes)) =
-        locked
-    else {
+    let Some(locked) = locked else {
         if expected_tenant_id.is_some() {
             return Err(AppError::conflict(
                 "entity changed after authorization; retry the update",
@@ -534,6 +562,13 @@ async fn update_entity_with_audit_inner(
         }
         return Err(AppError::not_found(format!("entity {id} not found")));
     };
+    let LockedEntityUpdate {
+        kind: current_kind,
+        name: current_name,
+        profile_id: current_profile_id,
+        profile_version_id: current_profile_version_id,
+        attributes: current_attributes,
+    } = locked;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "entities", id).await?;
     if matches!(attribute_mode, EntityAttributeUpdateMode::MergeSelfProfile)
         && (current_kind != EntityKind::Human || current_tenant_id.is_some())
@@ -542,19 +577,44 @@ async fn update_entity_with_audit_inner(
             "entity changed after self-profile eligibility check; retry the update",
         ));
     }
-    let attributes = req
-        .attributes
-        .clone()
-        .map(|attributes| match attribute_mode {
-            EntityAttributeUpdateMode::Replace => Ok(normalize_attributes(attributes)),
-            EntityAttributeUpdateMode::MergeSelfProfile => {
-                merge_profile_attributes(&current_attributes, attributes)
+
+    if matches!(attribute_mode, EntityAttributeUpdateMode::MergeSelfProfile) {
+        if let Some(name) = req.name.as_deref().filter(|name| *name != current_name) {
+            // Name-only login without a tenant selector fails when more than one
+            // live entity has the identifier. Serialize competing self-service
+            // choices and refuse to create that ambiguity.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(name)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            let name_in_use: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM entities
+                    WHERE id <> $1 AND name = $2 AND deleted_at IS NULL
+                )",
+            )
+            .bind(id)
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            if name_in_use {
+                return Err(AppError::conflict(
+                    "name is already in use by another entity; choose a different name",
+                ));
             }
-        })
-        .transpose()?;
-    if let Some(attrs) = attributes.as_ref() {
-        reject_parent_group_attribute(attrs)?;
+        }
     }
+
+    let attributes = match attribute_mode {
+        EntityAttributeUpdateMode::Replace => replacement_attributes,
+        EntityAttributeUpdateMode::MergeSelfProfile => req
+            .attributes
+            .clone()
+            .map(|attributes| merge_profile_attributes(&current_attributes, attributes))
+            .transpose()?,
+    };
     if req.kind.is_some()
         || req.profile_id.is_some()
         || req.profile_version_id.is_some()
@@ -1157,7 +1217,13 @@ fn merge_profile_attributes(existing: &Value, update: Value) -> Result<Value, Ap
             ))
         }
     };
-    merged.extend(update);
+    for (key, value) in update {
+        if value.is_null() {
+            merged.remove(&key);
+        } else {
+            merged.insert(key, value);
+        }
+    }
     Ok(Value::Object(merged))
 }
 

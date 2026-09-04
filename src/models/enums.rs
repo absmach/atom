@@ -1879,7 +1879,20 @@ callouts:
             entity_authorization,
             &serde_json::json!({
                 "operations": ["updateEntity", "deleteEntity"],
-                "selfTargetBypass": false,
+                "administrativeSelfTargetBypass": false,
+                "selfProfileUpdate": {
+                    "operation": "updateEntity",
+                    "authentication": "session_required",
+                    "scopedCredentialsAllowed": false,
+                    "target": {
+                        "relation": "self",
+                        "kind": "human",
+                        "tenantId": null
+                    },
+                    "entityFields": ["name"],
+                    "attributeFields": ["first_name", "last_name", "picture"],
+                    "nullRemovesAttributeFields": ["first_name", "last_name", "picture"]
+                },
                 "updateSourceAnyOf": [
                     {"action": "manage", "scope": "target_object"},
                     {"action": "manage", "scope": "source_tenant_or_platform"},
@@ -1897,10 +1910,33 @@ callouts:
                 "authorizationSnapshotMustMatchMutation": true
             })
         );
+        let self_profile_contract = &entity_authorization["selfProfileUpdate"];
+        assert_eq!(
+            contract_strings(&self_profile_contract["entityFields"]),
+            crate::identity::self_profile::SELF_PROFILE_ENTITY_FIELDS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            contract_strings(&self_profile_contract["attributeFields"]),
+            crate::identity::self_profile::SELF_PROFILE_ATTRIBUTE_FIELDS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            contract_strings(&self_profile_contract["nullRemovesAttributeFields"]),
+            crate::identity::self_profile::SELF_PROFILE_CLEARABLE_ATTRIBUTE_FIELDS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        );
 
         let entity_resolvers = include_str!("../graphql/entities.rs");
         let update_resolver = function_section(entity_resolvers, "update_entity");
         assert!(update_resolver.contains("identity_service::update_entity_authorized"));
+        assert!(!update_resolver.contains("self_profile::try_update"));
         assert!(!update_resolver.contains("auth.entity_id == id"));
         assert!(!update_resolver.contains("auth.entity_id != id"));
         let delete_resolver = function_section(entity_resolvers, "delete_entity");
@@ -1911,6 +1947,7 @@ callouts:
         let identity_service = include_str!("../identity/service.rs");
         let update_service =
             top_level_async_function_section(identity_service, "update_entity_authorized");
+        assert!(update_service.contains("self_profile::try_update"));
         for gate in [
             "(\"manage\", AuthScope::Object(id))",
             "(\"manage\", scope_for_tenant(existing.tenant_id))",

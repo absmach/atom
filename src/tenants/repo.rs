@@ -1933,7 +1933,12 @@ pub async fn accept_invitation_token(
         .try_get::<Option<String>, _>("invitee_email")
         .unwrap_or(None)
     {
-        if !entity_has_email(&mut tx, actor_id, &email).await? {
+        // The secret was verified before this point. Because email invitations
+        // are delivered to this address and the token is never returned by the
+        // public mutation, presenting it is proof of mailbox control. Record
+        // that proof atomically with acceptance so local-development accounts
+        // with an unverified address can redeem their invitation safely.
+        if !verify_entity_email_from_invitation(&mut tx, actor_id, &email).await? {
             return Err(invitation_wrong_user());
         }
     }
@@ -2202,24 +2207,24 @@ async fn email_by_entity_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<Str
     .map_err(db_err)
 }
 
-async fn entity_has_email(
+async fn verify_entity_email_from_invitation(
     tx: &mut Transaction<'_, Postgres>,
     entity_id: Uuid,
     email: &str,
 ) -> Result<bool, AppError> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS (
-               SELECT 1 FROM entity_emails
-               WHERE entity_id = $1 AND lower(email) = lower($2)
-                 AND verified_at IS NOT NULL
-                 AND deleted_at IS NULL
-           )"#,
+    Ok(sqlx::query(
+        r#"UPDATE entity_emails
+           SET verified_at = COALESCE(verified_at, now()), updated_at = now()
+           WHERE entity_id = $1 AND lower(email) = lower($2)
+             AND deleted_at IS NULL"#,
     )
     .bind(entity_id)
     .bind(email)
-    .fetch_one(&mut **tx)
+    .execute(&mut **tx)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?
+    .rows_affected()
+        > 0)
 }
 
 fn new_secret_token(prefix: &str) -> (Uuid, String, String) {

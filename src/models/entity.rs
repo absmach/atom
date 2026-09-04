@@ -3,7 +3,35 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::error::AppError;
+
 use super::enums::{DeletedFilter, EntityKind, EntityOrderField, EntityStatus, SortDir};
+
+pub const MAX_ENTITY_NAME_CHARS: usize = 255;
+
+/// Normalize and validate a human-supplied entity name.
+///
+/// Entity names also serve as login identifiers, so signup and self-profile
+/// changes must apply the same basic rules. Keep the accepted character set
+/// broad for compatibility, but reject invisible control characters that make
+/// identifiers unsafe to display or compare.
+pub fn validate_entity_name(name: &str) -> Result<String, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::bad_request("name is required"));
+    }
+    if name.chars().count() > MAX_ENTITY_NAME_CHARS {
+        return Err(AppError::bad_request(format!(
+            "name must be at most {MAX_ENTITY_NAME_CHARS} characters"
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(AppError::bad_request(
+            "name must not contain control characters",
+        ));
+    }
+    Ok(name.to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Entity {
@@ -123,4 +151,29 @@ pub struct CreateOwnership {
 
 fn default_relation() -> String {
     "owner".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_name_validation_is_shared_and_bounded() {
+        assert_eq!(
+            validate_entity_name("  Alice Example  ").unwrap(),
+            "Alice Example"
+        );
+        assert!(matches!(
+            validate_entity_name("  "),
+            Err(AppError::BadRequest(message)) if message == "name is required"
+        ));
+        assert!(matches!(
+            validate_entity_name("Alice\nAdmin"),
+            Err(AppError::BadRequest(message)) if message.contains("control characters")
+        ));
+        assert!(matches!(
+            validate_entity_name(&"a".repeat(MAX_ENTITY_NAME_CHARS + 1)),
+            Err(AppError::BadRequest(message)) if message.contains("at most")
+        ));
+    }
 }

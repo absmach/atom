@@ -23,7 +23,7 @@ use crate::{
     keys::LoadedKey,
     mail,
     models::{
-        entity::{Entity, UpdateEntity},
+        entity::{validate_entity_name, Entity, UpdateEntity},
         enums::{AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus},
         session::{
             LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
@@ -497,16 +497,12 @@ struct PreparedSignup {
 }
 
 fn prepare_signup_human(cfg: &Config, req: SignupRequest) -> Result<PreparedSignup, AppError> {
-    let name = req.name.trim();
-    if name.is_empty() {
-        return Err(AppError::bad_request("name is required"));
-    }
+    let name = validate_entity_name(&req.name)?;
     if req.password.is_empty() {
         return Err(AppError::bad_request("password is required"));
     }
     validate_password_strength(&req.password)?;
     let email = normalize_email(&req.email)?;
-    let name = name.to_string();
     let attributes = normalize_json_object(req.attributes);
     let password_hash = hash_secret(req.password.as_bytes())?;
     let (token_id, token_secret, token) = new_secret_token("atomv");
@@ -1782,7 +1778,11 @@ async fn upsert_oauth_identity(
     }
 
     let entity_id = match sqlx::query(
-        "SELECT entity_id FROM entity_emails WHERE email = $1 AND deleted_at IS NULL",
+        "SELECT ee.entity_id, ee.verified_at
+         FROM entity_emails ee
+         JOIN entities e ON e.id = ee.entity_id
+         WHERE ee.email = $1 AND ee.deleted_at IS NULL
+         FOR UPDATE OF e",
     )
     .bind(email)
     .fetch_optional(&mut *tx)
@@ -1790,6 +1790,12 @@ async fn upsert_oauth_identity(
     .map_err(db_err)?
     {
         Some(row) => {
+            let verified_at: Option<DateTime<Utc>> = row.try_get("verified_at").unwrap_or(None);
+            if verified_at.is_none() {
+                return Err(AppError::unauthorized(
+                    "email address is pending verification; automatic OAuth linking is not allowed",
+                ));
+            }
             let entity_id = row.try_get("entity_id").map_err(db_err)?;
             if super::repo::lock_active_entity(&mut tx, entity_id)
                 .await?
@@ -1827,17 +1833,6 @@ async fn upsert_oauth_identity(
             entity_id
         }
     };
-
-    sqlx::query(
-        r#"UPDATE entity_emails
-           SET verified_at = COALESCE(verified_at, now()), updated_at = now()
-           WHERE entity_id = $1 AND email = $2"#,
-    )
-    .bind(entity_id)
-    .bind(email)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_err)?;
 
     sqlx::query(
         r#"INSERT INTO oauth_identities
@@ -2478,11 +2473,12 @@ fn make_shared_key(cred_id: Uuid) -> String {
     )
 }
 
-/// Authorize and update an entity through the one service-layer entry point
-/// used by GraphQL. Self-targeting is deliberately not special: every caller,
-/// including a scoped access token, must satisfy the same ceiling-aware source
-/// gate. Moving the entity additionally requires authority in the destination
-/// tenant.
+/// Authorize and update an entity through the single service-layer entry point.
+///
+/// A real session may use the narrowly defined global-human self-profile path.
+/// Every other request, including access-token authentication and all
+/// administrative fields, must satisfy the normal ceiling-aware source gate.
+/// Moving the entity additionally requires authority in the destination tenant.
 pub async fn update_entity_authorized(
     pool: &PgPool,
     cache: Option<&crate::cache::CacheClient>,
@@ -2492,6 +2488,21 @@ pub async fn update_entity_authorized(
     req: UpdateEntity,
     audit_details: Value,
 ) -> Result<Entity, AppError> {
+    let req = match super::self_profile::try_update(
+        pool,
+        cache,
+        events_enabled,
+        auth,
+        id,
+        req,
+        audit_details.clone(),
+    )
+    .await?
+    {
+        super::self_profile::SelfProfileUpdate::Updated(entity) => return Ok(entity),
+        super::self_profile::SelfProfileUpdate::NotApplicable(req) => req,
+    };
+
     let existing = super::repo::get_entity(pool, id).await?;
     require_any_capability(
         pool,
@@ -2833,4 +2844,81 @@ pub struct CredentialSummary {
     pub expires_at: Option<chrono::DateTime<Utc>>,
     pub created_at: chrono::DateTime<Utc>,
     pub managed_by: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn oidc_auto_link_requires_a_previously_verified_email() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB-gated tests");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to test database");
+        sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("load migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let entity_id = Uuid::new_v4();
+        let email = format!("oidc-unverified-{entity_id}@example.test");
+        sqlx::query(
+            "INSERT INTO entities (id, kind, name, status, attributes)
+             VALUES ($1, 'human', $2, 'active', '{}')",
+        )
+        .bind(entity_id)
+        .bind(format!("oidc-unverified-{entity_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert entity");
+        sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+            .bind(Uuid::new_v4())
+            .bind(entity_id)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("insert unverified email");
+
+        let result = upsert_oauth_identity(
+            &pool,
+            "test-provider",
+            &format!("subject-{entity_id}"),
+            &email,
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::Unauthorized(message))
+                if message.contains("pending verification")
+        ));
+        let links: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1")
+                .bind(entity_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count rejected links");
+        assert_eq!(links, 0);
+
+        sqlx::query("UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1")
+            .bind(entity_id)
+            .execute(&pool)
+            .await
+            .expect("verify email");
+        let linked = upsert_oauth_identity(
+            &pool,
+            "test-provider",
+            &format!("subject-{entity_id}"),
+            &email,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("verified address may link");
+        assert_eq!(linked, entity_id);
+    }
 }
