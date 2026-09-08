@@ -1,0 +1,235 @@
+---
+title: Atom v1 Capabilities
+description: A concise inventory of the identity, authentication, authorization, PKI, API, and operational capabilities available in Atom v1.
+---
+
+# Atom v1 Capabilities
+
+Atom v1 is a security control plane for connected software. It brings identity,
+authentication, authorization, machine identity, and audit into one system so
+applications do not have to build or synchronize those concerns independently.
+
+This page is the high-level capability inventory for the v1 line. Detailed
+behavior, constraints, and configuration live in the linked documentation.
+
+## At a glance
+
+| Area | Atom v1 provides |
+|---|---|
+| **Identity** | First-class entities for humans, devices, services, workloads, and applications |
+| **Authentication** | Passwords, JWT sessions, access tokens, shared keys, OAuth/OIDC, and certificate identity |
+| **Authorization** | Online RBAC and ABAC decisions with deny-overrides-allow semantics |
+| **Multi-tenancy** | Tenant isolation, tenant membership, tenant-owned objects, and lifecycle enforcement |
+| **Machine identity** | Managed multi-tenant PKI, enrollment, renewal, revocation, CRL, OCSP, and EST |
+| **Management APIs** | GraphQL-first administration plus generated API contracts |
+| **Runtime APIs** | gRPC authentication, authorization, and certificate-resolution paths |
+| **Operations** | Audit, transactional events, metrics, readiness, rate limiting, and graceful shutdown |
+| **Deployment** | One Rust binary and PostgreSQL, with optional Redis, UI, and PKCS#11 HSM integration |
+
+## Identity and tenancy
+
+Atom uses one entity model for principals instead of maintaining separate user,
+device, and service identity systems.
+
+- human, device, service, workload, and application entity kinds;
+- global and tenant-owned entities;
+- first-class tenants as isolation boundaries;
+- human tenant memberships without duplicating the global human identity;
+- entity ownership relationships;
+- human-readable aliases and application-owned attributes;
+- entity and tenant lifecycle states, including disable, freeze, soft-delete,
+  restore, and eventual purge workflows;
+- profiles and profile versions for schema-driven entity creation.
+
+See [Architecture](/architecture) and the
+[product requirements](/reference/product-requirements) for the complete data
+model.
+
+## Authentication and credentials
+
+Credentials belong to entities, so multiple authentication methods can use the
+same identity and authorization model.
+
+Atom v1 supports:
+
+- password authentication;
+- JWT sessions with revocation;
+- long-lived access-token credentials;
+- scoped access tokens with server-side permission ceilings;
+- shared-key credentials;
+- configured OAuth/OIDC federation;
+- certificate credentials for machine identity;
+- credential rotation and revocation;
+- JWKS publication for external JWT verification;
+- session and credential invalidation when entity or tenant state changes.
+
+Scoped access tokens remain bounded by the owner's live grants: the token's
+stored ceiling can reduce authority but cannot expand it.
+
+See [Authentication](/authentication) for credential-specific behavior.
+
+## Live authorization
+
+Atom authorization is online: tokens identify the caller, while authorization
+is evaluated from current state at request time.
+
+The v1 access model includes:
+
+- Actions and Action Applicability;
+- Assignment Guardrails;
+- Permission Blocks;
+- Roles and Role Assignments;
+- Direct Policies;
+- RBAC;
+- ABAC conditions;
+- deny-overrides-allow evaluation;
+- Principal Groups for grouping subjects;
+- Object Groups for grouping protected objects;
+- platform, tenant, object-kind, object-type, group, and exact-object scopes;
+- cross-tenant platform grants for trusted services;
+- authorization checks and bulk checks;
+- access-listing and explainability-oriented query surfaces.
+
+Because permissions are not embedded in identity tokens, changes to roles,
+policies, memberships, credentials, or tenant lifecycle can affect the next
+authorization decision without token reissuance.
+
+See [Access Control](/access-control).
+
+## Multi-tenant PKI and machine identity
+
+Atom v1 includes managed certificate infrastructure as part of the same entity
+and tenant model used for other credentials.
+
+Capabilities include:
+
+- managed tenant intermediates and platform leaf issuers;
+- certificate profiles;
+- tenant-aware CSR signing;
+- generated-key enrollment;
+- certificate renewal and revocation;
+- entity-wide certificate lifecycle handling;
+- per-issuer certificate revocation lists (CRLs);
+- OCSP responses;
+- RFC 7030 EST enrollment;
+- runtime certificate identity resolution;
+- lifecycle automation and expiry visibility;
+- encrypted database-backed authority keys;
+- optional PKCS#11 HSM-backed managed CA keys;
+- trust-bundle and issuer-artifact publication.
+
+The production root private key stays outside Atom. Atom operates with the
+configured trust chain and managed issuing authorities beneath it.
+
+See [Certificates](/authentication/certificates) and the
+[certificate lifecycle reference](/reference/certificate-lifecycle).
+
+## Groups, resources, and application objects
+
+Applications can map their own domain objects into Atom without making Atom
+application-specific.
+
+- resources represent protected application objects;
+- Principal Groups organize identities for shared access;
+- Object Groups organize protected objects for scoped access;
+- object-group membership supports entities and resources;
+- groups can be hierarchical;
+- application-specific metadata remains in `attributes`;
+- external IDs and aliases can map Atom records to application-owned objects.
+
+For an example mapping, see [Magistrala On Atom](/magistrala-on-atom).
+
+## Bootstrap and configuration-managed security state
+
+Atom can declaratively provision a platform security baseline from configuration.
+This is useful for service identities and access relationships that must exist as
+soon as a deployment starts.
+
+The bootstrap model can provision entities, credentials, tenants, resources,
+groups, roles, permission blocks, assignments, direct policies, capabilities,
+guardrails, and service access tokens.
+
+Rows owned by bootstrap configuration are marked as config-managed and exposed
+read-only through normal management surfaces so runtime administration cannot
+silently rewrite deployment-owned security state.
+
+## APIs and integrations
+
+Atom separates human/admin management workflows from runtime security calls while
+keeping both backed by the same state.
+
+- GraphQL management API;
+- gRPC runtime APIs;
+- generated GraphQL, OpenAPI, and protobuf contracts;
+- broker authentication/authorization callout support;
+- external policy callouts;
+- public JWKS and PKI artifact endpoints;
+- API Endpoint Builder for controlled custom HTTP surfaces backed by Atom
+  GraphQL.
+
+The v1 public contracts are treated as compatibility surfaces. Breaking changes
+belong in a future major version.
+
+See [API Endpoints](/endpoints).
+
+## Audit, events, and observability
+
+Security state must be explainable after a request completes.
+
+Atom provides:
+
+- persisted audit history for security-relevant operations;
+- transactional domain-event outbox;
+- optional external event publishing;
+- structured runtime logs;
+- health and readiness endpoints;
+- Prometheus-style metrics;
+- configurable rate limiting;
+- trusted-proxy handling;
+- graceful shutdown;
+- startup validation for security-sensitive configuration.
+
+See [Operations](/operations).
+
+## Performance and optional Redis acceleration
+
+PostgreSQL remains the source of truth. Atom can optionally use Redis to
+accelerate authentication and authorization inputs.
+
+The cache design uses mutation-aware invalidation barriers for security-sensitive
+state instead of treating authorization decisions as ordinary TTL-cached data.
+Revocation and policy changes therefore remain part of the live authorization
+model.
+
+Redis is optional; deployments can run Atom directly against PostgreSQL.
+
+## Administration UI
+
+Atom includes an optional web administration UI built on the public GraphQL
+surface. Operators can manage and inspect tenants, entities, credentials,
+resources, groups, roles, policies, profiles, invitations, audit records, and
+other Atom objects without making the UI part of the runtime dependency chain.
+
+Headless deployments are fully supported.
+
+## Deployment shape
+
+The core deployment remains intentionally small:
+
+```text
+Atom (one Rust binary)
+        |
+        v
+   PostgreSQL
+```
+
+Optional components can be added when needed:
+
+- Atom administration UI;
+- Redis for acceleration;
+- PKCS#11 HSM for non-exportable managed authority keys;
+- external event broker or policy callout services.
+
+Start with [Quickstart](/quickstart), then use [Architecture](/architecture),
+[Access Control](/access-control), [Authentication](/authentication), and
+[Operations](/operations) for production design details.
