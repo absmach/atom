@@ -579,7 +579,7 @@ mod tests {
             events.len(),
             "event names must be unique"
         );
-        assert_eq!(catalog_names.len(), 106, "review any v1 event-name change");
+        assert_eq!(catalog_names.len(), 110, "review any v1 event-name change");
 
         let outcomes = catalog["outcomeProfiles"]
             .as_object()

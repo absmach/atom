@@ -24,6 +24,21 @@ pub struct LoginResponse {
     pub email_verified: Option<bool>,
     #[serde(skip_serializing_if = "is_false")]
     pub verification_required: bool,
+    /// Alias for `token` (issue #100). Always equal to `token` — populated
+    /// regardless of `ATOM_REFRESH_TOKENS_ENABLED` so existing clients that
+    /// only read `token`/`expires_at` see no change, while clients migrating
+    /// to the new names have them available immediately.
+    pub access_token: String,
+    pub access_token_expires_at: DateTime<Utc>,
+    /// Plaintext refresh token, shown only in this response. `None` unless
+    /// `ATOM_REFRESH_TOKENS_ENABLED=true` — these are "the refresh-token
+    /// response fields" the issue requires to stay null when the feature is
+    /// off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Also the refresh-token family's absolute deadline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]

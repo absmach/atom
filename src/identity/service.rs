@@ -25,6 +25,7 @@ use crate::{
     models::{
         entity::{validate_entity_name, Entity, UpdateEntity},
         enums::{AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus},
+        refresh_token::TokenPairResponse,
         session::{
             LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
             SignupResponse,
@@ -1112,12 +1113,309 @@ pub async fn refresh_session(
     tx.commit().await.map_err(db_err)?;
 
     Ok(LoginResponse {
-        token,
+        token: token.clone(),
         entity_id,
         session_id: session.id,
         expires_at: session.expires_at,
         email_verified: None,
         verification_required: false,
+        access_token: token,
+        access_token_expires_at: session.expires_at,
+        refresh_token: None,
+        refresh_token_expires_at: None,
+    })
+}
+
+const REFRESH_TOKEN_INVALID: &str = "invalid refresh token";
+
+/// Fire-and-forget audit for a refresh-token exchange that denies without
+/// mutating anything. `Deny` outcomes are never suppressed by audit policy
+/// (unlike `Allow`), so every rejection reason gets recorded — see `reason`.
+async fn deny_refresh_token_exchange(
+    pool: &PgPool,
+    cfg: &Config,
+    reason: &'static str,
+    token_id: Option<Uuid>,
+    entity_id: Option<Uuid>,
+    tenant_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+) -> AppError {
+    audit::write_hot_path(
+        pool,
+        cfg.audit_policy,
+        cfg.events.enabled(),
+        audit::HotPathAuditKind::AuthRefresh,
+        audit::AuditEvent {
+            actor_entity_id: entity_id,
+            tenant_id,
+            target_kind: Some("refresh_token"),
+            target_id: token_id,
+            event: "auth.refresh",
+            outcome: AuditOutcome::Deny,
+            details: serde_json::json!({ "reason": reason, "session_id": session_id }),
+        },
+    )
+    .await;
+    AppError::unauthorized(REFRESH_TOKEN_INVALID)
+}
+
+/// Rolls back the open exchange transaction and awaits it before denying.
+/// `deny_refresh_token_exchange` acquires its own pool connection for the
+/// audit write, which would deadlock under `max_connections = 1` against a
+/// transaction connection still checked out.
+#[allow(clippy::too_many_arguments)]
+async fn deny_refresh_token_exchange_rollback(
+    tx: Transaction<'_, Postgres>,
+    pool: &PgPool,
+    cfg: &Config,
+    reason: &'static str,
+    token_id: Option<Uuid>,
+    entity_id: Option<Uuid>,
+    tenant_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+) -> AppError {
+    if let Err(err) = tx.rollback().await {
+        tracing::warn!(error = %err, "refresh token exchange rollback failed");
+    }
+    deny_refresh_token_exchange(
+        pool, cfg, reason, token_id, entity_id, tenant_id, session_id,
+    )
+    .await
+}
+
+/// Exchanges a presented refresh token for a new access JWT + rotated
+/// refresh token (issue #100); every rejection reason returns the identical
+/// [`REFRESH_TOKEN_INVALID`] error, so a caller can never probe whether a
+/// token, session, entity, or tenant exists. `cache` is only touched on the
+/// replay-detected branch, since that's the only path that revokes the
+/// session.
+pub async fn exchange_refresh_token(
+    pool: &PgPool,
+    cfg: &Config,
+    signer: &crate::auth::JwtSigner,
+    cache: Option<&crate::cache::CacheClient>,
+    presented: &str,
+) -> Result<TokenPairResponse, AppError> {
+    if !cfg.refresh_tokens.enabled {
+        return Err(AppError::unauthorized(REFRESH_TOKEN_INVALID));
+    }
+    // No audit write for a value that doesn't even parse as `atom_rt_...` —
+    // it names no real-looking credential, so it must not cost an
+    // unauthenticated caller a free `audit_logs` row per request.
+    let Some((token_id, secret_bytes)) = crate::auth::parse_refresh_token(presented) else {
+        return Err(AppError::unauthorized(REFRESH_TOKEN_INVALID));
+    };
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let Some(locked) =
+        super::refresh_tokens::lock_refresh_token_for_exchange(&mut tx, token_id).await?
+    else {
+        return Err(deny_refresh_token_exchange_rollback(
+            tx,
+            pool,
+            cfg,
+            "not_found",
+            Some(token_id),
+            None,
+            None,
+            None,
+        )
+        .await);
+    };
+
+    let verified = match cfg.signing_keys.key_encryption_key.as_ref() {
+        // Config validation refuses to enable the feature without a KEK, so
+        // reaching `None` here means that invariant was bypassed at runtime
+        // (e.g. key rotation cleared it) — fail closed rather than treat any
+        // secret as valid.
+        Some(kek) => crypto::hmac_sha256_verify(kek.expose(), &secret_bytes, &locked.secret_hash),
+        None => false,
+    };
+    if !verified {
+        return Err(deny_refresh_token_exchange_rollback(
+            tx,
+            pool,
+            cfg,
+            "bad_secret",
+            Some(token_id),
+            Some(locked.entity_id),
+            locked.tenant_id,
+            Some(locked.session_id),
+        )
+        .await);
+    }
+
+    // Already revoked is a plain, cheap deny. Replaying it must not re-run
+    // the revoke transaction on every repeat, or an attacker holding one
+    // dead token can drive that indefinitely for free.
+    if locked.revoked_at.is_some() {
+        return Err(deny_refresh_token_exchange_rollback(
+            tx,
+            pool,
+            cfg,
+            "already_revoked",
+            Some(token_id),
+            Some(locked.entity_id),
+            locked.tenant_id,
+            Some(locked.session_id),
+        )
+        .await);
+    }
+    // A token already consumed but not yet revoked is the *first* detection
+    // of replay: the loser of a concurrent exchange also lands here after
+    // the winner commits, so this revokes the session and the winner's new
+    // replacement too — required by the issue's concurrency spec, not a bug
+    // to soften later.
+    if locked.consumed_at.is_some() {
+        // Only this branch mutates `sessions`, so only it pays for a cache
+        // barrier. The far more common rotation-success path never touches
+        // the session row and would otherwise version-bump its cache entry
+        // for nothing.
+        let session_key = crate::cache::keys::session(locked.session_id);
+        let lease = match cache {
+            Some(cache) => match cache
+                .begin(
+                    crate::cache::CacheCategory::Session,
+                    std::slice::from_ref(&session_key),
+                )
+                .await
+            {
+                Ok(lease) => Some(lease),
+                Err(err) => {
+                    if let Err(rollback_err) = tx.rollback().await {
+                        tracing::warn!(error = %rollback_err, "refresh token exchange rollback failed");
+                    }
+                    return Err(err);
+                }
+            },
+            None => None,
+        };
+        let commit_result =
+            match super::refresh_tokens::revoke_family_in_tx(&mut tx, locked.session_id).await {
+                Ok(()) => {
+                    let event = audit::AuditEvent {
+                        actor_entity_id: Some(locked.entity_id),
+                        tenant_id: locked.tenant_id,
+                        target_kind: Some("session"),
+                        target_id: Some(locked.session_id),
+                        event: "auth.refresh.reuse_detected",
+                        outcome: AuditOutcome::Deny,
+                        details: serde_json::json!({ "token_id": token_id }),
+                    };
+                    audit::commit_with_audit(pool, tx, cfg.events.enabled(), &event).await
+                }
+                Err(err) => Err(err),
+            };
+        if let (Some(cache), Some(lease)) = (cache, lease) {
+            cache.end(lease).await;
+        }
+        commit_result?;
+        return Err(AppError::unauthorized(REFRESH_TOKEN_INVALID));
+    }
+
+    if locked.family_expires_at <= Utc::now() {
+        return Err(deny_refresh_token_exchange_rollback(
+            tx,
+            pool,
+            cfg,
+            "expired",
+            Some(token_id),
+            Some(locked.entity_id),
+            locked.tenant_id,
+            Some(locked.session_id),
+        )
+        .await);
+    }
+    if locked.session_revoked_at.is_some() || locked.session_expires_at <= Utc::now() {
+        return Err(deny_refresh_token_exchange_rollback(
+            tx,
+            pool,
+            cfg,
+            "session_inactive",
+            Some(token_id),
+            Some(locked.entity_id),
+            locked.tenant_id,
+            Some(locked.session_id),
+        )
+        .await);
+    }
+    // `lock_active_entity` returns `Err(NotFound)`, not `Ok(None)`, when the
+    // entity is active but its tenant isn't — and that error's message
+    // carries the tenant id. Matched explicitly here so it can't propagate
+    // past the generic-error handling below.
+    let tenant_id = match super::repo::lock_active_entity(&mut tx, locked.entity_id).await {
+        Ok(Some((_, tenant_id))) => tenant_id,
+        Ok(None) => {
+            return Err(deny_refresh_token_exchange_rollback(
+                tx,
+                pool,
+                cfg,
+                "entity_inactive",
+                Some(token_id),
+                Some(locked.entity_id),
+                locked.tenant_id,
+                Some(locked.session_id),
+            )
+            .await);
+        }
+        Err(_) => {
+            return Err(deny_refresh_token_exchange_rollback(
+                tx,
+                pool,
+                cfg,
+                "tenant_inactive",
+                Some(token_id),
+                Some(locked.entity_id),
+                locked.tenant_id,
+                Some(locked.session_id),
+            )
+            .await);
+        }
+    };
+
+    let (new_secret, new_digest) = super::refresh_tokens::new_secret(&cfg.signing_keys)?;
+    let new_token_id = Uuid::new_v4();
+    super::refresh_tokens::consume_and_rotate_in_tx(
+        &mut tx,
+        token_id,
+        new_token_id,
+        locked.session_id,
+        &new_digest,
+        locked.family_expires_at,
+    )
+    .await?;
+
+    let access_token_expires_at =
+        Utc::now() + Duration::seconds(cfg.refresh_tokens.access_token_expiry_secs as i64);
+    let jwt = crate::auth::encode_jwt_with(
+        locked.entity_id,
+        locked.session_id,
+        tenant_id,
+        signer,
+        cfg.refresh_tokens.access_token_expiry_secs,
+        &cfg.jwt_issuer,
+        &cfg.jwt_audience,
+    )?;
+    let refresh_token = crate::auth::make_refresh_token(new_token_id, &new_secret);
+
+    let event = audit::AuditEvent {
+        actor_entity_id: Some(locked.entity_id),
+        tenant_id,
+        target_kind: Some("session"),
+        target_id: Some(locked.session_id),
+        event: "auth.refresh.rotate",
+        outcome: AuditOutcome::Allow,
+        details: serde_json::json!({ "old_token_id": token_id, "new_token_id": new_token_id }),
+    };
+    audit::commit_with_audit(pool, tx, cfg.events.enabled(), &event).await?;
+
+    Ok(TokenPairResponse {
+        access_token: jwt,
+        refresh_token,
+        access_token_expires_at,
+        refresh_token_expires_at: locked.family_expires_at,
+        entity_id: locked.entity_id,
+        session_id: locked.session_id,
     })
 }
 
@@ -1133,25 +1431,65 @@ async fn create_login_response(
         return Err(AppError::unauthorized("entity is not active"));
     };
 
+    // With refresh tokens enabled, `sessions.expires_at` becomes the
+    // family's absolute deadline (long-lived) and the JWT's own lifetime is
+    // the separate, short-lived `access_token_expiry_secs`. Disabled, both
+    // are `jwt_expiry_secs` exactly as before this feature existed.
+    let (session_expiry_secs, access_token_expiry_secs) = if cfg.refresh_tokens.enabled {
+        (
+            cfg.refresh_tokens.refresh_token_expiry_secs,
+            cfg.refresh_tokens.access_token_expiry_secs,
+        )
+    } else {
+        (cfg.jwt_expiry_secs, cfg.jwt_expiry_secs)
+    };
+
     let session =
-        super::repo::create_session_in_tx(&mut tx, entity_id, cfg.jwt_expiry_secs).await?;
+        super::repo::create_session_in_tx(&mut tx, entity_id, session_expiry_secs).await?;
     let token = encode_jwt(
         entity_id,
         session.id,
         tenant_id,
         primary_key,
-        cfg.jwt_expiry_secs,
+        access_token_expiry_secs,
         &cfg.jwt_issuer,
         &cfg.jwt_audience,
     )?;
+    // Disabled: identical to `session.expires_at`, matching this field's old
+    // value exactly. `handlers::auth_cookie` uses it as the cookie's
+    // Max-Age, so it must always mean "when does `token` expire".
+    let access_token_expires_at = if cfg.refresh_tokens.enabled {
+        Utc::now() + Duration::seconds(access_token_expiry_secs as i64)
+    } else {
+        session.expires_at
+    };
+
+    let refresh_token = if cfg.refresh_tokens.enabled {
+        Some(
+            super::refresh_tokens::create_refresh_token_family_in_tx(
+                &mut tx,
+                &cfg.signing_keys,
+                session.id,
+                session.expires_at,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     tx.commit().await.map_err(db_err)?;
     Ok(LoginResponse {
-        token,
+        token: token.clone(),
         entity_id,
         session_id: session.id,
-        expires_at: session.expires_at,
+        expires_at: access_token_expires_at,
         email_verified,
         verification_required: email_verified == Some(false),
+        access_token: token,
+        access_token_expires_at,
+        refresh_token,
+        refresh_token_expires_at: cfg.refresh_tokens.enabled.then_some(session.expires_at),
     })
 }
 

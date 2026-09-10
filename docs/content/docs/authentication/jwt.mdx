@@ -51,6 +51,27 @@ This means:
 
 Default TTL is 3600 seconds (1 hour), configurable via `JWT_EXPIRY_SECS`. For long-running services that need persistent access, use API keys instead.
 
+## Refresh tokens
+
+Set `ATOM_REFRESH_TOKENS_ENABLED=true` (requires `ATOM_KEY_ENCRYPTION_KEY`) to have login also return a long-lived opaque refresh token — an `atom_rt_<id>_<secret>` credential, verified the same way as access tokens (a KEK-keyed HMAC digest, never stored or logged in plaintext) but kept in its own table and never accepted by Bearer/API-key auth, gRPC, broker auth, or certificate enrollment.
+
+```graphql
+mutation {
+  refreshToken(input: { refreshToken: "atom_rt_..." }) {
+    accessToken
+    refreshToken
+    accessTokenExpiresAt
+    refreshTokenExpiresAt
+  }
+}
+```
+
+Send this request **without an `Authorization` header** — the refresh token itself is the credential, and the normal request wrapper would otherwise reject an expired JWT before this resolver runs (the same reason `refreshSession`, below, cannot recover from an already-expired token).
+
+Each exchange consumes the presented token and returns a new access JWT plus a new refresh token for the same session; the previous refresh token stops working immediately. `refreshTokenExpiresAt` is the family's fixed absolute deadline — it never moves forward on rotation, so a session cannot be kept alive indefinitely by repeated refreshing. Presenting an already-consumed token is treated as token theft: it revokes the session and every token in its family, not just the one presented.
+
+`refreshSession` (the older, JWT-authenticated session-extension mutation) is deprecated but unchanged, and still requires a currently valid access JWT.
+
 ## Verification flow (Atom-internal)
 
 1. Extract `kid` from the JWT header.

@@ -1965,9 +1965,13 @@ pub(crate) async fn refresh_session_in_tx(
 ) -> Result<Session, AppError> {
     let expires_at = checked_session_expiration(expiry_secs)?;
 
+    // GREATEST, not an unconditional overwrite: with refresh tokens enabled,
+    // `expires_at` is the long family deadline, and the deprecated
+    // `refreshSession` mutation only knows `jwt_expiry_secs` — a plain `SET`
+    // would truncate the family and kill future refresh exchanges.
     sqlx::query_as::<_, Session>(
         r#"UPDATE sessions
-           SET expires_at = $3
+           SET expires_at = GREATEST(expires_at, $3)
            WHERE id = $1
              AND entity_id = $2
              AND revoked_at IS NULL

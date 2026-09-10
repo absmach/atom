@@ -197,14 +197,18 @@ fn decode_jwt(
 
 // ─── API key ──────────────────────────────────────────────────────────────────
 
-pub fn make_api_key(cred_id: Uuid, secret_bytes: &[u8; 32]) -> String {
-    let id_hex = hex::encode(cred_id.as_bytes());
+/// Shared codec for every `<prefix><32-hex-id>_<64-hex-secret>` credential
+/// in this module — only the prefix differs. Two older, unparameterized
+/// copies of this layout also exist in `identity::service`/`tenants::repo`
+/// (a different return type each), left untouched here.
+fn make_prefixed_token(prefix: &str, id: Uuid, secret_bytes: &[u8; 32]) -> String {
+    let id_hex = hex::encode(id.as_bytes());
     let secret_hex = hex::encode(secret_bytes);
-    format!("atom_{id_hex}_{secret_hex}")
+    format!("{prefix}{id_hex}_{secret_hex}")
 }
 
-pub fn parse_api_key(key: &str) -> Option<(Uuid, [u8; 32])> {
-    let rest = key.strip_prefix("atom_")?;
+fn parse_prefixed_token(prefix: &str, token: &str) -> Option<(Uuid, [u8; 32])> {
+    let rest = token.strip_prefix(prefix)?;
     if rest.len() != 32 + 1 + 64 {
         return None;
     }
@@ -213,17 +217,45 @@ pub fn parse_api_key(key: &str) -> Option<(Uuid, [u8; 32])> {
 
     let id_bytes = hex::decode(id_hex).ok()?;
     let id: [u8; 16] = id_bytes.try_into().ok()?;
-    let cred_id = Uuid::from_bytes(id);
 
     let secret_bytes = hex::decode(secret_hex).ok()?;
     let secret: [u8; 32] = secret_bytes.try_into().ok()?;
 
-    Some((cred_id, secret))
+    Some((Uuid::from_bytes(id), secret))
+}
+
+pub fn make_api_key(cred_id: Uuid, secret_bytes: &[u8; 32]) -> String {
+    make_prefixed_token("atom_", cred_id, secret_bytes)
+}
+
+pub fn parse_api_key(key: &str) -> Option<(Uuid, [u8; 32])> {
+    parse_prefixed_token("atom_", key)
+}
+
+// ─── Refresh token ────────────────────────────────────────────────────────────
+
+/// Prefix distinguishing a refresh token from an `atom_` API key/shared key.
+/// Refresh tokens authenticate only the `refreshToken` GraphQL mutation and
+/// must never be accepted anywhere `atom_...` API keys are.
+pub const REFRESH_TOKEN_PREFIX: &str = "atom_rt_";
+
+pub fn make_refresh_token(token_id: Uuid, secret_bytes: &[u8; 32]) -> String {
+    make_prefixed_token(REFRESH_TOKEN_PREFIX, token_id, secret_bytes)
+}
+
+pub fn parse_refresh_token(token: &str) -> Option<(Uuid, [u8; 32])> {
+    parse_prefixed_token(REFRESH_TOKEN_PREFIX, token)
 }
 
 // ─── Token dispatch ───────────────────────────────────────────────────────────
 
 async fn auth_from_token(state: &AppState, token: &str) -> Result<AuthContext, AppError> {
+    // A refresh token must never authenticate as a Bearer/API-key credential.
+    // It shares the `atom_` prefix family, so reject it here explicitly
+    // rather than relying on `parse_api_key`'s incidental length mismatch.
+    if token.starts_with(REFRESH_TOKEN_PREFIX) {
+        return Err(AppError::unauthorized("invalid credential"));
+    }
     if token.starts_with("atom_") {
         return auth_from_api_key(state, token).await;
     }
@@ -1615,5 +1647,47 @@ mod tests {
                 "missing JWT semantic: {required}"
             );
         }
+    }
+
+    #[test]
+    fn refresh_token_encoding_round_trips_and_rejects_malformed_input() {
+        use super::{make_refresh_token, parse_refresh_token};
+
+        let token_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("UUID");
+        let secret = [0xcdu8; 32];
+        let encoded = make_refresh_token(token_id, &secret);
+        assert_eq!(
+            encoded,
+            format!(
+                "atom_rt_00112233445566778899aabbccddeeff_{}",
+                hex::encode(secret)
+            )
+        );
+        assert_eq!(parse_refresh_token(&encoded), Some((token_id, secret)));
+
+        // Case-insensitive hex, like the API-key format.
+        assert_eq!(
+            parse_refresh_token(
+                &encoded
+                    .to_ascii_uppercase()
+                    .replacen("ATOM_RT_", "atom_rt_", 1)
+            ),
+            Some((token_id, secret))
+        );
+
+        // Malformed / truncated / wrong-prefix inputs never parse.
+        assert!(parse_refresh_token("atom_rt_0011_deadbeef").is_none());
+        assert!(parse_refresh_token("atom_00112233445566778899aabbccddeeff_cd").is_none());
+        assert!(parse_refresh_token("not-a-token").is_none());
+
+        // A refresh token must never parse as a plain API key or vice versa —
+        // the two formats are disjoint despite sharing the `atom_` family.
+        assert!(super::parse_api_key(&encoded).is_none());
+
+        // The dispatch guard in `auth_from_token` matches on this exact
+        // prefix; keep the constant and the format's literal prefix in sync
+        // (a DB-gated end-to-end check of the full `authenticate_token` path
+        // lives in `tests/m51_refresh_tokens.rs`).
+        assert!(encoded.starts_with(super::REFRESH_TOKEN_PREFIX));
     }
 }
