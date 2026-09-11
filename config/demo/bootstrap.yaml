@@ -104,6 +104,10 @@ capabilities:
     applicability:
       - object_kind: resource
         object_type: resource:rule
+      # Matches the applicability the launch migration already persists for
+      # `execute`/`api_endpoint` (see migrations/001_initial.sql); omitting
+      # it here makes bootstrap reject the pre-existing row as undeclared.
+      - object_kind: api_endpoint
 
 # --- Assignment guardrails ---------------------------------------------
 action_assignment_rules:
