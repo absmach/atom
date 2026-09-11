@@ -1382,7 +1382,7 @@ callouts:
         );
         assert_eq!(
             artifact_names.len(),
-            162,
+            165,
             "review any deployment API addition"
         );
 
@@ -1425,6 +1425,8 @@ callouts:
         );
         assert_eq!(default("JWT_EXPIRY_SECS"), 3_600);
         assert_eq!(default("ATOM_EMAIL_VERIFICATION_EXPIRY_SECS"), 86_400);
+        assert_eq!(default("ATOM_EMAIL_CHANGE_EXPIRY_SECS"), 1_800);
+        assert_eq!(default("ATOM_EMAIL_CHANGE_MAX_SESSION_AGE_SECS"), 900);
         assert_eq!(default("ATOM_INVITATION_EXPIRY_SECS"), 604_800);
         assert_eq!(default("ATOM_OAUTH_STATE_EXPIRY_SECS"), 600);
         assert_eq!(default("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS"), 300);
@@ -1451,6 +1453,8 @@ callouts:
             [
                 "JWT_EXPIRY_SECS",
                 "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+                "ATOM_EMAIL_CHANGE_EXPIRY_SECS",
+                "ATOM_EMAIL_CHANGE_MAX_SESSION_AGE_SECS",
                 "ATOM_INVITATION_EXPIRY_SECS",
                 "ATOM_OAUTH_STATE_EXPIRY_SECS",
                 "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",

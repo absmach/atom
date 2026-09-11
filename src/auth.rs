@@ -971,6 +971,22 @@ impl AuthContext {
         }
         Ok(())
     }
+
+    /// Returns the session id, or `Forbidden` for any access-token
+    /// authentication (scoped or unscoped). `session_id` is `None` for every
+    /// token-based auth path (see `finish_api_key_auth`/`finish_token_auth`)
+    /// and `Some` only for JWT/cookie session auth, which never sets
+    /// `scoped`; the `scoped` check is defense in depth, not load-bearing.
+    /// Used by flows narrower than `reject_scoped_credential_management`'s
+    /// "not scoped" bar — e.g. the self-service email-change request, which
+    /// must not be reachable by *any* access token, unscoped included,
+    /// because a token was never proof of a live, interactive login.
+    pub fn require_session(&self) -> Result<Uuid, AppError> {
+        match self.session_id {
+            Some(session_id) if !self.scoped => Ok(session_id),
+            _ => Err(AppError::Forbidden),
+        }
+    }
 }
 
 /// Whether a scoped token's `ceiling` permits `action_id` at `scopes`. `None`

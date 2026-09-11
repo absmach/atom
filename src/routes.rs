@@ -115,6 +115,14 @@ pub fn create_router(state: AppState) -> Router {
             "/auth/password/reset",
             post(identity::reset_password).layer(DefaultBodyLimit::max(auth_body_limit)),
         )
+        .route(
+            "/auth/email/change/request",
+            post(identity::request_email_change).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
+        .route(
+            "/auth/email/change/confirm",
+            post(identity::confirm_email_change).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
         .route("/auth/oauth/:provider/start", get(identity::oauth_start))
         .route(
             "/auth/oauth/:provider/callback",

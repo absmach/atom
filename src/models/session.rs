@@ -87,6 +87,18 @@ pub struct PasswordResetConfirmRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailChangeRequest {
+    pub new_email: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailChangeConfirmRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OAuthStartQuery {
     pub return_to: Option<String>,
 }
