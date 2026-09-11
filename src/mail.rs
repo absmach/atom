@@ -34,6 +34,11 @@ pub enum EmailTemplate {
     Verification,
     PasswordReset,
     Invitation,
+    /// Sent to the *proposed* new address; carries the confirmation link.
+    EmailChange,
+    /// Sent to the *old* address after a confirmed change commits. Carries no
+    /// secret — see `identity::service::send_email_change_notice_email`.
+    EmailChangeNotice,
 }
 
 impl EmailTemplate {
@@ -42,6 +47,8 @@ impl EmailTemplate {
             EmailTemplate::Verification => "verification",
             EmailTemplate::PasswordReset => "password_reset",
             EmailTemplate::Invitation => "invitation",
+            EmailTemplate::EmailChange => "email_change",
+            EmailTemplate::EmailChangeNotice => "email_change_notice",
         }
     }
 
