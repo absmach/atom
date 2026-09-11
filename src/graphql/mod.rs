@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod entities;
 pub mod groups;
 pub mod mutation;
+pub mod object_changes;
 pub mod operations;
 pub mod policies;
 pub mod profiles;

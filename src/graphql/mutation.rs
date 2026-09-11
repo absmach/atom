@@ -3,6 +3,7 @@ use async_graphql::MergedObject;
 #[derive(MergedObject, Default)]
 pub struct MutationRoot(
     super::auth::AuthMutation,
+    super::object_changes::ObjectChangesMutation,
     super::tenants::TenantMutation,
     super::profiles::ProfileMutation,
     super::entities::EntityMutation,

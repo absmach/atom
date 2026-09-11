@@ -299,7 +299,7 @@ pub async fn create_resource_with_audit(
         r#"INSERT INTO resources (id, kind, name, alias, tenant_id, owner_id, attributes)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
-                     deleted_at, deleted_by, created_at, updated_at"#,
+                     deleted_at, deleted_by, created_at, updated_at, managed_by, revision"#,
     )
     .bind(id)
     .bind(req.kind)
@@ -343,7 +343,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query_as::<_, Resource>(
-        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by FROM resources WHERE id = $1 AND deleted_at IS NULL",
+        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by, revision FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_one(executor)
@@ -360,7 +360,7 @@ pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Re
     }
 
     sqlx::query_as::<_, Resource>(
-        r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at
+        r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by, revision
            FROM resources
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY array_position($1::uuid[], id)"#,
@@ -397,7 +397,7 @@ pub async fn list_resources(
                WHERE $5::boolean
            )
            SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes,
-                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at, r.managed_by
+                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at, r.managed_by, r.revision
            FROM resources r
            WHERE ($1::text IS NULL OR r.kind = $1)
              AND ($2::uuid IS NULL OR r.tenant_id = $2)
@@ -513,7 +513,7 @@ pub async fn update_resource_with_audit(
                updated_at = now()
            WHERE id = $1 AND deleted_at IS NULL
            RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
-                     deleted_at, deleted_by, created_at, updated_at"#,
+                     deleted_at, deleted_by, created_at, updated_at, managed_by, revision"#,
     )
     .bind(id)
     .bind(req.name)
