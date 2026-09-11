@@ -14,6 +14,14 @@
 #
 #   psql $DATABASE_URL -c \
 #     "SELECT name, managed_by FROM entities WHERE managed_by='config'"
+#
+# Recovering from "bootstrap capability execute has persisted applicability
+# not declared in config: api_endpoint:<any>": that error means your database
+# already has the `execute`/`api_endpoint` row seeded by migration 001, from
+# before this file declared it. No manual DB change is needed and nothing is
+# lost — pull this updated file (which now declares that applicability) and
+# restart; bootstrap only claims and stamps the pre-existing row, it never
+# deletes it.
 
 # --- Tenants -------------------------------------------------------------
 tenants:
