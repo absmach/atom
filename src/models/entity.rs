@@ -36,6 +36,8 @@ pub fn validate_entity_name(name: &str) -> Result<String, AppError> {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Entity {
     pub id: Uuid,
+    /// Revision from the same database snapshot as the object attributes.
+    pub revision: i64,
     pub kind: EntityKind,
     pub name: String,
     pub alias: Option<String>,
