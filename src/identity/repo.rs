@@ -1332,7 +1332,7 @@ async fn deactivate_entity_email_in_tx(
     Ok(())
 }
 
-async fn invalidate_email_tokens_in_tx(
+pub(crate) async fn invalidate_email_tokens_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     email_id: Uuid,
 ) -> Result<(), AppError> {

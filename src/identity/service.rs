@@ -19,15 +19,15 @@ use crate::{
     auth::{encode_jwt, require_any_capability, scope_for_tenant, AuthContext, Scope as AuthScope},
     config::{Config, OidcProviderConfig, SigningKeyConfig},
     crypto,
-    error::{db_err, AppError},
+    error::{db_err, entity_write_conflict, AppError},
     keys::LoadedKey,
     mail,
     models::{
         entity::{validate_entity_name, Entity, UpdateEntity},
         enums::{AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus},
         session::{
-            LoginResponse, PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest,
-            SignupResponse,
+            EmailChangeConfirmRequest, EmailChangeRequest, LoginResponse,
+            PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest, SignupResponse,
         },
         token::{CreateSharedKey, SharedKeyResponse},
     },
@@ -915,6 +915,420 @@ async fn finish_password_reset_in_tx(
     Ok(())
 }
 
+// ─── Email change (issue #110, workstream A) ───────────────────────────────
+//
+// A dedicated verify-before-apply flow, deliberately separate from the
+// generic self-profile path (`self_profile::try_update`), which excludes
+// email precisely because it is a login/recovery/OAuth-linking identifier,
+// not display metadata. `attributes.email` stays out of the self-profile
+// allowlist; this is the only self-service way a global human can change it.
+//
+// Scope: global human identities only (`tenant_id IS NULL`), matching #109's
+// precedent. Issue #99's tenant-local human identities need this state and
+// these tokens bound to a home tenant, which this flow does not yet do —
+// extending it is out of scope here and left to #99's implementation.
+
+/// `POST /auth/email/change/request`. Requires a real, recent session — no
+/// access token, scoped or unscoped, and no session older than
+/// `cfg.email_change_max_session_age_secs`. There is no dedicated step-up/
+/// reauthentication mechanism in Atom; the session-recency check is the
+/// deliberate stand-in (see the field doc on `Config::email_change_max_session_age_secs`).
+/// Mutates nothing in `entity_emails`, `entities.attributes`, or credentials —
+/// only inserts a token. Enumeration-resistant: a proposed email already
+/// live on another account returns `Ok(())` exactly like a fresh token would,
+/// without minting one or sending mail — mirrors `request_password_reset`/
+/// `resend_verification`.
+pub async fn request_email_change(
+    pool: &PgPool,
+    cfg: &Config,
+    auth: &AuthContext,
+    req: EmailChangeRequest,
+) -> Result<(), AppError> {
+    let session_id = auth.require_session()?;
+
+    let entity = super::repo::get_entity(pool, auth.entity_id).await?;
+    if entity.kind != EntityKind::Human || entity.tenant_id.is_some() {
+        return Err(AppError::bad_request(
+            "self-service email change is only available for global human accounts",
+        ));
+    }
+
+    let session_created_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT created_at FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
+    let max_age = Duration::seconds(cfg.email_change_max_session_age_secs as i64);
+    if Utc::now().signed_duration_since(session_created_at) > max_age {
+        return Err(AppError::unauthorized(
+            "this session is too old to request an email change; log in again",
+        ));
+    }
+
+    let new_email = normalize_email(&req.new_email)?;
+    let current_email: Option<String> = sqlx::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(auth.entity_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?;
+    let Some(current_email) = current_email else {
+        return Err(AppError::bad_request("account has no email on file"));
+    };
+    if new_email == current_email {
+        return Err(AppError::bad_request(
+            "new email must differ from the current email",
+        ));
+    }
+
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM entity_emails WHERE email = $1 AND deleted_at IS NULL)",
+    )
+    .bind(&new_email)
+    .fetch_one(pool)
+    .await
+    .map_err(db_err)?;
+    if taken {
+        return Ok(());
+    }
+
+    let (token_id, token_secret, token) = new_secret_token("atomc");
+    let token_hash = hash_secret(token_secret.as_bytes())?;
+    let expires_at = checked_expiration_from_now(
+        "ATOM_EMAIL_CHANGE_EXPIRY_SECS",
+        cfg.email_change_expiry_secs,
+    )?;
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    // Supersede older pending requests for this entity — only the most
+    // recent one is honourable, and confirming a stale one would apply a
+    // proposed email the user may no longer want.
+    sqlx::query(
+        "UPDATE email_change_tokens SET consumed_at = now() \
+         WHERE entity_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(auth.entity_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        r#"INSERT INTO email_change_tokens
+             (id, entity_id, session_id, current_email, new_email, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+    )
+    .bind(token_id)
+    .bind(auth.entity_id)
+    .bind(session_id)
+    .bind(&current_email)
+    .bind(&new_email)
+    .bind(&token_hash)
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
+
+    if let Err(err) = send_email_change_email(cfg, &new_email, &token).await {
+        tracing::warn!("email change confirmation send failed: {err}");
+    }
+    Ok(())
+}
+
+/// `POST /auth/email/change/confirm`. Unauthenticated by design (like
+/// `reset_password`) — the token itself, proven only by receipt at the
+/// proposed mailbox, is the credential. Deliberately does **not** require the
+/// requesting session to still be alive: the token is emailed to a different
+/// inbox than the one the browser session lives in, so pinning confirmation
+/// to that exact session would block the common cross-device flow (request
+/// from a laptop, confirm from the phone the new mail arrived on) for no
+/// extra security the confirmation transaction doesn't already provide by
+/// revoking every session on success.
+pub async fn confirm_email_change(
+    pool: &PgPool,
+    cfg: &Config,
+    cache: Option<&crate::cache::CacheClient>,
+    events_enabled: bool,
+    req: EmailChangeConfirmRequest,
+) -> Result<(), AppError> {
+    let (token_id, token_secret) = parse_secret_token(&req.token, "atomc")
+        .ok_or_else(|| AppError::bad_request("invalid email change token"))?;
+
+    let row = sqlx::query(
+        r#"SELECT entity_id, current_email, new_email, secret_hash, expires_at, consumed_at
+           FROM email_change_tokens
+           WHERE id = $1"#,
+    )
+    .bind(token_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::bad_request("invalid email change token"),
+        other => AppError::Database(other),
+    })?;
+
+    let secret_hash: String = row.try_get("secret_hash").map_err(db_err)?;
+    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
+    let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
+    if consumed_at.is_some() || expires_at < Utc::now() {
+        return Err(AppError::bad_request("email change token expired"));
+    }
+    if !verify_secret(token_secret.as_bytes(), &secret_hash) {
+        return Err(AppError::bad_request("invalid email change token"));
+    }
+
+    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+    let current_email: String = row.try_get("current_email").map_err(db_err)?;
+    let new_email: String = row.try_get("new_email").map_err(db_err)?;
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::bad_request("invalid email change token"));
+    }
+
+    // Same lock ordering as every other identity mutation touching this
+    // table (`sync_entity_email_from_attrs_in_tx`, `verify_email`,
+    // `reset_password`): the active entity first, then the canonical email
+    // row. `deleted_at IS NULL` treats a since-deactivated email (e.g. an
+    // admin cleared `attributes.email`) the same as one that changed — both
+    // fail the drift check below rather than resurrecting a removed row.
+    let locked_email: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, email FROM entity_emails \
+         WHERE entity_id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(entity_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let Some((email_id, live_email)) = locked_email else {
+        return Err(AppError::bad_request(
+            "your email address changed since this request was made; request the change again",
+        ));
+    };
+    if live_email != current_email {
+        // Fail safely: the precondition this token was issued under no
+        // longer holds. Deliberately does not consume the token — if
+        // whatever changed the email gets reverted, a legitimate retry with
+        // the same token should still be able to succeed, and the token is
+        // still bounded by its own expiry either way.
+        return Err(AppError::bad_request(
+            "your email address changed since this request was made; request the change again",
+        ));
+    }
+
+    let consumed = sqlx::query(
+        "UPDATE email_change_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
+    )
+    .bind(token_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if consumed.rows_affected() == 0 {
+        return Err(AppError::bad_request(
+            "email change token already used or expired",
+        ));
+    }
+    // Defensive re-sweep: a second request could have superseded-in-theory
+    // issued a newer pending token for this entity after this one was
+    // minted (the request path only supersedes what existed *at request
+    // time*). Only one email change may ever land from a confirm.
+    sqlx::query(
+        "UPDATE email_change_tokens SET consumed_at = now() \
+         WHERE entity_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(entity_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    // Old-state cleanup: outstanding verification/reset tokens tied to the
+    // email being replaced can never be redeemed against the new one.
+    super::repo::invalidate_email_tokens_in_tx(&mut tx, email_id).await?;
+
+    let entity_row = sqlx::query("SELECT attributes, external_id FROM entities WHERE id = $1")
+        .bind(entity_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    let attributes: Value = entity_row.try_get("attributes").map_err(db_err)?;
+    let external_id: Option<String> = entity_row.try_get("external_id").map_err(db_err)?;
+
+    // Explicit case-insensitive recheck, ahead of and independent from the
+    // unique index below. `idx_entity_emails_email` is a plain (case-
+    // sensitive) index — it only enforces case-insensitive uniqueness
+    // transitively, because every writer normalizes to lowercase before
+    // storing (`normalize_email`/`normalize_email_lossy`). Checking with
+    // `lower()` here does not depend on that invariant holding for every row
+    // that could ever exist (a bootstrap-provisioned row predating a
+    // normalization fix, for one) — see AGENTS.md on why this codebase
+    // never trusts a single-path invariant for uniqueness.
+    let case_insensitive_collision: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM entity_emails
+             WHERE lower(email) = lower($1) AND deleted_at IS NULL AND entity_id != $2
+         )",
+    )
+    .bind(&new_email)
+    .bind(entity_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if case_insensitive_collision {
+        return Err(AppError::conflict("Email address already taken"));
+    }
+
+    sqlx::query(
+        "UPDATE entity_emails SET email = $2, verified_at = now(), updated_at = now() \
+         WHERE id = $1",
+    )
+    .bind(email_id)
+    .bind(&new_email)
+    .execute(&mut *tx)
+    .await
+    .map_err(entity_write_conflict)?;
+
+    sqlx::query(
+        "UPDATE credentials SET identifier = $2 \
+         WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
+    )
+    .bind(entity_id)
+    .bind(&new_email)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    // Compatibility mirror: only entities that already carry `attributes.email`
+    // (bootstrap-provisioned or admin-managed rows — see
+    // `sync_entity_email_from_attrs_in_tx`) get it kept in sync. An entity that
+    // never had the key does not gain one here; this flow's canonical write is
+    // always `entity_emails`.
+    if attributes.get("email").is_some() {
+        let mut updated = attributes;
+        updated["email"] = Value::String(new_email.clone());
+        sqlx::query("UPDATE entities SET attributes = $2, updated_at = now() WHERE id = $1")
+            .bind(entity_id)
+            .bind(updated)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    }
+
+    // Enumerated under the entity lock taken above, so no session created
+    // concurrently (itself gated on the same lock — see `create_session_in_tx`)
+    // can be missed. Every session is revoked, including the requesting one:
+    // a fresh login is required everywhere, matching `reset_password`.
+    let session_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL")
+            .bind(entity_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let session_keys: Vec<String> = session_ids
+        .iter()
+        .copied()
+        .map(crate::cache::keys::session)
+        .collect();
+    let entity_status_keys = [crate::cache::keys::entity_status(entity_id)];
+    let grants_keys = [crate::cache::keys::grants(entity_id)];
+
+    let leases = match cache {
+        Some(cache) => Some(
+            crate::cache::invalidate::begin_all(
+                cache,
+                &[
+                    (
+                        crate::cache::CacheCategory::Session,
+                        session_keys.as_slice(),
+                    ),
+                    (
+                        crate::cache::CacheCategory::EntityStatus,
+                        entity_status_keys.as_slice(),
+                    ),
+                    (crate::cache::CacheCategory::Grants, grants_keys.as_slice()),
+                ],
+            )
+            .await?,
+        ),
+        None => None,
+    };
+
+    let outcome = async {
+        sqlx::query(
+            "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(entity_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        audit::commit_with_audit(
+            pool,
+            tx,
+            events_enabled,
+            &audit::AuditEvent {
+                actor_entity_id: Some(entity_id),
+                tenant_id: None,
+                target_kind: Some("entity"),
+                target_id: Some(entity_id),
+                event: "entity.update",
+                outcome: AuditOutcome::Allow,
+                details: serde_json::json!({
+                    "external_id": external_id,
+                    "field": "email",
+                }),
+            },
+        )
+        .await
+    }
+    .await;
+
+    if let (Some(cache), Some(leases)) = (cache, leases) {
+        crate::cache::invalidate::end_all(cache, leases).await;
+    }
+    outcome?;
+
+    if let Err(err) = send_email_change_notice_email(cfg, &current_email, &new_email).await {
+        tracing::warn!("email change old-address notice send failed: {err}");
+    }
+    Ok(())
+}
+
+async fn send_email_change_email(cfg: &Config, email: &str, token: &str) -> Result<(), AppError> {
+    let confirm_url = url_with_params(&cfg.email_change_redirect, &[("token", token)]);
+    mail::send_templated_email(
+        cfg,
+        mail::EmailTemplate::EmailChange,
+        email,
+        &confirm_url,
+        &[("confirm_url", confirm_url.as_str())],
+    )
+    .await
+}
+
+/// Sent to the address being *replaced*, after the change has committed.
+/// Carries no token/link/secret by design — an attacker who triggered an
+/// unwanted change must not be able to harvest anything useful from this
+/// message, and a legitimate recipient needs no link to act on: the account
+/// is already changed, so the remedy is contacting an administrator.
+async fn send_email_change_notice_email(
+    cfg: &Config,
+    old_email: &str,
+    new_email: &str,
+) -> Result<(), AppError> {
+    mail::send_templated_email(
+        cfg,
+        mail::EmailTemplate::EmailChangeNotice,
+        old_email,
+        new_email,
+        &[("new_email", new_email)],
+    )
+    .await
+}
+
 pub async fn oauth_start(
     pool: &PgPool,
     cfg: &Config,
@@ -1777,12 +2191,22 @@ async fn upsert_oauth_identity(
         return Ok(entity_id);
     }
 
+    // Locks both the matched `entity_emails` row and its `entities` row.
+    // Locking only `e` would let this auto-link read a soon-to-be-stale email
+    // concurrently with `identity::service::confirm_email_change`, which
+    // updates `entity_emails` without ever touching `entities` when the
+    // entity has no `attributes.email` mirror — a plain `e`-only lock would
+    // not serialize against that write at all, letting this transaction
+    // commit an OAuth link keyed to an email the entity no longer owns by
+    // the time it observes the row. Locking `ee` too forces this query to
+    // wait for `confirm_email_change`'s (or the admin sync path's) `entity_emails
+    // FOR UPDATE`, then re-check `ee.email` against the now-current row.
     let entity_id = match sqlx::query(
         "SELECT ee.entity_id, ee.verified_at
          FROM entity_emails ee
          JOIN entities e ON e.id = ee.entity_id
          WHERE ee.email = $1 AND ee.deleted_at IS NULL
-         FOR UPDATE OF e",
+         FOR UPDATE OF e, ee",
     )
     .bind(email)
     .fetch_optional(&mut *tx)
