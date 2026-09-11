@@ -7,6 +7,8 @@ FROM rust:1.89-alpine AS base
 # apk actually writes to /etc/apk/cache, which is the cache mount target.
 RUN --mount=type=cache,target=/etc/apk/cache,sharing=locked \
     apk add build-base cmake musl-dev openssl-dev perl pkgconfig protobuf-dev
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_INCREMENTAL=0
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
@@ -63,8 +65,8 @@ LABEL org.opencontainers.image.title="Atom" \
 # env var here could disagree with what the process actually reports.
 RUN --mount=type=cache,target=/etc/apk/cache,sharing=locked \
     apk add ca-certificates libgcc \
-    && addgroup -S atom \
-    && adduser -S -G atom atom
+    && addgroup -S -g 1000 atom \
+    && adduser -S -u 1000 -G atom atom
 WORKDIR /app
 COPY --from=builder-release /usr/local/bin/atom /usr/local/bin/atom
 COPY migrations ./migrations
@@ -86,8 +88,8 @@ LABEL org.opencontainers.image.title="Atom" \
 # env var here could disagree with what the process actually reports.
 RUN --mount=type=cache,target=/etc/apk/cache,sharing=locked \
     apk add ca-certificates libgcc \
-    && addgroup -S atom \
-    && adduser -S -G atom atom
+    && addgroup -S -g 1000 atom \
+    && adduser -S -u 1000 -G atom atom
 WORKDIR /app
 COPY --from=builder-dev /usr/local/bin/atom /usr/local/bin/atom
 COPY migrations ./migrations

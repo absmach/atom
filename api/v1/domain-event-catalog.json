@@ -18,6 +18,10 @@
     "internal_observation": "Internal compatibility wrapper emits stdout observation with event publishing disabled."
   },
   "events": [
+    {"name":"object_changes.commit","targetKinds":["transaction"],"outcomeProfile":"operation","publicationProfile":"mutation"},
+    {"name":"object_lease.acquire","targetKinds":["entity","resource"],"outcomeProfile":"operation","publicationProfile":"mutation"},
+    {"name":"object_lease.renew","targetKinds":["entity","resource"],"outcomeProfile":"operation","publicationProfile":"mutation"},
+    {"name":"object_lease.release","targetKinds":["entity","resource"],"outcomeProfile":"operation","publicationProfile":"mutation"},
     {"name":"action.create","targetKinds":["action"],"outcomeProfile":"operation","publicationProfile":"mutation"},
     {"name":"action.delete","targetKinds":["action"],"outcomeProfile":"operation","publicationProfile":"mutation"},
     {"name":"action.update","targetKinds":["action"],"outcomeProfile":"operation","publicationProfile":"mutation"},

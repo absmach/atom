@@ -2,6 +2,7 @@ use async_graphql::MergedObject;
 
 #[derive(MergedObject, Default)]
 pub struct QueryRoot(
+    super::object_changes::ObjectChangesQuery,
     super::auth::AuthQuery,
     super::tenants::TenantQuery,
     super::profiles::ProfileQuery,

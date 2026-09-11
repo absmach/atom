@@ -8,6 +8,8 @@ use super::enums::{DeletedFilter, ResourceOrderField, SortDir};
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Resource {
     pub id: Uuid,
+    /// Revision from the same database snapshot as the object attributes.
+    pub revision: i64,
     pub kind: String,
     pub name: Option<String>,
     pub alias: Option<String>,

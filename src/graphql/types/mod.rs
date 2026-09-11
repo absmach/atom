@@ -267,6 +267,9 @@ pub struct Entity(pub entity_model::Entity);
 
 #[Object]
 impl Entity {
+    async fn revision(&self) -> i64 {
+        self.0.revision
+    }
     async fn id(&self) -> ID {
         id(self.0.id)
     }
@@ -532,6 +535,9 @@ pub struct Resource(pub resource_model::Resource);
 
 #[Object]
 impl Resource {
+    async fn revision(&self) -> i64 {
+        self.0.revision
+    }
     async fn id(&self) -> ID {
         id(self.0.id)
     }

@@ -153,7 +153,7 @@ pub async fn create_entity_with_audit(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id, kind, name, alias, external_id, tenant_id, profile_id,
                      profile_version_id, status, attributes, deleted_at, deleted_by,
-                     created_at, updated_at, managed_by"#,
+                     created_at, updated_at, managed_by, revision"#,
     )
     .bind(id)
     .bind(kind)
@@ -225,7 +225,7 @@ where
 {
     sqlx::query_as::<_, Entity>(
         r#"SELECT id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
-                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
+                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by, revision
            FROM entities
            WHERE id = $1 AND deleted_at IS NULL"#,
     )
@@ -245,7 +245,7 @@ pub async fn list_entities_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Ent
 
     sqlx::query_as::<_, Entity>(
         r#"SELECT id, kind, name, alias, external_id, tenant_id, profile_id, profile_version_id,
-                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by
+                  status, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by, revision
            FROM entities
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY array_position($1::uuid[], id)"#,
@@ -283,7 +283,7 @@ pub async fn list_entities(pool: &PgPool, params: ListEntities) -> Result<Entity
            )
            SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
                   e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
-                  e.created_at, e.updated_at
+                  e.created_at, e.updated_at, e.managed_by, e.revision
            FROM entities e
            WHERE ($1::text IS NULL OR e.kind = $1)
              AND ($2::uuid IS NULL OR e.profile_id = $2)
@@ -667,7 +667,7 @@ async fn update_entity_with_audit_inner(
            WHERE id = $1 AND deleted_at IS NULL
            RETURNING id, kind, name, alias, external_id, tenant_id, profile_id,
                      profile_version_id, status, attributes, deleted_at, deleted_by,
-                     created_at, updated_at, managed_by"#,
+                     created_at, updated_at, managed_by, revision"#,
     )
     .bind(id)
     .bind(req.name)
@@ -3232,7 +3232,7 @@ pub async fn list_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Ent
     sqlx::query_as::<_, Entity>(
         r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
                   e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
-                  e.created_at, e.updated_at
+                  e.created_at, e.updated_at, e.managed_by, e.revision
            FROM entities e
            JOIN principal_group_members gm ON gm.entity_id = e.id
            WHERE gm.group_id = $1 AND e.deleted_at IS NULL
@@ -3326,7 +3326,7 @@ pub async fn list_owned(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Entity>, Ap
     sqlx::query_as::<_, Entity>(
         r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
                   e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
-                  e.created_at, e.updated_at
+                  e.created_at, e.updated_at, e.managed_by, e.revision
            FROM entities e
            JOIN ownerships o ON o.owned_id = e.id
            WHERE o.owner_id = $1 AND e.deleted_at IS NULL

@@ -354,6 +354,13 @@ type CertificateRevocation {
 	idempotentReplay: Boolean!
 }
 
+enum ChangeOperation {
+	create
+	update
+	delete
+	check
+}
+
 type ComponentCheck {
 	status: ComponentStatus!
 	message: String!
@@ -601,6 +608,7 @@ enum Effect {
 }
 
 type Entity {
+	revision: Int!
 	id: ID!
 	kind: EntityKind!
 	profileId: ID
@@ -750,6 +758,10 @@ type MutationRoot {
 	signup(input: SignupInput!): SignupResponse!
 	logout: Boolean!
 	refreshSession: LoginResponse!
+	commitObjectChanges(requestId: ID!, changes: [ObjectChangeInput!]!, guards: [ObjectLeaseGuardInput!]): JSON!
+	acquireObjectLease(input: ObjectLeaseInput!): JSON!
+	renewObjectLease(guard: ObjectLeaseGuardInput!, ttlSeconds: Int!): JSON!
+	releaseObjectLease(guard: ObjectLeaseGuardInput!): JSON!
 	createTenant(input: CreateTenantInput!): Tenant!
 	updateTenant(id: ID!, input: UpdateTenantInput!): Tenant!
 	deleteTenant(id: ID!): Boolean!
@@ -949,6 +961,38 @@ type MutationRoot {
 	rotateSigningKeys: Boolean!
 }
 
+input ObjectChangeInput {
+	objectKind: ObjectKind!
+	operation: ChangeOperation!
+	id: ID!
+	tenantId: ID
+	kind: String
+	name: String
+	alias: String
+	attributes: JSON
+	expectedRevision: Int
+}
+
+enum ObjectKind {
+	entity
+	resource
+}
+
+input ObjectLeaseGuardInput {
+	objectKind: ObjectKind!
+	objectId: ID!
+	holderId: ID!
+	fence: Int!
+}
+
+input ObjectLeaseInput {
+	objectKind: ObjectKind!
+	objectId: ID!
+	holderId: ID!
+	operation: String!
+	ttlSeconds: Int!
+}
+
 type OrphanPolicy {
 	id: ID!
 	tenantId: ID
@@ -1023,6 +1067,11 @@ type ProfileVersion {
 }
 
 type QueryRoot {
+	validateObjectLease(guard: ObjectLeaseGuardInput!): Boolean!
+	"""
+	Capability probe for clients that require transactional object metadata.
+	"""
+	objectCoordinationVersion: Int!
 	health: String!
 	session(id: ID!): Session!
 	tenants(id: ID, idContains: String, q: String, name: String, alias: String, tags: String, status: TenantStatus, deleted: DeletedFilter, order: TenantOrderField, dir: SortDir, limit: Int, offset: Int): TenantList!
@@ -1135,6 +1184,7 @@ input RenewGeneratedCertificateV2Input {
 }
 
 type Resource {
+	revision: Int!
 	id: ID!
 	kind: String!
 	name: String
