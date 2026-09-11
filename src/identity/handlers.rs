@@ -228,6 +228,30 @@ pub async fn confirm_email_change(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn request_email_change(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(req): Json<EmailChangeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    service::request_email_change(&state.pool, &state.config, &auth, req).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+pub async fn confirm_email_change(
+    State(state): State<AppState>,
+    Json(req): Json<EmailChangeConfirmRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    service::confirm_email_change(
+        &state.pool,
+        &state.config,
+        state.cache.as_deref(),
+        state.config.events.enabled(),
+        req,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn oauth_start(
     State(state): State<AppState>,
     Path(provider): Path<String>,
