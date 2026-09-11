@@ -696,6 +696,21 @@ mod tests {
                 .or_default()
                 .insert(Some(indirect_targets[name].to_string()));
         }
+        // Generic lease targets are selected by ObjectKind at runtime.
+        for event in [
+            "object_lease.acquire",
+            "object_lease.renew",
+            "object_lease.release",
+        ] {
+            assert!(joined_sources.contains(&format!("\"{event}\"")));
+            runtime_names.insert(event.to_string());
+            runtime_targets.insert(
+                event.to_string(),
+                [Some("entity".to_string()), Some("resource".to_string())]
+                    .into_iter()
+                    .collect(),
+            );
+        }
         assert_eq!(runtime_names, catalog_names);
 
         // GraphQL and gRPC derive these targets from the request rather than
