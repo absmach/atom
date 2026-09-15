@@ -6,7 +6,7 @@ use crate::{
     auth::{has_capability_in_scope, require_capability, AuthContext, Scope},
     authz::repo as authz_repo,
     error::AppError,
-    identity::repo as identity_repo,
+    identity::{repo as identity_repo, service as identity_service},
     models::access::{AdminPageQuery, AuditQuery, ExpiringCredentialsQuery},
     state::AppState,
 };
@@ -304,5 +304,104 @@ async fn audit_tenant_filter(
         Err(AppError::Forbidden)
     } else {
         Ok(Some(tenant_ids))
+    }
+}
+
+// ─── Legacy identity remediation (issue #110, workstream B) ───────────────
+//
+// Every mutation here targets exactly one operator-identified row and
+// requires a non-empty evidence/reason string — there is no bulk "fix
+// everything" entry point. See `identity::service`'s doc comments and
+// AGENTS.md for the accepted-proof rules. All three are idempotent: a
+// repeated or resumed call is a safe no-op, not an error.
+
+#[derive(Default)]
+pub struct AdminMutation;
+
+#[Object]
+impl AdminMutation {
+    /// Marks an entity's canonical email verified on the strength of
+    /// evidence an administrator gathered outside Atom. Never a substitute
+    /// for the user simply clicking their own verification link.
+    async fn record_administrator_assisted_email_verification(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: ID,
+        evidence: String,
+    ) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        identity_service::record_administrator_assisted_email_verification(
+            &state.pool,
+            state.config.events.enabled(),
+            auth.entity_id,
+            parse_id(entity_id, "entityId")?,
+            &evidence,
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(true)
+    }
+
+    /// Soft-disables a specific OAuth link found unjustified on review —
+    /// preserved for audit, but it can no longer authenticate or be
+    /// silently refreshed by a fresh OAuth callback.
+    async fn quarantine_oauth_link(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: ID,
+        provider: String,
+        subject: String,
+        reason: String,
+    ) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        identity_service::quarantine_oauth_link(
+            &state.pool,
+            state.config.events.enabled(),
+            auth.entity_id,
+            parse_id(entity_id, "entityId")?,
+            &provider,
+            &subject,
+            &reason,
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(true)
+    }
+
+    /// Permanently removes an OAuth link. Prefer `quarantineOauthLink` when
+    /// the link might still need investigation.
+    async fn revoke_oauth_link(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: ID,
+        provider: String,
+        subject: String,
+        reason: String,
+    ) -> Result<bool> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        identity_service::revoke_oauth_link(
+            &state.pool,
+            state.config.events.enabled(),
+            auth.entity_id,
+            parse_id(entity_id, "entityId")?,
+            &provider,
+            &subject,
+            &reason,
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(true)
     }
 }
