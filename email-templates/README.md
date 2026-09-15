@@ -24,11 +24,13 @@ Content-Type: text/html
 <html>...<a href="{{ verification_url }}">Verify email</a>...</html>
 ```
 
-| Template            | Variables         | Trigger                          |
-| ------------------- | ----------------- | --------------------------------- |
-| `verification.tmpl`   | `verification_url` | Signup and `/auth/email/resend`   |
-| `password_reset.tmpl` | `reset_url`        | `/auth/password/reset` request    |
-| `invitation.tmpl`     | `invitation_url`   | Tenant invitation created         |
+| Template                    | Variables         | Trigger                                 |
+| ---------------------------- | ----------------- | ---------------------------------------- |
+| `verification.tmpl`          | `verification_url` | Signup and `/auth/email/resend`          |
+| `password_reset.tmpl`        | `reset_url`        | `/auth/password/reset` request           |
+| `invitation.tmpl`            | `invitation_url`   | Tenant invitation created                |
+| `email_change.tmpl`          | `confirm_url`      | `/auth/email/change/request`, sent to the *new* address |
+| `email_change_notice.tmpl`   | `new_email`        | A confirmed `/auth/email/change/confirm`, sent to the *old* address; carries no link or secret |
 
 ## Overriding at runtime
 
