@@ -987,6 +987,23 @@ type MutationRoot {
 	authzExplain(input: AuthzCheckInput!): AuthzExplainResponse!
 	authzBulkCheck(input: [AuthzCheckInput!]!): [AuthzResponse!]!
 	rotateSigningKeys: Boolean!
+	"""
+	Marks an entity's canonical email verified on the strength of
+	evidence an administrator gathered outside Atom. Never a substitute
+	for the user simply clicking their own verification link.
+	"""
+	recordAdministratorAssistedEmailVerification(entityId: ID!, evidence: String!): Boolean!
+	"""
+	Soft-disables a specific OAuth link found unjustified on review —
+	preserved for audit, but it can no longer authenticate or be
+	silently refreshed by a fresh OAuth callback.
+	"""
+	quarantineOauthLink(entityId: ID!, provider: String!, subject: String!, reason: String!): Boolean!
+	"""
+	Permanently removes an OAuth link. Prefer `quarantineOauthLink` when
+	the link might still need investigation.
+	"""
+	revokeOauthLink(entityId: ID!, provider: String!, subject: String!, reason: String!): Boolean!
 }
 
 type OrphanPolicy {
