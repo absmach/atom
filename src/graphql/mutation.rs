@@ -15,6 +15,7 @@ pub struct MutationRoot(
     super::policies::PolicyMutation,
     super::authz::AuthzMutation,
     super::operations::OperationsMutation,
+    super::admin::AdminMutation,
 );
 
 pub fn mutation_root() -> MutationRoot {

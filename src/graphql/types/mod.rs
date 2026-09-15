@@ -1,4 +1,4 @@
-use async_graphql::{Context, Enum, InputObject, MaybeUndefined, Object, Result, ID};
+use async_graphql::{Context, Enum, InputObject, MaybeUndefined, Object, Result, SimpleObject, ID};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
@@ -1738,6 +1738,188 @@ impl OrphanPolicy {
 impl From<access_model::OrphanPolicyItem> for OrphanPolicy {
     fn from(policy: access_model::OrphanPolicyItem) -> Self {
         Self(policy)
+    }
+}
+
+// ─── Legacy identity audit (issue #110, workstream B) ──────────────────────
+
+#[derive(SimpleObject)]
+#[graphql(name = "PendingTokenCounts")]
+pub struct GqlPendingTokenCounts {
+    pub verification: i64,
+    pub password_reset: i64,
+    pub email_change: i64,
+    pub invitation: i64,
+}
+
+impl From<access_model::PendingTokenCounts> for GqlPendingTokenCounts {
+    fn from(counts: access_model::PendingTokenCounts) -> Self {
+        Self {
+            verification: counts.verification,
+            password_reset: counts.password_reset,
+            email_change: counts.email_change,
+            invitation: counts.invitation,
+        }
+    }
+}
+
+pub struct LegacyUnverifiedEmail(pub access_model::LegacyUnverifiedEmailItem);
+
+#[Object]
+impl LegacyUnverifiedEmail {
+    async fn entity_id(&self) -> ID {
+        id(self.0.entity_id)
+    }
+
+    async fn entity_kind(&self) -> GqlEntityKind {
+        GqlEntityKind::from(&self.0.entity_kind)
+    }
+
+    async fn entity_status(&self) -> GqlEntityStatus {
+        GqlEntityStatus::from(&self.0.entity_status)
+    }
+
+    async fn email(&self) -> &str {
+        &self.0.email
+    }
+
+    async fn email_created_at(&self) -> String {
+        timestamp(self.0.email_created_at)
+    }
+
+    async fn pending_tokens(&self) -> GqlPendingTokenCounts {
+        self.0.pending_tokens.into()
+    }
+}
+
+impl From<access_model::LegacyUnverifiedEmailItem> for LegacyUnverifiedEmail {
+    fn from(item: access_model::LegacyUnverifiedEmailItem) -> Self {
+        Self(item)
+    }
+}
+
+pub struct LegacyCredentialIdentifierMismatch(
+    pub access_model::LegacyCredentialIdentifierMismatchItem,
+);
+
+#[Object]
+impl LegacyCredentialIdentifierMismatch {
+    async fn credential_id(&self) -> ID {
+        id(self.0.credential_id)
+    }
+
+    async fn entity_id(&self) -> ID {
+        id(self.0.entity_id)
+    }
+
+    async fn identifier(&self) -> Option<&str> {
+        self.0.identifier.as_deref()
+    }
+
+    async fn canonical_email(&self) -> Option<&str> {
+        self.0.canonical_email.as_deref()
+    }
+
+    async fn canonical_verified_at(&self) -> Option<String> {
+        self.0.canonical_verified_at.map(timestamp)
+    }
+
+    async fn credential_created_at(&self) -> String {
+        timestamp(self.0.credential_created_at)
+    }
+
+    async fn pending_tokens(&self) -> GqlPendingTokenCounts {
+        self.0.pending_tokens.into()
+    }
+}
+
+impl From<access_model::LegacyCredentialIdentifierMismatchItem>
+    for LegacyCredentialIdentifierMismatch
+{
+    fn from(item: access_model::LegacyCredentialIdentifierMismatchItem) -> Self {
+        Self(item)
+    }
+}
+
+pub struct LegacyOauthEmailMismatch(pub access_model::LegacyOauthEmailMismatchItem);
+
+#[Object]
+impl LegacyOauthEmailMismatch {
+    async fn entity_id(&self) -> ID {
+        id(self.0.entity_id)
+    }
+
+    async fn provider(&self) -> &str {
+        &self.0.provider
+    }
+
+    async fn subject(&self) -> &str {
+        &self.0.subject
+    }
+
+    async fn oauth_email(&self) -> &str {
+        &self.0.oauth_email
+    }
+
+    async fn oauth_email_verified(&self) -> bool {
+        self.0.oauth_email_verified
+    }
+
+    async fn canonical_email(&self) -> Option<&str> {
+        self.0.canonical_email.as_deref()
+    }
+
+    async fn canonical_verified_at(&self) -> Option<String> {
+        self.0.canonical_verified_at.map(timestamp)
+    }
+
+    async fn linked_at(&self) -> String {
+        timestamp(self.0.linked_at)
+    }
+
+    async fn pending_tokens(&self) -> GqlPendingTokenCounts {
+        self.0.pending_tokens.into()
+    }
+}
+
+impl From<access_model::LegacyOauthEmailMismatchItem> for LegacyOauthEmailMismatch {
+    fn from(item: access_model::LegacyOauthEmailMismatchItem) -> Self {
+        Self(item)
+    }
+}
+
+pub struct LegacyAttributesEmailMismatch(pub access_model::LegacyAttributesEmailMismatchItem);
+
+#[Object]
+impl LegacyAttributesEmailMismatch {
+    async fn entity_id(&self) -> ID {
+        id(self.0.entity_id)
+    }
+
+    async fn attributes_email(&self) -> &str {
+        &self.0.attributes_email
+    }
+
+    async fn canonical_email(&self) -> Option<&str> {
+        self.0.canonical_email.as_deref()
+    }
+
+    async fn canonical_verified_at(&self) -> Option<String> {
+        self.0.canonical_verified_at.map(timestamp)
+    }
+
+    async fn entity_updated_at(&self) -> Option<String> {
+        self.0.entity_updated_at.map(timestamp)
+    }
+
+    async fn pending_tokens(&self) -> GqlPendingTokenCounts {
+        self.0.pending_tokens.into()
+    }
+}
+
+impl From<access_model::LegacyAttributesEmailMismatchItem> for LegacyAttributesEmailMismatch {
+    fn from(item: access_model::LegacyAttributesEmailMismatchItem) -> Self {
+        Self(item)
     }
 }
 

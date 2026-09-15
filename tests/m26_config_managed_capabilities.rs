@@ -257,6 +257,33 @@ async fn assignment_rule_bootstrap_stamps_managed_by_and_guards_delete() {
     );
 }
 
+/// Parity check: the demo bootstrap file's declared capability applicability
+/// must exactly match what the launch migration persists for those actions
+/// (issue #110, workstream C). Applying just the `capabilities:` section
+/// twice against a freshly migrated database proves both that a fresh
+/// database bootstraps cleanly and that a database which already carries the
+/// applicability (every database does, since migration 001 seeds it)
+/// reconciles idempotently, matching what `make up` does on every start.
+#[tokio::test]
+#[ignore]
+async fn demo_bootstrap_capability_applicability_matches_seeded_database_contract() {
+    let p = pool().await;
+    let signing_keys = Config::for_tests().signing_keys;
+    let demo_yaml = include_str!("../config/demo/bootstrap.yaml");
+    let demo: BootstrapConfig = serde_yaml::from_str(demo_yaml).expect("parse demo bootstrap.yaml");
+    let capabilities_only = BootstrapConfig {
+        capabilities: demo.capabilities,
+        ..Default::default()
+    };
+
+    apply(&p, &signing_keys, &capabilities_only)
+        .await
+        .expect("demo bootstrap capabilities must match the seeded database contract");
+    apply(&p, &signing_keys, &capabilities_only)
+        .await
+        .expect("second apply must be idempotent");
+}
+
 #[tokio::test]
 #[ignore]
 async fn api_created_capability_stays_api_managed() {

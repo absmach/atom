@@ -728,6 +728,46 @@ A scalar that can represent any JSON value.
 """
 scalar JSON
 
+type LegacyAttributesEmailMismatch {
+	entityId: ID!
+	attributesEmail: String!
+	canonicalEmail: String
+	canonicalVerifiedAt: String
+	entityUpdatedAt: String
+	pendingTokens: PendingTokenCounts!
+}
+
+type LegacyCredentialIdentifierMismatch {
+	credentialId: ID!
+	entityId: ID!
+	identifier: String
+	canonicalEmail: String
+	canonicalVerifiedAt: String
+	credentialCreatedAt: String!
+	pendingTokens: PendingTokenCounts!
+}
+
+type LegacyOauthEmailMismatch {
+	entityId: ID!
+	provider: String!
+	subject: String!
+	oauthEmail: String!
+	oauthEmailVerified: Boolean!
+	canonicalEmail: String
+	canonicalVerifiedAt: String
+	linkedAt: String!
+	pendingTokens: PendingTokenCounts!
+}
+
+type LegacyUnverifiedEmail {
+	entityId: ID!
+	entityKind: EntityKind!
+	entityStatus: EntityStatus!
+	email: String!
+	emailCreatedAt: String!
+	pendingTokens: PendingTokenCounts!
+}
+
 input LoginInput {
 	identifier: String!
 	secret: String!
@@ -947,6 +987,23 @@ type MutationRoot {
 	authzExplain(input: AuthzCheckInput!): AuthzExplainResponse!
 	authzBulkCheck(input: [AuthzCheckInput!]!): [AuthzResponse!]!
 	rotateSigningKeys: Boolean!
+	"""
+	Marks an entity's canonical email verified on the strength of
+	evidence an administrator gathered outside Atom. Never a substitute
+	for the user simply clicking their own verification link.
+	"""
+	recordAdministratorAssistedEmailVerification(entityId: ID!, evidence: String!): Boolean!
+	"""
+	Soft-disables a specific OAuth link found unjustified on review —
+	preserved for audit, but it can no longer authenticate or be
+	silently refreshed by a fresh OAuth callback.
+	"""
+	quarantineOauthLink(entityId: ID!, provider: String!, subject: String!, reason: String!): Boolean!
+	"""
+	Permanently removes an OAuth link. Prefer `quarantineOauthLink` when
+	the link might still need investigation.
+	"""
+	revokeOauthLink(entityId: ID!, provider: String!, subject: String!, reason: String!): Boolean!
 }
 
 type OrphanPolicy {
@@ -966,6 +1023,13 @@ type Ownership {
 	ownedId: ID!
 	relation: String!
 	createdAt: String!
+}
+
+type PendingTokenCounts {
+	verification: Int!
+	passwordReset: Int!
+	emailChange: Int!
+	invitation: Int!
 }
 
 type PermissionBlock {
@@ -1097,6 +1161,10 @@ type QueryRoot {
 	entityAuditLogs(entityId: ID!): AuditLogList!
 	orphanPolicies(limit: Int, offset: Int): [OrphanPolicy!]!
 	expiringCredentials(days: Int, entityId: ID, kind: CredentialKind, limit: Int, offset: Int): [Credential!]!
+	legacyUnverifiedEmails(entityId: ID, limit: Int, offset: Int): [LegacyUnverifiedEmail!]!
+	legacyCredentialIdentifierMismatches(entityId: ID, limit: Int, offset: Int): [LegacyCredentialIdentifierMismatch!]!
+	legacyOauthEmailMismatches(entityId: ID, limit: Int, offset: Int): [LegacyOauthEmailMismatch!]!
+	legacyAttributesEmailMismatches(entityId: ID, limit: Int, offset: Int): [LegacyAttributesEmailMismatch!]!
 	systemStatus: SystemStatus!
 	signingKeys: [SigningKey!]!
 }

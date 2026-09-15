@@ -6,6 +6,13 @@ use uuid::Uuid;
 use crate::{
     error::{db_err, entity_write_conflict, restore_conflict, AppError},
     models::{
+        access::{
+            AdminPageQuery, LegacyAttributesEmailMismatchItem,
+            LegacyAttributesEmailMismatchesResponse, LegacyCredentialIdentifierMismatchItem,
+            LegacyCredentialIdentifierMismatchesResponse, LegacyOauthEmailMismatchItem,
+            LegacyOauthEmailMismatchesResponse, LegacyUnverifiedEmailItem,
+            LegacyUnverifiedEmailsResponse, PendingTokenCounts,
+        },
         entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
         enums::{EntityKind, EntityOrderField, GroupOrderField, SortDir},
         group::{CreateGroup, Group, GroupList, ListGroups, UpdateGroup},
@@ -1332,7 +1339,7 @@ async fn deactivate_entity_email_in_tx(
     Ok(())
 }
 
-async fn invalidate_email_tokens_in_tx(
+pub(crate) async fn invalidate_email_tokens_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     email_id: Uuid,
 ) -> Result<(), AppError> {
@@ -3356,4 +3363,286 @@ fn search_pattern(q: Option<String>) -> Option<String> {
     q.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"))
+}
+
+// ─── Legacy identity audit (issue #110, workstream B) ──────────────────────
+//
+// Every function here is read-only: plain SELECTs, no locks, no writes.
+// "Live" means `deleted_at IS NULL` throughout — a tombstoned row is not a
+// finding an operator can act on. Each row carries `PendingTokenCounts`
+// (unexpired, unconsumed tokens naming the specific anomalous email this row
+// flags) so an operator can see a self-service path may already be in
+// flight before reaching for manual recovery — see AGENTS.md.
+
+fn pending_token_counts_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<PendingTokenCounts, AppError> {
+    use sqlx::Row;
+    Ok(PendingTokenCounts {
+        verification: row.try_get("pending_verification").map_err(db_err)?,
+        password_reset: row.try_get("pending_reset").map_err(db_err)?,
+        email_change: row.try_get("pending_email_change").map_err(db_err)?,
+        invitation: row.try_get("pending_invitation").map_err(db_err)?,
+    })
+}
+
+/// Live `entity_emails` rows with `verified_at IS NULL`. `entity_id`
+/// narrows to one account (operator follow-up on a specific report row, and
+/// what the adversarial tests use against the shared test database).
+pub async fn legacy_unverified_emails(
+    pool: &PgPool,
+    entity_id: Option<Uuid>,
+    params: AdminPageQuery,
+) -> Result<LegacyUnverifiedEmailsResponse, AppError> {
+    use sqlx::Row;
+    let limit = params.limit.clamp(1, 200);
+    let offset = params.offset.max(0);
+    const WHERE: &str = r#"
+           FROM entity_emails ee
+           JOIN entities e ON e.id = ee.entity_id AND e.deleted_at IS NULL
+           WHERE ee.verified_at IS NULL AND ee.deleted_at IS NULL
+             AND ($1::uuid IS NULL OR ee.entity_id = $1)"#;
+    let rows = sqlx::query(&format!(
+        r#"SELECT ee.entity_id, e.kind AS entity_kind, e.status AS entity_status,
+                  ee.email, ee.created_at AS email_created_at,
+                  (SELECT COUNT(*) FROM email_verification_tokens t
+                     WHERE t.entity_id = ee.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_verification,
+                  (SELECT COUNT(*) FROM password_reset_tokens t
+                     WHERE t.entity_id = ee.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_reset,
+                  (SELECT COUNT(*) FROM email_change_tokens t
+                     WHERE t.entity_id = ee.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_email_change,
+                  (SELECT COUNT(*) FROM tenant_invitations ti
+                     WHERE lower(ti.invitee_email) = lower(ee.email)
+                       AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                       AND (ti.expires_at IS NULL OR ti.expires_at >= now())) AS pending_invitation
+           {WHERE}
+           ORDER BY ee.created_at ASC
+           LIMIT $2 OFFSET $3"#
+    ))
+    .bind(entity_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+        .bind(entity_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            Ok(LegacyUnverifiedEmailItem {
+                entity_id: row.try_get("entity_id").map_err(db_err)?,
+                entity_kind: row.try_get("entity_kind").map_err(db_err)?,
+                entity_status: row.try_get("entity_status").map_err(db_err)?,
+                email: row.try_get("email").map_err(db_err)?,
+                email_created_at: row.try_get("email_created_at").map_err(db_err)?,
+                pending_tokens: pending_token_counts_from_row(&row)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(LegacyUnverifiedEmailsResponse { items, total })
+}
+
+/// Active password credentials whose `identifier` differs from the entity's
+/// live canonical email (including entities with no canonical email row at
+/// all — `identifier` naming an address `entity_emails` does not).
+pub async fn legacy_credential_identifier_mismatches(
+    pool: &PgPool,
+    entity_id: Option<Uuid>,
+    params: AdminPageQuery,
+) -> Result<LegacyCredentialIdentifierMismatchesResponse, AppError> {
+    use sqlx::Row;
+    let limit = params.limit.clamp(1, 200);
+    let offset = params.offset.max(0);
+    const WHERE: &str = r#"
+           FROM credentials c
+           JOIN entities e ON e.id = c.entity_id AND e.deleted_at IS NULL
+           LEFT JOIN entity_emails ee ON ee.entity_id = c.entity_id AND ee.deleted_at IS NULL
+           WHERE c.kind = 'password' AND c.status = 'active'
+             AND (ee.email IS NULL OR c.identifier IS DISTINCT FROM ee.email)
+             AND ($1::uuid IS NULL OR c.entity_id = $1)"#;
+    let rows = sqlx::query(&format!(
+        r#"SELECT c.id AS credential_id, c.entity_id, c.identifier, c.created_at AS credential_created_at,
+                  ee.email AS canonical_email, ee.verified_at AS canonical_verified_at,
+                  (SELECT COUNT(*) FROM email_verification_tokens t
+                     WHERE t.entity_id = c.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_verification,
+                  (SELECT COUNT(*) FROM password_reset_tokens t
+                     WHERE t.entity_id = c.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_reset,
+                  (SELECT COUNT(*) FROM email_change_tokens t
+                     WHERE t.entity_id = c.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_email_change,
+                  (SELECT COUNT(*) FROM tenant_invitations ti
+                     WHERE lower(ti.invitee_email) = lower(c.identifier)
+                       AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                       AND (ti.expires_at IS NULL OR ti.expires_at >= now())) AS pending_invitation
+           {WHERE}
+           ORDER BY c.created_at ASC
+           LIMIT $2 OFFSET $3"#
+    ))
+    .bind(entity_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+        .bind(entity_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            Ok(LegacyCredentialIdentifierMismatchItem {
+                credential_id: row.try_get("credential_id").map_err(db_err)?,
+                entity_id: row.try_get("entity_id").map_err(db_err)?,
+                identifier: row.try_get("identifier").map_err(db_err)?,
+                canonical_email: row.try_get("canonical_email").map_err(db_err)?,
+                canonical_verified_at: row.try_get("canonical_verified_at").map_err(db_err)?,
+                credential_created_at: row.try_get("credential_created_at").map_err(db_err)?,
+                pending_tokens: pending_token_counts_from_row(&row)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(LegacyCredentialIdentifierMismatchesResponse { items, total })
+}
+
+/// `oauth_identities` whose claimed email does not match an active, verified
+/// canonical email for the linked entity (including no canonical email at
+/// all, and a canonical email that exists but is still unverified).
+pub async fn legacy_oauth_email_mismatches(
+    pool: &PgPool,
+    entity_id: Option<Uuid>,
+    params: AdminPageQuery,
+) -> Result<LegacyOauthEmailMismatchesResponse, AppError> {
+    use sqlx::Row;
+    let limit = params.limit.clamp(1, 200);
+    let offset = params.offset.max(0);
+    const WHERE: &str = r#"
+           FROM oauth_identities oi
+           JOIN entities e ON e.id = oi.entity_id AND e.deleted_at IS NULL
+           LEFT JOIN entity_emails ee ON ee.entity_id = oi.entity_id AND ee.deleted_at IS NULL
+           WHERE (ee.email IS NULL
+              OR ee.verified_at IS NULL
+              OR lower(ee.email) IS DISTINCT FROM lower(oi.email))
+             AND ($1::uuid IS NULL OR oi.entity_id = $1)"#;
+    let rows = sqlx::query(&format!(
+        r#"SELECT oi.entity_id, oi.provider, oi.subject, oi.email AS oauth_email,
+                  oi.email_verified AS oauth_email_verified, oi.updated_at AS linked_at,
+                  ee.email AS canonical_email, ee.verified_at AS canonical_verified_at,
+                  (SELECT COUNT(*) FROM email_verification_tokens t
+                     WHERE t.entity_id = oi.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_verification,
+                  (SELECT COUNT(*) FROM password_reset_tokens t
+                     WHERE t.entity_id = oi.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_reset,
+                  (SELECT COUNT(*) FROM email_change_tokens t
+                     WHERE t.entity_id = oi.entity_id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_email_change,
+                  (SELECT COUNT(*) FROM tenant_invitations ti
+                     WHERE lower(ti.invitee_email) = lower(oi.email)
+                       AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                       AND (ti.expires_at IS NULL OR ti.expires_at >= now())) AS pending_invitation
+           {WHERE}
+           ORDER BY oi.updated_at ASC
+           LIMIT $2 OFFSET $3"#
+    ))
+    .bind(entity_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+        .bind(entity_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            Ok(LegacyOauthEmailMismatchItem {
+                entity_id: row.try_get("entity_id").map_err(db_err)?,
+                provider: row.try_get("provider").map_err(db_err)?,
+                subject: row.try_get("subject").map_err(db_err)?,
+                oauth_email: row.try_get("oauth_email").map_err(db_err)?,
+                oauth_email_verified: row.try_get("oauth_email_verified").map_err(db_err)?,
+                canonical_email: row.try_get("canonical_email").map_err(db_err)?,
+                canonical_verified_at: row.try_get("canonical_verified_at").map_err(db_err)?,
+                linked_at: row.try_get("linked_at").map_err(db_err)?,
+                pending_tokens: pending_token_counts_from_row(&row)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(LegacyOauthEmailMismatchesResponse { items, total })
+}
+
+/// Live human entities whose legacy `attributes.email` differs from the
+/// canonical `entity_emails` row (including no canonical row at all). This
+/// is the compatibility-mirror surface `sync_entity_email_from_attrs_in_tx`
+/// and `confirm_email_change` both keep in sync going forward; a mismatch
+/// here predates one of those paths running, or was written directly.
+pub async fn legacy_attributes_email_mismatches(
+    pool: &PgPool,
+    entity_id: Option<Uuid>,
+    params: AdminPageQuery,
+) -> Result<LegacyAttributesEmailMismatchesResponse, AppError> {
+    use sqlx::Row;
+    let limit = params.limit.clamp(1, 200);
+    let offset = params.offset.max(0);
+    const WHERE: &str = r#"
+           FROM entities e
+           LEFT JOIN entity_emails ee ON ee.entity_id = e.id AND ee.deleted_at IS NULL
+           WHERE e.kind = 'human' AND e.deleted_at IS NULL
+             -- `?` only checks key presence: {"email": null} passes it but
+             -- ->>'email' then extracts SQL NULL, not a comparable string.
+             -- A JSON-null value carries no legacy email to reconcile (the
+             -- established null-clears-the-key convention just wasn't used
+             -- to write it), so require an actual non-null text value too.
+             AND e.attributes ? 'email'
+             AND e.attributes->>'email' IS NOT NULL
+             AND (ee.email IS NULL
+                  OR lower(e.attributes->>'email') IS DISTINCT FROM lower(ee.email))
+             AND ($1::uuid IS NULL OR e.id = $1)"#;
+    let rows = sqlx::query(&format!(
+        r#"SELECT e.id AS entity_id, e.attributes->>'email' AS attributes_email, e.updated_at AS entity_updated_at,
+                  ee.email AS canonical_email, ee.verified_at AS canonical_verified_at,
+                  (SELECT COUNT(*) FROM email_verification_tokens t
+                     WHERE t.entity_id = e.id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_verification,
+                  (SELECT COUNT(*) FROM password_reset_tokens t
+                     WHERE t.entity_id = e.id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_reset,
+                  (SELECT COUNT(*) FROM email_change_tokens t
+                     WHERE t.entity_id = e.id AND t.consumed_at IS NULL AND t.expires_at > now()) AS pending_email_change,
+                  (SELECT COUNT(*) FROM tenant_invitations ti
+                     WHERE lower(ti.invitee_email) = lower(e.attributes->>'email')
+                       AND ti.accepted_at IS NULL AND ti.rejected_at IS NULL AND ti.revoked_at IS NULL
+                       AND (ti.expires_at IS NULL OR ti.expires_at >= now())) AS pending_invitation
+           {WHERE}
+           ORDER BY e.updated_at ASC NULLS LAST
+           LIMIT $2 OFFSET $3"#
+    ))
+    .bind(entity_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+        .bind(entity_id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            Ok(LegacyAttributesEmailMismatchItem {
+                entity_id: row.try_get("entity_id").map_err(db_err)?,
+                attributes_email: row.try_get("attributes_email").map_err(db_err)?,
+                canonical_email: row.try_get("canonical_email").map_err(db_err)?,
+                canonical_verified_at: row.try_get("canonical_verified_at").map_err(db_err)?,
+                entity_updated_at: row.try_get("entity_updated_at").map_err(db_err)?,
+                pending_tokens: pending_token_counts_from_row(&row)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(LegacyAttributesEmailMismatchesResponse { items, total })
 }

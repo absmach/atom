@@ -63,6 +63,10 @@ pub struct Config {
     pub auth_cookie_domain: Option<String>,
     pub email_verification_redirect: String,
     pub password_reset_redirect: String,
+    /// UI page the email-change confirmation link points at; the API always
+    /// builds it from this setting, never from a caller-supplied field (same
+    /// rule as `password_reset_redirect`).
+    pub email_change_redirect: String,
     pub invitation_redirect: String,
     pub oauth_success_redirect: String,
     pub oauth_error_redirect: String,
@@ -75,6 +79,21 @@ pub struct Config {
     /// operator actually wants to customize.
     pub email_templates_dir: Option<String>,
     pub email_verification_expiry_secs: u64,
+    /// Lifetime of an email-change confirmation token. Short by design — this
+    /// token both proves mailbox ownership and authorizes a login-identifier
+    /// change, so it gets password-reset-grade urgency rather than the
+    /// signup-verification window.
+    pub email_change_expiry_secs: u64,
+    /// How recently the requesting session must have been created
+    /// (`sessions.created_at`) for `POST /auth/email/change/request` to
+    /// accept it. There is no dedicated step-up/reauthentication mechanism in
+    /// Atom today, so this is the deliberate stand-in: it bounds how long a
+    /// hijacked but still-valid session can be used to redirect account
+    /// recovery to an attacker-controlled mailbox. The mutation itself still
+    /// requires proof of the *new* mailbox via the confirmation token: this
+    /// setting only narrows the blast radius of a stolen session at request
+    /// time.
+    pub email_change_max_session_age_secs: u64,
     pub invitation_expiry_secs: u64,
     pub oauth_state_expiry_secs: u64,
     pub auth_exchange_code_expiry_secs: u64,
@@ -990,6 +1009,8 @@ impl Config {
                 .unwrap_or_else(|_| public_url(&public_base_url, "/auth/email/verify")),
             password_reset_redirect: std::env::var("ATOM_PASSWORD_RESET_REDIRECT")
                 .unwrap_or_else(|_| public_url(&public_base_url, "/reset-password")),
+            email_change_redirect: std::env::var("ATOM_EMAIL_CHANGE_REDIRECT")
+                .unwrap_or_else(|_| public_url(&public_base_url, "/confirm-email-change")),
             invitation_redirect: std::env::var("ATOM_INVITATION_REDIRECT")
                 .unwrap_or_else(|_| public_url(&public_base_url, "/invitations/accept")),
             oauth_success_redirect: std::env::var("ATOM_OAUTH_SUCCESS_REDIRECT")
@@ -1002,6 +1023,14 @@ impl Config {
             email_verification_expiry_secs: env_positive_lifetime_secs(
                 "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
                 86_400,
+            )?,
+            email_change_expiry_secs: env_positive_lifetime_secs(
+                "ATOM_EMAIL_CHANGE_EXPIRY_SECS",
+                1_800,
+            )?,
+            email_change_max_session_age_secs: env_positive_lifetime_secs(
+                "ATOM_EMAIL_CHANGE_MAX_SESSION_AGE_SECS",
+                900,
             )?,
             invitation_expiry_secs: env_positive_lifetime_secs(
                 "ATOM_INVITATION_EXPIRY_SECS",
@@ -1085,6 +1114,7 @@ impl Config {
             auth_cookie_domain: None,
             email_verification_redirect: "http://localhost:8080/auth/email/verify".into(),
             password_reset_redirect: "http://localhost:8080/reset-password".into(),
+            email_change_redirect: "http://localhost:8080/confirm-email-change".into(),
             invitation_redirect: "http://localhost:8080/invitations/accept".into(),
             oauth_success_redirect: "http://localhost:8080".into(),
             oauth_error_redirect: "http://localhost:8080".into(),
@@ -1092,6 +1122,8 @@ impl Config {
             smtp: None,
             email_templates_dir: None,
             email_verification_expiry_secs: 86_400,
+            email_change_expiry_secs: 1_800,
+            email_change_max_session_age_secs: 900,
             invitation_expiry_secs: 604_800,
             oauth_state_expiry_secs: 600,
             auth_exchange_code_expiry_secs: 300,
@@ -2820,6 +2852,8 @@ mod tests {
             "ATOM_ALLOW_UNVERIFIED_EMAIL_LOGIN",
             "ATOM_AUTH_COOKIE_SECURE",
             "ATOM_EMAIL_VERIFICATION_EXPIRY_SECS",
+            "ATOM_EMAIL_CHANGE_EXPIRY_SECS",
+            "ATOM_EMAIL_CHANGE_MAX_SESSION_AGE_SECS",
             "ATOM_INVITATION_EXPIRY_SECS",
             "ATOM_OAUTH_STATE_EXPIRY_SECS",
             "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",

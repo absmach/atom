@@ -20,9 +20,10 @@ use crate::{
         group::{AddMember, CreateGroup, ListGroups, SetGroupParent, UpdateGroup},
         profile::{CreateProfile, CreateProfileVersion, ListProfiles},
         session::{
-            LoginRequest, OAuthCallbackQuery, OAuthExchangeRequest, OAuthStartQuery,
-            PasswordResetConfirmRequest, PasswordResetRequest, PublicAuthConfigResponse,
-            ResendVerificationRequest, SignupRequest, VerifyEmailQuery,
+            EmailChangeConfirmRequest, EmailChangeRequest, LoginRequest, OAuthCallbackQuery,
+            OAuthExchangeRequest, OAuthStartQuery, PasswordResetConfirmRequest,
+            PasswordResetRequest, PublicAuthConfigResponse, ResendVerificationRequest,
+            SignupRequest, VerifyEmailQuery,
         },
     },
     state::AppState,
@@ -194,6 +195,30 @@ pub async fn reset_password(
     Json(req): Json<PasswordResetConfirmRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     service::reset_password(&state.pool, state.cache.as_deref(), req).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn request_email_change(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(req): Json<EmailChangeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    service::request_email_change(&state.pool, &state.config, &auth, req).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+pub async fn confirm_email_change(
+    State(state): State<AppState>,
+    Json(req): Json<EmailChangeConfirmRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    service::confirm_email_change(
+        &state.pool,
+        &state.config,
+        state.cache.as_deref(),
+        state.config.events.enabled(),
+        req,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -342,6 +342,84 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /auth/email/change/request:
+    post:
+      tags: [Authentication]
+      operationId: requestEmailChange
+      summary: Request a verified email-change confirmation link
+      description: |
+        Authenticated session only — no access token, scoped or unscoped, is
+        accepted (`credential`/`accessToken` authentication returns 403).
+        Also rejects a session older than
+        `ATOM_EMAIL_CHANGE_MAX_SESSION_AGE_SECS` (default 900s) with 401, the
+        deliberate stand-in for step-up reauthentication. Mutates nothing:
+        only a token is created. The response is identical whether or not the
+        proposed email is already taken by another account (202 either way).
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailChangeRequest"
+      responses:
+        "202":
+          description: Request accepted; a confirmation link was sent to the proposed address unless it is already taken
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/email/change/confirm:
+    post:
+      tags: [Authentication]
+      operationId: confirmEmailChange
+      summary: Consume an email-change token and apply the new email
+      description: |
+        Unauthenticated — the token, provable only by its receipt at the
+        proposed mailbox, is the credential. Does not require the requesting
+        session to still be alive. On success, updates the canonical email,
+        the active password credential's login identifier, and (only if
+        already present) the `attributes.email` compatibility mirror
+        atomically, then revokes every session for the account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailChangeConfirmRequest"
+      responses:
+        "204":
+          description: Email changed; every session for the account is revoked
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /auth/oauth/{provider}/start:
     get:
       tags: [Authentication]
@@ -1565,6 +1643,20 @@ components:
         token: { type: string }
         password: { type: string, format: password }
         confirm_password: { type: string, format: password, nullable: true }
+
+    EmailChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [new_email]
+      properties:
+        new_email: { type: string, format: email }
+
+    EmailChangeConfirmRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: { type: string }
 
     OAuthExchangeRequest:
       type: object

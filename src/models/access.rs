@@ -246,6 +246,95 @@ pub struct ExpiringCredentialsResponse {
     pub total: i64,
 }
 
+// ─── Legacy identity audit (issue #110, workstream B) ──────────────────────
+//
+// Read-only findings only — no row here has been mutated. Recovery/
+// remediation is a deliberately separate, approval-gated tool (not part of
+// this report) per the issue's delivery order.
+
+/// Outstanding (unexpired, unconsumed) tokens that could independently prove
+/// or resolve an identity's email state, attached to each finding so an
+/// operator can see whether a self-service path is already in flight before
+/// reaching for manual recovery. Never carries a token value or hash.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct PendingTokenCounts {
+    pub verification: i64,
+    pub password_reset: i64,
+    pub email_change: i64,
+    pub invitation: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyUnverifiedEmailItem {
+    pub entity_id: Uuid,
+    pub entity_kind: EntityKind,
+    pub entity_status: EntityStatus,
+    pub email: String,
+    pub email_created_at: DateTime<Utc>,
+    pub pending_tokens: PendingTokenCounts,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyUnverifiedEmailsResponse {
+    pub items: Vec<LegacyUnverifiedEmailItem>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyCredentialIdentifierMismatchItem {
+    pub credential_id: Uuid,
+    pub entity_id: Uuid,
+    /// `None` only if `identifier` was never set (an argon2-only legacy row
+    /// predating identifier tracking) — a mismatch either way against a
+    /// canonical email that does exist.
+    pub identifier: Option<String>,
+    pub canonical_email: Option<String>,
+    pub canonical_verified_at: Option<DateTime<Utc>>,
+    pub credential_created_at: DateTime<Utc>,
+    pub pending_tokens: PendingTokenCounts,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyCredentialIdentifierMismatchesResponse {
+    pub items: Vec<LegacyCredentialIdentifierMismatchItem>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyOauthEmailMismatchItem {
+    pub entity_id: Uuid,
+    pub provider: String,
+    pub subject: String,
+    pub oauth_email: String,
+    pub oauth_email_verified: bool,
+    pub canonical_email: Option<String>,
+    pub canonical_verified_at: Option<DateTime<Utc>>,
+    pub linked_at: DateTime<Utc>,
+    pub pending_tokens: PendingTokenCounts,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyOauthEmailMismatchesResponse {
+    pub items: Vec<LegacyOauthEmailMismatchItem>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyAttributesEmailMismatchItem {
+    pub entity_id: Uuid,
+    pub attributes_email: String,
+    pub canonical_email: Option<String>,
+    pub canonical_verified_at: Option<DateTime<Utc>>,
+    pub entity_updated_at: Option<DateTime<Utc>>,
+    pub pending_tokens: PendingTokenCounts,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegacyAttributesEmailMismatchesResponse {
+    pub items: Vec<LegacyAttributesEmailMismatchItem>,
+    pub total: i64,
+}
+
 fn default_limit() -> i64 {
     20
 }
