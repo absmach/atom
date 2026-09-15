@@ -2160,14 +2160,26 @@ async fn upsert_oauth_identity(
 ) -> Result<Uuid, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     use sqlx::Row;
-    if let Some(row) =
-        sqlx::query("SELECT entity_id FROM oauth_identities WHERE provider = $1 AND subject = $2")
-            .bind(provider)
-            .bind(subject)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_err)?
+    if let Some(row) = sqlx::query(
+        "SELECT entity_id, quarantined_at FROM oauth_identities WHERE provider = $1 AND subject = $2",
+    )
+    .bind(provider)
+    .bind(subject)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?
     {
+        // A quarantined link (issue #110 workstream B remediation tooling —
+        // see `quarantine_oauth_link`) was reviewed and found unjustified.
+        // It stays in the table for audit but must never authenticate again
+        // or be silently refreshed by a fresh callback.
+        let quarantined_at: Option<DateTime<Utc>> =
+            row.try_get("quarantined_at").map_err(db_err)?;
+        if quarantined_at.is_some() {
+            return Err(AppError::unauthorized(
+                "this OAuth link has been quarantined; contact an administrator",
+            ));
+        }
         let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
         if super::repo::lock_active_entity(&mut tx, entity_id)
             .await?
@@ -3270,6 +3282,250 @@ pub struct CredentialSummary {
     pub managed_by: Option<String>,
 }
 
+// ─── Legacy identity remediation (issue #110, workstream B) ───────────────
+//
+// Approval-gated by construction, not just by the GraphQL `manage`-on-
+// `Scope::Platform` gate in front of each caller: every function here acts
+// on exactly one operator-identified row (never a bulk sweep — there is no
+// "fix everything" entry point) and requires a non-empty evidence/reason
+// string that is recorded verbatim in the audit trail. None of them
+// blanket-backfill anything merely because a row exists; the caller is
+// expected to have already reviewed the read-only report
+// (`identity::repo::legacy_*`) and satisfied one of the accepted proof
+// classes documented in AGENTS.md before calling. Idempotent: repeating a
+// call that already took effect is a no-op success, not an error, so a
+// retried or resumed remediation pass is always safe.
+
+async fn entity_external_id_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    entity_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar("SELECT external_id FROM entities WHERE id = $1")
+        .bind(entity_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_err)
+}
+
+/// Marks the entity's canonical email verified on the strength of evidence
+/// an administrator gathered *outside* Atom (a support ticket, an identity
+/// check, a legacy-migration cross-reference) — this function cannot and
+/// does not evaluate that evidence itself; it only requires the caller to
+/// state it, and records exactly what was stated. Never call this to work
+/// around a user simply not having clicked their verification link — that
+/// path is `verify_email`, and remains the trusted one.
+pub async fn record_administrator_assisted_email_verification(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Uuid,
+    entity_id: Uuid,
+    evidence: &str,
+) -> Result<(), AppError> {
+    let evidence = evidence.trim();
+    if evidence.is_empty() {
+        return Err(AppError::bad_request(
+            "evidence is required to record an administrator-assisted email verification",
+        ));
+    }
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::bad_request("entity is not active"));
+    }
+    let email_row: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT id, verified_at FROM entity_emails \
+         WHERE entity_id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(entity_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let Some((email_id, verified_at)) = email_row else {
+        return Err(AppError::bad_request("entity has no email on file"));
+    };
+    if verified_at.is_some() {
+        // Idempotent: a prior run (or the user's own verification link)
+        // already resolved this — not a reason to fail a resumed pass.
+        return Ok(());
+    }
+
+    let external_id = entity_external_id_in_tx(&mut tx, entity_id).await?;
+    sqlx::query("UPDATE entity_emails SET verified_at = now(), updated_at = now() WHERE id = $1")
+        .bind(email_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+    audit::commit_with_audit(
+        pool,
+        tx,
+        events_enabled,
+        &audit::AuditEvent {
+            actor_entity_id: Some(actor_id),
+            tenant_id: None,
+            target_kind: Some("entity"),
+            target_id: Some(entity_id),
+            event: "entity.update",
+            outcome: AuditOutcome::Allow,
+            details: serde_json::json!({
+                "external_id": external_id,
+                "field": "email_verified_administrative",
+                "evidence": evidence,
+            }),
+        },
+    )
+    .await
+}
+
+/// Soft-disables a specific OAuth link an administrator reviewed and found
+/// unjustified (see `identity::repo::legacy_oauth_email_mismatches` and
+/// AGENTS.md) without deleting it — the row, and the audit trail explaining
+/// why it was quarantined, survive for later investigation. A quarantined
+/// link can no longer authenticate or be silently refreshed by a fresh
+/// OAuth callback; see `upsert_oauth_identity`.
+pub async fn quarantine_oauth_link(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Uuid,
+    entity_id: Uuid,
+    provider: &str,
+    subject: &str,
+    reason: &str,
+) -> Result<(), AppError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(AppError::bad_request(
+            "a reason is required to quarantine an OAuth link",
+        ));
+    }
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::bad_request("entity is not active"));
+    }
+    let updated = sqlx::query(
+        "UPDATE oauth_identities SET quarantined_at = now(), updated_at = now() \
+         WHERE entity_id = $1 AND provider = $2 AND subject = $3 AND quarantined_at IS NULL",
+    )
+    .bind(entity_id)
+    .bind(provider)
+    .bind(subject)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if updated.rows_affected() == 0 {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM oauth_identities \
+             WHERE entity_id = $1 AND provider = $2 AND subject = $3)",
+        )
+        .bind(entity_id)
+        .bind(provider)
+        .bind(subject)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if exists {
+            return Ok(()); // already quarantined — idempotent no-op
+        }
+        return Err(AppError::not_found("oauth link not found"));
+    }
+
+    let external_id = entity_external_id_in_tx(&mut tx, entity_id).await?;
+    audit::commit_with_audit(
+        pool,
+        tx,
+        events_enabled,
+        &audit::AuditEvent {
+            actor_entity_id: Some(actor_id),
+            tenant_id: None,
+            target_kind: Some("entity"),
+            target_id: Some(entity_id),
+            event: "entity.update",
+            outcome: AuditOutcome::Allow,
+            details: serde_json::json!({
+                "external_id": external_id,
+                "field": "oauth_link_quarantined",
+                "provider": provider,
+                "subject": subject,
+                "reason": reason,
+            }),
+        },
+    )
+    .await
+}
+
+/// Permanently removes an OAuth link. Prefer `quarantine_oauth_link` when
+/// the link might still need investigation — this cannot be undone by
+/// re-running the remediation, only by the user completing OAuth again
+/// (which requires their canonical email to already be verified; see
+/// `upsert_oauth_identity`'s auto-link precondition).
+pub async fn revoke_oauth_link(
+    pool: &PgPool,
+    events_enabled: bool,
+    actor_id: Uuid,
+    entity_id: Uuid,
+    provider: &str,
+    subject: &str,
+    reason: &str,
+) -> Result<(), AppError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(AppError::bad_request(
+            "a reason is required to revoke an OAuth link",
+        ));
+    }
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    if super::repo::lock_active_entity(&mut tx, entity_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::bad_request("entity is not active"));
+    }
+    let deleted = sqlx::query(
+        "DELETE FROM oauth_identities WHERE entity_id = $1 AND provider = $2 AND subject = $3",
+    )
+    .bind(entity_id)
+    .bind(provider)
+    .bind(subject)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    if deleted.rows_affected() == 0 {
+        // Already gone — a resumed remediation pass must not fail here.
+        return Ok(());
+    }
+
+    let external_id = entity_external_id_in_tx(&mut tx, entity_id).await?;
+    audit::commit_with_audit(
+        pool,
+        tx,
+        events_enabled,
+        &audit::AuditEvent {
+            actor_entity_id: Some(actor_id),
+            tenant_id: None,
+            target_kind: Some("entity"),
+            target_id: Some(entity_id),
+            event: "entity.update",
+            outcome: AuditOutcome::Allow,
+            details: serde_json::json!({
+                "external_id": external_id,
+                "field": "oauth_link_revoked",
+                "provider": provider,
+                "subject": subject,
+                "reason": reason,
+            }),
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3344,5 +3600,88 @@ mod tests {
         .await
         .expect("verified address may link");
         assert_eq!(linked, entity_id);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn quarantined_oauth_link_cannot_authenticate_or_be_silently_refreshed() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB-gated tests");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to test database");
+        sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+            .await
+            .expect("load migrations")
+            .run(&pool)
+            .await
+            .expect("apply migrations");
+
+        let entity_id = Uuid::new_v4();
+        let email = format!("quarantine-{entity_id}@example.test");
+        let provider = "test-provider";
+        let subject = format!("subject-{entity_id}");
+        sqlx::query(
+            "INSERT INTO entities (id, kind, name, status, attributes)
+             VALUES ($1, 'human', $2, 'active', '{}')",
+        )
+        .bind(entity_id)
+        .bind(format!("quarantine-{entity_id}"))
+        .execute(&pool)
+        .await
+        .expect("insert entity");
+        sqlx::query(
+            "INSERT INTO entity_emails (id, entity_id, email, verified_at) \
+             VALUES ($1, $2, $3, now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(entity_id)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("insert verified email");
+
+        upsert_oauth_identity(&pool, provider, &subject, &email, serde_json::json!({}))
+            .await
+            .expect("initial link succeeds");
+
+        quarantine_oauth_link(
+            &pool,
+            false,
+            entity_id,
+            entity_id,
+            provider,
+            &subject,
+            "reviewed: no supporting ticket for this preclaim-era link",
+        )
+        .await
+        .expect("quarantine succeeds");
+
+        let profile_after_quarantine = serde_json::json!({"attempted": "refresh"});
+        let rejected = upsert_oauth_identity(
+            &pool,
+            provider,
+            &subject,
+            &email,
+            profile_after_quarantine.clone(),
+        )
+        .await;
+        assert!(matches!(
+            rejected,
+            Err(AppError::Unauthorized(message)) if message.contains("quarantined")
+        ));
+
+        let stored_profile: serde_json::Value = sqlx::query_scalar(
+            "SELECT profile FROM oauth_identities WHERE provider = $1 AND subject = $2",
+        )
+        .bind(provider)
+        .bind(&subject)
+        .fetch_one(&pool)
+        .await
+        .expect("oauth identity still present");
+        assert_ne!(
+            stored_profile, profile_after_quarantine,
+            "a rejected callback must not silently refresh the quarantined row"
+        );
     }
 }
