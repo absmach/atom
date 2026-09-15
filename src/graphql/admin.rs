@@ -6,6 +6,7 @@ use crate::{
     auth::{has_capability_in_scope, require_capability, AuthContext, Scope},
     authz::repo as authz_repo,
     error::AppError,
+    identity::repo as identity_repo,
     models::access::{AdminPageQuery, AuditQuery, ExpiringCredentialsQuery},
     state::AppState,
 };
@@ -15,7 +16,8 @@ use super::{
     types::{
         parse_id, parse_optional_audit_outcome, parse_optional_credential_kind, parse_optional_id,
         parse_optional_timestamp, AuditLog, AuditLogList, Credential, GqlAuditOutcome,
-        GqlCredentialKind, OrphanPolicy,
+        GqlCredentialKind, LegacyAttributesEmailMismatch, LegacyCredentialIdentifierMismatch,
+        LegacyOauthEmailMismatch, LegacyUnverifiedEmail, OrphanPolicy,
     },
 };
 
@@ -149,6 +151,127 @@ impl AdminQuery {
             .items
             .into_iter()
             .map(Credential::from)
+            .collect())
+    }
+
+    // ─── Legacy identity audit (issue #110, workstream B) ──────────────────
+    //
+    // Read-only findings — see AGENTS.md. Remediation is a deliberately
+    // separate, approval-gated tool, not exposed here.
+
+    async fn legacy_unverified_emails(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: Option<ID>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<LegacyUnverifiedEmail>> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        let report = identity_repo::legacy_unverified_emails(
+            &state.pool,
+            parse_optional_id(entity_id, "entityId")?,
+            AdminPageQuery {
+                limit: limit.map(i64::from).unwrap_or(50),
+                offset: offset.map(i64::from).unwrap_or(0),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(report
+            .items
+            .into_iter()
+            .map(LegacyUnverifiedEmail::from)
+            .collect())
+    }
+
+    async fn legacy_credential_identifier_mismatches(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: Option<ID>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<LegacyCredentialIdentifierMismatch>> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        let report = identity_repo::legacy_credential_identifier_mismatches(
+            &state.pool,
+            parse_optional_id(entity_id, "entityId")?,
+            AdminPageQuery {
+                limit: limit.map(i64::from).unwrap_or(50),
+                offset: offset.map(i64::from).unwrap_or(0),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(report
+            .items
+            .into_iter()
+            .map(LegacyCredentialIdentifierMismatch::from)
+            .collect())
+    }
+
+    async fn legacy_oauth_email_mismatches(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: Option<ID>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<LegacyOauthEmailMismatch>> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        let report = identity_repo::legacy_oauth_email_mismatches(
+            &state.pool,
+            parse_optional_id(entity_id, "entityId")?,
+            AdminPageQuery {
+                limit: limit.map(i64::from).unwrap_or(50),
+                offset: offset.map(i64::from).unwrap_or(0),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(report
+            .items
+            .into_iter()
+            .map(LegacyOauthEmailMismatch::from)
+            .collect())
+    }
+
+    async fn legacy_attributes_email_mismatches(
+        &self,
+        ctx: &Context<'_>,
+        entity_id: Option<ID>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<LegacyAttributesEmailMismatch>> {
+        let auth = require_auth(ctx)?;
+        let state = ctx.data::<AppState>()?;
+        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+            .await
+            .map_err(gql_error)?;
+        let report = identity_repo::legacy_attributes_email_mismatches(
+            &state.pool,
+            parse_optional_id(entity_id, "entityId")?,
+            AdminPageQuery {
+                limit: limit.map(i64::from).unwrap_or(50),
+                offset: offset.map(i64::from).unwrap_or(0),
+            },
+        )
+        .await
+        .map_err(gql_error)?;
+        Ok(report
+            .items
+            .into_iter()
+            .map(LegacyAttributesEmailMismatch::from)
             .collect())
     }
 }
