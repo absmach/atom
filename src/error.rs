@@ -72,6 +72,120 @@ impl AppError {
     }
 }
 
+/// Stable, public GraphQL/API error code (issue #101). Frozen set for v1 —
+/// see `api/v1/graphql-error-contract.md`. Adding a tenth variant is a
+/// breaking change to that contract, not a routine addition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicErrorCode {
+    BadRequest,
+    Unauthenticated,
+    Forbidden,
+    NotFound,
+    Conflict,
+    PayloadTooLarge,
+    RateLimited,
+    ServiceUnavailable,
+    Internal,
+}
+
+impl PublicErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BadRequest => "BAD_REQUEST",
+            Self::Unauthenticated => "UNAUTHENTICATED",
+            Self::Forbidden => "FORBIDDEN",
+            Self::NotFound => "NOT_FOUND",
+            Self::Conflict => "CONFLICT",
+            Self::PayloadTooLarge => "PAYLOAD_TOO_LARGE",
+            Self::RateLimited => "RATE_LIMITED",
+            Self::ServiceUnavailable => "SERVICE_UNAVAILABLE",
+            Self::Internal => "INTERNAL",
+        }
+    }
+}
+
+/// The public shape of an `AppError`: a stable code, a message already
+/// screened for safety, whether a client may retry, and — only for
+/// `RateLimited` when the caller supplied a window — how long to wait.
+/// Never carries SQL text, stack traces, or policy internals; see
+/// [`AppError::public_contract`].
+#[derive(Debug, Clone)]
+pub struct PublicError {
+    pub code: PublicErrorCode,
+    pub message: String,
+    pub retryable: bool,
+    pub retry_after_secs: Option<u64>,
+}
+
+impl AppError {
+    fn not_retryable(code: PublicErrorCode, message: impl Into<String>) -> PublicError {
+        PublicError {
+            code,
+            message: message.into(),
+            retryable: false,
+            retry_after_secs: None,
+        }
+    }
+
+    /// The one exhaustive mapping from `AppError` to public contract data —
+    /// code, safe message, retryability, and retry-after. Every transport
+    /// (today: the GraphQL error adapter, `graphql::auth::gql_error`) must
+    /// derive its public error shape from this, not duplicate the message
+    /// rules. Deliberately does not replace `IntoResponse`/`tonic::Status`
+    /// (REST and gRPC keep their existing, separately-frozen behavior;
+    /// see issue #101's non-goals) — this is additive.
+    pub fn public_contract(&self) -> PublicError {
+        match self {
+            AppError::NotFound(m) => Self::not_retryable(PublicErrorCode::NotFound, m.clone()),
+            AppError::BadRequest(m) => Self::not_retryable(PublicErrorCode::BadRequest, m.clone()),
+            AppError::Unauthorized(m) => {
+                Self::not_retryable(PublicErrorCode::Unauthenticated, m.clone())
+            }
+            AppError::Forbidden => Self::not_retryable(PublicErrorCode::Forbidden, "forbidden"),
+            AppError::Conflict(m) => Self::not_retryable(PublicErrorCode::Conflict, m.clone()),
+            AppError::PayloadTooLarge(m) => {
+                Self::not_retryable(PublicErrorCode::PayloadTooLarge, m.clone())
+            }
+            AppError::RateLimited {
+                message,
+                retry_after_secs,
+            } => PublicError {
+                code: PublicErrorCode::RateLimited,
+                message: message.clone(),
+                retryable: true,
+                retry_after_secs: Some(*retry_after_secs),
+            },
+            AppError::ServiceUnavailable(m) => PublicError {
+                code: PublicErrorCode::ServiceUnavailable,
+                message: m.clone(),
+                retryable: true,
+                retry_after_secs: None,
+            },
+            AppError::Database(e) => match database_constraint_violation(e) {
+                Some(DatabaseConstraintViolation::Unique) => {
+                    Self::not_retryable(PublicErrorCode::Conflict, "already exists")
+                }
+                Some(DatabaseConstraintViolation::ForeignKey) => {
+                    tracing::warn!("foreign-key violation: {e}");
+                    Self::not_retryable(PublicErrorCode::BadRequest, "invalid reference")
+                }
+                Some(DatabaseConstraintViolation::Check) => {
+                    tracing::warn!("check violation: {e}");
+                    Self::not_retryable(PublicErrorCode::BadRequest, "invalid value")
+                }
+                None => {
+                    tracing::error!("db error: {e}");
+                    Self::not_retryable(PublicErrorCode::Internal, "database error")
+                }
+            },
+            AppError::Internal(e) => {
+                tracing::error!("internal error: {e}");
+                Self::not_retryable(PublicErrorCode::Internal, "internal error")
+            }
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
@@ -293,5 +407,114 @@ mod tests {
         );
         assert_eq!(database_constraint_violation_code(Some("40001")), None);
         assert_eq!(database_constraint_violation_code(None), None);
+    }
+
+    // Issue #101: `public_contract()` is the one exhaustive AppError -> public
+    // contract mapping every transport (today: the GraphQL error adapter)
+    // must reuse rather than re-deriving message/code/retry rules. Every
+    // non-Database, non-Internal variant is covered directly here; the
+    // Database-constraint-violation arm reuses `database_constraint_violation`
+    // (tested above) and is additionally proven end-to-end against a real
+    // unique-violation in `tests/m55_graphql_error_contract.rs`.
+    #[test]
+    fn public_contract_maps_every_variant_to_its_frozen_code_and_retry_behavior() {
+        use super::{AppError, PublicErrorCode};
+
+        let cases: Vec<(AppError, PublicErrorCode, bool, Option<u64>)> = vec![
+            (
+                AppError::not_found("x not found"),
+                PublicErrorCode::NotFound,
+                false,
+                None,
+            ),
+            (
+                AppError::bad_request("bad input"),
+                PublicErrorCode::BadRequest,
+                false,
+                None,
+            ),
+            (
+                AppError::unauthorized("no session"),
+                PublicErrorCode::Unauthenticated,
+                false,
+                None,
+            ),
+            (AppError::Forbidden, PublicErrorCode::Forbidden, false, None),
+            (
+                AppError::conflict("already exists"),
+                PublicErrorCode::Conflict,
+                false,
+                None,
+            ),
+            (
+                AppError::payload_too_large("too big"),
+                PublicErrorCode::PayloadTooLarge,
+                false,
+                None,
+            ),
+            (
+                AppError::rate_limited("slow down", 30),
+                PublicErrorCode::RateLimited,
+                true,
+                Some(30),
+            ),
+            (
+                AppError::service_unavailable("try later"),
+                PublicErrorCode::ServiceUnavailable,
+                true,
+                None,
+            ),
+            (
+                AppError::Internal(anyhow::anyhow!("boom")),
+                PublicErrorCode::Internal,
+                false,
+                None,
+            ),
+        ];
+
+        for (err, expected_code, expected_retryable, expected_retry_after) in cases {
+            let contract = err.public_contract();
+            assert_eq!(
+                contract.code, expected_code,
+                "{expected_code:?}: {}",
+                contract.message
+            );
+            assert_eq!(contract.retryable, expected_retryable, "{expected_code:?}");
+            assert_eq!(
+                contract.retry_after_secs, expected_retry_after,
+                "{expected_code:?}"
+            );
+            assert_eq!(contract.code.as_str(), expected_code.as_str());
+        }
+    }
+
+    #[test]
+    fn public_error_codes_are_frozen_strings() {
+        use super::PublicErrorCode::*;
+        assert_eq!(
+            [
+                BadRequest,
+                Unauthenticated,
+                Forbidden,
+                NotFound,
+                Conflict,
+                PayloadTooLarge,
+                RateLimited,
+                ServiceUnavailable,
+                Internal,
+            ]
+            .map(|code| code.as_str()),
+            [
+                "BAD_REQUEST",
+                "UNAUTHENTICATED",
+                "FORBIDDEN",
+                "NOT_FOUND",
+                "CONFLICT",
+                "PAYLOAD_TOO_LARGE",
+                "RATE_LIMITED",
+                "SERVICE_UNAVAILABLE",
+                "INTERNAL",
+            ]
+        );
     }
 }

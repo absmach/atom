@@ -11,6 +11,7 @@ readonly contract_paths=(
   api/v1/domain-event-catalog.json
   api/v1/domain-event.schema.json
   api/v1/graphql-auth-matrix.json
+  api/v1/graphql-error-contract.md
   api/v1/jwt-contract.json
   "${migration_manifest}"
   api/v1/persisted-semantics.json

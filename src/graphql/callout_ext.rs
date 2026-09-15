@@ -134,7 +134,20 @@ impl Extension for CalloutExtension {
                 } => {
                     audit_callout_deny(state, &auth, &p.resolver, &endpoint_id, &reason);
                     let message = format!("callout denied ({endpoint_id}): {reason}");
-                    return Response::from_errors(vec![ServerError::new(message, None)]);
+                    // FORBIDDEN, not the BAD_REQUEST default `attach_error_metadata`
+                    // would otherwise apply (issue #101) — an external policy
+                    // decision is exactly what that code means: the caller,
+                    // not the request shape, was not allowed.
+                    let mut extensions = async_graphql::ErrorExtensionValues::default();
+                    extensions.set("code", "FORBIDDEN");
+                    extensions.set("retryable", false);
+                    return Response::from_errors(vec![ServerError {
+                        message,
+                        source: None,
+                        locations: Vec::new(),
+                        path: Vec::new(),
+                        extensions: Some(extensions),
+                    }]);
                 }
             }
         }

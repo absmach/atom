@@ -1,4 +1,4 @@
-use async_graphql::{Context, Object, Result, ID};
+use async_graphql::{Context, ErrorExtensions, Object, Result, ID};
 use uuid::Uuid;
 
 use crate::{
@@ -73,7 +73,9 @@ impl AuthMutation {
     async fn signup(&self, ctx: &Context<'_>, input: SignupInput) -> Result<SignupResponse> {
         let state = ctx.data::<AppState>()?;
         if !state.config.self_registration_enabled {
-            return Err(async_graphql::Error::new("sign up is not enabled"));
+            // Matches the REST signup handler's AppError::Forbidden exactly —
+            // same operation, same code, across both transports.
+            return Err(gql_error(AppError::Forbidden));
         }
         let response = service::signup_human(
             &state.pool,
@@ -199,40 +201,29 @@ fn parse_login_credential_kind(value: &str) -> Result<CredentialKind> {
     }
 }
 
+/// The one GraphQL adapter over `AppError` (issue #101): every resolver
+/// failure across the codebase goes through this, so `code`/`retryable`/
+/// `retryAfterSeconds` land on every one of them without touching each of
+/// the ~240 call sites individually. `requestId` is *not* set here — this
+/// function has no access to it — it is stamped centrally afterward, on
+/// every error in the response, by `graphql::attach_error_metadata`.
+/// Derives its public shape from `AppError::public_contract`, the single
+/// exhaustive mapping — do not hand-roll message/code rules here again.
 pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {
-    match &err {
-        AppError::Database(sqlx::Error::Database(db)) => match db.code().as_deref() {
-            Some("23505") => async_graphql::Error::new("already exists"),
-            Some("23503") => async_graphql::Error::new("invalid reference"),
-            Some("23514") => async_graphql::Error::new("invalid value"),
-            Some(_) | None => {
-                tracing::error!("db error: {}", db);
-                async_graphql::Error::new("database error")
-            }
-        },
-        AppError::Database(e) => {
-            tracing::error!("db error: {}", e);
-            async_graphql::Error::new("database error")
+    let contract = err.public_contract();
+    async_graphql::Error::new(contract.message).extend_with(|_, e| {
+        e.set("code", contract.code.as_str());
+        e.set("retryable", contract.retryable);
+        if let Some(retry_after_secs) = contract.retry_after_secs {
+            e.set("retryAfterSeconds", retry_after_secs);
         }
-        AppError::Internal(e) => {
-            tracing::error!("internal error: {}", e);
-            async_graphql::Error::new("internal error")
-        }
-        AppError::NotFound(_)
-        | AppError::BadRequest(_)
-        | AppError::Unauthorized(_)
-        | AppError::Forbidden
-        | AppError::Conflict(_)
-        | AppError::PayloadTooLarge(_)
-        | AppError::RateLimited { .. }
-        | AppError::ServiceUnavailable(_) => async_graphql::Error::new(err.to_string()),
-    }
+    })
 }
 
 pub(crate) fn require_auth(ctx: &Context<'_>) -> Result<AuthContext> {
     ctx.data::<AuthContext>()
         .cloned()
-        .map_err(|_| async_graphql::Error::new("missing authentication"))
+        .map_err(|_| gql_error(AppError::unauthorized("missing authentication")))
 }
 
 pub(crate) fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {

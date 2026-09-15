@@ -18,6 +18,16 @@ info:
     `Authorization: Bearer <token>` header. The GraphQL and session routes also
     accept the `atom_token` HttpOnly cookie. Cookie-authenticated unsafe
     requests require a trusted Origin or Referer.
+
+    Every response carries an `X-Request-ID` header (issue #101) — echoing a
+    valid client-supplied one, or server-generated when absent or invalid.
+    On `/graphql`, the same ID appears in `extensions.requestId` on every
+    returned error, alongside a stable `extensions.code`
+    (`GraphQLErrorExtensions`); see `api/v1/graphql-error-contract.md` for
+    the full contract. That contract governs only the base GraphQL
+    endpoint's error `extensions` — configured custom endpoints
+    (`/api/custom/*`) keep their own REST-shaped status/body mapping,
+    unchanged by it.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -584,7 +594,24 @@ paths:
               $ref: "#/components/schemas/GraphQLRequest"
       responses:
         "200":
-          description: GraphQL response; resolver failures appear in `errors`
+          description: |
+            GraphQL response; HTTP 200 means the server processed the
+            request, not that every field succeeded — resolver, callout,
+            and transport-authentication failures all appear in `errors`
+            with an unchanged HTTP status (issue #101). A response may
+            carry both partial `data` and non-empty `errors` in the same
+            payload; check `errors` in addition to the HTTP status before
+            treating a response as a success. Every error's
+            `extensions.requestId` matches this response's `X-Request-ID`
+            header.
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+              description: |
+                Present on every Atom HTTP response, not only `/graphql`.
+                Echoes a valid client-supplied `X-Request-ID` request
+                header, or a server-generated one when absent or invalid.
           content:
             application/json:
               schema:
@@ -1643,4 +1670,44 @@ components:
                 type: array
                 items: {}
               extensions:
-                type: object
+                $ref: "#/components/schemas/GraphQLErrorExtensions"
+
+    GraphQLErrorExtensions:
+      type: object
+      description: |
+        Stable, machine-readable metadata attached to every Atom-generated
+        GraphQL error (issue #101) — resolver failures, transport
+        authentication failures, and callout denials. `code` and
+        `retryable` are always present; `requestId` is always present on
+        the *response's* errors (the base `/graphql` response envelope
+        this schema nests under — a bare `async_graphql::Error` never
+        appears without going through that response). async-graphql's own
+        parse/validation/depth/complexity/introspection-disabled failures,
+        which never reach Atom's resolvers, are defaulted to
+        `BAD_REQUEST`/non-retryable. See
+        `api/v1/graphql-error-contract.md` for the full contract: the code
+        table, retry semantics, and the security rules governing what a
+        message may contain.
+      required: [code, retryable, requestId]
+      properties:
+        code:
+          type: string
+          enum:
+            - BAD_REQUEST
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - NOT_FOUND
+            - CONFLICT
+            - PAYLOAD_TOO_LARGE
+            - RATE_LIMITED
+            - SERVICE_UNAVAILABLE
+            - INTERNAL
+        retryable:
+          type: boolean
+        requestId:
+          type: string
+          description: Matches the `X-Request-ID` response header for this request.
+        retryAfterSeconds:
+          type: integer
+          minimum: 0
+          description: Present only when `code` is `RATE_LIMITED` and the wait window is known.

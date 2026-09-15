@@ -549,7 +549,7 @@ async fn credential_tenant_id(
     .await
     .map_err(crate::error::AppError::Database)
     .map_err(gql_error)?
-    .ok_or_else(|| async_graphql::Error::new("credential not found"))?;
+    .ok_or_else(|| gql_error(AppError::not_found("credential not found")))?;
     Ok(tenant_id)
 }
 

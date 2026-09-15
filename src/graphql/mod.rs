@@ -20,13 +20,15 @@ pub mod schema;
 pub mod tenants;
 pub mod types;
 
-use async_graphql::{Extensions, Request, Response, ServerError, Variables};
+use async_graphql::{ErrorExtensionValues, Extensions, Request, Response, ServerError, Variables};
 use async_graphql_axum::GraphQLResponse;
 use axum::{extract::State, http::HeaderMap, Extension, Json};
 use serde::Deserialize;
 
 use crate::{
     auth::{authenticate_token, require_trusted_origin, token_from_headers, AuthTokenSource},
+    error::AppError,
+    request_id::RequestId,
     state::AppState,
 };
 
@@ -46,6 +48,7 @@ pub struct GraphqlHttpRequest {
 
 pub async fn graphql_handler(
     Extension(schema): Extension<AtomSchema>,
+    Extension(request_id): Extension<RequestId>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<GraphqlHttpRequest>,
@@ -66,7 +69,7 @@ pub async fn graphql_handler(
                 if let Err(err) =
                     require_trusted_origin(&headers, &state.config.cors_allowed_origins)
                 {
-                    return graphql_error(err.to_string());
+                    return graphql_error(err, &request_id);
                 }
             }
             match authenticate_token(&state, token).await {
@@ -75,16 +78,57 @@ pub async fn graphql_handler(
                     // enforced explicitly by each gate; no request wrapper needed.
                     req = req.data(auth);
                 }
-                Err(err) => return graphql_error(err.to_string()),
+                Err(err) => return graphql_error(err, &request_id),
             }
         }
         Ok(None) => {}
-        Err(err) => return graphql_error(err.to_string()),
+        Err(err) => return graphql_error(err, &request_id),
     }
 
-    schema.execute(req).await.into()
+    attach_error_metadata(schema.execute(req).await, &request_id).into()
 }
 
-fn graphql_error(message: String) -> GraphQLResponse {
-    Response::from_errors(vec![ServerError::new(message, None)]).into()
+/// Builds the GraphQL error envelope for a failure that happens *before*
+/// `schema.execute` ever runs (bad token, untrusted cookie origin) — so no
+/// extension hook in the schema's execution chain ever sees it. Derives the
+/// full public contract from `AppError::public_contract` (issue #101), the
+/// same mapping `graphql::auth::gql_error` uses for in-resolver failures.
+fn graphql_error(err: AppError, request_id: &RequestId) -> GraphQLResponse {
+    let contract = err.public_contract();
+    let mut extensions = ErrorExtensionValues::default();
+    extensions.set("code", contract.code.as_str());
+    extensions.set("retryable", contract.retryable);
+    if let Some(retry_after_secs) = contract.retry_after_secs {
+        extensions.set("retryAfterSeconds", retry_after_secs);
+    }
+    extensions.set("requestId", request_id.as_str());
+    let error = ServerError {
+        message: contract.message,
+        source: None,
+        locations: Vec::new(),
+        path: Vec::new(),
+        extensions: Some(extensions),
+    };
+    Response::from_errors(vec![error]).into()
+}
+
+/// Stamps `extensions.requestId` on every error in the response, and — for
+/// any error that does not already carry a `code` (async-graphql's own
+/// parse/validation/depth/complexity/introspection-disabled failures, which
+/// never reach a resolver or `gql_error`) — a default `BAD_REQUEST`,
+/// non-retryable code. Errors `gql_error` already coded (the overwhelming
+/// majority — every resolver failure) are left exactly as set; this only
+/// adds `requestId` to those. See `api/v1/graphql-error-contract.md`.
+fn attach_error_metadata(mut response: Response, request_id: &RequestId) -> Response {
+    for error in &mut response.errors {
+        let extensions = error
+            .extensions
+            .get_or_insert_with(ErrorExtensionValues::default);
+        if extensions.get("code").is_none() {
+            extensions.set("code", "BAD_REQUEST");
+            extensions.set("retryable", false);
+        }
+        extensions.set("requestId", request_id.as_str());
+    }
+    response
 }
