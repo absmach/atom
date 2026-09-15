@@ -728,6 +728,46 @@ A scalar that can represent any JSON value.
 """
 scalar JSON
 
+type LegacyAttributesEmailMismatch {
+	entityId: ID!
+	attributesEmail: String!
+	canonicalEmail: String
+	canonicalVerifiedAt: String
+	entityUpdatedAt: String
+	pendingTokens: PendingTokenCounts!
+}
+
+type LegacyCredentialIdentifierMismatch {
+	credentialId: ID!
+	entityId: ID!
+	identifier: String
+	canonicalEmail: String
+	canonicalVerifiedAt: String
+	credentialCreatedAt: String!
+	pendingTokens: PendingTokenCounts!
+}
+
+type LegacyOauthEmailMismatch {
+	entityId: ID!
+	provider: String!
+	subject: String!
+	oauthEmail: String!
+	oauthEmailVerified: Boolean!
+	canonicalEmail: String
+	canonicalVerifiedAt: String
+	linkedAt: String!
+	pendingTokens: PendingTokenCounts!
+}
+
+type LegacyUnverifiedEmail {
+	entityId: ID!
+	entityKind: EntityKind!
+	entityStatus: EntityStatus!
+	email: String!
+	emailCreatedAt: String!
+	pendingTokens: PendingTokenCounts!
+}
+
 input LoginInput {
 	identifier: String!
 	secret: String!
@@ -968,6 +1008,13 @@ type Ownership {
 	createdAt: String!
 }
 
+type PendingTokenCounts {
+	verification: Int!
+	passwordReset: Int!
+	emailChange: Int!
+	invitation: Int!
+}
+
 type PermissionBlock {
 	id: ID!
 	tenantId: ID
@@ -1097,6 +1144,10 @@ type QueryRoot {
 	entityAuditLogs(entityId: ID!): AuditLogList!
 	orphanPolicies(limit: Int, offset: Int): [OrphanPolicy!]!
 	expiringCredentials(days: Int, entityId: ID, kind: CredentialKind, limit: Int, offset: Int): [Credential!]!
+	legacyUnverifiedEmails(entityId: ID, limit: Int, offset: Int): [LegacyUnverifiedEmail!]!
+	legacyCredentialIdentifierMismatches(entityId: ID, limit: Int, offset: Int): [LegacyCredentialIdentifierMismatch!]!
+	legacyOauthEmailMismatches(entityId: ID, limit: Int, offset: Int): [LegacyOauthEmailMismatch!]!
+	legacyAttributesEmailMismatches(entityId: ID, limit: Int, offset: Int): [LegacyAttributesEmailMismatch!]!
 	systemStatus: SystemStatus!
 	signingKeys: [SigningKey!]!
 }
