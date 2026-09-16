@@ -367,6 +367,44 @@ middlewares.
   (`event="callout.deny"`, target_kind="callout", details include operation
   + endpoint id + reason) fire-and-forget through `audit::write`.
 
+## GraphQL Error Contract (issue #101)
+
+`AppError::public_contract()` (`src/error.rs`) is the one exhaustive mapping
+from `AppError` to a stable `{code, message, retryable, retry_after_secs}` —
+nine frozen codes (`BAD_REQUEST`, `UNAUTHENTICATED`, `FORBIDDEN`,
+`NOT_FOUND`, `CONFLICT`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`,
+`SERVICE_UNAVAILABLE`, `INTERNAL`; the full contract, including retry
+semantics and security rules, is `api/v1/graphql-error-contract.md`). It is
+additive to, and does not replace, the REST `IntoResponse`/gRPC
+`tonic::Status` conversions, which keep their own separately-frozen
+behavior — this is GraphQL-only.
+
+`graphql::auth::gql_error` is the single adapter every GraphQL resolver
+failure goes through (~240 call sites); it derives `code`/`retryable`/
+`retryAfterSeconds` from `public_contract()` so none of those call sites had
+to change. `requestId` is deliberately *not* set there — `gql_error` has no
+access to it — it is stamped centrally by `graphql::attach_error_metadata`
+on every error in the final response, after `schema.execute()` returns.
+That same function also defaults any error still missing a `code` (parse,
+validation, depth/complexity, introspection-disabled — async-graphql's own
+internal failures, which never reach a resolver) to `BAD_REQUEST`/
+non-retryable. Two paths construct GraphQL errors directly and must set
+`code`/`retryable` themselves rather than rely on that default: the
+pre-execution transport failures in `graphql::graphql_error` (bad token,
+untrusted cookie origin — these run *before* `schema.execute` and so never
+reach any extension hook at all) and the callout-deny short-circuit in
+`graphql::callout_ext` (an external policy decision, correctly `FORBIDDEN`,
+not the generic default).
+
+`src/request_id.rs` owns `X-Request-ID`: generation, validating an incoming
+client-supplied one (bounded length, `[A-Za-z0-9._-]` only — anything else
+is treated as absent, never rejected outright), and setting the response
+header. Applied as the outermost HTTP layer in `routes.rs` so every
+response carries it, not only `/graphql`'s — and `graphql_handler` reads
+the same value back out of request extensions to stamp into every GraphQL
+error, so the header and every `extensions.requestId` in that response
+always match.
+
 ## Metrics
 
 Prometheus metrics are exposed at `GET /metrics` (text exposition). All metric
