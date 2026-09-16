@@ -1112,15 +1112,22 @@ pub async fn refresh_session(
     )?;
     tx.commit().await.map_err(db_err)?;
 
+    // `session.expires_at` is the row's (possibly long, refresh-token-family)
+    // deadline preserved by `refresh_session_in_tx`'s GREATEST — not
+    // necessarily when this JWT itself expires. Report the JWT's own
+    // expiry, matching `create_login_response`'s handling of the same
+    // distinction.
+    let access_token_expires_at = Utc::now() + Duration::seconds(cfg.jwt_expiry_secs as i64);
+
     Ok(LoginResponse {
         token: token.clone(),
         entity_id,
         session_id: session.id,
-        expires_at: session.expires_at,
+        expires_at: access_token_expires_at,
         email_verified: None,
         verification_required: false,
         access_token: token,
-        access_token_expires_at: session.expires_at,
+        access_token_expires_at,
         refresh_token: None,
         refresh_token_expires_at: None,
     })
@@ -1207,8 +1214,11 @@ pub async fn exchange_refresh_token(
     };
 
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let Some(locked) =
-        super::refresh_tokens::lock_refresh_token_for_exchange(&mut tx, token_id).await?
+
+    // Discover the owning entity/tenant with a plain, unlocked read, then
+    // take the canonical tenant -> entity order *before* locking the token
+    // and session rows below — see `RefreshTokenOwner`'s docs.
+    let Some(owner) = super::refresh_tokens::lookup_refresh_token_owner(&mut tx, token_id).await?
     else {
         return Err(deny_refresh_token_exchange_rollback(
             tx,
@@ -1219,6 +1229,56 @@ pub async fn exchange_refresh_token(
             None,
             None,
             None,
+        )
+        .await);
+    };
+
+    // `lock_active_entity` returns `Err(NotFound)`, not `Ok(None)`, when the
+    // entity is active but its tenant isn't — and that error's message
+    // carries the tenant id. Matched explicitly here so it can't propagate
+    // past the generic-error handling below.
+    let tenant_id = match super::repo::lock_active_entity(&mut tx, owner.entity_id).await {
+        Ok(Some((_, tenant_id))) => tenant_id,
+        Ok(None) => {
+            return Err(deny_refresh_token_exchange_rollback(
+                tx,
+                pool,
+                cfg,
+                "entity_inactive",
+                Some(token_id),
+                Some(owner.entity_id),
+                owner.tenant_id,
+                Some(owner.session_id),
+            )
+            .await);
+        }
+        Err(_) => {
+            return Err(deny_refresh_token_exchange_rollback(
+                tx,
+                pool,
+                cfg,
+                "tenant_inactive",
+                Some(token_id),
+                Some(owner.entity_id),
+                owner.tenant_id,
+                Some(owner.session_id),
+            )
+            .await);
+        }
+    };
+
+    let Some(locked) =
+        super::refresh_tokens::lock_refresh_token_for_exchange(&mut tx, token_id).await?
+    else {
+        return Err(deny_refresh_token_exchange_rollback(
+            tx,
+            pool,
+            cfg,
+            "not_found",
+            Some(token_id),
+            Some(owner.entity_id),
+            owner.tenant_id,
+            Some(owner.session_id),
         )
         .await);
     };
@@ -1339,39 +1399,8 @@ pub async fn exchange_refresh_token(
         )
         .await);
     }
-    // `lock_active_entity` returns `Err(NotFound)`, not `Ok(None)`, when the
-    // entity is active but its tenant isn't — and that error's message
-    // carries the tenant id. Matched explicitly here so it can't propagate
-    // past the generic-error handling below.
-    let tenant_id = match super::repo::lock_active_entity(&mut tx, locked.entity_id).await {
-        Ok(Some((_, tenant_id))) => tenant_id,
-        Ok(None) => {
-            return Err(deny_refresh_token_exchange_rollback(
-                tx,
-                pool,
-                cfg,
-                "entity_inactive",
-                Some(token_id),
-                Some(locked.entity_id),
-                locked.tenant_id,
-                Some(locked.session_id),
-            )
-            .await);
-        }
-        Err(_) => {
-            return Err(deny_refresh_token_exchange_rollback(
-                tx,
-                pool,
-                cfg,
-                "tenant_inactive",
-                Some(token_id),
-                Some(locked.entity_id),
-                locked.tenant_id,
-                Some(locked.session_id),
-            )
-            .await);
-        }
-    };
+    // Tenant/entity are already locked and validated above, before the
+    // token/session lock — `tenant_id` from that check is still current.
 
     let (new_secret, new_digest) = super::refresh_tokens::new_secret(&cfg.signing_keys)?;
     let new_token_id = Uuid::new_v4();

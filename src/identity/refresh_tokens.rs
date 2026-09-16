@@ -74,11 +74,56 @@ pub(crate) struct LockedRefreshToken {
     pub session_expires_at: DateTime<Utc>,
 }
 
+/// Which entity/tenant/session own `token_id`, read with no lock. Callers
+/// must use this to acquire the tenant/entity lock (`lock_active_entity`,
+/// canonical tenant -> entity order) *before* calling
+/// [`lock_refresh_token_for_exchange`] below — that function's `FOR UPDATE`
+/// locks the session row, and `refresh_session` and entity deletion already
+/// lock tenant/entity before touching a session. Taking the session lock
+/// first here instead would let this exchange and one of those paths form a
+/// cross-transaction lock-order cycle that Postgres can only resolve by
+/// aborting one side.
+pub(crate) struct RefreshTokenOwner {
+    pub session_id: Uuid,
+    pub entity_id: Uuid,
+    pub tenant_id: Option<Uuid>,
+}
+
+pub(crate) async fn lookup_refresh_token_owner(
+    tx: &mut Transaction<'_, Postgres>,
+    token_id: Uuid,
+) -> Result<Option<RefreshTokenOwner>, AppError> {
+    let row = sqlx::query(
+        r#"SELECT rt.session_id, s.entity_id, e.tenant_id
+           FROM refresh_tokens rt
+           JOIN sessions s ON s.id = rt.session_id
+           JOIN entities e ON e.id = s.entity_id
+           WHERE rt.id = $1"#,
+    )
+    .bind(token_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some(RefreshTokenOwner {
+        session_id: row.try_get("session_id").map_err(db_err)?,
+        entity_id: row.try_get("entity_id").map_err(db_err)?,
+        tenant_id: row.try_get("tenant_id").map_err(db_err)?,
+    }))
+}
+
 /// Look up `token_id` and lock both its row and its parent session's row
 /// `FOR UPDATE`, so a concurrent exchange of the same token and a concurrent
 /// logout both serialize against this read. `None` when the id doesn't
 /// exist — callers must map that to the same generic error as every other
 /// rejection reason, never a distinguishable "not found".
+///
+/// Callers must hold the tenant/entity lock (see [`RefreshTokenOwner`])
+/// *before* calling this — it locks the session row, and locking it first
+/// inverts the lock order against `refresh_session` and entity deletion.
 pub(crate) async fn lock_refresh_token_for_exchange(
     tx: &mut Transaction<'_, Postgres>,
     token_id: Uuid,

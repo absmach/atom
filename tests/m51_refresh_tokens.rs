@@ -17,6 +17,7 @@ use atom::{
     models::{entity::CreateEntity, enums::EntityKind, tenant::CreateTenant},
     state::AppState,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -26,6 +27,17 @@ const SECRET: &str = "dev1_key";
 fn slug(prefix: &str) -> String {
     let id = Uuid::new_v4().simple().to_string();
     format!("{prefix}-{}", &id[..12])
+}
+
+/// Decodes a JWT's `exp` claim without verifying the signature — enough to
+/// compare a response's advertised expiry against what the token itself
+/// actually carries.
+fn jwt_exp(token: &str) -> chrono::DateTime<chrono::Utc> {
+    let payload = token.split('.').nth(1).expect("jwt has a payload segment");
+    let decoded = URL_SAFE_NO_PAD.decode(payload).expect("decode jwt payload");
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).expect("parse jwt claims");
+    let exp = claims["exp"].as_i64().expect("exp claim");
+    chrono::DateTime::from_timestamp(exp, 0).expect("valid exp timestamp")
 }
 
 /// `Config::for_tests()` with refresh tokens enabled and (by default) a
@@ -316,6 +328,55 @@ async fn concurrent_exchange_of_the_same_token_yields_exactly_one_success() {
     );
 }
 
+/// Regression test: `exchange_refresh_token` locks tenant/entity before the
+/// refresh token/session rows, matching the order `refresh_session` (the
+/// deprecated legacy renewal mutation) already uses. Run concurrently
+/// against the same entity/session, opposite lock orders would let each
+/// transaction hold one resource while waiting on the other — a cycle
+/// Postgres can only resolve by aborting one side with "deadlock detected".
+/// Repeated here across several iterations since the interleaving needed to
+/// hit a would-be cycle isn't guaranteed on any single run.
+#[tokio::test]
+#[ignore]
+async fn concurrent_refresh_exchange_and_legacy_renewal_do_not_deadlock() {
+    let pool = common::pool().await;
+    let keys = active_keys(&pool).await;
+    let cfg = refresh_enabled_config(3600, 7200);
+
+    for _ in 0..10 {
+        let signer_exchange = JwtSigner::from_key(&keys.primary).expect("signer");
+        let signer_renewal = JwtSigner::from_key(&keys.primary).expect("signer");
+        let (_, name) = make_device(&pool, make_tenant(&pool).await).await;
+        let login_response = login(&pool, &keys, &cfg, &name).await;
+        let refresh_token = login_response.refresh_token.expect("refresh token");
+
+        let (exchange, renewal) = tokio::join!(
+            identity_service::exchange_refresh_token(
+                &pool,
+                &cfg,
+                &signer_exchange,
+                None,
+                &refresh_token,
+            ),
+            identity_service::refresh_session(
+                &pool,
+                &cfg,
+                &signer_renewal,
+                login_response.entity_id,
+                login_response.session_id,
+            ),
+        );
+        assert!(
+            !matches!(&exchange, Err(e) if format!("{e:?}").to_lowercase().contains("deadlock")),
+            "refresh exchange hit a lock-order deadlock: {exchange:?}"
+        );
+        assert!(
+            !matches!(&renewal, Err(e) if format!("{e:?}").to_lowercase().contains("deadlock")),
+            "legacy renewal hit a lock-order deadlock: {renewal:?}"
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore]
 async fn logout_revokes_the_family_and_expired_family_is_rejected() {
@@ -471,6 +532,58 @@ async fn refresh_session_never_truncates_a_refresh_enabled_session() {
     .await
     .expect("refresh exchange must still succeed after a legacy refreshSession call");
     assert_eq!(pair.entity_id, login_response.entity_id);
+}
+
+/// Regression test: with refresh tokens enabled, the deprecated
+/// `refreshSession` mutation's response must report the JWT's own expiry —
+/// not the long refresh-token family deadline `refresh_session_in_tx`
+/// preserves via `GREATEST`. Reporting the family deadline made clients
+/// (which schedule their next renewal from `expiresAt`) believe the access
+/// token stayed valid for days when it actually expired after
+/// `jwt_expiry_secs`, so their next request failed authentication.
+#[tokio::test]
+#[ignore]
+async fn refresh_session_response_expiry_matches_the_jwt_not_the_family_deadline() {
+    let pool = common::pool().await;
+    let keys = active_keys(&pool).await;
+    let cfg = refresh_enabled_config(3600, 7200);
+    let signer = JwtSigner::from_key(&keys.primary).expect("signer");
+
+    let (_, name) = make_device(&pool, make_tenant(&pool).await).await;
+    let login_response = login(&pool, &keys, &cfg, &name).await;
+    let family_deadline = login_response
+        .refresh_token_expires_at
+        .expect("family deadline");
+
+    let renewed = identity_service::refresh_session(
+        &pool,
+        &cfg,
+        &signer,
+        login_response.entity_id,
+        login_response.session_id,
+    )
+    .await
+    .expect("legacy refresh_session");
+
+    let jwt_exp = jwt_exp(&renewed.access_token);
+    let diff_secs = (renewed.access_token_expires_at - jwt_exp)
+        .num_seconds()
+        .abs();
+    assert!(
+        diff_secs <= 2,
+        "access_token_expires_at ({}) must match the JWT's own exp claim ({jwt_exp})",
+        renewed.access_token_expires_at,
+    );
+    assert_eq!(
+        renewed.expires_at, renewed.access_token_expires_at,
+        "expires_at and access_token_expires_at must agree"
+    );
+    assert!(
+        renewed.access_token_expires_at < family_deadline - chrono::Duration::seconds(60),
+        "the reported JWT expiry ({}) must be far shorter than the family deadline \
+         ({family_deadline}) refresh_session_in_tx preserves internally",
+        renewed.access_token_expires_at,
+    );
 }
 
 #[tokio::test]
