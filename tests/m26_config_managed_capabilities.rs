@@ -257,13 +257,17 @@ async fn assignment_rule_bootstrap_stamps_managed_by_and_guards_delete() {
     );
 }
 
-/// Parity check: the demo bootstrap file's declared capability applicability
-/// must exactly match what the launch migration persists for those actions
-/// (issue #110, workstream C). Applying just the `capabilities:` section
-/// twice against a freshly migrated database proves both that a fresh
-/// database bootstraps cleanly and that a database which already carries the
-/// applicability (every database does, since migration 001 seeds it)
-/// reconciles idempotently, matching what `make up` does on every start.
+
+/// Compatibility check: the demo bootstrap file's declared capability
+/// applicability must be compatible with what the launch migration persists
+/// for those actions (issue #110, workstream C). Migration 001 seeds the
+/// `execute`/`api_endpoint` row directly and never removes it, so bootstrap
+/// must claim that pre-existing row rather than reject it as undeclared.
+/// Applying just the `capabilities:` section twice against a freshly
+/// migrated database proves both that a fresh database bootstraps cleanly
+/// and that a database which already carries the applicability (every
+/// database does, since migration 001 seeds it) reconciles idempotently,
+/// matching what `make up` does on every start.
 #[tokio::test]
 #[ignore]
 async fn demo_bootstrap_capability_applicability_matches_seeded_database_contract() {
