@@ -257,6 +257,7 @@ async fn assignment_rule_bootstrap_stamps_managed_by_and_guards_delete() {
     );
 }
 
+
 /// Compatibility check: the demo bootstrap file's declared capability
 /// applicability must be compatible with what the launch migration persists
 /// for those actions (issue #110, workstream C). Migration 001 seeds the
