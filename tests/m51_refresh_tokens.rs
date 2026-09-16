@@ -366,14 +366,8 @@ async fn concurrent_refresh_exchange_and_legacy_renewal_do_not_deadlock() {
                 login_response.session_id,
             ),
         );
-        assert!(
-            !matches!(&exchange, Err(e) if format!("{e:?}").to_lowercase().contains("deadlock")),
-            "refresh exchange hit a lock-order deadlock: {exchange:?}"
-        );
-        assert!(
-            !matches!(&renewal, Err(e) if format!("{e:?}").to_lowercase().contains("deadlock")),
-            "legacy renewal hit a lock-order deadlock: {renewal:?}"
-        );
+        exchange.expect("refresh exchange must succeed during concurrent legacy renewal");
+        renewal.expect("legacy renewal must succeed during concurrent refresh exchange");
     }
 }
 
