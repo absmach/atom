@@ -107,7 +107,7 @@ impl CredentialMutation {
 
         let result: std::result::Result<bool, AppError> = async {
             auth.reject_scoped_credential_management()?;
-            let mut tx = state.pool().begin().await.map_err(db_err)?;
+            let mut tx = state.begin().await.map_err(db_err)?;
             let credential_id = service::change_own_password_in_tx(
                 &mut tx,
                 auth.entity_id,
@@ -158,11 +158,7 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state
-            .pool()
-            .begin()
-            .await
-            .map_err(|e| gql_error(db_err(e)))?;
+        let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
         let credential_id = service::create_password_in_tx(&mut tx, entity_id, &password)
             .await
             .map_err(gql_error)?;
@@ -226,11 +222,7 @@ impl CredentialMutation {
             .into_iter()
             .map(permission_input_into_model)
             .collect::<Result<Vec<_>>>()?;
-        let mut tx = state
-            .pool()
-            .begin()
-            .await
-            .map_err(|e| gql_error(db_err(e)))?;
+        let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
         let response = service::create_access_token_in_tx(
             &mut tx,
             &state.config.signing_keys,
@@ -293,7 +285,7 @@ impl CredentialMutation {
             crate::cache::CacheCategory::CredentialCeiling,
             std::slice::from_ref(&crate::cache::keys::cred_ceiling(credential_id)),
             || async {
-                let mut tx = state.pool().begin().await.map_err(db_err)?;
+                let mut tx = state.begin().await.map_err(db_err)?;
                 service::replace_access_token_permissions_in_tx(
                     &mut tx,
                     owner_id,
@@ -340,7 +332,7 @@ impl CredentialMutation {
             crate::cache::CacheCategory::Credential,
             std::slice::from_ref(&crate::cache::keys::credential(credential_id)),
             || async {
-                let mut tx = state.pool().begin().await.map_err(db_err)?;
+                let mut tx = state.begin().await.map_err(db_err)?;
                 service::revoke_access_token_in_tx(&mut tx, owner_id, credential_id).await?;
                 audit::commit_with_audit(
                     state.pool(),
@@ -379,11 +371,7 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state
-            .pool()
-            .begin()
-            .await
-            .map_err(|e| gql_error(db_err(e)))?;
+        let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
         let response = service::create_shared_key_in_tx(
             &mut tx,
             &state.config.signing_keys,
@@ -484,7 +472,7 @@ impl CredentialMutation {
             crate::cache::CacheCategory::Credential,
             std::slice::from_ref(&crate::cache::keys::credential(credential_id)),
             || async {
-                let mut tx = state.pool().begin().await.map_err(db_err)?;
+                let mut tx = state.begin().await.map_err(db_err)?;
                 service::revoke_credential_in_tx(&mut tx, entity_id, credential_id).await?;
                 audit::commit_with_audit(
                     state.pool(),

@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db::{Database, DbTransaction};
+
 use crate::{
     error::{db_err, AppError},
     state::AppState,
@@ -158,10 +160,10 @@ pub async fn deliver_outbox_batch(
     publisher: &dyn EventPublisher,
     cfg: &crate::config::EventsConfig,
 ) -> Result<usize, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = Database::from(pool.clone()).begin().await.map_err(db_err)?;
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(EVENT_OUTBOX_ADVISORY_LOCK_ID)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     if !acquired {
@@ -188,7 +190,7 @@ pub async fn deliver_outbox_batch(
     )
     .bind(cfg.outbox_batch_size)
     .bind(cfg.outbox_max_attempts)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -281,7 +283,7 @@ pub async fn deliver_outbox_batch(
                         )
                         .bind(id)
                         .bind(&err.0)
-                        .execute(&mut *tx)
+                        .execute(tx.as_postgres_mut())
                         .await
                         .map_err(db_err)?;
                     }
@@ -291,7 +293,7 @@ pub async fn deliver_outbox_batch(
             if !delivered_ids.is_empty() {
                 sqlx::query("UPDATE event_outbox SET delivered_at = now() WHERE id = ANY($1)")
                     .bind(&delivered_ids)
-                    .execute(&mut *tx)
+                    .execute(tx.as_postgres_mut())
                     .await
                     .map_err(db_err)?;
             }
@@ -313,7 +315,7 @@ pub async fn deliver_outbox_batch(
             )
             .bind(&ids)
             .bind(&err.0)
-            .execute(&mut *tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
             tx.commit().await.map_err(db_err)?;
@@ -371,7 +373,7 @@ pub async fn cleanup_expired_outbox(
 /// — is observable; it's logged and counted here rather than silently
 /// happening.
 async fn record_unparseable_failure(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     ids: &[Uuid],
     error: &str,
     max_attempts: i32,
@@ -384,7 +386,7 @@ async fn record_unparseable_failure(
     )
     .bind(ids)
     .bind(error)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 

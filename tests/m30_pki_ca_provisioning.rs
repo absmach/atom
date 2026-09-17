@@ -153,7 +153,10 @@ fn test_root(common_name: &str, starts_in_days: i64, lasts_days: i64) -> TestRoo
 }
 
 async fn import_root(pool: &PgPool, pem: &str) {
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     provisioning::import_root_in_tx(&mut tx, pem).await.unwrap();
     tx.commit().await.unwrap();
 }

@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::{
     audit,
     auth::{require_capability, Scope},
+    db::DbTransaction,
     error::{db_err, AppError},
     graphql::{
         auth::{gql_error, require_auth},
@@ -61,7 +62,7 @@ impl AuthorityMutation {
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         let result = async {
             require_mutation_access(state, &auth, Scope::Tenant(tenant_id)).await?;
-            let mut tx = state.pool().begin().await.map_err(db_err)?;
+            let mut tx = state.begin().await.map_err(db_err)?;
             let mut outcome = provisioning::begin_tenant_authority_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
@@ -120,7 +121,7 @@ impl AuthorityMutation {
                 Scope::Platform,
             )
             .await?;
-            let mut tx = state.pool().begin().await.map_err(db_err)?;
+            let mut tx = state.begin().await.map_err(db_err)?;
             let mut mutation = provisioning::provision_tenant_automatically_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
@@ -202,7 +203,7 @@ impl AuthorityMutation {
             let existing = repo::authority_by_id(state.pool(), authority_id).await?;
             observed_tenant_id = existing.tenant_id;
             require_mutation_access(state, &auth, authority_scope(&existing)).await?;
-            let mut tx = state.pool().begin().await.map_err(db_err)?;
+            let mut tx = state.begin().await.map_err(db_err)?;
             let mut outcome = if complete {
                 provisioning::complete_retirement_mutation_in_tx(&mut tx, authority_id).await?
             } else {
@@ -436,7 +437,7 @@ fn scope_for_authority(tenant_id: Option<Uuid>) -> Scope {
 
 async fn commit_authority_event(
     state: &AppState,
-    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: DbTransaction<'_>,
     auth: &crate::auth::AuthContext,
     authority: &AuthorityRecord,
     event: &'static str,
@@ -463,7 +464,7 @@ async fn commit_authority_event(
 #[allow(clippy::too_many_arguments)]
 async fn commit_authority_mutation(
     state: &AppState,
-    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: DbTransaction<'_>,
     auth: &crate::auth::AuthContext,
     authority: &AuthorityRecord,
     changed: bool,

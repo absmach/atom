@@ -40,7 +40,10 @@ pub async fn create_api_endpoint_with_audit(
     validate_json_object("response_mapping", &req.response_mapping)?;
 
     let id = Uuid::new_v4();
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
         r#"INSERT INTO api_endpoints
            (id, tenant_id, key, name, description, method, path, operation_kind,
@@ -66,7 +69,7 @@ pub async fn create_api_endpoint_with_audit(
     .bind(json_object_or_default(req.response_mapping))
     .bind(status)
     .bind(actor_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(endpoint_db_err)?;
     crate::audit::commit_with_observation(
@@ -188,7 +191,10 @@ pub async fn update_api_endpoint_with_audit(
     let service_entity_id = req.service_entity_id.or(existing.service_entity_id);
     validate_auth_mode(&auth_mode, service_entity_id)?;
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET key               = COALESCE($2, key),
@@ -224,7 +230,7 @@ pub async fn update_api_endpoint_with_audit(
     .bind(req.response_mapping.map(json_object_or_default))
     .bind(req.status)
     .bind(actor_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("api endpoint {id} not found")),
@@ -389,7 +395,10 @@ async fn set_api_endpoint_status_with_audit(
     event: &str,
 ) -> Result<ApiEndpoint, AppError> {
     validate_status(status)?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET status = $2, updated_by = $3, updated_at = now()
@@ -399,7 +408,7 @@ async fn set_api_endpoint_status_with_audit(
     .bind(id)
     .bind(status)
     .bind(actor_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("api endpoint {id} not found")),

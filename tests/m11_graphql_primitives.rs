@@ -338,7 +338,10 @@ async fn change_own_password_rejects_config_managed_password() {
     .await
     .expect("insert managed password");
 
-    let mut tx = pool.begin().await.expect("begin transaction");
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .expect("begin transaction");
     let err = service::change_own_password_in_tx(
         &mut tx,
         entity_id,

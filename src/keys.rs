@@ -15,6 +15,7 @@ use crate::{
     auth::{require_capability, AuthContext, Scope},
     config::SigningKeyConfig,
     crypto,
+    db::{Database, DbTransaction},
     error::{db_err, AppError},
     state::AppState,
 };
@@ -375,7 +376,7 @@ pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Resul
 /// All three steps run in a single transaction.
 /// After the JWT TTL elapses, no outstanding tokens reference the retired key.
 pub async fn rotate(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<ActiveKeys, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = Database::from(pool.clone()).begin().await.map_err(db_err)?;
     let keys = rotate_in_tx(&mut tx, cfg).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(keys)
@@ -385,16 +386,16 @@ pub async fn rotate(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<ActiveKeys,
 /// its `signing_key.rotate` event into one transaction via
 /// [`crate::audit::commit_with_audit`].
 pub async fn rotate_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError> {
     sqlx::query("UPDATE signing_keys SET status = 'retired' WHERE status = 'standby'")
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
 
     sqlx::query("UPDATE signing_keys SET status = 'standby' WHERE status = 'primary'")
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
 
@@ -419,7 +420,7 @@ pub async fn rotate_in_tx(
     .bind(storage.nonce)
     .bind(storage.key_id)
     .bind(storage.encryption_alg)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -427,7 +428,7 @@ pub async fn rotate_in_tx(
 
     // Read inside the transaction: loading after the commit would let a
     // transient failure report an already-applied rotation as an error.
-    fetch_active_keys(&mut **tx, cfg).await
+    fetch_active_keys(tx.as_postgres_mut(), cfg).await
 }
 
 fn private_key_from_row(

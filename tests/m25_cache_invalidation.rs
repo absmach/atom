@@ -1383,7 +1383,10 @@ async fn concurrent_session_creation_cannot_evade_the_entity_delete_enumeration(
     let p = pool().await;
     let entity = active_entity(&p, "service").await;
 
-    let mut tx = p.begin().await.expect("begin tx");
+    let mut tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin tx");
     let (session_ids, credential_ids) =
         identity_repo::lock_entity_and_collect_revocation_ids_in_tx(&mut tx, entity)
             .await
@@ -1447,7 +1450,10 @@ async fn concurrent_session_creation_cannot_evade_the_tenant_delete_enumeration(
     let tenant_id = tenant(&p).await;
     let entity = active_entity_in_tenant(&p, tenant_id, "service").await;
 
-    let mut tx = p.begin().await.expect("begin tx");
+    let mut tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin tx");
     let session_ids = tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id)
         .await
         .expect("lock and enumerate");
@@ -1792,10 +1798,13 @@ async fn group_hierarchy_mutation_locks_tenant_before_advisory() {
     let parent = new_group_in_tenant(&p, tenant_id, "principal", "lock-order-parent").await;
     let child = new_group_in_tenant(&p, tenant_id, "principal", "lock-order-child").await;
 
-    let mut tenant_tx = p.begin().await.expect("begin tenant-locking tx");
+    let mut tenant_tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin tenant-locking tx");
     sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(&mut *tenant_tx)
+        .fetch_one(tenant_tx.as_postgres_mut())
         .await
         .expect("lock tenant");
 
@@ -1811,7 +1820,7 @@ async fn group_hierarchy_mutation_locks_tenant_before_advisory() {
     let advisory_available: bool = sqlx::query_scalar(
         "SELECT pg_try_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))",
     )
-    .fetch_one(&mut *tenant_tx)
+    .fetch_one(tenant_tx.as_postgres_mut())
     .await
     .expect("try hierarchy advisory lock");
     assert!(
@@ -1840,16 +1849,22 @@ async fn object_group_closure_preparation_locks_tenant_before_advisory() {
     let tenant_id = tenant(&p).await;
     let object_group = new_group_in_tenant(&p, tenant_id, "object", "object-lock-order").await;
 
-    let mut tenant_tx = p.begin().await.expect("begin tenant-locking tx");
+    let mut tenant_tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin tenant-locking tx");
     sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(&mut *tenant_tx)
+        .fetch_one(tenant_tx.as_postgres_mut())
         .await
         .expect("lock tenant");
 
     let p2 = p.clone();
     let handle = tokio::spawn(async move {
-        let mut mutation_tx = p2.begin().await.expect("begin closure-preparation tx");
+        let mut mutation_tx = atom::db::Database::from(p2.clone())
+            .begin()
+            .await
+            .expect("begin closure-preparation tx");
         authz_repo::lock_group_closures_and_collect_member_ids(&mut mutation_tx, &[object_group])
             .await
             .expect("prepare object-group closure");
@@ -1857,7 +1872,7 @@ async fn object_group_closure_preparation_locks_tenant_before_advisory() {
         // only after preparation had already acquired the advisory lock.
         sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
             .bind(tenant_id)
-            .fetch_one(&mut *mutation_tx)
+            .fetch_one(mutation_tx.as_postgres_mut())
             .await
             .expect("re-lock tenant in mutation body");
         mutation_tx.commit().await.expect("commit preparation tx");
@@ -1871,7 +1886,7 @@ async fn object_group_closure_preparation_locks_tenant_before_advisory() {
     let advisory_available: bool = sqlx::query_scalar(
         "SELECT pg_try_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))",
     )
-    .fetch_one(&mut *tenant_tx)
+    .fetch_one(tenant_tx.as_postgres_mut())
     .await
     .expect("try hierarchy advisory lock");
     assert!(
@@ -1899,16 +1914,22 @@ async fn group_closure_preparation_locks_object_rows_before_principal_rows() {
     let principal_group_id =
         new_group_in_tenant(&p, tenant_id, "principal", "principal-physical-lock").await;
 
-    let mut object_tx = p.begin().await.expect("begin object-locking tx");
+    let mut object_tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin object-locking tx");
     sqlx::query("SELECT id FROM object_groups WHERE id = $1 FOR UPDATE")
         .bind(object_group_id)
-        .fetch_one(&mut *object_tx)
+        .fetch_one(object_tx.as_postgres_mut())
         .await
         .expect("lock object-group row");
 
     let p2 = p.clone();
     let handle = tokio::spawn(async move {
-        let mut closure_tx = p2.begin().await.expect("begin closure tx");
+        let mut closure_tx = atom::db::Database::from(p2.clone())
+            .begin()
+            .await
+            .expect("begin closure tx");
         authz_repo::lock_group_closures_and_collect_member_ids(
             &mut closure_tx,
             &[principal_group_id, object_group_id],
@@ -1927,7 +1948,7 @@ async fn group_closure_preparation_locks_object_rows_before_principal_rows() {
         std::time::Duration::from_millis(500),
         sqlx::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
             .bind(principal_group_id)
-            .fetch_one(&mut *object_tx),
+            .fetch_one(object_tx.as_postgres_mut()),
     )
     .await
     .expect("principal row must remain unlocked while closure preparation waits for the object row")
@@ -1969,7 +1990,10 @@ async fn concurrent_group_membership_change_serializes_against_the_group_subject
     // Hold the lock a group-subject mutation resolver would (e.g.
     // `deleteDirectPolicy`'s) — the exact enumeration step, kept open (not
     // yet committed).
-    let mut tx = p.begin().await.expect("begin tx");
+    let mut tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin tx");
     let member_ids = authz_repo::lock_group_closures_and_collect_member_ids(&mut tx, &[group])
         .await
         .expect("lock and enumerate");
@@ -2028,10 +2052,13 @@ async fn cached_role_mutation_locks_tenant_before_role() {
     .await
     .expect("create tenant role");
 
-    let mut tx = p.begin().await.expect("begin tenant-locking tx");
+    let mut tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin tenant-locking tx");
     sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .expect("lock tenant");
 
@@ -2040,7 +2067,10 @@ async fn cached_role_mutation_locks_tenant_before_role() {
     let (prepared_sender, mut prepared_receiver) = tokio::sync::oneshot::channel();
     let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        let mut mutation_tx = p2.begin().await.expect("begin cached-preparation tx");
+        let mut mutation_tx = atom::db::Database::from(p2.clone())
+            .begin()
+            .await
+            .expect("begin cached-preparation tx");
         authz_repo::lock_role_and_collect_grants_keys(&mut mutation_tx, role_id)
             .await
             .expect("prepare cached role mutation");
@@ -2061,7 +2091,7 @@ async fn cached_role_mutation_locks_tenant_before_role() {
         std::time::Duration::from_millis(500),
         sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
             .bind(role_id)
-            .fetch_one(&mut *tx),
+            .fetch_one(tx.as_postgres_mut()),
     )
     .await
     .expect(
@@ -2148,10 +2178,13 @@ async fn create_role_assignment_for_group_subject_locks_the_role_before_the_grou
     // (`lock_role_and_collect_grants_keys`) holds at the point it's already
     // past its own first step, before it reaches for the assigned groups'
     // closures.
-    let mut tx = p.begin().await.expect("begin tx");
+    let mut tx = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin tx");
     sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
         .bind(role.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .expect("lock role");
 
@@ -2192,7 +2225,7 @@ async fn create_role_assignment_for_group_subject_locks_the_role_before_the_grou
         std::time::Duration::from_millis(500),
         sqlx::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
             .bind(descendant)
-            .fetch_one(&mut *tx),
+            .fetch_one(tx.as_postgres_mut()),
     )
     .await
     .expect(

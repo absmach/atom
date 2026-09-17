@@ -7,11 +7,16 @@
 //! disabled by default — see [`crate::config::PurgeConfig`].
 
 use chrono::{Duration, Utc};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    audit, config::PurgeConfig, error::AppError, models::enums::AuditOutcome, state::AppState,
+    audit,
+    config::PurgeConfig,
+    db::{Database, DbTransaction},
+    error::AppError,
+    models::enums::AuditOutcome,
+    state::AppState,
 };
 
 /// Simple object tables purged generically (one batch each). Entities (their
@@ -82,10 +87,10 @@ pub fn spawn_purge_cleanup(state: AppState) {
 /// dangling — the same cleanup the explicit purge mutations use.
 pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSummary, AppError> {
     let cutoff = Utc::now() - Duration::days(cfg.retention_days);
-    let mut tx = pool.begin().await?;
+    let mut tx = Database::from(pool.clone()).begin().await?;
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(PURGE_ADVISORY_LOCK_ID)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_postgres_mut())
         .await?;
 
     if !acquired {
@@ -115,12 +120,12 @@ pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSumma
              WHERE scope_kind = 'entity' AND scope_id = ANY($1)",
         )
         .bind(&entity_ids)
-        .execute(&mut *tx)
+        .execute(tx.as_postgres_mut())
         .await?;
         let credential_ids: Vec<Uuid> =
             sqlx::query_scalar("SELECT id FROM credentials WHERE entity_id = ANY($1)")
                 .bind(&entity_ids)
-                .fetch_all(&mut *tx)
+                .fetch_all(tx.as_postgres_mut())
                 .await?;
         deleted_rows += delete_by_ids(&mut tx, "entities", &entity_ids).await?;
         doomed_ids.extend(entity_ids);
@@ -152,7 +157,7 @@ pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSumma
 
 /// Locks and returns one bounded batch of tombstoned ids past the cutoff.
 async fn select_doomed(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     table: &str,
     cutoff: chrono::DateTime<Utc>,
     batch_size: i64,
@@ -168,12 +173,12 @@ async fn select_doomed(
     Ok(sqlx::query_scalar(&sql)
         .bind(cutoff)
         .bind(batch_size)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.as_postgres_mut())
         .await?)
 }
 
 async fn delete_by_ids(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     table: &str,
     ids: &[Uuid],
 ) -> Result<i64, AppError> {
@@ -181,7 +186,10 @@ async fn delete_by_ids(
         return Ok(0);
     }
     let sql = format!("DELETE FROM {table} WHERE id = ANY($1)");
-    let result = sqlx::query(&sql).bind(ids).execute(&mut **tx).await?;
+    let result = sqlx::query(&sql)
+        .bind(ids)
+        .execute(tx.as_postgres_mut())
+        .await?;
     Ok(i64::try_from(result.rows_affected()).unwrap_or(i64::MAX))
 }
 
@@ -189,7 +197,7 @@ async fn delete_by_ids(
 /// by their removal, returning the physically removed role ids so the caller can
 /// fold them into the canonical authz-reference cleanup.
 async fn purge_roles(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     cutoff: chrono::DateTime<Utc>,
     batch_size: i64,
 ) -> Result<Vec<Uuid>, AppError> {
@@ -204,12 +212,12 @@ async fn purge_roles(
            WHERE role_id = ANY($1)"#,
     )
     .bind(&role_ids)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await?;
 
     sqlx::query("DELETE FROM roles WHERE id = ANY($1)")
         .bind(&role_ids)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await?;
 
     if !candidate_block_ids.is_empty() {
@@ -226,7 +234,7 @@ async fn purge_roles(
                  )"#,
         )
         .bind(&candidate_block_ids)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await?;
     }
 

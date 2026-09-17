@@ -120,6 +120,14 @@ impl AppState {
         self.db.as_postgres()
     }
 
+    /// Opens a new top-level transaction through the façade, replacing the
+    /// old `state.pool().begin()` (which returned a bare `sqlx::Transaction`)
+    /// now that mutation call sites hand transactions to backend-neutral
+    /// commit helpers as [`crate::db::DbTransaction`].
+    pub async fn begin(&self) -> Result<crate::db::DbTransaction<'static>, sqlx::Error> {
+        self.db.begin().await
+    }
+
     pub async fn grpc_status(&self) -> GrpcRuntimeStatus {
         self.grpc_status.read().await.clone()
     }

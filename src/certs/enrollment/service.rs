@@ -11,6 +11,7 @@ use crate::{
         IssueGeneratedCertificateV2, OneTimePrivateKey, RenewCertificateV2, RenewalKeySource,
         ResolveCertificateV2,
     },
+    db::DbTransaction,
     error::AppError,
     models::enums::AuditOutcome,
     state::AppState,
@@ -102,7 +103,7 @@ async fn enroll_generated_inner(
 ) -> Result<GeneratedEnrollmentResponse, AppError> {
     enforce_rate_limits(state, subject).await?;
 
-    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
+    let mut tx = state.begin().await.map_err(AppError::Database)?;
     let mut issued = certificates::issue_generated_certificate_v2_in_tx(
         &mut tx,
         &state.config,
@@ -169,7 +170,7 @@ async fn enroll_inner(
 ) -> Result<EnrollmentResponse, AppError> {
     enforce_input_and_rate_limits(state, subject, &input).await?;
 
-    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
+    let mut tx = state.begin().await.map_err(AppError::Database)?;
     let issued = certificates::issue_certificate_from_csr_v2_in_tx(
         &mut tx,
         &state.config,
@@ -243,7 +244,7 @@ async fn re_enroll_inner(
     };
     enforce_input_and_rate_limits(state, subject, &input).await?;
 
-    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
+    let mut tx = state.begin().await.map_err(AppError::Database)?;
     let issued = certificates::renew_certificate_v2_in_tx(
         &mut tx,
         &state.config,
@@ -303,7 +304,7 @@ async fn enforce_input_and_rate_limits(
 }
 
 async fn enforce_rate_limits(state: &AppState, subject: Subject) -> Result<(), AppError> {
-    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
+    let mut tx = state.begin().await.map_err(AppError::Database)?;
     let entity = repo::consume_rate_limit(
         &mut tx,
         RateLimitScope::Entity,
@@ -344,7 +345,7 @@ async fn enforce_rate_limits(state: &AppState, subject: Subject) -> Result<(), A
 #[allow(clippy::too_many_arguments)]
 async fn commit_with_mode_audit(
     state: &AppState,
-    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: DbTransaction<'_>,
     subject: Subject,
     target_id: Uuid,
     replay: bool,

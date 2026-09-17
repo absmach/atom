@@ -245,7 +245,10 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .expect("PKCS#11 config")
         .module_path = "/definitely/missing/libpkcs11.so".to_string();
     let outage_tenant = common::pki::create_tenant(&pool, "pkcs11-outage").await;
-    let mut tx = pool.begin().await.expect("outage transaction");
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .expect("outage transaction");
     provisioning::provision_tenant_automatically_in_tx(&mut tx, &unavailable_keys, outage_tenant)
         .await
         .expect_err("provider outage");
@@ -265,7 +268,10 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
     // Rolling that outer transaction back must also remove the token objects;
     // otherwise retries would accumulate usable keys with no authority row.
     let rollback_tenant = common::pki::create_tenant(&pool, "pkcs11-rollback").await;
-    let mut tx = pool.begin().await.expect("rollback transaction");
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .expect("rollback transaction");
     let rolled_back = provisioning::provision_tenant_automatically_in_tx(
         &mut tx,
         &app_config.pki_ca_keys,
@@ -293,7 +299,10 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
     let rotated_tenant = common::pki::create_tenant(&pool, "encrypted-rotation").await;
     let mut rotated_keys = app_config.pki_ca_keys.clone();
     rotated_keys.provisioning_backend = PkiCaProvisioningBackend::EncryptedDatabase;
-    let mut tx = pool.begin().await.expect("rotation transaction");
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .expect("rotation transaction");
     let mut rotated =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &rotated_keys, rotated_tenant)
             .await
