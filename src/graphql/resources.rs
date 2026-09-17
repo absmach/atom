@@ -37,7 +37,7 @@ impl ResourceQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
 
-        authz_repo::authorized_resource_kinds(&state.pool, &auth, auth.entity_id, tenant_id)
+        authz_repo::authorized_resource_kinds(state.pool(), &auth, auth.entity_id, tenant_id)
             .await
             .map_err(gql_error)
     }
@@ -70,9 +70,9 @@ impl ResourceQuery {
         let include_descendants = include_descendants.unwrap_or(false);
 
         if deleted != DeletedFilter::Live {
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
+            require_any_capability(state.pool(), &auth, &[("manage", Scope::Platform)]).await?;
             let list = authz_repo::list_resources(
-                &state.pool,
+                state.pool(),
                 ListResources {
                     q,
                     kind: kind.clone(),
@@ -103,7 +103,7 @@ impl ResourceQuery {
             }
         });
         let authorized = authz_repo::authorized_object_ids(
-            &state.pool,
+            state.pool(),
             &auth,
             AuthorizedObjectIdsQuery {
                 subject_id: auth.entity_id,
@@ -130,7 +130,7 @@ impl ResourceQuery {
         )
         .await
         .map_err(gql_error)?;
-        let items = authz_repo::list_resources_by_ids(&state.pool, &authorized.ids)
+        let items = authz_repo::list_resources_by_ids(state.pool(), &authorized.ids)
             .await
             .map_err(gql_error)?;
 
@@ -144,13 +144,13 @@ impl ResourceQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let resource = authz_repo::get_resource(&state.pool, id)
+        let resource = authz_repo::get_resource(state.pool(), id)
             .await
             .map_err(gql_error)?;
         // Object read decision via the PDP. `manage` implies `read`, so the caller
         // may read the resource if they can read or manage it.
         if !engine::allows_any(
-            &state.pool,
+            state.pool(),
             &auth,
             auth.entity_id,
             "resource",
@@ -207,7 +207,7 @@ impl ResourceMutation {
 
         let result = async {
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", scope_for_tenant(tenant_id)),
@@ -217,7 +217,7 @@ impl ResourceMutation {
             .await?;
 
             authz_repo::create_resource_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 CreateResource {
@@ -236,7 +236,7 @@ impl ResourceMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -268,9 +268,9 @@ impl ResourceMutation {
         let details = serde_json::json!({ "updated_fields": updated_fields });
 
         let result = async {
-            let existing = authz_repo::get_resource(&state.pool, id).await?;
+            let existing = authz_repo::get_resource(state.pool(), id).await?;
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", crate::auth::Scope::Object(id)),
@@ -280,7 +280,7 @@ impl ResourceMutation {
             .await?;
 
             authz_repo::update_resource_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -297,7 +297,7 @@ impl ResourceMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -323,9 +323,9 @@ impl ResourceMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            let existing = authz_repo::get_resource(&state.pool, id).await?;
+            let existing = authz_repo::get_resource(state.pool(), id).await?;
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", crate::auth::Scope::Object(id)),
@@ -335,7 +335,7 @@ impl ResourceMutation {
             .await?;
 
             authz_repo::delete_resource_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -347,7 +347,7 @@ impl ResourceMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -375,10 +375,14 @@ impl ResourceMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            crate::auth::require_any_capability(
+                state.pool(),
+                &auth,
+                &[("manage", Scope::Platform)],
+            )
+            .await?;
             authz_repo::restore_resource_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -390,7 +394,7 @@ impl ResourceMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -418,10 +422,14 @@ impl ResourceMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            crate::auth::require_any_capability(
+                state.pool(),
+                &auth,
+                &[("manage", Scope::Platform)],
+            )
+            .await?;
             authz_repo::purge_resource_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -432,7 +440,7 @@ impl ResourceMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -458,9 +466,9 @@ impl ResourceMutation {
         let resource_id = parse_id(resource_id, "resourceId")?;
         let group_id = parse_id(object_group_id, "objectGroupId")?;
         let result = async {
-            let resource = authz_repo::get_resource(&state.pool, resource_id).await?;
+            let resource = authz_repo::get_resource(state.pool(), resource_id).await?;
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", crate::auth::Scope::Object(resource_id)),
@@ -472,7 +480,7 @@ impl ResourceMutation {
             )
             .await?;
             authz_repo::add_resource_to_object_group_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 resource_id,
@@ -491,7 +499,7 @@ impl ResourceMutation {
             };
             let details = serde_json::json!({ "group_id": group_id });
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -517,7 +525,7 @@ impl ResourceMutation {
         let result = async {
             require_resource_group_manage(state, &auth, resource_id).await?;
             authz_repo::remove_resource_from_object_group_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 resource_id,
@@ -536,7 +544,7 @@ impl ResourceMutation {
             };
             let details = serde_json::json!({ "group_id": group_id });
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -561,7 +569,7 @@ impl ResourceMutation {
         let result = async {
             require_resource_group_manage(state, &auth, resource_id).await?;
             authz_repo::clear_resource_object_groups_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 resource_id,
@@ -579,7 +587,7 @@ impl ResourceMutation {
             };
             let details = serde_json::json!({});
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -599,9 +607,9 @@ async fn require_resource_group_manage(
     auth: &crate::auth::AuthContext,
     resource_id: uuid::Uuid,
 ) -> std::result::Result<(), crate::error::AppError> {
-    let resource = authz_repo::get_resource(&state.pool, resource_id).await?;
+    let resource = authz_repo::get_resource(state.pool(), resource_id).await?;
     crate::auth::require_any_capability(
-        &state.pool,
+        state.pool(),
         auth,
         &[
             ("manage", crate::auth::Scope::Object(resource_id)),

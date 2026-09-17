@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    cache::CacheClient, callout::CalloutService, config::Config, events::publisher::EventPublisher,
-    keys::ActiveKeys, rate_limit::RateLimiter,
+    cache::CacheClient, callout::CalloutService, config::Config, db::Database,
+    events::publisher::EventPublisher, keys::ActiveKeys, rate_limit::RateLimiter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +51,11 @@ impl GrpcRuntimeStatus {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: sqlx::PgPool,
+    /// Backend-neutral database handle. Storage code that has not yet moved
+    /// onto `Database`/`DbTransaction` reaches the pool through
+    /// [`AppState::pool`] rather than this field directly, so a repository
+    /// migration to the façade never touches transport call sites.
+    pub db: Database,
     pub config: Config,
     pub keys: Arc<RwLock<ActiveKeys>>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -75,14 +79,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(
-        pool: sqlx::PgPool,
+        db: impl Into<Database>,
         config: Config,
         keys: ActiveKeys,
         cache: Option<CacheClient>,
     ) -> Self {
         let grpc_status = GrpcRuntimeStatus::starting(config.grpc_addr.clone());
         AppState {
-            pool,
+            db: db.into(),
             config,
             keys: Arc::new(RwLock::new(keys)),
             rate_limiter: Arc::new(RateLimiter::default()),
@@ -107,6 +111,13 @@ impl AppState {
     pub fn with_callouts(mut self, callouts: CalloutService) -> Self {
         self.callouts = callouts;
         self
+    }
+
+    /// Transitional accessor — see [`Database::as_postgres`]. Existing
+    /// storage code keeps calling `state.pool()` exactly as it called
+    /// `state.pool` before this field became the backend-neutral façade.
+    pub fn pool(&self) -> &sqlx::PgPool {
+        self.db.as_postgres()
     }
 
     pub async fn grpc_status(&self) -> GrpcRuntimeStatus {

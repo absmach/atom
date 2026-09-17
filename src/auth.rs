@@ -369,7 +369,7 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
         .map_err(|_| AppError::unauthorized("invalid tenant id in token"))?;
 
     let Some(cache) = &state.cache else {
-        let snapshot = load_session_entity_tenant(&state.pool, session_id, entity_id).await?;
+        let snapshot = load_session_entity_tenant(state.pool(), session_id, entity_id).await?;
         check_session_entity_tenant(&snapshot, entity_id, tenant_id)?;
         return Ok(jwt_auth_context(state, entity_id, session_id, &snapshot));
     };
@@ -430,7 +430,7 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
 
     // Any miss/dirty/unavailable key: fall back to the existing combined
     // query, unchanged, then best-effort populate whichever entries missed.
-    let snapshot = load_session_entity_tenant(&state.pool, session_id, entity_id).await?;
+    let snapshot = load_session_entity_tenant(state.pool(), session_id, entity_id).await?;
 
     if let Lookup::Miss { version, epoch } = session_lookup {
         let entry = SessionCacheEntry {
@@ -679,7 +679,7 @@ async fn finish_api_key_auth(
                     )
                     .bind(digest)
                     .bind(cred_id)
-                    .execute(&state.pool)
+                    .execute(state.pool())
                     .await
                     .map_err(AppError::Database)
                 },
@@ -706,7 +706,7 @@ async fn finish_api_key_auth(
              AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')"#,
     )
     .bind(cred_id)
-    .execute(&state.pool)
+    .execute(state.pool())
     .await
     {
         tracing::warn!(
@@ -724,7 +724,7 @@ async fn finish_api_key_auth(
             state.cache.as_deref(),
             CacheCategory::CredentialCeiling,
             &cache_keys::cred_ceiling(cred_id),
-            || crate::authz::repo::load_credential_ceiling(&state.pool, cred_id),
+            || crate::authz::repo::load_credential_ceiling(state.pool(), cred_id),
         )
         .await?;
         Some(std::sync::Arc::new(ceiling))
@@ -748,7 +748,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         parse_api_key(key).ok_or_else(|| AppError::unauthorized("malformed api key"))?;
 
     let Some(cache) = &state.cache else {
-        let row = load_credential_row(&state.pool, cred_id).await?;
+        let row = load_credential_row(state.pool(), cred_id).await?;
         return finish_api_key_auth(state, cred_id, &secret_bytes, &row).await;
     };
 
@@ -797,7 +797,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         // whichever entries missed — always keyed off `row`'s freshly
         // joined entity_id/tenant_id, mirroring the cold-start path exactly,
         // never off the credential entry's stale copy.
-        let row = load_credential_row(&state.pool, cred_id).await?;
+        let row = load_credential_row(state.pool(), cred_id).await?;
         // `entity_key` (and the version observed for it) came from
         // `cred_entry.entity_id`, which is the credential entry's own,
         // possibly stale copy; the payload below comes from `row`. Populate
@@ -846,7 +846,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     // Credential missed (or dirty/unavailable): one combined query loads
     // everything; populate the credential entry and, best-effort, the
     // entity/tenant entries too (each with its own freshly-observed version).
-    let row = load_credential_row(&state.pool, cred_id).await?;
+    let row = load_credential_row(state.pool(), cred_id).await?;
 
     if let Lookup::Miss { version, epoch } = credential_lookup {
         let entry = credential_cache_entry(&row);
@@ -1484,7 +1484,7 @@ where
         let app_state = AppState::from_ref(state);
         let auth = AuthContext::from_request_parts(parts, state).await?;
 
-        if !has_global_manage(&app_state.pool, &auth).await? {
+        if !has_global_manage(app_state.pool(), &auth).await? {
             return Err(AppError::Forbidden);
         }
 

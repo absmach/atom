@@ -106,7 +106,7 @@ async fn first_enrollment(
     let result = service::enroll(&state, auth.clone(), request.into()).await;
     if let Err(ref error) = result {
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
@@ -131,7 +131,7 @@ async fn re_enrollment(
     let result = service::re_enroll(&state, peer, request.into()).await;
     if let Err(ref error) = result {
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &audit::AuditMeta {
                 actor_entity_id: None,

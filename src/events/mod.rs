@@ -132,7 +132,7 @@ pub fn spawn_event_publisher(state: AppState) {
 
         loop {
             interval.tick().await;
-            match deliver_outbox_batch(&state.pool, publisher.as_ref(), &cfg).await {
+            match deliver_outbox_batch(state.pool(), publisher.as_ref(), &cfg).await {
                 Ok(delivered) if delivered > 0 => {
                     tracing::debug!(events.delivered = delivered, "event outbox batch delivered");
                 }

@@ -102,7 +102,7 @@ async fn enroll_generated_inner(
 ) -> Result<GeneratedEnrollmentResponse, AppError> {
     enforce_rate_limits(state, subject).await?;
 
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
     let mut issued = certificates::issue_generated_certificate_v2_in_tx(
         &mut tx,
         &state.config,
@@ -152,13 +152,13 @@ pub async fn csr_requirements(
     state: &AppState,
     auth: &AuthContext,
 ) -> Result<Vec<KeyAlgorithmRule>, AppError> {
-    let subject = profile::load_subject(&state.pool, auth.entity_id).await?;
+    let subject = profile::load_subject(state.pool(), auth.entity_id).await?;
     if subject.tenant_id() != auth.tenant_id {
         return Err(AppError::unauthorized(
             "authenticated subject scope does not match the stored entity",
         ));
     }
-    let profile = profile::resolve_for_subject(&state.pool, &subject, "client").await?;
+    let profile = profile::resolve_for_subject(state.pool(), &subject, "client").await?;
     Ok(profile.permitted_key_algorithms().to_vec())
 }
 
@@ -169,7 +169,7 @@ async fn enroll_inner(
 ) -> Result<EnrollmentResponse, AppError> {
     enforce_input_and_rate_limits(state, subject, &input).await?;
 
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
     let issued = certificates::issue_certificate_from_csr_v2_in_tx(
         &mut tx,
         &state.config,
@@ -226,7 +226,7 @@ async fn re_enroll_inner(
     input: EnrollmentInput,
 ) -> Result<EnrollmentResponse, AppError> {
     let identity = certificates::resolve_certificate_identity_v2(
-        &state.pool,
+        state.pool(),
         ResolveCertificateV2 {
             certificate_der: Some(peer.as_der().to_vec()),
             fingerprint_sha256: None,
@@ -243,7 +243,7 @@ async fn re_enroll_inner(
     };
     enforce_input_and_rate_limits(state, subject, &input).await?;
 
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
     let issued = certificates::renew_certificate_v2_in_tx(
         &mut tx,
         &state.config,
@@ -303,7 +303,7 @@ async fn enforce_input_and_rate_limits(
 }
 
 async fn enforce_rate_limits(state: &AppState, subject: Subject) -> Result<(), AppError> {
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
     let entity = repo::consume_rate_limit(
         &mut tx,
         RateLimitScope::Entity,
@@ -370,12 +370,16 @@ async fn commit_with_mode_audit(
         let commit = tx.commit().await.map_err(AppError::Database);
         certificates::record_lifecycle_commit(operation, &commit);
         commit?;
-        audit::write(&state.pool, false, audit_event).await;
+        audit::write(state.pool(), false, audit_event).await;
         Ok(())
     } else {
-        let commit =
-            audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &audit_event)
-                .await;
+        let commit = audit::commit_with_audit(
+            state.pool(),
+            tx,
+            state.config.events.enabled(),
+            &audit_event,
+        )
+        .await;
         certificates::record_lifecycle_commit(operation, &commit);
         commit
     }

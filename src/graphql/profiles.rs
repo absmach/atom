@@ -40,9 +40,9 @@ impl ProfileQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_list_access(&state.pool, &auth, tenant_id).await?;
+        require_list_access(state.pool(), &auth, tenant_id).await?;
         let list = profile_repo::list_profiles(
-            &state.pool,
+            state.pool(),
             ListProfiles {
                 tenant_id,
                 object_kind,
@@ -67,9 +67,9 @@ impl ProfileQuery {
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
         require_profile_target_access(
-            &state.pool,
+            state.pool(),
             &auth,
-            profile_tenant_target(&state.pool, id)
+            profile_tenant_target(state.pool(), id)
                 .await
                 .map_err(gql_error)?,
             id,
@@ -78,7 +78,7 @@ impl ProfileQuery {
         )
         .await
         .map_err(gql_error)?;
-        let profile = profile_repo::get_profile(&state.pool, id)
+        let profile = profile_repo::get_profile(state.pool(), id)
             .await
             .map_err(gql_error)?;
         Ok(profile.into())
@@ -93,9 +93,9 @@ impl ProfileQuery {
         let state = ctx.data::<AppState>()?;
         let profile_id = parse_id(profile_id, "profileId")?;
         require_profile_target_access(
-            &state.pool,
+            state.pool(),
             &auth,
-            profile_tenant_target(&state.pool, profile_id)
+            profile_tenant_target(state.pool(), profile_id)
                 .await
                 .map_err(gql_error)?,
             profile_id,
@@ -104,7 +104,7 @@ impl ProfileQuery {
         )
         .await
         .map_err(gql_error)?;
-        let versions = profile_repo::list_profile_versions(&state.pool, profile_id)
+        let versions = profile_repo::list_profile_versions(state.pool(), profile_id)
             .await
             .map_err(gql_error)?;
         Ok(versions.into_iter().map(ProfileVersion::from).collect())
@@ -126,7 +126,7 @@ impl ProfileMutation {
         let tenant_id = parse_optional_id(input.tenant_id, "tenantId")?;
         let result = async {
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", scope_for_tenant(tenant_id)),
@@ -135,7 +135,7 @@ impl ProfileMutation {
             )
             .await?;
             profile_repo::create_profile_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 CreateProfile {
@@ -154,7 +154,7 @@ impl ProfileMutation {
 
         if let Err(ref err) = result {
             crate::audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -181,13 +181,13 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let profile_id = parse_id(profile_id, "profileId")?;
-        let target = profile_tenant_target(&state.pool, profile_id)
+        let target = profile_tenant_target(state.pool(), profile_id)
             .await
             .map_err(gql_error)?;
         let tenant_id = target.flatten();
         let result = async {
             require_profile_target_access(
-                &state.pool,
+                state.pool(),
                 &auth,
                 target,
                 profile_id,
@@ -196,7 +196,7 @@ impl ProfileMutation {
             )
             .await?;
             profile_repo::create_profile_version_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 tenant_id,
@@ -214,7 +214,7 @@ impl ProfileMutation {
 
         if let Err(ref err) = result {
             crate::audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -241,7 +241,7 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let target = profile_tenant_target(&state.pool, id)
+        let target = profile_tenant_target(state.pool(), id)
             .await
             .map_err(gql_error)?;
         let tenant_id = target.flatten();
@@ -249,7 +249,7 @@ impl ProfileMutation {
 
         let result = async {
             require_profile_target_access(
-                &state.pool,
+                state.pool(),
                 &auth,
                 target,
                 id,
@@ -258,7 +258,7 @@ impl ProfileMutation {
             )
             .await?;
             profile_repo::update_profile_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -274,7 +274,7 @@ impl ProfileMutation {
 
         if let Err(ref err) = result {
             crate::audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -303,7 +303,7 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let target = profile_version_tenant_target(&state.pool, id)
+        let target = profile_version_tenant_target(state.pool(), id)
             .await
             .map_err(gql_error)?;
         let tenant_id = target.and_then(|(_, tenant_id)| tenant_id);
@@ -312,7 +312,7 @@ impl ProfileMutation {
 
         let result = async {
             require_profile_target_access(
-                &state.pool,
+                state.pool(),
                 &auth,
                 target.map(|(_, tenant_id)| tenant_id),
                 id,
@@ -321,7 +321,7 @@ impl ProfileMutation {
             )
             .await?;
             profile_repo::update_profile_version_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 tenant_id,
@@ -338,7 +338,7 @@ impl ProfileMutation {
 
         if let Err(ref err) = result {
             crate::audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
