@@ -476,7 +476,6 @@ impl std::io::Write for CapturedLogs {
 #[tokio::test]
 #[ignore]
 async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
-    use tracing::instrument::WithSubscriber;
     let (pool, schema) = fixture().await;
     let app = Uuid::new_v4();
     let data = Uuid::new_v4();
@@ -487,16 +486,20 @@ async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
         .with_max_level(tracing::Level::INFO)
         .with_writer(move || writer.clone())
         .finish();
+    // Other concurrent tests hit these tracing callsites too. A global
+    // subscriber avoids racing their cached interest with a scoped dispatcher.
+    tracing::subscriber::set_global_default(subscriber).expect("test subscriber");
     commit(
         &schema,
         json!([create(app, "entity"), create(data, "resource")]),
     )
-    .with_subscriber(subscriber)
     .await;
     let output = String::from_utf8(logs.0.lock().expect("log buffer").clone()).expect("UTF-8 logs");
-    for event in ["entity.create", "resource.create"] {
+    for (event, id) in [("entity.create", app), ("resource.create", data)] {
         assert!(
-            output.contains(event),
+            output
+                .lines()
+                .any(|line| line.contains(event) && line.contains(&id.to_string())),
             "missing observation {event}: {output}"
         );
     }

@@ -163,6 +163,15 @@ async fn assert_recovered(
     assert_eq!(std::fs::read_dir(&process.directory).unwrap().count(), 0);
 }
 
+async fn coordination_snapshot(database_url: &str, id: Uuid) -> Value {
+    let pool = sqlx::PgPool::connect(database_url).await.unwrap();
+    let value = sqlx::query_scalar::<_, Value>(
+        "SELECT jsonb_build_object('resource', to_jsonb(r), 'leases', (SELECT jsonb_agg(l) FROM object_leases l WHERE object_id=$1), 'replays', (SELECT jsonb_agg(q ORDER BY request_id) FROM object_change_requests q)) FROM resources r WHERE r.id=$1"
+    ).bind(id).fetch_one(&pool).await.unwrap();
+    pool.close().await;
+    value
+}
+
 #[tokio::test]
 #[ignore = "requires an empty disposable PostgreSQL database via DATABASE_URL"]
 async fn committed_state_survives_graceful_and_forced_process_replacement() {
@@ -203,6 +212,16 @@ async fn committed_state_survives_graceful_and_forced_process_replacement() {
     .await;
     let tenant_id = &data["createTenant"]["id"];
     assert!(tenant_id.is_string());
+    let object = Uuid::new_v4();
+    let request = Uuid::new_v4();
+    let replay_query = format!("mutation {{ commitObjectChanges(requestId: \"{request}\", changes: [{{objectKind: \"resource\", operation: \"create\", id: \"{object}\", kind: \"restart_test\", name: \"restart\", attributes: {{value: 1}}}}]) }}");
+    let replay = graph(&client, &first, token, replay_query.clone()).await;
+    let lease = graph(&client, &first, token, format!("mutation {{ acquireObjectLease(input: {{objectKind: \"resource\", objectId: \"{object}\", holderId: \"{}\", operation: \"replacement-test\", ttlSeconds: 300}}) }}", Uuid::new_v4())).await;
+    assert_eq!(lease["acquireObjectLease"]["fence"], 1);
+    let snapshot = coordination_snapshot(&database_url, object).await;
+    assert_eq!(snapshot["resource"]["revision"], 1);
+    assert_eq!(snapshot["leases"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["replays"].as_array().unwrap().len(), 1);
     first.graceful_stop().await;
     drop(first);
 
@@ -217,6 +236,11 @@ async fn committed_state_survives_graceful_and_forced_process_replacement() {
         &jwks,
     )
     .await;
+    assert_eq!(coordination_snapshot(&database_url, object).await, snapshot);
+    assert_eq!(
+        graph(&client, &second, token, replay_query.clone()).await,
+        replay
+    );
     second.child.kill().await.unwrap(); // SIGKILL: no graceful-shutdown code runs.
     drop(second);
 
@@ -231,5 +255,7 @@ async fn committed_state_survives_graceful_and_forced_process_replacement() {
         &jwks,
     )
     .await;
+    assert_eq!(coordination_snapshot(&database_url, object).await, snapshot);
+    assert_eq!(graph(&client, &third, token, replay_query).await, replay);
     third.graceful_stop().await;
 }
