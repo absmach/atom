@@ -175,6 +175,11 @@ async fn coordination_snapshot(database_url: &str, id: Uuid) -> Value {
 #[tokio::test]
 #[ignore = "requires an empty disposable PostgreSQL database via DATABASE_URL"]
 async fn committed_state_survives_graceful_and_forced_process_replacement() {
+    // Replaces live processes against one shared PostgreSQL database; a SQLite
+    // file admits a single owning process, so this scenario does not exist there.
+    if atom::db::testing::is_sqlite() {
+        return;
+    }
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL required");
     let client = Client::builder()
         .no_proxy()

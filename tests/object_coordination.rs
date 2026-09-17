@@ -5,21 +5,29 @@ use atom::{auth::AuthContext, config::Config, graphql::build_schema, keys, state
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-async fn fixture() -> (sqlx::PgPool, atom::graphql::AtomSchema) {
-    let pool = common::pool().await;
-    let schema = schema_for_pool(&pool).await;
-    (pool, schema)
+async fn fixture() -> (atom::db::Database, atom::graphql::AtomSchema) {
+    let db = common::pool().await;
+    let schema = schema_for_pool(&db).await;
+    (db, schema)
 }
 
-async fn schema_for_pool(pool: &sqlx::PgPool) -> atom::graphql::AtomSchema {
+/// For the tests that observe PostgreSQL lock waits directly
+/// (`pg_stat_activity`, `FOR UPDATE NOWAIT`). SQLite serializes writers at
+/// `BEGIN IMMEDIATE`, so there is no per-row wait to observe there.
+async fn pg_fixture() -> (sqlx::PgPool, atom::graphql::AtomSchema) {
+    let (db, schema) = fixture().await;
+    (db.as_postgres().clone(), schema)
+}
+
+async fn schema_for_pool(db: &atom::db::Database) -> atom::graphql::AtomSchema {
     let config = Config::for_tests();
-    keys::bootstrap_if_needed(pool, &config.signing_keys)
+    keys::bootstrap_if_needed(db, &config.signing_keys)
         .await
         .expect("keys");
-    let keys = keys::load_active_keys(pool, &config.signing_keys)
+    let keys = keys::load_active_keys(db, &config.signing_keys)
         .await
         .expect("active keys");
-    let mut state = AppState::new(pool.clone(), config, keys, None);
+    let mut state = AppState::new(db.clone(), config, keys, None);
     state.config.events.amqp_url = Some("amqp://test.invalid".into());
     build_schema(state)
 }
@@ -79,7 +87,7 @@ async fn batch_is_atomic_replayable_and_native_updates_advance_snapshot_revision
         .await;
     assert_eq!(conflict.errors[0].message, "REVISION_CONFLICT");
     assert!(
-        !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)")
+        !atom::db::query_scalar::<bool>("SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)")
             .bind(absent)
             .fetch_one(&pool)
             .await
@@ -92,7 +100,7 @@ async fn batch_is_atomic_replayable_and_native_updates_advance_snapshot_revision
         read.data.into_json().expect("JSON")["resource"]["revision"],
         2
     );
-    let audit_count: i64 = sqlx::query_scalar(
+    let audit_count: i64 = atom::db::query_scalar(
         "SELECT count(*) FROM audit_logs WHERE target_id=$1 AND event='entity.create'",
     )
     .bind(a)
@@ -153,11 +161,13 @@ async fn lease_expiry_fences_stale_workers_and_release_cannot_release_successor(
         ))
         .await;
     assert!(success.errors.is_empty(), "{:?}", success.errors);
-    sqlx::query("UPDATE object_leases SET expires_at=now()-interval '1 second' WHERE object_id=$1")
-        .bind(app)
-        .execute(&pool)
-        .await
-        .expect("expire without sleeping");
+    atom::db::query(
+        "UPDATE object_leases SET expires_at=now()-interval '1 second' WHERE object_id=$1",
+    )
+    .bind(app)
+    .execute(&pool)
+    .await
+    .expect("expire without sleeping");
     let successor = schema
         .execute(request(acquire, json!({"input":other_input})))
         .await;
@@ -188,7 +198,7 @@ async fn access_controls_and_config_management_apply_to_every_batch_target() {
     let id = Uuid::new_v4();
     commit(&schema, json!([create(id, "resource")])).await;
     let outsider = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities(id,kind,name) VALUES($1,'human',$2)")
+    atom::db::query("INSERT INTO entities(id,kind,name) VALUES($1,'human',$2)")
         .bind(outsider)
         .bind(format!("outsider-{outsider}"))
         .execute(&pool)
@@ -225,7 +235,7 @@ async fn access_controls_and_config_management_apply_to_every_batch_target() {
         )
         .await;
     assert_eq!(scoped.errors[0].message, "forbidden");
-    sqlx::query("UPDATE resources SET managed_by='config' WHERE id=$1")
+    atom::db::query("UPDATE resources SET managed_by='config' WHERE id=$1")
         .bind(id)
         .execute(&pool)
         .await
@@ -279,7 +289,7 @@ async fn named_fixture() -> (sqlx::PgPool, atom::graphql::AtomSchema, String) {
         .connect_with(options)
         .await
         .expect("named pool");
-    let schema = schema_for_pool(&pool).await;
+    let schema = schema_for_pool(&atom::db::Database::from(pool.clone())).await;
     (pool, schema, name)
 }
 
@@ -308,7 +318,10 @@ async fn wait_for_lock(pool: &sqlx::PgPool, name: &str, event: Option<&str>) {
 #[tokio::test]
 #[ignore]
 async fn alternate_uuid_guards_contend_on_the_canonical_lease_lock() {
-    let (pool, schema) = fixture().await;
+    if atom::db::testing::is_sqlite() {
+        return;
+    }
+    let (pool, schema) = pg_fixture().await;
     let app = Uuid::new_v4();
     let data = Uuid::new_v4();
     let holder = Uuid::new_v4();
@@ -362,7 +375,7 @@ async fn alternate_uuid_guards_contend_on_the_canonical_lease_lock() {
 }
 
 async fn concurrent_tenant_batches(create_only: bool) {
-    let (pool, schema) = fixture().await;
+    let (pool, schema) = pg_fixture().await;
     let mut tenants = [Uuid::new_v4(), Uuid::new_v4()];
     tenants.sort();
     for tenant in tenants {
@@ -451,12 +464,18 @@ async fn concurrent_tenant_batches(create_only: bool) {
 #[tokio::test]
 #[ignore]
 async fn disjoint_updates_lock_tenants_in_global_order() {
+    if atom::db::testing::is_sqlite() {
+        return;
+    }
     concurrent_tenant_batches(false).await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn creates_lock_tenants_in_global_order() {
+    if atom::db::testing::is_sqlite() {
+        return;
+    }
     concurrent_tenant_batches(true).await;
 }
 
@@ -523,12 +542,13 @@ async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
         ]),
     )
     .await;
-    let audits: Vec<String> =
-        sqlx::query_scalar("SELECT event FROM audit_logs WHERE target_id=ANY($1) ORDER BY event")
-            .bind(vec![app, data, absent])
-            .fetch_all(&pool)
-            .await
-            .expect("audits");
+    let audits: Vec<String> = atom::db::query_scalar(
+        "SELECT event FROM audit_logs WHERE target_id=ANY($1) ORDER BY event",
+    )
+    .bind(vec![app, data, absent])
+    .fetch_all(&pool)
+    .await
+    .expect("audits");
     assert_eq!(
         audits,
         [
@@ -538,7 +558,7 @@ async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
             "resource.update"
         ]
     );
-    let events: Vec<String> = sqlx::query_scalar(
+    let events: Vec<String> = atom::db::query_scalar(
         "SELECT event FROM event_outbox WHERE payload->>'target_id'=ANY($1) ORDER BY event",
     )
     .bind(vec![app.to_string(), data.to_string(), absent.to_string()])

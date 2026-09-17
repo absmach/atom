@@ -36,11 +36,11 @@ impl EntityQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let owner_id = parse_id(owner_id, "ownerId")?;
-        let owner = repo::get_entity(&state.pool, owner_id)
+        let owner = repo::get_entity(state.pool(), owner_id)
             .await
             .map_err(gql_error)?;
-        require_read_access(&state.pool, &auth, owner.tenant_id, owner_id).await?;
-        let entities = repo::list_owned(&state.pool, owner_id)
+        require_read_access(state.pool(), &auth, owner.tenant_id, owner_id).await?;
+        let entities = repo::list_owned(state.pool(), owner_id)
             .await
             .map_err(gql_error)?;
         Ok(entities.into_iter().map(Entity::from).collect())
@@ -50,14 +50,16 @@ impl EntityQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let entity = repo::get_entity(&state.pool, id).await.map_err(gql_error)?;
+        let entity = repo::get_entity(state.pool(), id)
+            .await
+            .map_err(gql_error)?;
         // Object read decision via the PDP. `manage` implies `read`, so the caller
         // may read the entity if they can read or manage it. The self-read
         // convenience is owner authority, so a scoped token still routes through
         // the ceiling-aware PDP rather than reading its own identity unconditionally.
         let allowed = (auth.entity_id == id && !auth.scoped)
             || engine::allows_any(
-                &state.pool,
+                state.pool(),
                 &auth,
                 auth.entity_id,
                 "entity",
@@ -106,9 +108,9 @@ impl EntityQuery {
         let offset = offset.map(i64::from).unwrap_or(0);
 
         if deleted != DeletedFilter::Live {
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
+            require_any_capability(state.pool(), &auth, &[("manage", Scope::Platform)]).await?;
             let list = repo::list_entities(
-                &state.pool,
+                state.pool(),
                 entity_model::ListEntities {
                     id,
                     q,
@@ -136,7 +138,7 @@ impl EntityQuery {
         }
 
         let authorized = authz_repo::authorized_object_ids(
-            &state.pool,
+            state.pool(),
             &auth,
             AuthorizedObjectIdsQuery {
                 subject_id: auth.entity_id,
@@ -163,7 +165,7 @@ impl EntityQuery {
         )
         .await
         .map_err(gql_error)?;
-        let items = repo::list_entities_by_ids(&state.pool, &authorized.ids)
+        let items = repo::list_entities_by_ids(state.pool(), &authorized.ids)
             .await
             .map_err(gql_error)?;
 
@@ -243,7 +245,7 @@ impl EntityMutation {
 
         let result = async {
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", scope_for_tenant(tenant_id)),
@@ -252,7 +254,7 @@ impl EntityMutation {
             )
             .await?;
             repo::create_entity_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 entity_model::CreateEntity {
@@ -273,7 +275,7 @@ impl EntityMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -319,7 +321,7 @@ impl EntityMutation {
         };
 
         let result = identity_service::update_entity_authorized(
-            &state.pool,
+            state.pool(),
             state.cache.as_deref(),
             state.config.events.enabled(),
             &auth,
@@ -331,7 +333,7 @@ impl EntityMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -357,7 +359,7 @@ impl EntityMutation {
         let details = serde_json::json!({});
 
         let result = identity_service::delete_entity_authorized(
-            &state.pool,
+            state.pool(),
             state.cache.as_deref(),
             state.config.events.enabled(),
             &auth,
@@ -367,7 +369,7 @@ impl EntityMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -398,8 +400,12 @@ impl EntityMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            crate::auth::require_any_capability(
+                state.pool(),
+                &auth,
+                &[("manage", Scope::Platform)],
+            )
+            .await?;
             // Separate function from `update_entity`/`change_entity_status`,
             // so it needs its own `entity_status` invalidation too.
             crate::cache::invalidate::guarded_mutation(
@@ -408,7 +414,7 @@ impl EntityMutation {
                 std::slice::from_ref(&crate::cache::keys::entity_status(id)),
                 || {
                     repo::restore_entity_with_audit(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         Some(auth.entity_id),
                         id,
@@ -422,7 +428,7 @@ impl EntityMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -450,10 +456,14 @@ impl EntityMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            crate::auth::require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)])
-                .await?;
+            crate::auth::require_any_capability(
+                state.pool(),
+                &auth,
+                &[("manage", Scope::Platform)],
+            )
+            .await?;
             repo::purge_entity_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -464,7 +474,7 @@ impl EntityMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -490,10 +500,10 @@ impl EntityMutation {
         let entity_id = parse_id(entity_id, "entityId")?;
         let group_id = parse_id(object_group_id, "objectGroupId")?;
         let result = async {
-            let entity = repo::get_entity(&state.pool, entity_id).await?;
-            let group = repo::get_group(&state.pool, group_id).await?;
+            let entity = repo::get_entity(state.pool(), entity_id).await?;
+            let group = repo::get_group(state.pool(), group_id).await?;
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", Scope::Object(entity_id)),
@@ -507,7 +517,7 @@ impl EntityMutation {
             )
             .await?;
             repo::add_entity_to_object_group_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 entity_id,
@@ -526,7 +536,7 @@ impl EntityMutation {
             };
             let details = serde_json::json!({ "group_id": group_id });
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -552,7 +562,7 @@ impl EntityMutation {
         let result = async {
             require_entity_group_manage(state, &auth, entity_id).await?;
             repo::remove_entity_from_object_group_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 entity_id,
@@ -571,7 +581,7 @@ impl EntityMutation {
             };
             let details = serde_json::json!({ "group_id": group_id });
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -592,7 +602,7 @@ impl EntityMutation {
         let result = async {
             require_entity_group_manage(state, &auth, entity_id).await?;
             repo::clear_entity_object_groups_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 entity_id,
@@ -610,7 +620,7 @@ impl EntityMutation {
             };
             let details = serde_json::json!({});
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -642,7 +652,7 @@ impl EntityMutation {
         let owned_id = parse_id(owned_id, "ownedId")?;
         require_ownership_manage(state, &auth, owner_id, owned_id).await?;
         let ownership = repo::create_ownership(
-            &state.pool,
+            state.pool(),
             owner_id,
             owned_id,
             relation.unwrap_or_else(|| "owner".to_string()),
@@ -663,7 +673,7 @@ impl EntityMutation {
         let owner_id = parse_id(owner_id, "ownerId")?;
         let owned_id = parse_id(owned_id, "ownedId")?;
         require_ownership_manage(state, &auth, owner_id, owned_id).await?;
-        repo::delete_ownership(&state.pool, owner_id, owned_id)
+        repo::delete_ownership(state.pool(), owner_id, owned_id)
             .await
             .map_err(gql_error)?;
         Ok(true)
@@ -684,9 +694,9 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
         event,
     };
     let result = async {
-        let existing = repo::get_entity(&state.pool, entity_id).await?;
+        let existing = repo::get_entity(state.pool(), entity_id).await?;
         crate::auth::require_any_capability(
-            &state.pool,
+            state.pool(),
             &auth,
             &[
                 ("manage", scope_for_tenant(existing.tenant_id)),
@@ -700,7 +710,7 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
             std::slice::from_ref(&crate::cache::keys::entity_status(entity_id)),
             || {
                 repo::update_entity_with_audit(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     Some(auth.entity_id),
                     entity_id,
@@ -725,7 +735,7 @@ async fn change_entity_status(ctx: &Context<'_>, id: ID, status: EntityStatus) -
     .await;
     if let Err(ref err) = result {
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &meta,
             &details,
@@ -742,14 +752,14 @@ async fn require_ownership_manage(
     owner_id: uuid::Uuid,
     owned_id: uuid::Uuid,
 ) -> Result<()> {
-    let owner = repo::get_entity(&state.pool, owner_id)
+    let owner = repo::get_entity(state.pool(), owner_id)
         .await
         .map_err(gql_error)?;
-    let owned = repo::get_entity(&state.pool, owned_id)
+    let owned = repo::get_entity(state.pool(), owned_id)
         .await
         .map_err(gql_error)?;
     require_any_capability(
-        &state.pool,
+        state.pool(),
         auth,
         &[
             ("manage", Scope::Object(owner_id)),
@@ -758,7 +768,7 @@ async fn require_ownership_manage(
     )
     .await?;
     require_any_capability(
-        &state.pool,
+        state.pool(),
         auth,
         &[
             ("manage", Scope::Object(owned_id)),
@@ -776,9 +786,9 @@ async fn require_entity_group_manage(
     auth: &AuthContext,
     entity_id: uuid::Uuid,
 ) -> std::result::Result<(), AppError> {
-    let entity = repo::get_entity(&state.pool, entity_id).await?;
+    let entity = repo::get_entity(state.pool(), entity_id).await?;
     crate::auth::require_any_capability(
-        &state.pool,
+        state.pool(),
         auth,
         &[
             ("manage", Scope::Object(entity_id)),

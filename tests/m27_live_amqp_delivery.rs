@@ -23,6 +23,7 @@
 mod common;
 
 use atom::config::EventsConfig;
+use atom::db::Database;
 use atom::events::deliver_outbox_batch;
 use atom::events::publisher::AmqpPublisher;
 use atom::events::DomainEventPayload;
@@ -31,15 +32,14 @@ use lapin::{
     types::FieldTable,
     Connection, ConnectionProperties,
 };
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn amqp_url() -> String {
     std::env::var("TEST_AMQP_URL").expect("TEST_AMQP_URL must be set to run this live test")
 }
 
-async fn insert_outbox_row(pool: &PgPool, payload: &DomainEventPayload) {
-    sqlx::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
+async fn insert_outbox_row(pool: &Database, payload: &DomainEventPayload) {
+    atom::db::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
         .bind(payload.event_id)
         .bind(&payload.event)
         .bind(serde_json::to_value(payload).expect("serialize payload"))
@@ -69,7 +69,7 @@ fn sample_payload(event: &str) -> DomainEventPayload {
 #[ignore]
 async fn a_published_event_is_actually_delivered_to_the_broker() {
     let pool = common::pool().await;
-    sqlx::query("TRUNCATE TABLE event_outbox")
+    atom::db::query("TRUNCATE TABLE event_outbox")
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -121,7 +121,7 @@ async fn a_published_event_is_actually_delivered_to_the_broker() {
     assert_eq!(delivered, 1, "the row must be delivered to the real broker");
 
     let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+        atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
             .bind(event_id)
             .fetch_one(&pool)
             .await
@@ -165,7 +165,7 @@ async fn a_published_event_is_actually_delivered_to_the_broker() {
 #[ignore]
 async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
     let pool = common::pool().await;
-    sqlx::query("TRUNCATE TABLE event_outbox")
+    atom::db::query("TRUNCATE TABLE event_outbox")
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -249,7 +249,7 @@ async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
 
     for payload in &payloads {
         let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-            sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+            atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
                 .bind(payload.event_id)
                 .fetch_one(&pool)
                 .await
@@ -272,7 +272,7 @@ async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
 #[ignore]
 async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
     let pool = common::pool().await;
-    sqlx::query("TRUNCATE TABLE event_outbox")
+    atom::db::query("TRUNCATE TABLE event_outbox")
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -305,7 +305,7 @@ async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
     );
 
     let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+        atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
             .bind(event_id)
             .fetch_one(&pool)
             .await
@@ -316,7 +316,7 @@ async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
     );
 
     let (attempts, last_error): (i32, Option<String>) =
-        sqlx::query_as("SELECT attempts, last_error FROM event_outbox WHERE id = $1")
+        atom::db::query_as("SELECT attempts, last_error FROM event_outbox WHERE id = $1")
             .bind(event_id)
             .fetch_one(&pool)
             .await
@@ -335,7 +335,7 @@ async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
 #[ignore]
 async fn publishing_to_a_custom_topic_exchange_declares_and_routes_correctly() {
     let pool = common::pool().await;
-    sqlx::query("TRUNCATE TABLE event_outbox")
+    atom::db::query("TRUNCATE TABLE event_outbox")
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -405,7 +405,7 @@ async fn publishing_to_a_custom_topic_exchange_declares_and_routes_correctly() {
     );
 
     let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
+        atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
             .bind(event_id)
             .fetch_one(&pool)
             .await

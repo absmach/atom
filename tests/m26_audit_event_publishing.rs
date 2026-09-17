@@ -14,6 +14,7 @@
 mod common;
 
 use async_graphql::Request;
+use atom::db::Database;
 use atom::{
     audit::{self, AuditEvent, AuditMeta},
     auth::AuthContext,
@@ -25,10 +26,9 @@ use atom::{
     state::AppState,
 };
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn state_with_events_enabled(pool: PgPool) -> AppState {
+async fn state_with_events_enabled(pool: Database) -> AppState {
     let mut config = Config::for_tests();
     // Enough to make `EventsConfig::enabled()` true so the observe path /
     // `write` enqueue outbox rows — the poller (which would actually dial this
@@ -37,12 +37,12 @@ async fn state_with_events_enabled(pool: PgPool) -> AppState {
     build_state(pool, config).await
 }
 
-async fn state_with_events_disabled(pool: PgPool) -> AppState {
+async fn state_with_events_disabled(pool: Database) -> AppState {
     build_state(pool, Config::for_tests()).await
 }
 
-async fn build_state(pool: PgPool, config: Config) -> AppState {
-    let _ = sqlx::query("TRUNCATE TABLE signing_keys CASCADE")
+async fn build_state(pool: Database, config: Config) -> AppState {
+    let _ = atom::db::query("TRUNCATE TABLE signing_keys CASCADE")
         .execute(&pool)
         .await;
     keys::bootstrap_if_needed(&pool, &config.signing_keys)
@@ -88,8 +88,8 @@ async fn create_resource_via_graphql(schema: &AtomSchema, name: &str) -> Uuid {
         .expect("resource id is a uuid")
 }
 
-async fn outbox_row_for(pool: &PgPool, event: &str, target_id: Uuid) -> Option<Value> {
-    sqlx::query_scalar::<_, Value>(
+async fn outbox_row_for(pool: &Database, event: &str, target_id: Uuid) -> Option<Value> {
+    atom::db::query_scalar::<Value>(
         "SELECT payload FROM event_outbox
          WHERE event = $1 AND (payload->>'target_id')::uuid = $2",
     )
@@ -115,7 +115,7 @@ async fn resource_create_produces_an_event_even_though_it_is_never_db_audited() 
 
     let resource_id = create_resource_via_graphql(&schema, &name).await;
 
-    let audited: Option<Uuid> = sqlx::query_scalar(
+    let audited: Option<Uuid> = atom::db::query_scalar(
         "SELECT target_id FROM audit_logs WHERE event = 'resource.create' AND target_id = $1",
     )
     .bind(resource_id)
@@ -165,7 +165,7 @@ async fn no_event_outbox_rows_are_written_when_events_are_not_configured() {
 async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
     let pool = common::pool().await;
     let action_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(action_id)
         .bind(format!("m26-applicability-{action_id}"))
         .execute(&pool)
@@ -193,7 +193,7 @@ async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
     .await
     .expect("replay action applicability add");
 
-    let event_count: i64 = sqlx::query_scalar(
+    let event_count: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*) FROM event_outbox
            WHERE event = 'action_applicability.add'
              AND (payload->>'target_id')::uuid = $1"#,
@@ -207,7 +207,7 @@ async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
         "an idempotent replay must not claim a second mutation occurred"
     );
 
-    sqlx::query("DELETE FROM actions WHERE id = $1")
+    atom::db::query("DELETE FROM actions WHERE id = $1")
         .bind(action_id)
         .execute(&pool)
         .await
@@ -222,48 +222,23 @@ async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
 /// the callers below capture their results and clean up before asserting. The
 /// sentinel event names are unique per test, so an installed trigger cannot
 /// affect any other test's rows even in the window it is live.
-async fn install_rejecting_trigger(pool: &PgPool, name: &str, table: &str, event: &str) {
-    sqlx::query(&format!(
-        r#"CREATE OR REPLACE FUNCTION {name}()
-           RETURNS trigger LANGUAGE plpgsql AS $$
-           BEGIN
-             IF NEW.event = '{event}' THEN
-               RAISE EXCEPTION 'forced {table} failure';
-             END IF;
-             RETURN NEW;
-           END;
-           $$"#
-    ))
-    .execute(pool)
-    .await
-    .expect("create rejection function");
-    sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON {table}"))
-        .execute(pool)
-        .await
-        .expect("drop stale rejection trigger");
-    sqlx::query(&format!(
-        r#"CREATE TRIGGER {name}
-           BEFORE INSERT ON {table}
-           FOR EACH ROW EXECUTE FUNCTION {name}()"#
-    ))
-    .execute(pool)
-    .await
-    .expect("create rejection trigger");
+async fn install_rejecting_trigger(pool: &Database, name: &str, table: &str, event: &str) {
+    atom::db::testing::install_rejecting_trigger(
+        pool,
+        name,
+        table,
+        &format!("NEW.event = '{event}'"),
+        &format!("forced {table} failure"),
+    )
+    .await;
 }
 
-async fn drop_rejecting_trigger(pool: &PgPool, name: &str, table: &str) {
-    sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON {table}"))
-        .execute(pool)
-        .await
-        .expect("drop rejection trigger");
-    sqlx::query(&format!("DROP FUNCTION IF EXISTS {name}()"))
-        .execute(pool)
-        .await
-        .expect("drop rejection function");
+async fn drop_rejecting_trigger(pool: &Database, name: &str, table: &str) {
+    atom::db::testing::drop_rejecting_trigger(pool, name, table).await;
 }
 
-async fn action_exists(pool: &PgPool, action_id: Uuid) -> bool {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
+async fn action_exists(pool: &Database, action_id: Uuid) -> bool {
+    atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
         .bind(action_id)
         .fetch_one(pool)
         .await
@@ -286,11 +261,11 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
 
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-atomic-{action_id}");
-    let mut tx = pool.begin().await.expect("begin transaction");
-    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+    let mut tx = pool.clone().begin().await.expect("begin transaction");
+    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(action_id)
         .bind(&action_name)
-        .execute(&mut *tx)
+        .execute(&mut tx)
         .await
         .expect("insert action in transaction");
     let result = audit::commit_with_observation(
@@ -309,7 +284,7 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
     let survived = action_exists(&pool, action_id).await;
 
     drop_rejecting_trigger(&pool, "m26_reject_atomic_test_event", "event_outbox").await;
-    sqlx::query("DELETE FROM actions WHERE id = $1")
+    atom::db::query("DELETE FROM actions WHERE id = $1")
         .bind(action_id)
         .execute(&pool)
         .await
@@ -341,11 +316,11 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
 
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-audit-{action_id}");
-    let mut tx = pool.begin().await.expect("begin transaction");
-    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+    let mut tx = pool.clone().begin().await.expect("begin transaction");
+    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(action_id)
         .bind(&action_name)
-        .execute(&mut *tx)
+        .execute(&mut tx)
         .await
         .expect("insert action in transaction");
     let result = audit::commit_with_audit(
@@ -366,7 +341,7 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
     let survived = action_exists(&pool, action_id).await;
 
     drop_rejecting_trigger(&pool, "m26_reject_audit_test_event", "audit_logs").await;
-    sqlx::query("DELETE FROM actions WHERE id = $1")
+    atom::db::query("DELETE FROM actions WHERE id = $1")
         .bind(action_id)
         .execute(&pool)
         .await
@@ -427,7 +402,7 @@ async fn failure_events_publish_even_when_the_tenant_and_actor_do_not_exist() {
     // The column copies must survive too — they are what the publisher and any
     // operator query filter on.
     let (row_tenant, row_actor): (Option<Uuid>, Option<Uuid>) =
-        sqlx::query_as("SELECT tenant_id, actor_entity_id FROM event_outbox WHERE event = $1")
+        atom::db::query_as("SELECT tenant_id, actor_entity_id FROM event_outbox WHERE event = $1")
             .bind(&event)
             .fetch_one(&pool)
             .await
@@ -435,7 +410,7 @@ async fn failure_events_publish_even_when_the_tenant_and_actor_do_not_exist() {
     assert_eq!(row_tenant, Some(missing_tenant));
     assert_eq!(row_actor, Some(missing_actor));
 
-    sqlx::query("DELETE FROM event_outbox WHERE event = $1")
+    atom::db::query("DELETE FROM event_outbox WHERE event = $1")
         .bind(&event)
         .execute(&pool)
         .await

@@ -19,7 +19,7 @@ use common::{admin_id, pool};
 use serde_json::json;
 use uuid::Uuid;
 
-async fn fresh_tenant(pool: &sqlx::PgPool) -> uuid::Uuid {
+async fn fresh_tenant(pool: &atom::db::Database) -> uuid::Uuid {
     let t = atom::tenants::repo::create_tenant(
         pool,
         CreateTenant {
@@ -36,7 +36,7 @@ async fn fresh_tenant(pool: &sqlx::PgPool) -> uuid::Uuid {
     t.id
 }
 
-async fn freeze_to(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, status: TenantStatus) {
+async fn freeze_to(pool: &atom::db::Database, tenant_id: uuid::Uuid, status: TenantStatus) {
     match status {
         TenantStatus::Active | TenantStatus::Inactive | TenantStatus::Frozen => {
             atom::tenants::repo::change_tenant_status(pool, tenant_id, status, None)
@@ -51,15 +51,17 @@ async fn freeze_to(pool: &sqlx::PgPool, tenant_id: uuid::Uuid, status: TenantSta
     }
 }
 
-async fn channel_in(pool: &sqlx::PgPool, tenant_id: uuid::Uuid) -> uuid::Uuid {
+async fn channel_in(pool: &atom::db::Database, tenant_id: uuid::Uuid) -> uuid::Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
-        .bind(id)
-        .bind(format!("m3-chan-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+    )
+    .bind(id)
+    .bind(format!("m3-chan-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
@@ -87,7 +89,7 @@ async fn inactive_tenant_denies_with_lifecycle_reason() {
     assert_eq!(details["tenant_status"], "inactive");
     assert_eq!(details["tenant_id"], serde_json::json!(t.to_string()));
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
         .bind(t)
         .execute(&p)
         .await;
@@ -115,7 +117,7 @@ async fn frozen_tenant_denies_with_lifecycle_reason() {
     assert_eq!(resp.reason, "tenant is frozen");
     assert_eq!(resp.details.unwrap()["tenant_status"], "frozen");
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
         .bind(t)
         .execute(&p)
         .await;
@@ -143,7 +145,7 @@ async fn deleted_tenant_denies_with_lifecycle_reason() {
     assert_eq!(resp.reason, "tenant is deleted");
     assert_eq!(resp.details.unwrap()["tenant_status"], "deleted");
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
         .bind(t)
         .execute(&p)
         .await;
@@ -173,11 +175,11 @@ async fn frozen_tenant_blocks_authz_on_objects_inside_it() {
     assert!(!resp.allowed);
     assert_eq!(resp.reason, "tenant is frozen");
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(chan)
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
         .bind(t)
         .execute(&p)
         .await;
@@ -195,7 +197,7 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
     // Sibling lifecycle-deny tests pass without this because tenant-frozen
     // deny short-circuits before applicability is checked; this platform test
     // has no tenant to short-circuit on.
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            SELECT id, 'resource', 'resource:channel'
              FROM actions WHERE name = 'publish'
@@ -206,7 +208,7 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
     .expect("seed publish applicability");
 
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
+    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
         .bind(id)
         .bind(format!("m3-platform-{id}"))
         .execute(&p)
@@ -230,7 +232,7 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
         resp.reason
     );
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(id)
         .execute(&p)
         .await;
@@ -258,7 +260,7 @@ async fn explain_surfaces_lifecycle_reason_too() {
     assert_eq!(resp.reason, "tenant is frozen");
     assert!(resp.matched_binding.is_none());
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
         .bind(t)
         .execute(&p)
         .await;

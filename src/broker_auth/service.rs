@@ -115,7 +115,7 @@ impl AuthService for BrokerAuth {
         // entity's own tenant comes back with it. That is what lets this work
         // with no configuration in a multi-tenant deployment.
         let result = identity_service::authenticate_credential_in_tenant(
-            &self.state.pool,
+            self.state.pool(),
             &self.state.config,
             &req.username,
             &req.password,
@@ -227,25 +227,25 @@ impl AuthService for BrokerAuth {
 
         // No ceiling: the broker is not acting under a scoped access token, and
         // the subject's own grants are the whole authority here.
-        let decision = match engine::evaluate_with_ceiling(&self.state.pool, &authz_req, None).await
-        {
-            Ok(decision) => decision,
-            Err(err) if is_decision(&err) => {
-                return Ok(Response::new(authz_denied(err.to_string())))
-            }
-            Err(err) => {
-                tracing::error!(subject_id = %subject_id, topic = %req.topic, error = %err,
+        let decision =
+            match engine::evaluate_with_ceiling(self.state.pool(), &authz_req, None).await {
+                Ok(decision) => decision,
+                Err(err) if is_decision(&err) => {
+                    return Ok(Response::new(authz_denied(err.to_string())))
+                }
+                Err(err) => {
+                    tracing::error!(subject_id = %subject_id, topic = %req.topic, error = %err,
                     "broker authorize: evaluation failed");
-                return Err(Status::from(err));
-            }
-        };
+                    return Err(Status::from(err));
+                }
+            };
 
         let tenant_id = matched
             .tenant
             .as_deref()
             .and_then(|tenant| Uuid::parse_str(tenant).ok());
         audit::write_hot_path(
-            &self.state.pool,
+            self.state.pool(),
             self.state.config.audit_policy,
             self.state.config.events.enabled(),
             audit::HotPathAuditKind::AuthzCheck,
@@ -305,7 +305,7 @@ impl BrokerAuth {
                     // not to a hardcoded equality test here.
                     Some(alias) => (None, Some(alias), false),
                     None => {
-                        match certs::repo::entity_tenant_id(&self.state.pool, subject_id).await? {
+                        match certs::repo::entity_tenant_id(self.state.pool(), subject_id).await? {
                             Some(tenant_id) => (Some(tenant_id), None, false),
                             // A tenantless subject addresses tenantless objects.
                             None => (None, None, true),
@@ -314,7 +314,7 @@ impl BrokerAuth {
                 };
 
                 let resolved = repo::resolve_alias(
-                    &self.state.pool,
+                    self.state.pool(),
                     tenant_id,
                     tenant_alias,
                     global,

@@ -19,8 +19,8 @@ use atom::{
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-async fn seeded_client_profile(pool: &sqlx::PgPool) -> Uuid {
-    sqlx::query_scalar(
+async fn seeded_client_profile(pool: &atom::db::Database) -> Uuid {
+    atom::db::query_scalar(
         "SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL",
     )
     .fetch_one(pool)
@@ -28,7 +28,7 @@ async fn seeded_client_profile(pool: &sqlx::PgPool) -> Uuid {
     .expect("seeded client profile")
 }
 
-async fn profile_with_schema(pool: &sqlx::PgPool, json_schema: Value) -> Uuid {
+async fn profile_with_schema(pool: &atom::db::Database, json_schema: Value) -> Uuid {
     let suffix = Uuid::new_v4();
     let profile = profile_repo::create_profile(
         pool,

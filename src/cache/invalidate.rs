@@ -11,10 +11,11 @@
 
 use std::{future::Future, pin::Pin};
 
-use sqlx::{PgPool, Postgres, Transaction};
-
 use super::{CacheCategory, CacheClient, CacheLease};
-use crate::error::{db_err, AppError};
+use crate::{
+    db::{Database, DbTransaction},
+    error::{db_err, AppError},
+};
 
 /// A boxed future borrowing the transaction it runs on — what
 /// [`guarded_tx_mutation`]'s closures return. Stable Rust has no async
@@ -71,17 +72,17 @@ where
 pub async fn guarded_tx_mutation<T, K, M, S>(
     cache: &CacheClient,
     category: CacheCategory,
-    pool: &PgPool,
+    db: &Database,
     collect_keys: K,
     mutate: M,
     on_success: S,
 ) -> Result<T, AppError>
 where
-    K: for<'a> FnOnce(&'a mut Transaction<'static, Postgres>) -> TxFuture<'a, Vec<String>>,
-    M: for<'a> FnOnce(&'a mut Transaction<'static, Postgres>) -> TxFuture<'a, T>,
+    K: for<'a> FnOnce(&'a mut DbTransaction<'static>) -> TxFuture<'a, Vec<String>>,
+    M: for<'a> FnOnce(&'a mut DbTransaction<'static>) -> TxFuture<'a, T>,
     S: FnOnce(&T),
 {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = db.begin().await.map_err(db_err)?;
     let keys = collect_keys(&mut tx).await?;
     let lease = cache.begin(category, &keys).await?;
     let outcome = mutate(&mut tx).await;

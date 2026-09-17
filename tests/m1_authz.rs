@@ -17,16 +17,16 @@ use common::{admin_id, pool};
 use serde_json::json;
 use uuid::Uuid;
 
-async fn read_capability_id(pool: &sqlx::PgPool) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+async fn read_capability_id(pool: &atom::db::Database) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
         .fetch_one(pool)
         .await
         .expect("read cap")
 }
 
-async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("m1-tenant-{id}"))
         .execute(pool)
@@ -35,9 +35,9 @@ async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
     id
 }
 
-async fn make_resource(pool: &sqlx::PgPool, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
+async fn make_resource(pool: &atom::db::Database, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
+    atom::db::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
         .bind(id)
         .bind(kind)
         .bind(format!("m1-res-{id}"))
@@ -48,9 +48,13 @@ async fn make_resource(pool: &sqlx::PgPool, tenant_id: Option<Uuid>, kind: &str)
     id
 }
 
-async fn make_active_entity(pool: &sqlx::PgPool, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
+async fn make_active_entity(
+    pool: &atom::db::Database,
+    tenant_id: Option<Uuid>,
+    kind: &str,
+) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')")
+    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')")
         .bind(id)
         .bind(kind)
         .bind(format!("m1-ent-{id}"))
@@ -84,7 +88,7 @@ async fn admin_platform_binding_authorises() {
         resp.reason
     );
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(resource_id)
         .execute(&p)
         .await;
@@ -151,15 +155,15 @@ async fn object_type_binding_matches_namespaced_resource_subkind() {
     );
 
     // Cleanup
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
         .bind(&[channel_id, other_id][..])
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
         .bind(entity_id)
         .execute(&p)
         .await;
@@ -221,15 +225,15 @@ async fn object_binding_matches_specific_resource_uuid() {
             .allowed
     );
 
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
         .bind(&[resource_id, other_id][..])
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
         .bind(entity_id)
         .execute(&p)
         .await;
@@ -281,15 +285,15 @@ async fn object_kind_binding_matches_every_resource_kind() {
         );
     }
 
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
         .bind(&[chan, cfg][..])
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
         .bind(entity_id)
         .execute(&p)
         .await;

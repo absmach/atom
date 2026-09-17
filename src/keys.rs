@@ -8,13 +8,13 @@ use p256::{
 };
 use rand::rngs::OsRng;
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
     auth::{require_capability, AuthContext, Scope},
     config::SigningKeyConfig,
     crypto,
+    db::{Database, DbTransaction},
     error::{db_err, AppError},
     state::AppState,
 };
@@ -261,7 +261,7 @@ fn kek(cfg: &SigningKeyConfig) -> Result<&[u8], AppError> {
 
 /// Load primary and standby keys from the database into memory.
 pub async fn load_active_keys(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError> {
     fetch_active_keys(pool, cfg).await
@@ -274,11 +274,9 @@ async fn fetch_active_keys<'e, E>(
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    use sqlx::Row;
-
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT kid,
                   public_key,
                   private_key,
@@ -327,11 +325,11 @@ where
 }
 
 /// On first boot, generate the initial primary key if none exists.
-pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<(), AppError> {
+pub async fn bootstrap_if_needed(pool: &Database, cfg: &SigningKeyConfig) -> Result<(), AppError> {
     encrypt_legacy_plaintext_keys(pool, cfg).await?;
 
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM signing_keys WHERE status = 'primary'")
+        crate::db::query_scalar("SELECT COUNT(*) FROM signing_keys WHERE status = 'primary'")
             .fetch_one(pool)
             .await
             .map_err(db_err)?;
@@ -339,7 +337,7 @@ pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Resul
     if count == 0 {
         let (kid, public_pem, private_pem) = generate_key_pair()?;
         let storage = storage_values_for_private_key(cfg, &kid, private_pem)?;
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO signing_keys (
                    kid,
                    public_key,
@@ -374,7 +372,7 @@ pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Resul
 ///
 /// All three steps run in a single transaction.
 /// After the JWT TTL elapses, no outstanding tokens reference the retired key.
-pub async fn rotate(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<ActiveKeys, AppError> {
+pub async fn rotate(pool: &Database, cfg: &SigningKeyConfig) -> Result<ActiveKeys, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let keys = rotate_in_tx(&mut tx, cfg).await?;
     tx.commit().await.map_err(db_err)?;
@@ -385,22 +383,22 @@ pub async fn rotate(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<ActiveKeys,
 /// its `signing_key.rotate` event into one transaction via
 /// [`crate::audit::commit_with_audit`].
 pub async fn rotate_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError> {
-    sqlx::query("UPDATE signing_keys SET status = 'retired' WHERE status = 'standby'")
-        .execute(&mut **tx)
+    crate::db::query("UPDATE signing_keys SET status = 'retired' WHERE status = 'standby'")
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
-    sqlx::query("UPDATE signing_keys SET status = 'standby' WHERE status = 'primary'")
-        .execute(&mut **tx)
+    crate::db::query("UPDATE signing_keys SET status = 'standby' WHERE status = 'primary'")
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
     let (kid, public_pem, private_pem) = generate_key_pair()?;
     let storage = storage_values_for_private_key(cfg, &kid, private_pem)?;
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO signing_keys (
                kid,
                public_key,
@@ -419,7 +417,7 @@ pub async fn rotate_in_tx(
     .bind(storage.nonce)
     .bind(storage.key_id)
     .bind(storage.encryption_alg)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -427,7 +425,7 @@ pub async fn rotate_in_tx(
 
     // Read inside the transaction: loading after the commit would let a
     // transient failure report an already-applied rotation as an error.
-    fetch_active_keys(&mut **tx, cfg).await
+    fetch_active_keys(tx, cfg).await
 }
 
 fn private_key_from_row(
@@ -484,16 +482,14 @@ fn private_key_from_row(
 }
 
 pub async fn encrypt_legacy_plaintext_keys(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &SigningKeyConfig,
 ) -> Result<u64, AppError> {
-    use sqlx::Row;
-
     if cfg.key_encryption_key.is_none() {
         return Ok(0);
     }
 
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT kid, private_key
            FROM signing_keys
            WHERE private_key IS NOT NULL
@@ -508,7 +504,7 @@ pub async fn encrypt_legacy_plaintext_keys(
         let kid: String = row.try_get("kid").map_err(db_err)?;
         let private_pem: String = row.try_get("private_key").map_err(db_err)?;
         let material = encrypt_private_key(cfg, &kid, &private_pem)?;
-        sqlx::query(
+        crate::db::query(
             r#"UPDATE signing_keys
                SET private_key = NULL,
                    private_key_ciphertext = $2,
@@ -534,10 +530,8 @@ pub async fn encrypt_legacy_plaintext_keys(
     Ok(encrypted)
 }
 
-pub async fn list_metadata(pool: &PgPool) -> Result<Vec<SigningKeyMetadata>, AppError> {
-    use sqlx::Row;
-
-    let rows = sqlx::query(
+pub async fn list_metadata(pool: &Database) -> Result<Vec<SigningKeyMetadata>, AppError> {
+    let rows = crate::db::query(
         r#"SELECT kid,
                   algorithm,
                   status,
@@ -577,10 +571,8 @@ pub async fn list_metadata(pool: &PgPool) -> Result<Vec<SigningKeyMetadata>, App
         .collect()
 }
 
-pub async fn storage_summary(pool: &PgPool) -> Result<SigningKeyStorageSummary, AppError> {
-    use sqlx::Row;
-
-    let row = sqlx::query(
+pub async fn storage_summary(pool: &Database) -> Result<SigningKeyStorageSummary, AppError> {
+    let row = crate::db::query(
         r#"SELECT COUNT(*)::bigint AS total,
                   COUNT(*) FILTER (WHERE private_key_ciphertext IS NOT NULL)::bigint AS encrypted,
                   COUNT(*) FILTER (WHERE private_key IS NOT NULL)::bigint AS plaintext
@@ -610,8 +602,8 @@ pub async fn rotate_keys(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<impl IntoResponse, AppError> {
-    require_capability(&state.pool, &auth, "rotate", Scope::Platform).await?;
-    let new_keys = rotate(&state.pool, &state.config.signing_keys).await?;
+    require_capability(state.pool(), &auth, "rotate", Scope::Platform).await?;
+    let new_keys = rotate(state.pool(), &state.config.signing_keys).await?;
     *state.keys.write().await = new_keys;
     Ok(StatusCode::NO_CONTENT)
 }

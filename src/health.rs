@@ -169,8 +169,8 @@ fn readiness_ok(
 }
 
 async fn database_check(state: &AppState) -> ComponentCheck {
-    match sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.pool)
+    match crate::db::query_scalar::<i32>("SELECT 1")
+        .fetch_one(state.pool())
         .await
     {
         Ok(_) => ComponentCheck {
@@ -185,9 +185,11 @@ async fn database_check(state: &AppState) -> ComponentCheck {
 }
 
 async fn migrations_check(state: &AppState) -> ComponentCheck {
-    match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE")
-        .fetch_one(&state.pool)
-        .await
+    match crate::db::query_scalar::<i64>(
+        "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE",
+    )
+    .fetch_one(state.pool())
+    .await
     {
         Ok(count) if count > 0 => ComponentCheck {
             status: ComponentStatus::Ok,
@@ -217,7 +219,7 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
     }
     drop(loaded);
 
-    match keys::storage_summary(&state.pool).await {
+    match keys::storage_summary(state.pool()).await {
         Ok(summary) => {
             let plaintext_allowed = state.config.signing_keys.allow_plaintext_signing_keys;
             let status = if summary.plaintext > 0 && !plaintext_allowed {
@@ -256,7 +258,7 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
 /// repeatedly by load balancers, so it must never open a PKCS#11 session or
 /// affect the HSM provider's circuit breaker.
 async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
-    match authority_repo::leaf_issuer_readiness(&state.pool).await {
+    match authority_repo::leaf_issuer_readiness(state.pool()).await {
         Ok(readiness) if readiness.active_count == 0 => ComponentCheck {
             status: ComponentStatus::Disabled,
             message: "no active certificate issuers".to_string(),
@@ -419,27 +421,27 @@ async fn grpc_check(state: &AppState) -> ComponentCheck {
 
 fn db_pool_status(state: &AppState) -> DbPoolStatus {
     DbPoolStatus {
-        max_connections: state.config.db_pool.max_connections,
+        max_connections: state.pool().max_connections(),
         min_connections: state.config.db_pool.min_connections,
         acquire_timeout_secs: state.config.db_pool.acquire_timeout_secs,
         connect_timeout_secs: state.config.db_pool.connect_timeout_secs,
         idle_timeout_secs: state.config.db_pool.idle_timeout_secs,
         max_lifetime_secs: state.config.db_pool.max_lifetime_secs,
-        size: state.pool.size(),
-        idle: state.pool.num_idle(),
+        size: state.pool().size(),
+        idle: state.pool().num_idle(),
     }
 }
 
 async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
     let cfg = state.config.audit_retention;
-    let last_cleanup = sqlx::query_scalar::<_, serde_json::Value>(
+    let last_cleanup = crate::db::query_scalar::<serde_json::Value>(
         r#"SELECT details
            FROM audit_logs
            WHERE event = 'audit.retention_cleanup'
            ORDER BY created_at DESC
            LIMIT 1"#,
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(state.pool())
     .await
     .ok()
     .flatten();

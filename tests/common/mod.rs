@@ -18,22 +18,12 @@
 
 pub mod pki;
 
-use atom::{cache::CacheClient, config::CacheConfig};
-use sqlx::PgPool;
+use atom::{cache::CacheClient, config::CacheConfig, db::Database};
 
-/// Connect to the test database and run all migrations.
-pub async fn pool() -> PgPool {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB-gated tests");
-    let pool = PgPool::connect(&url)
-        .await
-        .expect("connect to test database");
-    sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
-        .await
-        .expect("load migrations")
-        .run(&pool)
-        .await
-        .expect("apply migrations");
-    pool
+/// Connect to the test database and run all migrations; see
+/// [`atom::db::testing::database`].
+pub async fn pool() -> Database {
+    atom::db::testing::database().await
 }
 
 /// Connect to the test Redis with `CacheConfig::default`'s production TTLs,

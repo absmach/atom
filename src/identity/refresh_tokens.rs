@@ -5,12 +5,12 @@
 
 use chrono::{DateTime, Utc};
 use rand::RngCore;
-use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
     config::SigningKeyConfig,
     crypto,
+    db::{Database, DbTransaction},
     error::{db_err, AppError},
 };
 
@@ -34,22 +34,22 @@ pub(crate) fn new_secret(signing_keys: &SigningKeyConfig) -> Result<([u8; 32], V
 /// caller's transaction. Returns the plaintext token — never persisted,
 /// shown only here.
 pub async fn create_refresh_token_family_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     signing_keys: &SigningKeyConfig,
     session_id: Uuid,
     family_expires_at: DateTime<Utc>,
 ) -> Result<String, AppError> {
     let (secret, digest) = new_secret(signing_keys)?;
     let token_id = Uuid::new_v4();
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO refresh_tokens (id, session_id, secret_hash, family_expires_at)
            VALUES ($1, $2, $3, $4)"#,
     )
     .bind(token_id)
     .bind(session_id)
-    .bind(&digest)
+    .bind(digest.as_slice())
     .bind(family_expires_at)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(crate::auth::make_refresh_token(token_id, &secret))
@@ -90,10 +90,10 @@ pub(crate) struct RefreshTokenOwner {
 }
 
 pub(crate) async fn lookup_refresh_token_owner(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     token_id: Uuid,
 ) -> Result<Option<RefreshTokenOwner>, AppError> {
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT rt.session_id, s.entity_id, e.tenant_id
            FROM refresh_tokens rt
            JOIN sessions s ON s.id = rt.session_id
@@ -101,7 +101,7 @@ pub(crate) async fn lookup_refresh_token_owner(
            WHERE rt.id = $1"#,
     )
     .bind(token_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -125,10 +125,10 @@ pub(crate) async fn lookup_refresh_token_owner(
 /// *before* calling this — it locks the session row, and locking it first
 /// inverts the lock order against `refresh_session` and entity deletion.
 pub(crate) async fn lock_refresh_token_for_exchange(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     token_id: Uuid,
 ) -> Result<Option<LockedRefreshToken>, AppError> {
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT rt.secret_hash,
                   rt.family_expires_at,
                   rt.consumed_at,
@@ -145,7 +145,7 @@ pub(crate) async fn lock_refresh_token_for_exchange(
            FOR UPDATE OF rt, s"#,
     )
     .bind(token_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -169,20 +169,22 @@ pub(crate) async fn lock_refresh_token_for_exchange(
 /// the exchange's transaction. The replacement inherits `family_expires_at`
 /// unchanged — rotation never extends the absolute deadline.
 pub(crate) async fn consume_and_rotate_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     old_id: Uuid,
     new_id: Uuid,
     session_id: Uuid,
     new_secret_hash: &[u8],
     family_expires_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    sqlx::query(r#"UPDATE refresh_tokens SET consumed_at = now(), replaced_by = $2 WHERE id = $1"#)
-        .bind(old_id)
-        .bind(new_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_err)?;
-    sqlx::query(
+    crate::db::query(
+        r#"UPDATE refresh_tokens SET consumed_at = now(), replaced_by = $2 WHERE id = $1"#,
+    )
+    .bind(old_id)
+    .bind(new_id)
+    .execute(tx.exec())
+    .await
+    .map_err(db_err)?;
+    crate::db::query(
         r#"INSERT INTO refresh_tokens (id, session_id, secret_hash, family_expires_at)
            VALUES ($1, $2, $3, $4)"#,
     )
@@ -190,7 +192,7 @@ pub(crate) async fn consume_and_rotate_in_tx(
     .bind(session_id)
     .bind(new_secret_hash)
     .bind(family_expires_at)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -202,21 +204,21 @@ pub(crate) async fn consume_and_rotate_in_tx(
 /// reuse audit event, via `commit_with_audit`, so revocation and its event
 /// commit atomically.
 pub(crate) async fn revoke_family_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     session_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
+    crate::db::query("UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
         .bind(session_id)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE refresh_tokens
            SET revoked_at = now()
            WHERE session_id = $1 AND consumed_at IS NULL AND revoked_at IS NULL"#,
     )
     .bind(session_id)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -233,18 +235,18 @@ const REFRESH_TOKEN_CLEANUP_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_5254_434c;
 /// the deferred self-FK on `replaced_by` at commit; the advisory lock
 /// (mirroring `purge::purge_expired`) avoids concurrent replicas
 /// deadlocking on the same unordered `DELETE`.
-pub async fn purge_expired(pool: &PgPool, batch_size: i64) -> Result<u64, AppError> {
+pub async fn purge_expired(pool: &Database, batch_size: i64) -> Result<u64, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(REFRESH_TOKEN_CLEANUP_ADVISORY_LOCK_ID)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut tx)
         .await
         .map_err(db_err)?;
     if !acquired {
         return Ok(0);
     }
 
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"DELETE FROM refresh_tokens
            WHERE session_id IN (
                SELECT session_id FROM refresh_tokens
@@ -255,7 +257,7 @@ pub async fn purge_expired(pool: &PgPool, batch_size: i64) -> Result<u64, AppErr
            )"#,
     )
     .bind(batch_size)
-    .execute(&mut *tx)
+    .execute(&mut tx)
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;

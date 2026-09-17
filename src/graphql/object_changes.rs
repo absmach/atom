@@ -39,7 +39,7 @@ impl ObjectChangesMutation {
             object_changes::commit(state, &auth, id, changes, guards.unwrap_or_default()).await;
         if let Err(ref err) = result {
             crate::audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &crate::audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -153,7 +153,7 @@ async fn observe_lease_error(
 ) {
     if let Err(err) = result {
         crate::audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &crate::audit::AuditMeta {
                 actor_entity_id: Some(actor),

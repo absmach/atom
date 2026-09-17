@@ -15,7 +15,7 @@
 //! Swapping Prometheus pull for OTLP push later is an exporter change in
 //! `init`/`render` only — call sites do not move.
 
-use sqlx::PgPool;
+use crate::db::Database;
 use std::time::Duration;
 
 /// Histogram (seconds) of PDP decision latency, labelled by `result`.
@@ -112,7 +112,7 @@ mod backend {
 
     /// Render the Prometheus exposition text. Samples DB-pool gauges first so a
     /// scrape always reflects the current pool, without a background sampler.
-    pub fn render(pool: &PgPool) -> String {
+    pub fn render(pool: &Database) -> String {
         let Some(handle) = HANDLE.get() else {
             return String::new();
         };
@@ -314,7 +314,7 @@ mod backend {
         false
     }
     #[inline]
-    pub fn render(_pool: &PgPool) -> String {
+    pub fn render(_pool: &Database) -> String {
         String::new()
     }
     #[inline]

@@ -38,7 +38,7 @@ async fn seeded_admin_and_assignment_have_distinct_registered_ids() {
     let pool = common::pool().await;
     let admin_id = Uuid::parse_str(ADMIN_ENTITY_ID).expect("admin entity UUID");
     let role_id = Uuid::parse_str(ADMIN_ROLE_ID).expect("admin role UUID");
-    let assignment_id: Uuid = sqlx::query_scalar(
+    let assignment_id: Uuid = atom::db::query_scalar(
         r#"SELECT id FROM role_assignments
            WHERE tenant_id IS NULL AND subject_kind = 'entity'
              AND subject_id = $1 AND role_id = $2"#,

@@ -1,0 +1,137 @@
+---
+title: Running Atom on SQLite
+description: When to choose SQLite, how to configure it, its fixed durability policy, backup and restore, and how it differs from PostgreSQL.
+---
+
+# Running Atom on SQLite
+
+Atom stores its data in PostgreSQL or in a local SQLite file. The scheme of
+`DATABASE_URL` selects the backend; nothing else changes. Both backends are
+first-class: they run the same application code, the same schema and the same
+test suites.
+
+| | PostgreSQL | SQLite |
+| --- | --- | --- |
+| Use for | multi-replica, high write rate, shared infrastructure | one process, one host: development, edge, appliance, small self-hosted installs |
+| `DATABASE_URL` | `postgres://user:pass@host:5432/atom` | `sqlite:///var/lib/atom/atom.db` |
+| Processes per database | many | **exactly one** |
+| Storage | server managed | one file on a local disk |
+
+## Configuration
+
+```text
+DATABASE_URL=sqlite:///var/lib/atom/atom.db      # file (absolute path)
+DATABASE_URL=sqlite://data/atom.db               # file (relative to the working directory)
+DATABASE_URL=sqlite::memory:                     # in-memory; lost on exit, for tests
+```
+
+- The directory must already exist and be writable by Atom; Atom creates the
+  file on first start and applies the schema.
+- Query parameters (`?mode=…`) are rejected. Durability settings are fixed, not
+  tunable.
+- Use a **local** filesystem. Network and shared storage (NFS, SMB, most
+  container volume drivers that back onto them) do not provide the locking and
+  fsync guarantees SQLite depends on, and are unsupported.
+- `ATOM_DB_MAX_CONNECTIONS` sets the pool size when present; otherwise a file
+  database uses a small pool of 5 (SQLite has one writer, so a large pool only
+  adds contention).
+
+## Fixed runtime policy
+
+Every connection is opened with:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `journal_mode` | `WAL` | readers do not block the writer |
+| `synchronous` | `FULL` | a committed transaction survives power loss |
+| `foreign_keys` | `ON` | the schema's referential integrity is enforced |
+| `recursive_triggers` | `ON` | trigger semantics match PostgreSQL |
+| `busy_timeout` | 30 s | a contended write waits, then fails closed |
+
+Every write transaction starts with `BEGIN IMMEDIATE`, so a transaction that
+reads then writes can never deadlock against another writer. If the write lock
+cannot be taken within the busy timeout, the request fails with **HTTP 503 /
+gRPC `UNAVAILABLE`** ("database is busy; retry shortly") instead of hanging.
+
+## One process per database
+
+Atom refuses to start if another Atom process already owns the database file. It
+holds an exclusive lock on a sibling file, `atom.db.atom-lock`, for as long as it
+runs, and tells you so:
+
+```text
+another Atom process already owns this SQLite database; stop it or use a different file
+```
+
+This is a guard against a rolling deploy or a stray second instance corrupting
+the single-writer assumption. It is why SQLite is a single-node choice: to run
+several replicas, use PostgreSQL. Do not delete the lock file to "force" a
+start while another process is alive.
+
+## Files on disk
+
+```text
+atom.db            main database
+atom.db-wal        write-ahead log (durable, folded back into atom.db at checkpoints)
+atom.db-shm        shared-memory index for the WAL (rebuilt automatically)
+atom.db.atom-lock  ownership lock
+```
+
+All four belong together. Never copy `atom.db` alone while Atom is running.
+
+## Backup and restore
+
+Take a consistent backup with SQLite's own tooling; both commands are safe while
+Atom is running:
+
+```bash
+sqlite3 /var/lib/atom/atom.db "VACUUM INTO '/backups/atom-$(date +%F).db'"
+# or
+sqlite3 /var/lib/atom/atom.db ".backup '/backups/atom-$(date +%F).db'"
+```
+
+A plain file copy is only safe once Atom is stopped and the WAL has been folded
+in; if you copy files rather than use the commands above, copy `atom.db` and
+`atom.db-wal` together.
+
+To restore, stop Atom, replace `atom.db` with the backup, delete any stale
+`atom.db-wal` and `atom.db-shm`, and start Atom. The schema migration runs
+idempotently on start. The `atom.db.atom-lock` file carries no data and can be
+left in place.
+
+> Tables, indexes and views use only SQLite built-ins, so any SQLite tool can
+> open, read and copy the database. A few invariant triggers call Atom's own
+> SQL functions (`atom_*`), which Atom registers on every connection; a write
+> made from another client to those tables would fail. Treat direct writes as
+> unsupported and use Atom's API.
+
+## Behaviour that differs from PostgreSQL
+
+The application behaves the same; these are storage-engine differences to be
+aware of:
+
+- **Single writer.** All writes serialize. Concurrent requests queue for the
+  write lock rather than running in parallel; reads are unaffected.
+- **No advisory or row locks.** Atom's PostgreSQL row/advisory locks exist to
+  order concurrent writers. On SQLite the single write lock already guarantees
+  the same ordering, so those statements become no-ops (a statement that asked
+  for a row lock is run under the write lock).
+- **Data encodings.** UUIDs are stored as 16-byte blobs, timestamps as
+  fixed-width UTC text with microseconds, JSON as validated text, arrays as JSON
+  text. These are internal; the API, events and exports are identical.
+- **JSON containment search** (`attributesContains`) scans instead of using a
+  GIN index. That is fine at the scales SQLite is meant for.
+- **`TRUNCATE`** does not exist; Atom uses `DELETE`.
+- **CRL digest constraint.** PostgreSQL additionally checks that a stored CRL's
+  SHA-256 column equals the digest of its DER bytes. SQLite has no built-in
+  SHA-256, so only the format is checked in the database; Atom computes the
+  digest itself when it stores a CRL.
+
+## Choosing a backend
+
+Pick SQLite when a single Atom process on one host is enough and you value a
+zero-dependency deployment. Pick PostgreSQL when you need more than one Atom
+replica, an external database team, managed backups/PITR, or sustained heavy
+write load. Moving from one to the other is an export/import through Atom's
+API and bootstrap configuration; the two database files are not
+interchangeable.

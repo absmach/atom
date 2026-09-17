@@ -18,7 +18,7 @@ use atom::{
 async fn repo_validates_action_assignment_rule_creation() {
     let p = common::pool().await;
     let action_name = format!("m16-action-{}", uuid::Uuid::new_v4());
-    sqlx::query("INSERT INTO actions (name, description) VALUES ($1, 'm16 test action')")
+    atom::db::query("INSERT INTO actions (name, description) VALUES ($1, 'm16 test action')")
         .bind(&action_name)
         .execute(&p)
         .await
@@ -106,7 +106,7 @@ async fn repo_validates_action_assignment_rule_creation() {
     assert!(matches!(invalid_object_type, AppError::BadRequest(_)));
 
     let tenant_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(tenant_id)
         .bind(format!("m16-tenant-{tenant_id}"))
         .execute(&p)
@@ -162,7 +162,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     // the whole scenario to one tenant. The seeded device→manage→resource deny
     // is an absolute global rule, so it still fires for a tenant-scoped grant.
     let tenant_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(tenant_id)
         .bind(format!("m16-tenant-{tenant_id}"))
         .execute(&p)
@@ -170,7 +170,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
         .expect("insert tenant");
 
     let device_id = uuid::Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
     )
     .bind(device_id)
@@ -181,7 +181,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     .expect("insert device");
 
     let manage_action_id: uuid::Uuid =
-        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
             .fetch_one(&p)
             .await
             .expect("manage action");
@@ -249,7 +249,7 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
 async fn inactive_subject_cannot_receive_role_or_direct_grants() {
     let p = common::pool().await;
     let tenant_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(tenant_id)
         .bind(format!("m16-inactive-tenant-{tenant_id}"))
         .execute(&p)
@@ -257,7 +257,7 @@ async fn inactive_subject_cannot_receive_role_or_direct_grants() {
         .expect("insert tenant");
 
     let subject_id = uuid::Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'inactive')",
     )
     .bind(subject_id)
@@ -291,7 +291,7 @@ async fn inactive_subject_cannot_receive_role_or_direct_grants() {
     assert!(matches!(role_err, AppError::BadRequest(_)));
 
     let manage_action_id: uuid::Uuid =
-        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
             .fetch_one(&p)
             .await
             .expect("manage action");
@@ -325,13 +325,13 @@ async fn inactive_subject_cannot_receive_role_or_direct_grants() {
     assert!(matches!(policy_err, AppError::BadRequest(_)));
 
     let assignment_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM role_assignments WHERE subject_id = $1")
+        atom::db::query_scalar("SELECT COUNT(*) FROM role_assignments WHERE subject_id = $1")
             .bind(subject_id)
             .fetch_one(&p)
             .await
             .expect("count role assignments");
     let policy_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1")
+        atom::db::query_scalar("SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1")
             .bind(subject_id)
             .fetch_one(&p)
             .await

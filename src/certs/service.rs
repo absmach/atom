@@ -11,7 +11,6 @@ use ring::digest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spki::AlgorithmIdentifierOwned;
-use sqlx::Acquire;
 use std::time::Instant;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -25,7 +24,7 @@ use x509_ocsp::{
 };
 use zeroize::Zeroizing;
 
-use crate::{config::Config, error::AppError, identity};
+use crate::{config::Config, db::DbTransaction, error::AppError, identity};
 
 use super::{
     authority::{repo as authority_repo, AuthorityKind, AuthorityRecord, AuthorityStatus},
@@ -292,7 +291,7 @@ pub struct CertificateIdentity {
 /// it is not a public request field.  Rechecking it after locking the entity
 /// closes the authorization-to-issuance race without accepting caller scope.
 pub async fn issue_certificate_from_csr_v2(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     config: &Config,
     authorized_tenant_id: Option<Uuid>,
     input: IssueCertificateFromCsrV2,
@@ -306,7 +305,7 @@ pub async fn issue_certificate_from_csr_v2(
 /// Managed CSR issuance using only the caller's existing transaction and
 /// nested savepoints for serial retries.
 pub async fn issue_certificate_from_csr_v2_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     config: &Config,
     authorized_tenant_id: Option<Uuid>,
     input: IssueCertificateFromCsrV2,
@@ -318,19 +317,19 @@ pub async fn issue_certificate_from_csr_v2_in_tx(
 }
 
 async fn issue_certificate_from_csr_v2_in_tx_inner(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     config: &Config,
     authorized_tenant_id: Option<Uuid>,
     input: IssueCertificateFromCsrV2,
 ) -> Result<IssuedCertificate, AppError> {
     validate_idempotency_key(&input.idempotency_key)?;
-    let (_, stored_tenant_id) = identity::repo::lock_active_entity(tx, input.entity_id)
+    let (_, stored_tenant_id) = identity::repo::lock_active_entity(&mut *tx, input.entity_id)
         .await?
         .ok_or_else(|| AppError::not_found("entity not found"))?;
     if stored_tenant_id != authorized_tenant_id {
         return Err(AppError::Forbidden);
     }
-    let subject = profile::load_subject(&mut **tx, input.entity_id).await?;
+    let subject = profile::load_subject(&mut *tx, input.entity_id).await?;
     if subject.tenant_id() != stored_tenant_id {
         return Err(AppError::Internal(anyhow::anyhow!(
             "locked entity scope changed during certificate issuance"
@@ -341,7 +340,7 @@ async fn issue_certificate_from_csr_v2_in_tx_inner(
     let request_fingerprint =
         issuance_request_fingerprint(input.entity_id, input.ttl_secs, input.csr_pem.as_bytes());
     let request_id = match repo::claim_certificate_issuance_request(
-        tx,
+        &mut *tx,
         input.entity_id,
         &request_key_hash,
         &request_fingerprint,
@@ -351,7 +350,7 @@ async fn issue_certificate_from_csr_v2_in_tx_inner(
         repo::CertificateIssuanceRequestClaim::New { request_id } => request_id,
         repo::CertificateIssuanceRequestClaim::Replay { credential_id } => {
             let certificate =
-                record_from_row(repo::fetch_certificate_by_id(&mut **tx, credential_id).await?)?;
+                record_from_row(repo::fetch_certificate_by_id(&mut *tx, credential_id).await?)?;
             return Ok(IssuedCertificate {
                 chain_pem: certificate.chain_pem.clone(),
                 certificate,
@@ -361,8 +360,10 @@ async fn issue_certificate_from_csr_v2_in_tx_inner(
         }
     };
 
-    let certificate_profile = profile::resolve_for_subject_in_tx(tx, &subject, "client").await?;
-    let authority = authority_repo::lock_active_leaf_issuer_for_scope(tx, stored_tenant_id).await?;
+    let certificate_profile =
+        profile::resolve_for_subject_in_tx(&mut *tx, &subject, "client").await?;
+    let authority =
+        authority_repo::lock_active_leaf_issuer_for_scope(&mut *tx, stored_tenant_id).await?;
     validate_issuer_scope(&authority, stored_tenant_id)?;
     let issuer = pki_core::PkiIssuer::from_managed_authority(&authority, &config.pki_ca_keys)?;
 
@@ -426,7 +427,7 @@ async fn issue_certificate_from_csr_v2_in_tx_inner(
 /// Explicitly versioned managed generated-key bootstrap. The feature gate is
 /// off by default until per-issuer revocation publication is complete.
 pub async fn issue_generated_certificate_v2_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     config: &Config,
     authorized_tenant_id: Option<Uuid>,
     input: IssueGeneratedCertificateV2,
@@ -438,7 +439,7 @@ pub async fn issue_generated_certificate_v2_in_tx(
 }
 
 async fn issue_generated_certificate_v2_in_tx_inner(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     config: &Config,
     authorized_tenant_id: Option<Uuid>,
     input: IssueGeneratedCertificateV2,
@@ -447,21 +448,23 @@ async fn issue_generated_certificate_v2_in_tx_inner(
         return Err(AppError::Forbidden);
     }
 
-    let (_, stored_tenant_id) = identity::repo::lock_active_entity(tx, input.entity_id)
+    let (_, stored_tenant_id) = identity::repo::lock_active_entity(&mut *tx, input.entity_id)
         .await?
         .ok_or_else(|| AppError::not_found("entity not found"))?;
     if stored_tenant_id != authorized_tenant_id {
         return Err(AppError::Forbidden);
     }
-    let subject = profile::load_subject(&mut **tx, input.entity_id).await?;
+    let subject = profile::load_subject(&mut *tx, input.entity_id).await?;
     if subject.tenant_id() != stored_tenant_id {
         return Err(AppError::Internal(anyhow::anyhow!(
             "locked entity scope changed during certificate issuance"
         )));
     }
 
-    let certificate_profile = profile::resolve_for_subject_in_tx(tx, &subject, "client").await?;
-    let authority = authority_repo::lock_active_leaf_issuer_for_scope(tx, stored_tenant_id).await?;
+    let certificate_profile =
+        profile::resolve_for_subject_in_tx(&mut *tx, &subject, "client").await?;
+    let authority =
+        authority_repo::lock_active_leaf_issuer_for_scope(&mut *tx, stored_tenant_id).await?;
     validate_issuer_scope(&authority, stored_tenant_id)?;
     let issuer = pki_core::PkiIssuer::from_managed_authority(&authority, &config.pki_ca_keys)?;
     let mut generated = Some(pki_core::generate_leaf_request(&certificate_profile)?);
@@ -535,7 +538,7 @@ async fn issue_generated_certificate_v2_in_tx_inner(
 }
 
 pub async fn renew_certificate_v2(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     config: &Config,
     authorization: CertificateRenewalAuthorization,
     input: RenewCertificateV2,
@@ -550,7 +553,7 @@ pub async fn renew_certificate_v2(
 /// authorization is bound to the exact credential that authenticated the
 /// caller. The transport never supplies tenant, entity, issuer, or profile.
 pub async fn renew_certificate_v2_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     config: &Config,
     authorization: CertificateRenewalAuthorization,
     input: RenewCertificateV2,
@@ -561,7 +564,7 @@ pub async fn renew_certificate_v2_in_tx(
 }
 
 async fn renew_certificate_v2_in_tx_inner(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     config: &Config,
     authorization: CertificateRenewalAuthorization,
     input: RenewCertificateV2,
@@ -573,8 +576,8 @@ async fn renew_certificate_v2_in_tx_inner(
         return Err(AppError::Forbidden);
     }
 
-    let old = repo::lock_certificate_by_id(tx, input.credential_id).await?;
-    let (_, stored_tenant_id) = identity::repo::lock_active_entity(tx, old.entity_id)
+    let old = repo::lock_certificate_by_id(&mut *tx, input.credential_id).await?;
+    let (_, stored_tenant_id) = identity::repo::lock_active_entity(&mut *tx, old.entity_id)
         .await?
         .ok_or_else(|| AppError::not_found("entity not found"))?;
     if old.tenant_id != stored_tenant_id {
@@ -590,7 +593,7 @@ async fn renew_certificate_v2_in_tx_inner(
         authorization,
         CertificateRenewalAuthorization::PresentedCertificate { .. }
     ) {
-        validate_renewal_source(tx, &old, &old_metadata, authorization, now).await?;
+        validate_renewal_source(&mut *tx, &old, &old_metadata, authorization, now).await?;
     }
 
     let key_mode = input.key_source.mode();
@@ -606,7 +609,7 @@ async fn renew_certificate_v2_in_tx_inner(
         },
     );
     let renewal_id = match repo::claim_certificate_renewal(
-        tx,
+        &mut *tx,
         input.credential_id,
         &request_key_hash,
         &request_fingerprint,
@@ -617,7 +620,7 @@ async fn renew_certificate_v2_in_tx_inner(
         repo::CertificateRenewalRequestClaim::New { renewal_id } => renewal_id,
         repo::CertificateRenewalRequestClaim::Replay { credential_id } => {
             let certificate =
-                record_from_row(repo::fetch_certificate_by_id(&mut **tx, credential_id).await?)?;
+                record_from_row(repo::fetch_certificate_by_id(&mut *tx, credential_id).await?)?;
             if certificate.renewed_from_credential_id != Some(input.credential_id) {
                 return Err(AppError::Internal(anyhow::anyhow!(
                     "stored certificate renewal link is inconsistent"
@@ -636,17 +639,19 @@ async fn renew_certificate_v2_in_tx_inner(
         authorization,
         CertificateRenewalAuthorization::Operator { .. }
     ) {
-        validate_renewal_source(tx, &old, &old_metadata, authorization, now).await?;
+        validate_renewal_source(&mut *tx, &old, &old_metadata, authorization, now).await?;
     }
 
-    let subject = profile::load_subject(&mut **tx, old.entity_id).await?;
+    let subject = profile::load_subject(&mut *tx, old.entity_id).await?;
     if subject.tenant_id() != stored_tenant_id {
         return Err(AppError::Internal(anyhow::anyhow!(
             "locked entity scope changed during certificate renewal"
         )));
     }
-    let certificate_profile = profile::resolve_for_subject_in_tx(tx, &subject, "client").await?;
-    let authority = authority_repo::lock_active_leaf_issuer_for_scope(tx, stored_tenant_id).await?;
+    let certificate_profile =
+        profile::resolve_for_subject_in_tx(&mut *tx, &subject, "client").await?;
+    let authority =
+        authority_repo::lock_active_leaf_issuer_for_scope(&mut *tx, stored_tenant_id).await?;
     validate_issuer_scope(&authority, stored_tenant_id)?;
     let issuer = pki_core::PkiIssuer::from_managed_authority(&authority, &config.pki_ca_keys)?;
     let (csr_pem, mut generated) = match input.key_source {
@@ -744,7 +749,7 @@ async fn renew_certificate_v2_in_tx_inner(
 /// Resolve a certificate's renewal window from its stored profile snapshot,
 /// falling back to the referenced/effective profile for pre-PR-007 rows.
 pub async fn certificate_renewal_due_at(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     credential_id: Uuid,
 ) -> Result<DateTime<Utc>, AppError> {
     let row = repo::certificate_by_id(pool, credential_id).await?;
@@ -768,7 +773,7 @@ pub async fn certificate_renewal_due_at(
 }
 
 pub async fn certificate_by_revocation_selector(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     selector: &CertificateRevocationSelector,
 ) -> Result<CertificateRecord, AppError> {
     let row = match selector {
@@ -791,7 +796,7 @@ pub async fn certificate_by_revocation_selector(
 }
 
 pub async fn revoke_certificate_v2(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     input: RevokeCertificateV2,
 ) -> Result<CertificateRevocationResult, AppError> {
     let mut tx = begin_lifecycle_transaction(pool, "revocation").await?;
@@ -804,7 +809,7 @@ pub async fn revoke_certificate_v2(
 /// revocation evidence and dirties only this certificate's issuer artifacts in
 /// the same transaction.
 pub async fn revoke_certificate_v2_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     input: RevokeCertificateV2,
 ) -> Result<CertificateRevocationResult, AppError> {
     let result = revoke_certificate_v2_in_tx_inner(tx, input).await;
@@ -813,23 +818,23 @@ pub async fn revoke_certificate_v2_in_tx(
 }
 
 async fn revoke_certificate_v2_in_tx_inner(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     input: RevokeCertificateV2,
 ) -> Result<CertificateRevocationResult, AppError> {
     let current = match &input.selector {
         CertificateRevocationSelector::CredentialId(credential_id) => {
-            repo::lock_certificate_by_id(tx, *credential_id).await?
+            repo::lock_certificate_by_id(&mut *tx, *credential_id).await?
         }
         CertificateRevocationSelector::FingerprintSha256(fingerprint) => {
             let fingerprint = validated_fingerprint(fingerprint)?;
-            repo::lock_certificate_by_fingerprint(tx, &fingerprint).await?
+            repo::lock_certificate_by_fingerprint(&mut *tx, &fingerprint).await?
         }
         CertificateRevocationSelector::IssuerSerial {
             issuer_id,
             serial_number,
         } => {
             let serial = normalize_serial(serial_number)?;
-            repo::lock_certificate_by_issuer_serial(tx, *issuer_id, &serial).await?
+            repo::lock_certificate_by_issuer_serial(&mut *tx, *issuer_id, &serial).await?
         }
     };
     if current.entity_id != input.expected_entity_id
@@ -839,7 +844,7 @@ async fn revoke_certificate_v2_in_tx_inner(
     }
 
     if current.status == "revoked" {
-        let revocation = repo::certificate_revocation_by_id(&mut **tx, current.id).await?;
+        let revocation = repo::certificate_revocation_by_id(&mut *tx, current.id).await?;
         return Ok(CertificateRevocationResult {
             certificate: record_from_row(current)?,
             issuer_fingerprint_sha256: revocation.issuer_fingerprint_sha256,
@@ -861,13 +866,13 @@ async fn revoke_certificate_v2_in_tx_inner(
         input.actor_entity_id,
         now,
     );
-    if !repo::revoke_certificate_if_active(tx, current.id, metadata).await? {
+    if !repo::revoke_certificate_if_active(&mut *tx, current.id, metadata).await? {
         return Err(AppError::conflict(
             "certificate revocation state changed concurrently",
         ));
     }
-    let revocation = repo::certificate_revocation_by_id(&mut **tx, current.id).await?;
-    let certificate = record_from_row(repo::fetch_certificate_by_id(&mut **tx, current.id).await?)?;
+    let revocation = repo::certificate_revocation_by_id(&mut *tx, current.id).await?;
+    let certificate = record_from_row(repo::fetch_certificate_by_id(&mut *tx, current.id).await?)?;
     Ok(CertificateRevocationResult {
         certificate,
         issuer_fingerprint_sha256: revocation.issuer_fingerprint_sha256,
@@ -879,7 +884,7 @@ async fn revoke_certificate_v2_in_tx_inner(
 }
 
 pub async fn revoke_entity_certificates(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     entity_id: Uuid,
     reason: Option<String>,
 ) -> Result<usize, AppError> {
@@ -893,7 +898,7 @@ pub async fn revoke_entity_certificates(
 /// them atomic with each other; one transaction makes the reported count and
 /// the published event describe the same committed state.
 pub async fn revoke_entity_certificates_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     reason: Option<String>,
 ) -> Result<usize, AppError> {
@@ -905,7 +910,7 @@ pub async fn revoke_entity_certificates_in_tx(
 }
 
 pub async fn revoke_entity_certificates_v2_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     reason: Option<String>,
     actor_entity_id: Option<Uuid>,
@@ -917,23 +922,23 @@ pub async fn revoke_entity_certificates_v2_in_tx(
 }
 
 async fn revoke_entity_certificates_v2_in_tx_inner(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     reason: Option<String>,
     actor_entity_id: Option<Uuid>,
 ) -> Result<BulkCertificateRevocationResult, AppError> {
     // Serializes explicit entity-wide revocation with issuance paths, which
     // also lock the active entity before inserting a certificate.
-    identity::repo::lock_active_entity(tx, entity_id)
+    identity::repo::lock_active_entity(&mut *tx, entity_id)
         .await?
         .ok_or_else(|| AppError::not_found("entity not found"))?;
     let reason = normalize_revocation_reason(reason.as_deref().or(Some("entity_revoked")))?;
-    let certs = repo::active_entity_certificates(&mut **tx, entity_id).await?;
+    let certs = repo::active_entity_certificates(&mut *tx, entity_id).await?;
     let mut credential_ids = Vec::with_capacity(certs.len());
     let mut issuer_ids = Vec::new();
     for cert in certs {
         let metadata = revocation_metadata(cert.metadata, &reason, actor_entity_id, Utc::now());
-        if repo::revoke_certificate_if_active(tx, cert.id, metadata).await? {
+        if repo::revoke_certificate_if_active(&mut *tx, cert.id, metadata).await? {
             credential_ids.push(cert.id);
             if let Some(issuer_id) = cert.issuer_id {
                 if !issuer_ids.contains(&issuer_id) {
@@ -951,7 +956,7 @@ async fn revoke_entity_certificates_v2_in_tx_inner(
 }
 
 pub async fn certificate_by_id(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     credential_id: Uuid,
 ) -> Result<CertificateRecord, AppError> {
     repo::certificate_by_id(pool, credential_id)
@@ -960,7 +965,7 @@ pub async fn certificate_by_id(
 }
 
 pub async fn list_certificates(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     entity_id: Option<Uuid>,
     tenant_id: Option<Uuid>,
     status: Option<String>,
@@ -981,7 +986,7 @@ pub async fn list_certificates(
 }
 
 pub async fn list_certificates_filtered(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     mut filter: CertificateListFilter,
 ) -> Result<CertificateListPage, AppError> {
     filter.status = filter.status.map(validate_certificate_status).transpose()?;
@@ -1009,7 +1014,7 @@ pub async fn list_certificates_filtered(
 /// Clean cache reads avoid the signing lock; dirty/missing/expired/corrupt
 /// entries serialize on an issuer-derived advisory lock and recheck state.
 pub async fn issuer_crl(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     config: &Config,
     issuer_id: Uuid,
 ) -> Result<CrlArtifact, AppError> {
@@ -1033,9 +1038,9 @@ pub async fn issuer_crl(
 
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let lock_id = issuer_crl_lock_id(issuer_id);
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    crate::db::query("SELECT pg_advisory_xact_lock($1)")
         .bind(lock_id)
-        .execute(&mut *tx)
+        .execute(tx.exec())
         .await
         .map_err(AppError::Database)?;
 
@@ -1130,7 +1135,7 @@ pub async fn issuer_crl(
 /// The request is parsed before issuer lookup so malformed input has identical
 /// behavior for known and unknown route identifiers.
 pub async fn issuer_ocsp_response(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     config: &Config,
     issuer_id: Uuid,
     request_der: &[u8],
@@ -1201,7 +1206,7 @@ pub async fn issuer_ocsp_response(
 /// is independently verified and, when more than one is present, all selectors
 /// must identify the same credential.
 pub async fn resolve_certificate_identity_v2(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     input: ResolveCertificateV2,
 ) -> Result<CertificateIdentity, AppError> {
     let der_fingerprint = input
@@ -1438,7 +1443,7 @@ fn revocation_metadata(
 }
 
 async fn persist_managed_certificate(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     authority: &AuthorityRecord,
     issued: pki_core::IssuedCertificate,
@@ -1499,7 +1504,7 @@ async fn persist_managed_certificate(
         issued.not_after,
     )
     .await?;
-    record_from_row(repo::fetch_certificate_by_id(&mut **tx, id).await?)
+    record_from_row(repo::fetch_certificate_by_id(tx, id).await?)
 }
 
 fn record_from_row(row: repo::CertificateCredential) -> Result<CertificateRecord, AppError> {
@@ -1614,7 +1619,7 @@ fn validate_renewal_authorization(
 }
 
 async fn validate_renewal_source(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     old: &repo::CertificateCredential,
     metadata: &CertificateMetadata,
     authorization: CertificateRenewalAuthorization,
@@ -1916,7 +1921,7 @@ fn validate_ocsp_authority(
 }
 
 async fn managed_ocsp_status(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     issuer_id: Uuid,
     serial_number: &str,
 ) -> Result<CertStatus, AppError> {
@@ -2062,16 +2067,13 @@ fn sha256_hex(value: &[u8]) -> String {
 }
 
 fn is_unique_violation(err: &AppError) -> bool {
-    matches!(
-        err,
-        AppError::Database(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505")
-    )
+    matches!(err, AppError::Database(e) if crate::error::is_unique_violation(e))
 }
 
-async fn begin_lifecycle_transaction<'a>(
-    pool: &'a sqlx::PgPool,
+async fn begin_lifecycle_transaction(
+    pool: &crate::db::Database,
     operation: &'static str,
-) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, AppError> {
+) -> Result<DbTransaction<'static>, AppError> {
     match pool.begin().await {
         Ok(tx) => Ok(tx),
         Err(error) => {
@@ -2082,7 +2084,7 @@ async fn begin_lifecycle_transaction<'a>(
 }
 
 async fn commit_lifecycle_transaction<T>(
-    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: DbTransaction<'_>,
     value: T,
     operation: &'static str,
 ) -> Result<T, AppError> {
