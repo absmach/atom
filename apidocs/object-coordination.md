@@ -17,9 +17,12 @@ identity/resource APIs remain available and automatically advance object revisio
 - Creates use Atom's existing tenant/platform capability gate. Existing targets
   use the canonical PDP, including deny precedence and the caller's token ceiling.
   Configuration-managed objects cannot be edited/deleted. Active tenants are
-  locked through commit. Application status/grant cache barriers cover writes.
+  locked in UUID order before object rows and held through commit, including
+  tenants of create targets. Application status/grant cache barriers cover writes.
 - Optional guards must match a live lease's object, authenticated actor, holder
   UUID, and fence. They are checked after locking and immediately before commit.
+  All lease lock keys use parsed UUIDs, so uppercase, simple, and URN spellings
+  contend on the same lock as acquisition, renewal, and release.
 - `acquireObjectLease` accepts a holder UUID, operation, and TTL of 1–600 seconds.
   An expired lease can be taken over; its fence increases. Repeating a live
   acquisition with the same actor/holder/operation returns that lease. Renew and
@@ -32,10 +35,11 @@ identity/resource APIs remain available and automatically advance object revisio
   remain replayable after deletion; replay performs no new object mutation.
 - Database uniqueness applies to each create/update, including live aliases.
   Callers can reserve application-specific keys as resources in the same batch.
-- Domain events are enqueued inside the transaction. Per-object compliance audit
-  rows are written after commit; request bodies and application attributes are
-  not copied to audit details. The existing `entity.update.external_id` detail
-  contract is preserved.
+- Domain events are enqueued inside the transaction. Creates emit stdout
+  observations after commit without adding compliance audit rows. Entity/resource
+  updates and deletes retain their post-commit compliance audit rows. Request
+  bodies and application attributes are not copied to audit details. The existing
+  `entity.update.external_id` detail contract is preserved.
 
 `objectCoordinationVersion` currently returns `1` to authenticated clients.
 Conflicts expose `REVISION_CONFLICT`, `LEASE_HELD`, `LEASE_LOST`,
