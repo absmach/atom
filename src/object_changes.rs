@@ -115,19 +115,32 @@ async fn lock_key(tx: &mut Transaction<'_, Postgres>, key: &str) -> Result<(), A
         .map_err(db_err)?;
     Ok(())
 }
-async fn locked_object(
+fn lease_lock_key(kind: ObjectKind, id: Uuid) -> String {
+    format!("lease:{}:{id}", kind.label())
+}
+async fn object_tenant(
     tx: &mut Transaction<'_, Postgres>,
     kind: ObjectKind,
     id: Uuid,
-) -> Result<Value, AppError> {
-    let table = kind.table();
-    let tenant: Option<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT tenant_id FROM {table} WHERE id=$1 AND deleted_at IS NULL"
+) -> Result<Option<Uuid>, AppError> {
+    sqlx::query_scalar(&format!(
+        "SELECT tenant_id FROM {} WHERE id=$1 AND deleted_at IS NULL",
+        kind.table()
     ))
     .bind(id)
     .fetch_one(&mut **tx)
     .await
-    .map_err(db_err)?;
+    .map_err(db_err)
+}
+async fn locked_object(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: ObjectKind,
+    id: Uuid,
+    tenant: Option<Uuid>,
+) -> Result<Value, AppError> {
+    let table = kind.table();
+    // Recheck the discovered tenant when locking the object; never acquire a
+    // newly discovered tenant out of order if an external writer moved it.
     crate::tenants::repo::lock_optional_active_tenant(tx, tenant).await?;
     sqlx::query_scalar(&format!("SELECT to_jsonb(o) FROM {table} o WHERE id=$1 AND deleted_at IS NULL AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE"))
         .bind(id).bind(tenant).fetch_one(&mut **tx).await.map_err(db_err)
@@ -304,8 +317,8 @@ async fn commit_inner(
     }
     let mut keys: Vec<_> = guards
         .iter()
-        .map(|g| format!("lease:{}:{}", g.object_kind.label(), g.object_id.as_str()))
-        .collect();
+        .map(|g| Ok(lease_lock_key(g.object_kind, uuid(&g.object_id)?)))
+        .collect::<Result<_, AppError>>()?;
     keys.sort();
     keys.dedup();
     for key in keys {
@@ -316,12 +329,31 @@ async fn commit_inner(
     }
     let mut results = Vec::with_capacity(changes.len());
     let mut audit_events = Vec::new();
-    // Deterministic ordering prevents cross-batch object lock inversion.
-    let mut ordered = changes.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|c| (c.object_kind.label(), c.id.as_str()));
-    for change in &ordered {
+    let mut observations = Vec::new();
+    // Tenant locks precede object locks, including tenants of create targets.
+    // Disjoint object sets can otherwise acquire the same tenants in reverse.
+    let mut planned = Vec::with_capacity(changes.len());
+    for change in &changes {
+        let id = uuid(&change.id)?;
+        let tenant = if change.operation == ChangeOperation::Create {
+            change.tenant_id.as_ref().map(uuid).transpose()?
+        } else {
+            object_tenant(&mut tx, change.object_kind, id).await?
+        };
+        planned.push((id, tenant, change));
+    }
+    let tenant_ids = planned
+        .iter()
+        .map(|(_, tenant, _)| *tenant)
+        .collect::<Vec<_>>();
+    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &tenant_ids).await?;
+    // Canonical UUID ordering also prevents alternate spellings from inverting
+    // the object row locks. Preserve input order for execution and results.
+    let mut ordered = planned.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(id, _, c)| (c.object_kind.label(), *id));
+    for (id, tenant, change) in ordered {
         if change.operation != ChangeOperation::Create {
-            let existing = locked_object(&mut tx, change.object_kind, uuid(&change.id)?).await?;
+            let existing = locked_object(&mut tx, change.object_kind, *id, *tenant).await?;
             if existing["revision"].as_i64() != change.expected_revision {
                 return Err(conflict("REVISION_CONFLICT"));
             }
@@ -346,12 +378,12 @@ async fn commit_inner(
             }
         }
     }
-    for change in &changes {
-        let id = uuid(&change.id)?;
+    for (id, tenant, change) in &planned {
+        let id = *id;
+        let tenant = *tenant;
         let table = change.object_kind.table();
         let row: Value=match change.operation {
             ChangeOperation::Create=> {
-                let tenant=change.tenant_id.as_ref().map(uuid).transpose()?;
                 crate::tenants::repo::lock_optional_active_tenant(&mut tx,tenant).await?;
                 let alias=crate::models::alias::validate_alias_opt(change.alias.clone())?;
                 let attrs=change.attributes.clone().unwrap_or_else(||json!({}));
@@ -369,7 +401,7 @@ async fn commit_inner(
                 sqlx::query_scalar(&format!("UPDATE {table} AS o SET deleted_at=clock_timestamp(),deleted_by=$2,updated_at=clock_timestamp(){status} WHERE id=$1 RETURNING to_jsonb(o)"))
                     .bind(id).bind(auth.entity_id).fetch_one(&mut *tx).await.map_err(db_err)?
             },
-            ChangeOperation::Check=>locked_object(&mut tx,change.object_kind,id).await?,
+            ChangeOperation::Check=>locked_object(&mut tx,change.object_kind,id,tenant).await?,
         };
         if change.operation != ChangeOperation::Check {
             let event = match (change.object_kind, change.operation) {
@@ -388,15 +420,28 @@ async fn commit_inner(
             if event == "entity.update" {
                 details["external_id"] = row["external_id"].clone();
             }
-            audit_events.push(crate::audit::AuditEvent {
-                actor_entity_id: Some(auth.entity_id),
-                tenant_id: tenant,
-                target_kind: Some(change.object_kind.label()),
-                target_id: Some(id),
-                event,
-                outcome: crate::models::enums::AuditOutcome::Allow,
-                details: details.clone(),
-            });
+            if change.operation == ChangeOperation::Create {
+                observations.push((
+                    crate::audit::AuditMeta {
+                        actor_entity_id: Some(auth.entity_id),
+                        tenant_id: tenant,
+                        target_kind: change.object_kind.label(),
+                        target_id: Some(id),
+                        event,
+                    },
+                    details.clone(),
+                ));
+            } else {
+                audit_events.push(crate::audit::AuditEvent {
+                    actor_entity_id: Some(auth.entity_id),
+                    tenant_id: tenant,
+                    target_kind: Some(change.object_kind.label()),
+                    target_id: Some(id),
+                    event,
+                    outcome: crate::models::enums::AuditOutcome::Allow,
+                    details: details.clone(),
+                });
+            }
             crate::events::enqueue(
                 &mut *tx,
                 state.config.events.enabled(),
@@ -436,6 +481,9 @@ async fn commit_inner(
         &json!({"count":changes.len()}),
     )
     .await?;
+    for (meta, details) in observations {
+        crate::audit::log_observe_allow(&meta, &details);
+    }
     for event in audit_events {
         crate::audit::write(&state.pool, false, event).await;
     }
@@ -456,12 +504,9 @@ pub async fn acquire(
     let holder = uuid(&input.holder_id)?;
     authorize(&state.pool, auth, input.object_kind, id, None, false).await?;
     let mut tx = state.pool.begin().await.map_err(db_err)?;
-    lock_key(
-        &mut tx,
-        &format!("lease:{}:{id}", input.object_kind.label()),
-    )
-    .await?;
-    locked_object(&mut tx, input.object_kind, id).await?;
+    lock_key(&mut tx, &lease_lock_key(input.object_kind, id)).await?;
+    let tenant = object_tenant(&mut tx, input.object_kind, id).await?;
+    locked_object(&mut tx, input.object_kind, id, tenant).await?;
     let row:Option<Value>=sqlx::query_scalar("INSERT INTO object_leases AS l(object_kind,object_id,actor_id,holder_id,operation,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+make_interval(secs=>$6)) ON CONFLICT(object_kind,object_id) DO UPDATE SET actor_id=EXCLUDED.actor_id,holder_id=EXCLUDED.holder_id,operation=EXCLUDED.operation,fence=l.fence+1,expires_at=EXCLUDED.expires_at WHERE l.expires_at<=clock_timestamp() RETURNING to_jsonb(l)")
         .bind(input.object_kind.label()).bind(id).bind(auth.entity_id).bind(holder).bind(&input.operation).bind(f64::from(input.ttl_seconds)).fetch_optional(&mut *tx).await.map_err(db_err)?;
     let row=match row {Some(row)=>row,None=>sqlx::query_scalar("SELECT to_jsonb(l) FROM object_leases l WHERE object_kind=$1 AND object_id=$2 AND actor_id=$3 AND holder_id=$4 AND operation=$5 AND expires_at>clock_timestamp()")
@@ -489,11 +534,7 @@ pub async fn finish_lease(
     let id = uuid(&guard.object_id)?;
     authorize(&state.pool, auth, guard.object_kind, id, None, false).await?;
     let mut tx = state.pool.begin().await.map_err(db_err)?;
-    lock_key(
-        &mut tx,
-        &format!("lease:{}:{id}", guard.object_kind.label()),
-    )
-    .await?;
+    lock_key(&mut tx, &lease_lock_key(guard.object_kind, id)).await?;
     lease_guard(&mut tx, auth.entity_id, &guard).await?;
     let row:Value=sqlx::query_scalar("UPDATE object_leases AS l SET expires_at=clock_timestamp()+make_interval(secs=>$6) WHERE object_kind=$1 AND object_id=$2 AND actor_id=$3 AND holder_id=$4 AND fence=$5 RETURNING to_jsonb(l)")
         .bind(guard.object_kind.label()).bind(id).bind(auth.entity_id).bind(uuid(&guard.holder_id)?).bind(guard.fence).bind(f64::from(ttl.unwrap_or(0))).fetch_one(&mut *tx).await.map_err(db_err)?;

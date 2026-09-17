@@ -7,16 +7,21 @@ use uuid::Uuid;
 
 async fn fixture() -> (sqlx::PgPool, atom::graphql::AtomSchema) {
     let pool = common::pool().await;
+    let schema = schema_for_pool(&pool).await;
+    (pool, schema)
+}
+
+async fn schema_for_pool(pool: &sqlx::PgPool) -> atom::graphql::AtomSchema {
     let config = Config::for_tests();
-    keys::bootstrap_if_needed(&pool, &config.signing_keys)
+    keys::bootstrap_if_needed(pool, &config.signing_keys)
         .await
         .expect("keys");
-    let keys = keys::load_active_keys(&pool, &config.signing_keys)
+    let keys = keys::load_active_keys(pool, &config.signing_keys)
         .await
         .expect("active keys");
     let mut state = AppState::new(pool.clone(), config, keys, None);
     state.config.events.amqp_url = Some("amqp://test.invalid".into());
-    (pool, build_schema(state))
+    build_schema(state)
 }
 fn request(query: &str, vars: Value) -> Request {
     Request::new(query)
@@ -94,7 +99,7 @@ async fn batch_is_atomic_replayable_and_native_updates_advance_snapshot_revision
     .fetch_one(&pool)
     .await
     .expect("audit");
-    assert_eq!(audit_count, 1);
+    assert_eq!(audit_count, 0);
 }
 #[tokio::test]
 #[ignore]
@@ -260,4 +265,292 @@ async fn a_committed_delete_can_be_replayed_after_its_target_disappears() {
     let again = schema.execute(request(COMMIT, vars)).await;
     assert!(again.errors.is_empty(), "{:?}", again.errors);
     assert_eq!(first.data, again.data);
+}
+
+async fn named_fixture() -> (sqlx::PgPool, atom::graphql::AtomSchema, String) {
+    let name = format!("coordination-{}", Uuid::new_v4());
+    let options = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL")
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .expect("database URL")
+        .application_name(&name);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .expect("named pool");
+    let schema = schema_for_pool(&pool).await;
+    (pool, schema, name)
+}
+
+async fn wait_for_lock(pool: &sqlx::PgPool, name: &str, event: Option<&str>) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1
+                 AND wait_event_type='Lock' AND ($2::text IS NULL OR wait_event=$2))",
+            )
+            .bind(name)
+            .bind(event)
+            .fetch_one(pool)
+            .await
+            .expect("inspect lock wait");
+            if waiting {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("operation must wait for the expected PostgreSQL lock");
+}
+
+#[tokio::test]
+#[ignore]
+async fn alternate_uuid_guards_contend_on_the_canonical_lease_lock() {
+    let (pool, schema) = fixture().await;
+    let app = Uuid::new_v4();
+    let data = Uuid::new_v4();
+    let holder = Uuid::new_v4();
+    commit(
+        &schema,
+        json!([create(app, "entity"), create(data, "resource")]),
+    )
+    .await;
+    let acquired = schema
+        .execute(request(
+            "mutation($input:ObjectLeaseInput!) { acquireObjectLease(input:$input) }",
+            json!({"input":{"objectKind":"entity","objectId":app,"holderId":holder,
+                         "operation":"build","ttlSeconds":600}}),
+        ))
+        .await;
+    assert!(acquired.errors.is_empty(), "{:?}", acquired.errors);
+    let fence = acquired.data.into_json().expect("JSON")["acquireObjectLease"]["fence"].clone();
+    let (_named_pool, named_schema, name) = named_fixture().await;
+    let spellings = [
+        app.to_string().to_uppercase(),
+        app.simple().to_string(),
+        app.urn().to_string(),
+    ];
+    for (index, spelling) in spellings.into_iter().enumerate() {
+        let mut blocker = pool.begin().await.expect("blocker");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 17))")
+            .bind(format!("lease:entity:{app}"))
+            .execute(&mut *blocker)
+            .await
+            .expect("hold canonical lease lock");
+        let schema = named_schema.clone();
+        let guard =
+            json!({"objectKind":"entity","objectId":spelling,"holderId":holder,"fence":fence});
+        let batch = tokio::spawn(async move {
+            schema
+                .execute(request(
+                    COMMIT,
+                    json!({"request":Uuid::new_v4(),
+                "changes":[update(data, index as i64 + 1, index as i64 + 2)],"guards":[guard]}),
+                ))
+                .await
+        });
+        wait_for_lock(&pool, &name, Some("advisory")).await;
+        // A differently spelled guard must not bypass the lock used by release
+        // or takeover, even though its lease-row lookup parses the UUID.
+        assert!(!batch.is_finished());
+        blocker.rollback().await.expect("release canonical lock");
+        let response = batch.await.expect("batch task");
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+    }
+}
+
+async fn concurrent_tenant_batches(create_only: bool) {
+    let (pool, schema) = fixture().await;
+    let mut tenants = [Uuid::new_v4(), Uuid::new_v4()];
+    tenants.sort();
+    for tenant in tenants {
+        sqlx::query("INSERT INTO tenants(id,name) VALUES($1,$2)")
+            .bind(tenant)
+            .bind(format!("coordination-{tenant}"))
+            .execute(&pool)
+            .await
+            .expect("tenant");
+    }
+    let mut ids = [
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    ids.sort();
+    let creates = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let mut change = create(*id, "resource");
+            change["tenantId"] = json!(tenants[index % 2]);
+            change
+        })
+        .collect::<Vec<_>>();
+    if !create_only {
+        commit(&schema, json!(creates)).await;
+    }
+    // Disjoint batches whose object/input order implies A -> B and B -> A.
+    let first = if create_only {
+        json!([creates[0], creates[3]])
+    } else {
+        json!([update(ids[0], 1, 2), update(ids[3], 1, 2)])
+    };
+    let second = if create_only {
+        json!([creates[1], creates[2]])
+    } else {
+        json!([update(ids[1], 1, 2), update(ids[2], 1, 2)])
+    };
+    let (_pool_a, schema_a, name_a) = named_fixture().await;
+    let (_pool_b, schema_b, name_b) = named_fixture().await;
+    let mut blocker = pool.begin().await.expect("tenant blocker");
+    sqlx::query("SELECT id FROM tenants WHERE id=$1 FOR UPDATE")
+        .bind(tenants[0])
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("block first tenant");
+    let batch_a = tokio::spawn(async move {
+        schema_a
+            .execute(request(
+                COMMIT,
+                json!({"request":Uuid::new_v4(),"changes":first}),
+            ))
+            .await
+    });
+    wait_for_lock(&pool, &name_a, None).await;
+    let batch_b = tokio::spawn(async move {
+        schema_b
+            .execute(request(
+                COMMIT,
+                json!({"request":Uuid::new_v4(),"changes":second}),
+            ))
+            .await
+    });
+    wait_for_lock(&pool, &name_b, None).await;
+    // Both batches must wait on A before touching B. Under the old ordering,
+    // batch B held B while waiting on A, setting up a cross-tenant deadlock.
+    let mut probe = pool.begin().await.expect("tenant probe");
+    sqlx::query("SELECT id FROM tenants WHERE id=$1 FOR UPDATE NOWAIT")
+        .bind(tenants[1])
+        .fetch_one(&mut *probe)
+        .await
+        .expect("later tenant must remain unlocked while first tenant is blocked");
+    probe.rollback().await.expect("release probe");
+    blocker.rollback().await.expect("release first tenant");
+    for batch in [batch_a, batch_b] {
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), batch)
+            .await
+            .expect("batch completes")
+            .expect("batch task");
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn disjoint_updates_lock_tenants_in_global_order() {
+    concurrent_tenant_batches(false).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn creates_lock_tenants_in_global_order() {
+    concurrent_tenant_batches(true).await;
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
+    use tracing::instrument::WithSubscriber;
+    let (pool, schema) = fixture().await;
+    let app = Uuid::new_v4();
+    let data = Uuid::new_v4();
+    let logs = CapturedLogs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    commit(
+        &schema,
+        json!([create(app, "entity"), create(data, "resource")]),
+    )
+    .with_subscriber(subscriber)
+    .await;
+    let output = String::from_utf8(logs.0.lock().expect("log buffer").clone()).expect("UTF-8 logs");
+    for event in ["entity.create", "resource.create"] {
+        assert!(
+            output.contains(event),
+            "missing observation {event}: {output}"
+        );
+    }
+    let mut entity_update = update(app, 1, 2);
+    entity_update["objectKind"] = json!("entity");
+    commit(&schema, json!([entity_update, update(data, 1, 2)])).await;
+    let absent = Uuid::new_v4();
+    let failed = schema
+        .execute(request(
+            COMMIT,
+            json!({"request":Uuid::new_v4(),
+        "changes":[create(absent,"resource"),update(data,1,3)]}),
+        ))
+        .await;
+    assert_eq!(failed.errors[0].message, "REVISION_CONFLICT");
+    commit(
+        &schema,
+        json!([
+            {"objectKind":"entity","operation":"delete","id":app,"expectedRevision":2},
+            {"objectKind":"resource","operation":"delete","id":data,"expectedRevision":2}
+        ]),
+    )
+    .await;
+    let audits: Vec<String> =
+        sqlx::query_scalar("SELECT event FROM audit_logs WHERE target_id=ANY($1) ORDER BY event")
+            .bind(vec![app, data, absent])
+            .fetch_all(&pool)
+            .await
+            .expect("audits");
+    assert_eq!(
+        audits,
+        [
+            "entity.delete",
+            "entity.update",
+            "resource.delete",
+            "resource.update"
+        ]
+    );
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT event FROM event_outbox WHERE payload->>'target_id'=ANY($1) ORDER BY event",
+    )
+    .bind(vec![app.to_string(), data.to_string(), absent.to_string()])
+    .fetch_all(&pool)
+    .await
+    .expect("outbox");
+    assert_eq!(
+        events,
+        [
+            "entity.create",
+            "entity.delete",
+            "entity.update",
+            "resource.create",
+            "resource.delete",
+            "resource.update"
+        ]
+    );
 }
