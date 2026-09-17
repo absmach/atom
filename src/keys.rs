@@ -610,8 +610,8 @@ pub async fn rotate_keys(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<impl IntoResponse, AppError> {
-    require_capability(&state.pool, &auth, "rotate", Scope::Platform).await?;
-    let new_keys = rotate(&state.pool, &state.config.signing_keys).await?;
+    require_capability(state.pool(), &auth, "rotate", Scope::Platform).await?;
+    let new_keys = rotate(state.pool(), &state.config.signing_keys).await?;
     *state.keys.write().await = new_keys;
     Ok(StatusCode::NO_CONTENT)
 }

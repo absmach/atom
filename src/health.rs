@@ -170,7 +170,7 @@ fn readiness_ok(
 
 async fn database_check(state: &AppState) -> ComponentCheck {
     match sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.pool)
+        .fetch_one(state.pool())
         .await
     {
         Ok(_) => ComponentCheck {
@@ -186,7 +186,7 @@ async fn database_check(state: &AppState) -> ComponentCheck {
 
 async fn migrations_check(state: &AppState) -> ComponentCheck {
     match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE")
-        .fetch_one(&state.pool)
+        .fetch_one(state.pool())
         .await
     {
         Ok(count) if count > 0 => ComponentCheck {
@@ -217,7 +217,7 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
     }
     drop(loaded);
 
-    match keys::storage_summary(&state.pool).await {
+    match keys::storage_summary(state.pool()).await {
         Ok(summary) => {
             let plaintext_allowed = state.config.signing_keys.allow_plaintext_signing_keys;
             let status = if summary.plaintext > 0 && !plaintext_allowed {
@@ -256,7 +256,7 @@ async fn signing_keys_check(state: &AppState) -> (ComponentCheck, Option<Signing
 /// repeatedly by load balancers, so it must never open a PKCS#11 session or
 /// affect the HSM provider's circuit breaker.
 async fn certificate_issuer_check(state: &AppState) -> ComponentCheck {
-    match authority_repo::leaf_issuer_readiness(&state.pool).await {
+    match authority_repo::leaf_issuer_readiness(state.pool()).await {
         Ok(readiness) if readiness.active_count == 0 => ComponentCheck {
             status: ComponentStatus::Disabled,
             message: "no active certificate issuers".to_string(),
@@ -425,8 +425,8 @@ fn db_pool_status(state: &AppState) -> DbPoolStatus {
         connect_timeout_secs: state.config.db_pool.connect_timeout_secs,
         idle_timeout_secs: state.config.db_pool.idle_timeout_secs,
         max_lifetime_secs: state.config.db_pool.max_lifetime_secs,
-        size: state.pool.size(),
-        idle: state.pool.num_idle(),
+        size: state.pool().size(),
+        idle: state.pool().num_idle(),
     }
 }
 
@@ -439,7 +439,7 @@ async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
            ORDER BY created_at DESC
            LIMIT 1"#,
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(state.pool())
     .await
     .ok()
     .flatten();

@@ -83,7 +83,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn cacerts(State(state): State<AppState>) -> Result<Response, EstError> {
-    let bundle = provisioning::trust_bundle(&state.pool).await?;
+    let bundle = provisioning::trust_bundle(state.pool()).await?;
     base64_response(
         PKCS7_CERTS_ONLY_MEDIA_TYPE,
         certs_only_der(&bundle.pem)?,
@@ -115,7 +115,7 @@ async fn simple_enroll(
     .await;
     if let Err(ref error) = result {
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
@@ -162,7 +162,7 @@ async fn simple_reenroll(
     .await;
     if let Err(ref error) = result {
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &audit::AuditMeta {
                 actor_entity_id: None,
@@ -200,7 +200,7 @@ async fn server_keygen(
     let result = service::enroll_generated(&state, auth.clone()).await;
     if let Err(ref error) = result {
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),
@@ -286,7 +286,7 @@ async fn authenticate_http(state: &AppState, headers: &HeaderMap) -> Result<Auth
         .filter(|(identifier, secret)| !identifier.is_empty() && !secret.is_empty())
         .ok_or_else(|| AppError::unauthorized("invalid HTTP Basic authentication"))?;
     let authenticated = identity_service::authenticate_password_credential_in_tenant(
-        &state.pool,
+        state.pool(),
         &state.config,
         identifier,
         secret,

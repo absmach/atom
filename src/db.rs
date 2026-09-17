@@ -1,11 +1,56 @@
 use std::time::Duration;
 
 use sqlx::{
+    migrate::MigrateError,
     postgres::{PgConnectOptions, PgPoolOptions},
-    PgPool,
+    Acquire, PgConnection, PgPool, Postgres, Transaction,
 };
 
 use crate::config::DbPoolConfig;
+
+/// Identifies which storage backend a [`Database`] is backed by. `DATABASE_URL`'s
+/// scheme selects this at startup (see [`classify_url`]); every backend-specific
+/// pool/transaction type stays behind the [`Database`]/[`DbTransaction`] façade so
+/// domain and transport code never names a concrete SQLx backend type directly.
+///
+/// Only `Postgres` is connectable today — adding SQLite (tracked in
+/// `product-docs/development/database-backends/`) is additive: a new variant here,
+/// a new `Database`/`DbTransaction` arm, and a `storage/sqlite` adapter, with no
+/// change to this type's callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseKind {
+    Postgres,
+}
+
+impl DatabaseKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DatabaseKind::Postgres => "postgres",
+        }
+    }
+}
+
+impl std::fmt::Display for DatabaseKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Classifies a `DATABASE_URL` by scheme without connecting, so an unsupported
+/// scheme fails startup before any pool/migration work rather than deep inside
+/// connection setup.
+pub fn classify_url(url: &str) -> anyhow::Result<DatabaseKind> {
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        Ok(DatabaseKind::Postgres)
+    } else if url.starts_with("sqlite://") || url.starts_with("sqlite:") {
+        anyhow::bail!(
+            "DATABASE_URL scheme 'sqlite' is not supported by this build yet; \
+             use postgres:// or postgresql://"
+        )
+    } else {
+        anyhow::bail!("unsupported DATABASE_URL scheme; expected postgres:// or postgresql://")
+    }
+}
 
 pub fn pool_options(cfg: &DbPoolConfig) -> PgPoolOptions {
     PgPoolOptions::new()
@@ -25,6 +70,151 @@ pub async fn create_pool(url: &str, cfg: &DbPoolConfig) -> anyhow::Result<PgPool
     .await
     .map_err(|_| anyhow::anyhow!("database connect timed out"))??;
     Ok(pool)
+}
+
+/// A sanitized, log-safe summary of where a [`Database`] is connected — host,
+/// port, and database name, never credentials. Startup logging uses this
+/// instead of the raw `DATABASE_URL`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseLocation {
+    pub kind: DatabaseKind,
+    pub host: String,
+    pub port: Option<u16>,
+    pub database: String,
+}
+
+impl std::fmt::Display for DatabaseLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.port {
+            Some(port) => write!(
+                f,
+                "{}://{}:{}/{}",
+                self.kind, self.host, port, self.database
+            ),
+            None => write!(f, "{}://{}/{}", self.kind, self.host, self.database),
+        }
+    }
+}
+
+/// Re-parses `url` for logging only — `Database` itself never retains the raw
+/// URL string once connected, so this is the one place startup recovers a
+/// display form of it.
+pub fn location(url: &str) -> anyhow::Result<DatabaseLocation> {
+    match classify_url(url)? {
+        DatabaseKind::Postgres => {
+            let opts: PgConnectOptions = url.parse()?;
+            Ok(DatabaseLocation {
+                kind: DatabaseKind::Postgres,
+                host: opts.get_host().to_string(),
+                port: Some(opts.get_port()),
+                database: opts.get_database().unwrap_or_default().to_string(),
+            })
+        }
+    }
+}
+
+/// Backend-neutral database handle: owns the connection pool, dispatches
+/// migrations, and mints transactions. Cheaply cloneable (the pool clones its
+/// handle, not its connections), so it lives on [`crate::state::AppState`].
+///
+/// Domain and transport code should hold this (or [`DbTransaction`]) rather
+/// than a concrete SQLx pool/connection type — see
+/// `product-docs/development/database-backends/RFC.md`.
+#[derive(Clone)]
+pub enum Database {
+    Postgres(PgPool),
+}
+
+impl Database {
+    /// Classifies `url`, then connects and returns the pool wrapped in this
+    /// façade. Fails before any listener serves on an unsupported scheme or a
+    /// connection/timeout error.
+    pub async fn connect(url: &str, cfg: &DbPoolConfig) -> anyhow::Result<Self> {
+        match classify_url(url)? {
+            DatabaseKind::Postgres => Ok(Database::Postgres(create_pool(url, cfg).await?)),
+        }
+    }
+
+    pub fn kind(&self) -> DatabaseKind {
+        match self {
+            Database::Postgres(_) => DatabaseKind::Postgres,
+        }
+    }
+
+    /// Applies the migration set belonging to this backend.
+    pub async fn run_migrations(&self) -> Result<(), MigrateError> {
+        match self {
+            Database::Postgres(pool) => sqlx::migrate!("./migrations").run(pool).await,
+        }
+    }
+
+    /// Opens a new top-level transaction. Nested (savepoint) transactions are
+    /// opened from an existing [`DbTransaction`] via [`DbTransaction::begin`].
+    pub async fn begin(&self) -> Result<DbTransaction<'static>, sqlx::Error> {
+        match self {
+            Database::Postgres(pool) => Ok(DbTransaction::Postgres(pool.begin().await?)),
+        }
+    }
+
+    /// Transitional accessor for storage code that has not yet moved onto
+    /// `Database`/`DbTransaction` (identity/authz/certs/tenants repositories
+    /// and their callers). Removing every remaining use of this is
+    /// Milestone A's exit criterion (see `ROADMAP.md`); until then it is the
+    /// only place a [`PgPool`] may be recovered from the façade.
+    pub fn as_postgres(&self) -> &PgPool {
+        match self {
+            Database::Postgres(pool) => pool,
+        }
+    }
+}
+
+impl From<PgPool> for Database {
+    fn from(pool: PgPool) -> Self {
+        Database::Postgres(pool)
+    }
+}
+
+/// A backend-neutral open transaction. Wraps exactly one backend transaction
+/// and forwards commit/rollback/nested-savepoint semantics to it.
+///
+/// `'c` is the borrow lifetime of the connection this transaction runs on:
+/// `'static` for a top-level transaction opened from a pooled [`Database`], or
+/// borrowed from the parent for a nested savepoint opened via [`Self::begin`].
+pub enum DbTransaction<'c> {
+    Postgres(Transaction<'c, Postgres>),
+}
+
+impl<'c> DbTransaction<'c> {
+    /// Opens a nested savepoint transaction borrowing this one. PKI
+    /// issuance's serial-collision retry uses this so a unique violation
+    /// aborts only the inner savepoint, never the caller's outer transaction
+    /// (see `certs::service`).
+    pub async fn begin(&mut self) -> Result<DbTransaction<'_>, sqlx::Error> {
+        match self {
+            DbTransaction::Postgres(tx) => Ok(DbTransaction::Postgres(tx.begin().await?)),
+        }
+    }
+
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        match self {
+            DbTransaction::Postgres(tx) => tx.commit().await,
+        }
+    }
+
+    pub async fn rollback(self) -> Result<(), sqlx::Error> {
+        match self {
+            DbTransaction::Postgres(tx) => tx.rollback().await,
+        }
+    }
+
+    /// Transitional accessor: the concrete Postgres connection this
+    /// transaction runs on, for storage code that has not yet moved onto a
+    /// dispatching adapter. See [`Database::as_postgres`].
+    pub fn as_postgres_mut(&mut self) -> &mut PgConnection {
+        match self {
+            DbTransaction::Postgres(tx) => tx,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -48,5 +238,36 @@ mod tests {
 
         assert_eq!(pool.options().get_max_connections(), 12);
         assert_eq!(pool.options().get_min_connections(), 2);
+    }
+
+    #[test]
+    fn classify_url_accepts_postgres_schemes() {
+        assert_eq!(
+            classify_url("postgres://u:p@host/db").unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert_eq!(
+            classify_url("postgresql://u:p@host/db").unwrap(),
+            DatabaseKind::Postgres
+        );
+    }
+
+    #[test]
+    fn classify_url_rejects_sqlite_and_unknown_schemes() {
+        assert!(classify_url("sqlite://local.db").is_err());
+        assert!(classify_url("sqlite::memory:").is_err());
+        assert!(classify_url("mysql://u:p@host/db").is_err());
+        assert!(classify_url("not a url").is_err());
+    }
+
+    #[test]
+    fn location_never_exposes_credentials() {
+        let loc = location("postgres://user:hunter2@db.internal:6543/atom").unwrap();
+        assert_eq!(loc.host, "db.internal");
+        assert_eq!(loc.port, Some(6543));
+        assert_eq!(loc.database, "atom");
+        let rendered = loc.to_string();
+        assert!(!rendered.contains("hunter2"));
+        assert!(!rendered.contains("user"));
     }
 }
