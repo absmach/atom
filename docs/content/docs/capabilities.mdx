@@ -189,7 +189,8 @@ Atom provides:
 - graceful shutdown;
 - startup validation for security-sensitive configuration.
 
-See [Operations](/operations).
+See [Operations UI](/user-guide/operations) for health diagnostics and signing-key
+management, and [Audit queries](/queries/audit) for inspecting audit records.
 
 ## Performance and optional Redis acceleration
 
@@ -207,7 +208,7 @@ Redis is optional; deployments can run Atom directly against PostgreSQL.
 
 Atom includes an optional web administration UI built on the public GraphQL
 surface. Operators can manage and inspect tenants, entities, credentials,
-resources, groups, roles, policies, profiles, invitations, audit records, and
+resources, groups, roles, policies, profiles, audit records, and
 other Atom objects without making the UI part of the runtime dependency chain.
 
 Headless deployments are fully supported.
@@ -231,5 +232,6 @@ Optional components can be added when needed:
 - external event broker or policy callout services.
 
 Start with [Quickstart](/quickstart), then use [Architecture](/architecture),
-[Access Control](/access-control), [Authentication](/authentication), and
-[Operations](/operations) for production design details.
+[Access Control](/access-control), and [Authentication](/authentication) for design
+details. See [Operations UI](/user-guide/operations) and [Audit queries](/queries/audit)
+for operational workflows.
