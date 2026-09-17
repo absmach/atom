@@ -31,7 +31,7 @@ boundaries plus a static architecture gate.
 - Blocked by: None
 - Blocks: Implement full SQLite behavior
 
-## Agent-sized child issues
+## Phases (within the single PR)
 
 - DB-001 Database façade, runtime URL classification, and benchmark baseline
 - DB-002 Backend-neutral transactions, commit helpers, and error classification
@@ -42,6 +42,6 @@ boundaries plus a static architecture gate.
 
 ## Story acceptance
 
-- [ ] Every child issue is closed with linked verification evidence.
+- [ ] Every phase's checklist item in the tracking issue is checked off with linked verification evidence in the PR description.
 - [ ] Capability-level acceptance passes end to end.
 - [ ] Canonical PRD/RFC remains accurate.

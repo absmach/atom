@@ -18,7 +18,7 @@ architecture rule in CI.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Database, PKI/security, and operations reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: PKI trust/issuer semantics, secret handling, outbox delivery, purge retention, or startup ordering would change.
 
 ## Scope
@@ -74,4 +74,4 @@ startup bootstraps, and the final static boundary check/removal of transitional 
 - [ ] Milestone A exit gate passes.
 - [ ] No secret-bearing type gains unsafe `Debug`/logging.
 - [ ] No released migration changes.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

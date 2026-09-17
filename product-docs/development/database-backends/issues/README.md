@@ -1,7 +1,10 @@
-# Draft GitHub Delivery Hierarchy
+# Draft Phase Specifications (Single-PR Delivery)
 
-These files are draft issue bodies. They are subordinate to `../PRD.md` and
-`../RFC.md`. No issue has been created.
+These files are draft phase specifications for the one database-backends PR
+(see `../PRD.md` "Delivery model"). They are subordinate to `../PRD.md` and
+`../RFC.md`. No GitHub issue has been created; only a single tracking issue is
+proposed (see `../PUBLICATION-MANIFEST.md`), carrying this hierarchy as a
+checklist rather than as native sub-issues.
 
 ## Epic
 
@@ -37,6 +40,9 @@ These files are draft issue bodies. They are subordinate to `../PRD.md` and
 
 ## Publication order
 
-Create the Epic first, then the three capabilities as native sub-issues, then
-their leaf issues as native sub-issues. Apply dependencies from `ROADMAP.md`.
-Do not replace native hierarchy with Markdown checklists after publication.
+Create one tracking issue from `epic.md`, with the three capabilities and their
+leaf issues (phases) represented as a Markdown checklist inside that single
+issue, in the order given above. Apply dependencies from `ROADMAP.md` as
+checklist ordering/notes. Create one PR implementing every phase, referencing
+that tracking issue with `Closes #<number>`. Do not create native GitHub
+sub-issues or separate PRs per phase.

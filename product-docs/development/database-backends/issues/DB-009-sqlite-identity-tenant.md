@@ -17,7 +17,7 @@ invitations, authentication, and bootstrap using the established repository cont
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Identity, database, and security reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: password/shared-key verification, revocation provenance, tenant boundaries, or restore semantics would differ from PostgreSQL.
 
 ## Scope
@@ -72,4 +72,4 @@ sessions, profiles, tenants/invitations, auth lookups, and bootstrap idempotency
 - [ ] Acceptance and parity criteria pass.
 - [ ] No authorization/PKI scope was silently stubbed.
 - [ ] All same-transaction validators assigned by DB-008 are implemented for this domain.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

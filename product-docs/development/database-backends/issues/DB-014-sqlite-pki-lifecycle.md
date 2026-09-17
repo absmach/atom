@@ -18,7 +18,7 @@ purge behavior with PostgreSQL-equivalent security and recovery semantics.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: PKI/security, database, and operations reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: certificate identity, issuer derivation, serial collision, revocation immutability, CRL/OCSP correctness, or enrollment trust would differ.
 
 ## Scope
@@ -74,4 +74,4 @@ evidence, issuer CRLs, OCSP/resolver, enrollment accounting, automation, and PKI
 - [ ] Milestone B functional PKI parity passes.
 - [ ] Every DB-008 lifecycle invariant owner is closed.
 - [ ] No public PKI contract or trust boundary changes.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

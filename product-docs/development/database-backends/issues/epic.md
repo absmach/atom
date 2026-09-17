@@ -1,4 +1,9 @@
-# [Epic] Run Atom on PostgreSQL or SQLite with equivalent behavior
+# [Tracking issue] Run Atom on PostgreSQL or SQLite with equivalent behavior
+
+Delivered as a single consolidated PR (see `../PRD.md` "Delivery model"), not as
+separate PRs per phase. This issue tracks the whole initiative; the phase
+groups below are checklist sections in this issue, not native sub-issues, and
+the PR closes this issue with `Closes #<number>` once every phase has landed.
 
 ## Outcome
 
@@ -50,9 +55,10 @@ same identity, authorization, audit, lifecycle, and PKI behavior.
 - Engineering/database reviewer: TBD before publication
 - Security/operations reviewer: TBD before publication
 
-## Epic acceptance
+## Tracking issue acceptance
 
-- [ ] All child capabilities have passed acceptance and are closed.
+- [ ] All phase groups have passed acceptance within the single PR before merge.
 - [ ] Requirement traceability has no gaps.
 - [ ] Required rollout, observability, security, and support readiness checks pass.
 - [ ] Outcome evidence or the agreed measurement window is active.
+- [ ] The PR closes this issue with `Closes #<number>`.

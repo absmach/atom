@@ -204,17 +204,32 @@ ownership.
 
 ## Rollout and rollback
 
-1. Merge DB-001 through DB-006 as PostgreSQL-only behavior-preserving changes.
-2. Merge the SQLite driver, schema, and adapters without documenting SQLite as
-   production-supported; selection may remain test-only until parity is complete.
-3. Enable the dual-backend CI and release matrix. Stop if PostgreSQL performance,
+This lands as a single PR against `main` (see `PRD.md` "Delivery model"), not as
+staged merges. The steps below are ordered phases within that one PR — each is
+its own commit(s) with its own acceptance evidence, but none of them is reachable
+on `main` independently:
+
+1. DB-001 through DB-006: PostgreSQL-only behavior-preserving changes.
+2. DB-007 through DB-014: the SQLite driver, schema, and adapters, without
+   documenting SQLite as production-supported; selection remains test-only until
+   parity is complete later in the same PR.
+3. DB-015: enable the dual-backend CI and release matrix within the branch. Stop
+   and revert the offending phase (not the whole PR) if PostgreSQL performance,
    contracts, authz parity, transaction semantics, or PKI invariants fail.
-4. Publish SQLite operator documentation and support only after reviewer approval
-   and release evidence.
+4. DB-016: SQLite operator documentation and support, included in the same PR,
+   gated on reviewer approval and release evidence before merge.
+
+Because every phase merges to `main` at once, there is no window where only
+Milestone A is exposed in production. All the risk containment that staged
+merges provide on `main` must instead be complete on the branch before the PR
+is opened for review: full PostgreSQL suite, full dual-backend suite, the fixed
+authz benchmark, `scripts/check-v1-contracts.sh`, and the differential parity
+suite all green on the final branch state.
 
 PostgreSQL rollback uses the current binary rollback policy because its released
 migrations are unchanged. Before a SQLite database is used externally, rollback
-is removal of the unreleased SQLite path. After release, roll back only to an
+is reverting the single PR (removing the unreleased SQLite path in one action,
+since it never shipped independently). After release, roll back only to an
 earlier SQLite-capable binary whose migration compatibility is documented, or
 restore the pre-upgrade SQLite backup. Rollback never converts SQLite data into
 PostgreSQL.

@@ -5,6 +5,12 @@
 **Not published.** This manifest prepares GitHub planning objects only. Drafting
 does not authorize issue, label, milestone, Project, assignment, or release mutations.
 
+**Delivery model:** a single tracking issue plus a single consolidated PR that
+closes it — not the Epic/capability/16-leaf-issue GitHub hierarchy this manifest
+previously proposed. See `PRD.md` "Delivery model" for why. The phase
+decomposition (`issues/`) is retained as the implementation and review plan and
+becomes a checklist inside the one tracking issue, not native sub-issues.
+
 ## Target
 
 | Field | Value |
@@ -12,7 +18,8 @@ does not authorize issue, label, milestone, Project, assignment, or release muta
 | Repository | `absmach/atom` |
 | Default branch | `main` |
 | Initiative slug | `database-backends` |
-| Draft branch | `codex/database-backend-planning` |
+| Planning draft branch | `codex/database-backend-planning` |
+| Implementation branch | `codex/database-backend-single-pr-plan` (revises delivery model to single PR; implementation itself is a follow-up) |
 | Viewer permission observed | `MAINTAIN` |
 | Related existing issue | #42, serverless PostgreSQL pool/health behavior; related only, not absorbed or closed |
 
@@ -23,7 +30,7 @@ does not authorize issue, label, milestone, Project, assignment, or release muta
 | `product-docs/development/database-backends/PRD.md` | Draft | Product requirements, acceptance, and traceability |
 | `product-docs/development/database-backends/RFC.md` | Draft | Backend architecture, data, security, migration, reliability, and operations decisions |
 | `product-docs/development/database-backends/ROADMAP.md` | Draft | Staged dependencies, milestones, and review gates |
-| `product-docs/development/database-backends/issues/` | Draft | Epic, capability, and 16 agent-ready leaf issue bodies |
+| `product-docs/development/database-backends/issues/` | Draft | Tracking issue text, capability groupings, and 16 agent-ready phase specs (implemented as commits in one PR, not separate issues) |
 | `product-docs/development/database-backends/README.md` | Draft | Reading order and authorization boundary |
 | `product-docs/development/database-backends/PUBLICATION-MANIFEST.md` | Draft | Exact publication proposal and gate status |
 
@@ -49,16 +56,18 @@ does not authorize issue, label, milestone, Project, assignment, or release muta
 - Non-goals: 7
 - Functional requirements: 10
 - Non-functional requirements: 10
-- GitHub planning objects proposed: 20
-  - 1 Epic
-  - 3 capabilities/stories
-  - 16 leaf implementation/validation issues
+- GitHub planning objects proposed: 2
+  - 1 tracking issue (carries the capability/phase breakdown as a checklist)
+  - 1 PR implementing every phase, closing the tracking issue
 - Final end-to-end evidence owner: DB-015
 - Operator/release evidence owner: DB-016
 
-## Proposed Epic hierarchy
+## Proposed tracking issue structure
 
-1. **[Epic] Run Atom on PostgreSQL or SQLite with equivalent behavior**
+One issue, built from `issues/epic.md`, with this checklist body (order is the
+implementation and commit order within the single PR):
+
+1. **[Tracking] Run Atom on PostgreSQL or SQLite with equivalent behavior**
    1. **Isolate persistence without PostgreSQL regression**
       1. DB-001 — Add the database façade and PostgreSQL benchmark baseline
       2. DB-002 — Generalize transactions, commit helpers, and database errors
@@ -79,10 +88,18 @@ does not authorize issue, label, milestone, Project, assignment, or release muta
       1. DB-015 — Enforce dual-backend parity, concurrency, and performance gates
       2. DB-016 — Publish SQLite operations guidance and complete release readiness
 
-Use native GitHub sub-issues for both levels. Create in the listed order, then
-apply dependencies from `ROADMAP.md`. Do not use a checklist as the published hierarchy.
+This is a Markdown checklist inside the one tracking issue, not native GitHub
+sub-issues — there is nothing to create or link at the capability/leaf level.
+The PR that implements this checklist references the tracking issue with
+`Closes #<number>` and reproduces the checklist in its description with boxes
+checked as phases land, so reviewers can see progress on a single large diff.
 
 ## Dependencies
+
+This graph is now the commit ordering within the single PR, not a merge-order
+dependency graph across separate PRs — "parallel" below means independent
+commits that can be authored in any order before the PR is opened for review,
+not independently mergeable work.
 
 - DB-001 -> DB-002.
 - DB-002 -> DB-003, DB-004, DB-005, DB-006.
@@ -110,7 +127,7 @@ to the dependencies above.
 | Engineering/database reviewer | TBD | Blocking publication |
 | Security/PKI reviewer | TBD | Blocking publication |
 | Operations reviewer | TBD | Blocking publication |
-| AI executor | Any approved coding agent | Ready in leaf contracts |
+| AI executor | Any approved coding agent | Ready in phase specs |
 
 ## Repository taxonomy observed
 
@@ -131,11 +148,10 @@ available because the token lacks `read:project`; no Project is claimed.
 
 ### Proposed issue metadata
 
-- Epic: existing `enhancement`; proposed missing label `epic`.
-- Capabilities: existing `enhancement`; proposed missing label `capability`.
-- DB-001 through DB-015: existing `enhancement`; proposed missing labels
-  `database`, `agent-ready`; add proposed `sqlite` to DB-007 through DB-016.
-- DB-016: existing `documentation` and `enhancement`; proposed `database`, `sqlite`, `agent-ready`.
+- Tracking issue: existing `enhancement`; proposed missing labels `database`,
+  `sqlite`, `agent-ready` (the checklist body covers both PostgreSQL-boundary
+  and SQLite-implementation phases, so both apply to the one issue).
+- PR: same labels as the tracking issue it closes.
 - Proposed milestone: `Database backends and SQLite parity`.
 - Proposed Project: TBD after an authorized user with `read:project` confirms the
   target; do not create a new Project by default.
@@ -148,14 +164,18 @@ explicitly say whether to create them or use only existing taxonomy.
 
 1. Confirm owners/reviewers, Project decision, labels, and milestone.
 2. Approve the canonical Markdown diff in the repository.
-3. Create the Epic from `issues/epic.md`.
-4. Create capabilities and attach them as native Epic sub-issues.
-5. Create leaves from their files and attach them as native capability sub-issues.
-6. Apply only approved existing/new labels, assignments, milestone, and Project fields.
-7. Add dependency relationships in the roadmap order.
-8. Replace planned titles in PRD traceability with issue links/numbers without
-   changing requirement meaning.
-9. Verify every created object and record URLs; never infer success from command exit alone.
+3. Create one tracking issue from `issues/epic.md`, with the capability/phase
+   breakdown above as its checklist body (no sub-issues).
+4. Apply only approved existing/new labels, assignments, milestone, and Project
+   fields to that one issue.
+5. Implement every phase (DB-001 through DB-016) as ordered commits on one
+   branch, checking off the corresponding checklist item as each lands.
+6. Open one PR from that branch with the same checklist in its description,
+   referencing the tracking issue with `Closes #<number>`.
+7. Replace planned phase references in PRD traceability with the tracking
+   issue/PR link without changing requirement meaning.
+8. Verify the created issue and PR and record their URLs; never infer success
+   from command exit alone.
 
 ## Quality gate
 
@@ -167,7 +187,7 @@ explicitly say whether to create them or use only existing taxonomy.
 | Requirement-to-issue traceability | Pass |
 | RFC covers interfaces/data/security/migration/reliability/operations | Pass |
 | Dependency graph coherent and acyclic | Pass |
-| Leaf issues bounded and independently verifiable | Pass |
+| Phases bounded and independently verifiable within the single PR | Pass |
 | Repository paths and commands verified | Pass |
 | GitHub taxonomy verified or marked proposed | Pass |
 | Human ownership/review confirmed | **Blocked for publication** |

@@ -17,7 +17,7 @@ an explicit schema/application invariant matrix before domain adapters write dat
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Database and security reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: a persisted enum/string meaning, uniqueness behavior, or security invariant cannot be represented consistently.
 
 ## Scope
@@ -72,4 +72,4 @@ positive/negative tests for every baseline invariant.
 - [ ] Acceptance criteria pass.
 - [ ] No codec logs sensitive data or silently coerces invalid values.
 - [ ] Every deferred application validator has a blocking owner among DB-009 through DB-014.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

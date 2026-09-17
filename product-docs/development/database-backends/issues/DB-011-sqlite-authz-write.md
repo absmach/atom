@@ -18,7 +18,7 @@ serialization and PostgreSQL-equivalent outcomes.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Security and database reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: SQLite trigger recursion, immediate transactions, or guardrail queries cannot preserve policy cleanup or assignment correctness under concurrency.
 
 ## Scope
@@ -73,4 +73,4 @@ idempotent membership/assignment behavior, and policy-target cleanup triggers.
 - [ ] Acceptance and concurrency evidence passes.
 - [ ] Every DB-008 authz invariant owner is closed.
 - [ ] No public or PostgreSQL semantic change is included.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

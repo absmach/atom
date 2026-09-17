@@ -18,7 +18,7 @@ identical.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Database reviewer TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: commit ordering, audit asymmetry, cache barriers, or outbox atomicity would change.
 
 ## Scope
@@ -76,4 +76,4 @@ identical.
 - [ ] Acceptance criteria and failure-injection tests pass.
 - [ ] No commit helper accepts a concrete PostgreSQL transaction publicly.
 - [ ] No unrelated repository domain is migrated in this PR.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

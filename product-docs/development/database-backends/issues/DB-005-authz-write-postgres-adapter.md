@@ -18,7 +18,7 @@ backend-neutral write contracts without changing authorization state semantics.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Security and database reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: assignment tenant boundaries, hierarchy serialization, policy cleanup, idempotent membership, or guardrail precedence would change.
 
 ## Scope
@@ -71,4 +71,4 @@ reverse assignment-time validation, including transaction-scoped locks and purge
 - [ ] Acceptance and concurrency criteria pass.
 - [ ] Canonical forward/reverse boundaries remain documented and enforced.
 - [ ] No unrelated read-path or SQLite implementation is included.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

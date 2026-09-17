@@ -18,7 +18,7 @@ while preserving key isolation and tenant/issuer invariants.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: PKI/security and database reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: issuer selection, authority hierarchy, profile ceilings, KEK behavior, or secret observability would change.
 
 ## Scope
@@ -73,4 +73,4 @@ storage and validation, and configured root/intermediate startup bootstrap.
 - [ ] Acceptance and security evidence passes.
 - [ ] Every DB-008 PKI-foundation invariant owner is closed.
 - [ ] Lifecycle scope remains in DB-014.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

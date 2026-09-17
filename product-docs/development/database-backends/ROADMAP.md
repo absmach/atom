@@ -3,8 +3,11 @@
 ## Status
 
 Draft execution plan for `PRD.md` and `RFC.md`. GitHub objects have not been
-published. Implement one leaf issue per focused PR and do not advertise SQLite
-until Milestone C exits.
+published. **Delivery is a single consolidated PR** (see `PRD.md` "Delivery
+model"), not one PR per leaf issue: implement every leaf issue below as an
+ordered phase — its own commit(s), with its own acceptance evidence recorded in
+the PR description — inside that one PR and branch. Do not advertise SQLite,
+and do not merge the PR, until Milestone C exits.
 
 ## Delivery sequence
 
@@ -100,8 +103,10 @@ Exit gate:
 - Subject-forward authorization uses the canonical backend grant expansion;
   reverse guardrail expansion stays separate.
 - No secret, key material, database URL, or unsafe file path enters logs/events.
-- Every leaf issue updates tests before relaxing or replacing an invariant.
-- A PR description closes only its published leaf issue with `Closes #<number>`.
+- Every leaf issue (phase) updates tests before relaxing or replacing an invariant.
+- The single PR description tracks every phase as a checklist item and closes
+  the one tracking issue with `Closes #<number>`; phases are not separate
+  issues or PRs.
 
 ## Review gates
 

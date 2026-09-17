@@ -18,7 +18,7 @@ change.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Identity/database reviewer TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: authentication, credential revocation, restore provenance, or tenant lifecycle semantics would change.
 
 ## Scope
@@ -70,5 +70,5 @@ access tokens, profiles, tenants/invitations, authentication lookups, and YAML/e
 
 - [ ] Acceptance criteria pass with PostgreSQL evidence.
 - [ ] Raw SQL for this domain exists only in the PostgreSQL storage adapter.
-- [ ] Authz and PKI scope did not drift into the PR.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] Authz and PKI scope did not drift into this phase.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

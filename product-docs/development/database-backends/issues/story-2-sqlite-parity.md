@@ -33,12 +33,12 @@ cross-backend transfer, SQLCipher, and release advertising before parity proof.
 - Blocked by: Isolate persistence without PostgreSQL regression
 - Blocks: Prove parity and release safely
 
-## Agent-sized child issues
+## Phases (within the single PR)
 
 - DB-007 through DB-014 as listed in `README.md`
 
 ## Story acceptance
 
-- [ ] Every child issue is closed with linked verification evidence.
+- [ ] Every phase's checklist item in the tracking issue is checked off with linked verification evidence in the PR description.
 - [ ] Capability-level acceptance passes end to end.
 - [ ] Canonical PRD/RFC remains accurate.

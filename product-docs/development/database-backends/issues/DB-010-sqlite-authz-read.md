@@ -18,7 +18,7 @@ readers with PostgreSQL-equivalent results.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Security and database reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: more than one subject-forward expansion/scope implementation is needed or a PostgreSQL result cannot be matched without changing public semantics.
 
 ## Scope
@@ -73,4 +73,4 @@ semantics where dialect defaults differ.
 - [ ] Authorization parity and fail-closed criteria pass.
 - [ ] Canonical expansion rule is documented and statically reviewable.
 - [ ] No mutation or reverse-guardrail implementation is bundled.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

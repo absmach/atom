@@ -18,7 +18,7 @@ external I/O or losing committed events.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Database and operations reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: an outbox design could mark unpublished work delivered, hold a write lock during broker I/O, or weaken purge/audit retention semantics.
 
 ## Scope
@@ -73,4 +73,4 @@ soft-delete purge, and non-PKI worker coordination/observability.
 - [ ] Acceptance and recovery criteria pass.
 - [ ] No write lock spans external broker I/O.
 - [ ] Event wire contract remains unchanged.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

@@ -18,7 +18,7 @@ and PostgreSQL performance guard in CI. This issue owns final end-to-end proof.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Product/API, database, security, CI, and operations reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: a test is excluded for backend convenience, parity normalization hides a real semantic difference, or performance exceeds the approved budget.
 
 ## Scope
@@ -75,4 +75,4 @@ concurrency/failure/restart suites, benchmark comparison, and release evidence g
 - [ ] All requirements owned by this issue have linked passing evidence.
 - [ ] No skipped backend test lacks an explicit external-infrastructure reason and owner.
 - [ ] Performance and contract gates pass.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

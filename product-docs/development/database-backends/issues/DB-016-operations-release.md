@@ -18,7 +18,7 @@ boundaries, and the final human release review.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Product, database, security, documentation, and operations reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: documentation would imply multi-instance/shared-storage support, safe transfer between backends, SQLCipher, or a rollback path not proven by a drill.
 
 ## Scope
@@ -75,4 +75,4 @@ rollback/upgrade notes, and release checklist/evidence review.
 - [ ] Acceptance criteria pass with operator evidence.
 - [ ] PostgreSQL remains the recommended/default production path.
 - [ ] No unsupported capability is implied.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

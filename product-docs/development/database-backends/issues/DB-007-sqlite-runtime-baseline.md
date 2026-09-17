@@ -17,7 +17,7 @@ enforcement, backend migration selection, and the version-025 SQLite baseline.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Database and operations reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: SQLite cannot enforce the selected durability/topology or the baseline cannot represent the current logical schema without changing a public meaning.
 
 ## Scope
@@ -79,4 +79,4 @@ enforcement, backend migration selection, and the version-025 SQLite baseline.
 - [ ] Acceptance criteria pass on Linux and Windows CI-supported behavior.
 - [ ] SQLite remains unadvertised as supported.
 - [ ] PostgreSQL migration checks remain green.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

@@ -33,13 +33,13 @@ transfer utility.
 - Blocked by: Implement full SQLite behavior
 - Blocks: SQLite support announcement/release
 
-## Agent-sized child issues
+## Phases (within the single PR)
 
 - DB-015 Dual-backend parity, concurrency, and performance quality gate
 - DB-016 Operator documentation, deployment examples, and release readiness
 
 ## Story acceptance
 
-- [ ] Every child issue is closed with linked verification evidence.
+- [ ] Every phase's checklist item in the tracking issue is checked off with linked verification evidence in the PR description.
 - [ ] Capability-level acceptance passes end to end.
 - [ ] Canonical PRD/RFC remains accurate.

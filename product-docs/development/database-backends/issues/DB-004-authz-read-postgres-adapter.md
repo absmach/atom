@@ -18,7 +18,7 @@ authorization-read contract without changing a decision.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Security and database reviewers TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: a reader would bypass `subject_effective_grants`, duplicate scope matching, weaken ABAC fail-closed, or change deny precedence.
 
 ## Scope
@@ -72,4 +72,4 @@ and entity/resource/group authorized listings.
 - [ ] Decision and visibility parity evidence passes.
 - [ ] No subject-forward alternative expansion was introduced.
 - [ ] PostgreSQL-specific logic is contained in its adapter.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.

@@ -106,6 +106,40 @@ events, purge, and PKI invariants currently depend on PostgreSQL semantics.
 - **NFR-9:** SQLite schema constraints/triggers or same-transaction application validation must preserve tenant isolation, soft-delete, policy cleanup, credential, and PKI invariants.
 - **NFR-10:** Adding a future internal backend must not require changes to public transports, domain models, or event envelopes.
 
+## Delivery model
+
+**This initiative ships as a single pull request against `main`, not as sixteen
+separate PRs.** `ROADMAP.md` and `issues/` still decompose the work into ordered
+phases (DB-001 through DB-016) because each phase has its own scope, acceptance
+criteria, and reviewer focus — that decomposition is the implementation plan and
+the review checklist, not a publication plan. Phases land as separate, reviewable
+commits inside one branch and one PR; none of them merges to `main` on its own,
+and SQLite is not reachable by any caller until every phase in the PR is present.
+
+Consequences of consolidating to one PR:
+
+- **All-or-nothing exposure.** There is no intermediate point where only
+  Milestone A (PostgreSQL-safe abstraction) is live on `main` while Milestone B
+  is still in flight. The risk containment that staged merges would have provided
+  (small blast radius per merge, easy revert of one phase) is replaced entirely by
+  pre-merge validation: every phase's acceptance criteria, the full existing
+  PostgreSQL suite, the dual-backend suite, the fixed authz benchmark, and
+  `scripts/check-v1-contracts.sh` must all pass on the final branch before the PR
+  merges, not incrementally on `main`.
+- **Commit-level granularity replaces PR-level granularity.** Each DB-0NN phase
+  is still its own commit (or small set of commits) with its own acceptance
+  evidence in the PR description, so reviewers can review and, if needed, revert
+  one phase without reverting the whole PR pre-merge — but the merge itself is a
+  single event.
+- **One tracking issue, one PR.** `PUBLICATION-MANIFEST.md` reflects this: a
+  single tracking issue carries the phase checklist (what was an Epic +
+  3 capabilities + 16 leaf issues), and the PR closes that one issue.
+- **Reviewer load is concentrated.** A ~74k-line codebase with 666 dynamic SQL
+  call sites and 26 migrations means the resulting diff is large. Reviewers
+  should use the phase boundaries (still visible as commits and as the DB-0NN
+  checklist in the PR description) to review incrementally even though merge is
+  atomic.
+
 ## Constraints and dependencies
 
 - Rust 2021, Axum 0.7, SQLx 0.8.6, async-graphql 7.2.1, and the existing public contracts remain fixed for this initiative.
@@ -123,13 +157,14 @@ events, purge, and PKI invariants currently depend on PostgreSQL semantics.
 | One local process is acceptable for SQLite adopters | File locking and worker coordination design changes materially | Confirm in release review and docs | Product reviewer |
 | Existing public APIs define parity; direct manual database writes are unsupported | More database-only compatibility work is needed | Approve RFC boundary | Database reviewer |
 | A 10% PostgreSQL p95 regression budget is acceptable | Release guardrail must change | Capture baseline and approve before DB-003 | Engineering reviewer |
+| A single consolidated PR is reviewable at this size | Reviewers cannot meaningfully evaluate a ~2000+ line, cross-cutting diff; risk containment shifts entirely to pre-merge gates | Keep DB-0NN phases as separate commits with per-phase evidence in the PR description; confirm with reviewers before requesting review | Requester |
 
 ## Risks and mitigations
 
 | Risk | Likelihood | Impact | Mitigation/contingency | Owner |
 |---|---|---|---|---|
 | Authorization semantics drift between dialects | High | High | Canonical backend queries, differential fixtures, deny/ceiling parity tests | Security reviewer |
-| Large refactor regresses PostgreSQL | Medium | High | PostgreSQL-only foundation PRs, benchmark first, no migration edits | Engineering reviewer |
+| Large refactor regresses PostgreSQL | Medium | High | PostgreSQL-only foundation phases (own commits within the single PR), benchmark first, no migration edits | Engineering reviewer |
 | SQLite writes block during broker or PKI work | Medium | High | Short immediate transactions; never hold SQLite write lock across broker I/O | Database reviewer |
 | Schema triggers differ from PostgreSQL | High | High | Explicit invariant matrix and negative tests per backend | Database reviewer |
 | SQLite is deployed on shared/network storage | Medium | High | Process lock, startup rejection where detectable, prominent unsupported-topology docs | Operations reviewer |
@@ -137,16 +172,20 @@ events, purge, and PKI invariants currently depend on PostgreSQL semantics.
 
 ## Acceptance and release criteria
 
-- All existing PostgreSQL tests and v1 contract checks pass after each foundation PR.
+- All existing PostgreSQL tests and v1 contract checks pass after each foundation phase (verified on the branch before the single PR merges, not incrementally on `main`).
 - Every database-relevant integration test passes against a fresh PostgreSQL database and a fresh SQLite file.
 - Differential authz, visibility, lifecycle, audit/outbox, purge, and PKI scenarios produce equivalent normalized results.
-- SQLite durability, restart, file ownership, busy timeout, rollback, backup, and restore evidence is attached to the release issue.
+- SQLite durability, restart, file ownership, busy timeout, rollback, backup, and restore evidence is attached to the tracking issue/PR.
 - PostgreSQL benchmark regression remains within NFR-2.
 - No prohibited backend-specific dependency remains outside storage adapters and fixtures.
 - Documentation identifies PostgreSQL as the multi-replica/high-write default and SQLite as a supported single-instance alternative.
 - Database, security, operations, and product reviewers approve the RFC and release evidence.
 
 ## Requirement traceability
+
+Each "issue or planned issue" below is a phase delivered as commits inside the
+single database-backends PR (see [Delivery model](#delivery-model)), not a
+separately merged PR.
 
 | Requirement | Acceptance evidence | Issue or planned issue | Verification |
 |---|---|---|---|
@@ -168,6 +207,7 @@ events, purge, and PKI invariants currently depend on PostgreSQL semantics.
 |---|---|---|---|---|
 | SQLite feature level | Resolved | Product | Planning | Full production parity |
 | Backend selection | Resolved | Product | Planning | Runtime `DATABASE_URL` scheme |
+| PR delivery model | Resolved | Requester | Planning | Single consolidated PR covering all phases (DB-001 through DB-016), not 16 separate PRs; see [Delivery model](#delivery-model) |
 | Abstraction style | Resolved | Engineering | Planning | Internal backend adapters; no public plugin API |
 | SQLite topology | Resolved | Operations | Planning | One Atom process per local file |
 | Durability | Resolved | Database | Planning | WAL plus `synchronous=FULL` and immediate writes |

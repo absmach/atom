@@ -18,7 +18,7 @@ runtime behavior.
 - Accountable human: `@arvindh123` (proposed)
 - Human reviewer: Product/API plus database reviewer TBD
 - AI executor: Any approved coding agent
-- Expected PR: One focused PR
+- Expected delivery: One ordered phase (own commit) within the single database-backends PR
 - Stop and escalate when: a change would edit/reorder a released migration, alter a public contract, or choose a benchmark budget different from the RFC.
 
 ## Scope
@@ -28,7 +28,7 @@ runtime behavior.
 - `DatabaseKind`, a cloneable database façade, URL scheme validation, PostgreSQL
   pool construction, backend migration dispatch, and sanitized startup logging.
 - Replace `AppState`'s public `PgPool` field with the façade while providing a
-  storage-internal transitional PostgreSQL accessor for later leaf issues.
+  storage-internal transitional PostgreSQL accessor for later phases.
 - Add a deterministic seeded authz benchmark and capture the main-branch baseline.
 
 **Out of scope**
@@ -71,11 +71,11 @@ runtime behavior.
 
 - Tests to add/update: URL classification, migration selection, sanitized errors, `AppState` construction, authz benchmark fixture.
 - Commands: `cargo fmt --check`; `cargo clippy --locked -- -D warnings`; `cargo test --no-run --locked`; `cargo test`; `scripts/check-v1-contracts.sh`.
-- Manual/operational evidence: Attach benchmark baseline and environment description to the PR.
+- Manual/operational evidence: Attach benchmark baseline and environment description to the tracking issue/PR description.
 
 ## Definition of done
 
-- [ ] Acceptance criteria pass with evidence in the PR.
+- [ ] Acceptance criteria pass with evidence in the tracking issue/PR description.
 - [ ] Required checks pass and released migrations are untouched.
 - [ ] Transitional PostgreSQL accessor is storage-internal and tagged for removal in DB-006.
-- [ ] PR description includes `Closes #<leaf-issue-number>` after publication.
+- [ ] This phase's checklist item in the tracking issue/PR description is checked off before the next phase begins.
