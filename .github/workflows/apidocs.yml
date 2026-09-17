@@ -11,6 +11,7 @@ on:
       - "migrations/**"
       - "examples/export-graphql-schema.rs"
       - "scripts/check-v1-contracts.sh"
+      - "scripts/test-v1-contracts.py"
       - "scripts/check-vendored-proto.sh"
       - "src/**"
       - "tests/api_contract.rs"
@@ -117,3 +118,6 @@ jobs:
 
       - name: Check v1 API and migration contracts
         run: bash scripts/check-v1-contracts.sh
+
+      - name: Test contract gate regressions
+        run: python3 scripts/test-v1-contracts.py

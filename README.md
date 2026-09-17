@@ -121,7 +121,12 @@ pnpm build
 
 Atom treats its public API as a compatibility surface. The launch baseline is
 the single `migrations/001_initial.sql`; once Atom is deployed, preserve it and
-add forward-only migrations for schema changes.
+add forward-only migrations for schema changes. Register each migration in
+`api/v1/migrations-v1.0.0.sha384` without changing existing migration checksums,
+then refresh its entry in `api/v1/contracts-v1.0.0.sha384`. Intentional API
+additions must also refresh their contract checksums. The gate requires the
+launch baseline, unique positive migration versions, a complete file inventory,
+and matching checksums.
 
 ```bash
 make proto
