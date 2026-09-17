@@ -86,7 +86,7 @@ async fn callout_check_grpc(
             let op_name = operation.to_string();
             let reason_for_audit = reason.clone();
             let endpoint_for_audit = endpoint_id.clone();
-            tokio::spawn(async move {
+            state.background_tasks.spawn(async move {
                 audit::write(
                     &pool,
                     events_enabled,
@@ -699,6 +699,18 @@ pub async fn serve(
     state: AppState,
     tls: Option<ServerTlsConfig>,
 ) -> anyhow::Result<()> {
+    serve_with_shutdown(listener, state, tls, crate::shutdown::shutdown_signal()).await
+}
+
+pub async fn serve_with_shutdown<F>(
+    listener: TcpListener,
+    state: AppState,
+    tls: Option<ServerTlsConfig>,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
     let addr = listener.local_addr()?;
     if state.config.broker_auth.enabled
         && state
@@ -810,7 +822,7 @@ pub async fn serve(
     }
 
     let result = router
-        .serve_with_incoming_shutdown(incoming, crate::shutdown::shutdown_signal())
+        .serve_with_incoming_shutdown(incoming, shutdown)
         .await;
 
     match result {

@@ -40,6 +40,28 @@ const KEY_REFERENCE_PREFIX: &str = "pkcs11:v1:id=";
 const P256_OID_DER: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 
 static RUNTIMES: OnceLock<Mutex<HashMap<String, Arc<Pkcs11Runtime>>>> = OnceLock::new();
+static IN_FLIGHT_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Call only after all request/job producers have stopped. A timed-out HSM
+/// operation still counts until its native worker actually returns.
+pub(super) async fn wait_for_idle() {
+    loop {
+        let changed = IN_FLIGHT_CHANGED.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let idle = RUNTIMES.get().is_none_or(|runtimes| {
+            runtimes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .all(|runtime| runtime.in_flight.load(Ordering::Acquire) == 0)
+        });
+        if idle {
+            return;
+        }
+        changed.await;
+    }
+}
 
 fn runtime_key(config: &PkiPkcs11Config) -> String {
     format!("{}\0{}", config.module_path, config.token_label)
@@ -249,6 +271,7 @@ struct InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.runtime.in_flight.fetch_sub(1, Ordering::AcqRel);
+        IN_FLIGHT_CHANGED.notify_waiters();
     }
 }
 
@@ -885,6 +908,23 @@ mod tests {
             circuit_failure_threshold: 10,
             circuit_reset_secs: 60,
         }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_drain_waits_for_native_operation_completion() {
+        let provider = Pkcs11KeyProvider::new(executor_config("lifecycle-native-drain"));
+        let operation = provider.runtime.acquire_in_flight(1).unwrap();
+        let drain = wait_for_idle();
+        tokio::pin!(drain);
+        tokio::select! {
+            biased;
+            _ = &mut drain => panic!("native operation was not included in drain"),
+            _ = std::future::ready(()) => {}
+        }
+        drop(operation);
+        tokio::time::timeout(Duration::from_secs(2), drain)
+            .await
+            .unwrap();
     }
 
     #[test]

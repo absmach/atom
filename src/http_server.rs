@@ -16,9 +16,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{
-    config::HttpServerConfig, connection_limit::PerIpConnectionLimiter, shutdown::shutdown_signal,
-};
+use crate::{config::HttpServerConfig, connection_limit::PerIpConnectionLimiter};
 
 pub async fn serve(
     listener: TcpListener,
@@ -26,6 +24,26 @@ pub async fn serve(
     config: HttpServerConfig,
     ipv6_prefix_len: u8,
 ) -> Result<()> {
+    serve_with_shutdown(
+        listener,
+        router,
+        config,
+        ipv6_prefix_len,
+        crate::shutdown::shutdown_signal(),
+    )
+    .await
+}
+
+pub async fn serve_with_shutdown<F>(
+    listener: TcpListener,
+    router: Router,
+    config: HttpServerConfig,
+    ipv6_prefix_len: u8,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
     let address = listener.local_addr()?;
     let permits = Arc::new(Semaphore::new(config.max_connections));
     let ip_connections =
@@ -33,7 +51,6 @@ pub async fn serve(
     let header_timeout = Duration::from_secs(config.http_header_timeout_secs);
     let connection_timeout = Duration::from_secs(config.connection_timeout_secs);
     let drain_timeout = Duration::from_secs(config.shutdown_drain_timeout_secs);
-    let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let (connection_shutdown, _) = watch::channel(false);
     let mut connections = JoinSet::new();
@@ -132,7 +149,132 @@ pub async fn serve(
             remaining,
             "aborted HTTP connections after shutdown drain deadline"
         );
+        anyhow::bail!("active requests exceeded the drain deadline; graceful shutdown failed");
     }
     tracing::info!(%address, "HTTP listener stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use axum::routing::get;
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn injected_shutdown_reports_forced_request_abort_as_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let started = Arc::new(Mutex::new(Some(started_tx)));
+        let router = Router::new().route(
+            "/work",
+            get(move || {
+                let started = started.lock().unwrap().take().unwrap();
+                async move {
+                    started.send(()).unwrap();
+                    std::future::pending::<&'static str>().await
+                }
+            }),
+        );
+        let stop = CancellationToken::new();
+        let config = HttpServerConfig {
+            shutdown_drain_timeout_secs: 0,
+            ..HttpServerConfig::default()
+        };
+        let server =
+            serve_with_shutdown(listener, router, config, 64, stop.clone().cancelled_owned());
+        tokio::pin!(server);
+        let request = tokio::spawn(async move {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/work"))
+                .send()
+                .await
+        });
+        tokio::select! {
+            result = &mut server => panic!("server exited before request entered: {result:?}"),
+            started = tokio::time::timeout(Duration::from_secs(2), started_rx) => started.unwrap().unwrap(),
+        }
+        stop.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "forced request abort cannot acknowledge graceful shutdown"
+        );
+        request.abort();
+        let _ = request.await;
+    }
+
+    #[tokio::test]
+    async fn injected_shutdown_drains_an_active_request_without_an_os_signal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let started = Arc::new(Mutex::new(Some(started_tx)));
+        let release = Arc::new(Mutex::new(Some(release_rx)));
+        let router = Router::new().route(
+            "/work",
+            get(move || {
+                let started = started.lock().unwrap().take().unwrap();
+                let release = release.lock().unwrap().take().unwrap();
+                async move {
+                    started.send(()).unwrap();
+                    release.await.unwrap();
+                    "completed"
+                }
+            }),
+        );
+        let stop = CancellationToken::new();
+        let server = serve_with_shutdown(
+            listener,
+            router,
+            HttpServerConfig::default(),
+            64,
+            stop.clone().cancelled_owned(),
+        );
+        tokio::pin!(server);
+        let request = tokio::spawn(async move {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/work"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+        tokio::select! {
+            result = &mut server => panic!("server exited before request entered: {result:?}"),
+            started = tokio::time::timeout(Duration::from_secs(2), started_rx) => started.unwrap().unwrap(),
+        }
+        stop.cancel();
+        tokio::select! {
+            biased;
+            result = &mut server => panic!("active request was not drained: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), request)
+                .await
+                .unwrap()
+                .unwrap(),
+            "completed"
+        );
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

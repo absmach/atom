@@ -114,24 +114,40 @@ const EVENT_OUTBOX_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_4556_4e54;
 /// all — when [`crate::config::EventsConfig::enabled`] is `false` (the
 /// default, i.e. no broker configured).
 pub fn spawn_event_publisher(state: AppState) {
+    drop(spawn_event_publisher_with_shutdown(
+        state,
+        tokio_util::sync::CancellationToken::new(),
+    ));
+}
+
+/// Starts a tracked worker. An active pass finishes before observing shutdown.
+pub fn spawn_event_publisher_with_shutdown(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
     let cfg = state.config.events.clone();
     if !cfg.enabled() {
         tracing::info!("event publishing disabled (no broker configured)");
-        return;
+        return None;
     }
     let Some(publisher) = state.event_publisher.clone() else {
         tracing::warn!("events configured but no publisher installed; not starting poller");
-        return;
+        return None;
     };
 
-    tokio::spawn(async move {
+    let tasks = state.background_tasks.clone();
+    Some(tasks.spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(
             cfg.outbox_poll_interval_secs,
         ));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
             match deliver_outbox_batch(&state.pool, publisher.as_ref(), &cfg).await {
                 Ok(delivered) if delivered > 0 => {
                     tracing::debug!(events.delivered = delivered, "event outbox batch delivered");
@@ -140,7 +156,7 @@ pub fn spawn_event_publisher(state: AppState) {
                 Err(err) => tracing::warn!("event outbox delivery failed: {err}"),
             }
         }
-    });
+    }))
 }
 
 #[derive(sqlx::FromRow)]

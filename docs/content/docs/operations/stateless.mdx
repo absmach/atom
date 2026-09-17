@@ -1,0 +1,113 @@
+---
+title: Stateless deployment
+description: Replace an Atom process without losing committed data, using external PostgreSQL.
+---
+
+Atom runs as a standalone executable connected to external PostgreSQL.
+
+```text
+Clients → Atom (replaceable process/container) → PostgreSQL (durable storage)
+```
+
+## What must survive a replacement
+
+| State | Where it lives |
+| --- | --- |
+| Identities, tenants, policies, credentials, sessions and signing-key records | PostgreSQL |
+| Committed domain events awaiting delivery | PostgreSQL event outbox |
+| Encryption keys, configuration, TLS material and optional template/bootstrap files | Deployment secrets and configuration, mounted read-only where applicable |
+| PKCS#11 keys, when enabled | External HSM or separately persisted token storage |
+| Connections, loaded-key copies, rate-limit counters and metrics | Process memory; recreated on restart |
+
+Keep `DATABASE_URL`, `ATOM_KEY_ENCRYPTION_KEY` and its key ID stable across
+replacements. When using PKI, also preserve the separate CA encryption key or
+external HSM keys and access configuration. Keep issuer/audience settings and
+other authentication configuration consistent. Losing the external encryption
+keys is not repaired by restarting Atom.
+
+No writable Atom application-data volume is required for the ordinary
+PostgreSQL-backed configuration. Optional configuration files and email
+templates are inputs, not application state. A software HSM such as SoftHSM is
+an exception: its token files need independent persistent storage.
+
+## Startup and shutdown
+
+Startup applies embedded migrations, performs the existing idempotent
+bootstrap, loads signing keys and configured clients, validates TLS, binds
+listeners, and starts the enabled background workers. Traffic should wait for
+`GET /health/ready`; `GET /health/live` is the shallow liveness check.
+
+On SIGTERM or Ctrl-C, one cancellation signal stops accepting new traffic and
+new maintenance passes. Active HTTP, gRPC and enrollment requests drain;
+already-running maintenance passes and tracked callout audit writes finish.
+Atom waits for outstanding native HSM operations and closes the database pool.
+An unexpected listener or worker exit shuts down the runtime with an error.
+
+`ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS` (default `30`) is also the overall
+standalone shutdown budget. Exceeding it produces a nonzero exit; Atom does not
+report a clean shutdown after dropping work. Native blocking operations get at
+most one additional second during Tokio shutdown before the executable exits.
+
+A forced kill cannot finish requests. PostgreSQL retains committed changes and
+rolls back unfinished transactions. Clients may need to retry, and a lost
+response does not mean the operation was rolled back.
+
+## Docker and Kubernetes
+
+Use the existing Docker image and Compose entry point. Keep PostgreSQL storage
+persistent; replace only the Atom service. The Compose service now allows
+35 seconds before force-killing Atom. Increase `ATOM_STOP_GRACE_PERIOD` if you
+increase Atom's drain timeout.
+
+For an already-running Compose deployment, replace the service with:
+
+```bash
+docker compose up -d --build --no-deps --force-recreate atom
+```
+
+For a plain Docker container, use `docker stop --time 35 <atom-container>`.
+Supply the same database and secrets when creating its replacement. A read-only
+root filesystem can be used with read-only configuration mounts; account
+separately for any PKCS#11 module's filesystem requirements.
+
+On Kubernetes, the same executable can run in a Deployment, with PostgreSQL
+outside the Pod and secrets/configuration injected by the deployment. Set
+`terminationGracePeriodSeconds` above the drain budget (for example `35` for
+the default), and configure startup, readiness and liveness probes. No special
+Kubernetes logic belongs in Atom. Validate concurrent bootstrap, cache
+coordination and optional integrations before expanding to multiple replicas.
+
+## Boundaries
+
+- Stateless does not mean database-free, automatic scaling, or automatic wake.
+  Background maintenance still runs on its configured schedule; the database
+  may remain active. Sleep/wake orchestration is optional future work.
+- PostgreSQL is authoritative. If Redis caching is enabled, follow its existing
+  invalidation and recovery contract: never flush/restart Redis while Atom
+  writers are running. Stateless Atom does not remove that coordination need.
+- Domain events are transactional in the outbox. Broker delivery may be
+  repeated after a crash; consumers must handle duplicates.
+- Audit writes retain their existing best-effort behavior. An abrupt failure
+  can lose an audit record; this change does not promise exactly-once audit.
+- Process-local rate-limit counters reset, and live connections must reconnect.
+  This is not a promise of uninterrupted requests or a cluster-wide rate limit.
+
+## Verify replacement
+
+The regression test starts the real executable in fresh empty working
+directories against ordinary PostgreSQL. It logs in, creates a tenant, replaces
+Atom after SIGTERM and again after SIGKILL, and verifies the same session,
+original signing keys and committed tenant remain usable. It also checks Atom
+does not create application files in those directories.
+
+Use an empty disposable database, not an existing development or production
+one (the test applies migrations and creates its own bootstrap credentials):
+
+```bash
+DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/atom_stateless_test \
+  cargo test --test stateless_runtime -- --ignored
+```
+
+This covers process replacement and the core auth/data path. It does not
+qualify PostgreSQL high availability, hardware HSM failures, or all optional
+broker, Redis and external OAuth deployments.

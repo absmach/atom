@@ -234,7 +234,7 @@ fn audit_callout_deny(
     let operation = operation.to_string();
     let endpoint = endpoint.to_string();
     let reason = reason.to_string();
-    tokio::spawn(async move {
+    state.background_tasks.spawn(async move {
         audit::write(
             &pool,
             events_enabled,

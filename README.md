@@ -18,6 +18,7 @@ platform, but its APIs and authorization model are product-neutral.
 - Transactional domain-event outbox and persisted audit trail
 - Optional Redis acceleration without caching authorization decisions
 - Health, readiness, metrics, rate limiting, and graceful shutdown
+- [Stateless deployment](docs/content/docs/operations/stateless.mdx) with external PostgreSQL
 
 ## Documentation
 

@@ -91,6 +91,18 @@ pub async fn prepare(state: &AppState) -> Result<Option<PreparedEnrollmentServer
 }
 
 pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Result<()> {
+    serve_with_shutdown(prepared, state, crate::shutdown::shutdown_signal()).await
+}
+
+pub async fn serve_with_shutdown<F>(
+    prepared: PreparedEnrollmentServer,
+    state: AppState,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    tokio::pin!(shutdown);
     let address = prepared.local_addr()?;
     let permits = Arc::new(Semaphore::new(prepared.max_connections));
     let ip_connections =
@@ -128,7 +140,7 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
                 }
                 continue;
             },
-            _ = crate::shutdown::shutdown_signal() => break,
+            _ = &mut shutdown => break,
             joined = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = joined {
                     tracing::warn!(%error, "enrollment connection task failed");
@@ -232,6 +244,7 @@ pub async fn serve(prepared: PreparedEnrollmentServer, state: AppState) -> Resul
             remaining,
             "aborted enrollment connections after shutdown drain deadline"
         );
+        anyhow::bail!("active requests exceeded the drain deadline; graceful shutdown failed");
     }
     tracing::info!(%address, "PKI enrollment listener stopped");
     Ok(())
