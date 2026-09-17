@@ -6,6 +6,7 @@ use crate::{
     audit,
     auth::{has_capability_in_scope, AuthContext, Scope},
     certs::{lifecycle, service},
+    db::DbTransaction,
     error::{db_err, AppError},
     models::enums::AuditOutcome,
     state::AppState,
@@ -97,7 +98,7 @@ fn parse_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>> {
 
 async fn commit_with_lifecycle_audit(
     pool: &sqlx::PgPool,
-    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: DbTransaction<'_>,
     events_enabled: bool,
     event: &audit::AuditEvent<'_>,
 ) -> std::result::Result<(), AppError> {
@@ -115,7 +116,7 @@ async fn commit_with_lifecycle_audit(
 }
 
 async fn commit_lifecycle_replay(
-    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: DbTransaction<'_>,
     operation: &'static str,
 ) -> std::result::Result<(), AppError> {
     let result = tx.commit().await.map_err(AppError::Database);
@@ -151,7 +152,7 @@ impl CertificateMutation {
             "managed": true,
             "transport": "graphql",
         });
-        let mut tx = match state.pool().begin().await {
+        let mut tx = match state.begin().await {
             Ok(tx) => tx,
             Err(error) => {
                 let error = db_err(error);
@@ -254,7 +255,7 @@ impl CertificateMutation {
             "managed": true,
             "transport": "graphql",
         });
-        let mut tx = match state.pool().begin().await {
+        let mut tx = match state.begin().await {
             Ok(tx) => tx,
             Err(error) => {
                 let error = db_err(error);
@@ -444,11 +445,7 @@ impl CertificateMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state
-            .pool()
-            .begin()
-            .await
-            .map_err(|e| gql_error(db_err(e)))?;
+        let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
         let revoked = service::revoke_entity_certificates_v2_in_tx(
             &mut tx,
             entity_id,
@@ -549,11 +546,7 @@ async fn revoke_certificate_exact(
         .map_err(gql_error)?;
     require_certificate_revoke(state, &auth, &cert).await?;
     let selector_kind = selector.kind();
-    let mut tx = state
-        .pool()
-        .begin()
-        .await
-        .map_err(|e| gql_error(db_err(e)))?;
+    let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
     let revoked = service::revoke_certificate_v2_in_tx(
         &mut tx,
         service::RevokeCertificateV2 {
@@ -644,7 +637,7 @@ async fn renew_certificate_v2(
         "managed": true,
         "transport": "graphql",
     });
-    let mut tx = match state.pool().begin().await {
+    let mut tx = match state.begin().await {
         Ok(tx) => tx,
         Err(error) => {
             let error = db_err(error);

@@ -97,15 +97,15 @@ impl IntoResponse for AppError {
             }
             AppError::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             AppError::Database(e) => {
-                match database_constraint_violation(e) {
-                    Some(DatabaseConstraintViolation::Unique) => {
+                match classify_database_error(e) {
+                    DatabaseErrorKind::Unique => {
                         return (
                             StatusCode::CONFLICT,
                             Json(json!({"error": "already exists"})),
                         )
                             .into_response();
                     }
-                    Some(DatabaseConstraintViolation::ForeignKey) => {
+                    DatabaseErrorKind::ForeignKey => {
                         tracing::warn!("foreign-key violation: {e}");
                         return (
                             StatusCode::BAD_REQUEST,
@@ -113,7 +113,7 @@ impl IntoResponse for AppError {
                         )
                             .into_response();
                     }
-                    Some(DatabaseConstraintViolation::Check) => {
+                    DatabaseErrorKind::Check => {
                         tracing::warn!("check violation: {e}");
                         return (
                             StatusCode::BAD_REQUEST,
@@ -121,7 +121,7 @@ impl IntoResponse for AppError {
                         )
                             .into_response();
                     }
-                    None => {}
+                    DatabaseErrorKind::NotFound | DatabaseErrorKind::Internal => {}
                 }
                 tracing::error!("db error: {}", e);
                 (
@@ -153,19 +153,19 @@ impl From<AppError> for tonic::Status {
             AppError::RateLimited { message, .. } => tonic::Status::resource_exhausted(message),
             AppError::ServiceUnavailable(msg) => tonic::Status::unavailable(msg),
             AppError::Database(e) => {
-                match database_constraint_violation(&e) {
-                    Some(DatabaseConstraintViolation::Unique) => {
+                match classify_database_error(&e) {
+                    DatabaseErrorKind::Unique => {
                         return tonic::Status::already_exists("already exists");
                     }
-                    Some(DatabaseConstraintViolation::ForeignKey) => {
+                    DatabaseErrorKind::ForeignKey => {
                         tracing::warn!("foreign-key violation: {e}");
                         return tonic::Status::invalid_argument("invalid reference");
                     }
-                    Some(DatabaseConstraintViolation::Check) => {
+                    DatabaseErrorKind::Check => {
                         tracing::warn!("check violation: {e}");
                         return tonic::Status::invalid_argument("invalid value");
                     }
-                    None => {}
+                    DatabaseErrorKind::NotFound | DatabaseErrorKind::Internal => {}
                 }
                 tracing::error!("db error: {e}");
                 tonic::Status::internal("database error")
@@ -179,9 +179,38 @@ impl From<AppError> for tonic::Status {
 }
 
 pub fn db_err(e: sqlx::Error) -> AppError {
+    match classify_database_error(&e) {
+        DatabaseErrorKind::NotFound => AppError::NotFound("not found".to_string()),
+        DatabaseErrorKind::Unique
+        | DatabaseErrorKind::ForeignKey
+        | DatabaseErrorKind::Check
+        | DatabaseErrorKind::Internal => AppError::Database(e),
+    }
+}
+
+/// Backend-neutral classification of a database failure, computed once ahead
+/// of transport mapping. Only the kinds Postgres actually produces today are
+/// represented — a busy/unavailable kind belongs to whichever backend phase
+/// first needs it (see `product-docs/development/database-backends/`), not
+/// here as a currently-unreachable placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseErrorKind {
+    NotFound,
+    Unique,
+    ForeignKey,
+    Check,
+    Internal,
+}
+
+fn classify_database_error(e: &sqlx::Error) -> DatabaseErrorKind {
     match e {
-        sqlx::Error::RowNotFound => AppError::NotFound("not found".to_string()),
-        other => AppError::Database(other),
+        sqlx::Error::RowNotFound => DatabaseErrorKind::NotFound,
+        _ => match database_constraint_violation(e) {
+            Some(DatabaseConstraintViolation::Unique) => DatabaseErrorKind::Unique,
+            Some(DatabaseConstraintViolation::ForeignKey) => DatabaseErrorKind::ForeignKey,
+            Some(DatabaseConstraintViolation::Check) => DatabaseErrorKind::Check,
+            None => DatabaseErrorKind::Internal,
+        },
     }
 }
 
@@ -275,7 +304,11 @@ pub fn entity_write_conflict(e: sqlx::Error) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{database_constraint_violation_code, DatabaseConstraintViolation};
+    use super::{
+        classify_database_error, database_constraint_violation_code, db_err,
+        DatabaseConstraintViolation, DatabaseErrorKind,
+    };
+    use crate::error::AppError;
 
     #[test]
     fn frozen_database_constraint_codes_are_classified_once_for_http_and_grpc() {
@@ -293,5 +326,27 @@ mod tests {
         );
         assert_eq!(database_constraint_violation_code(Some("40001")), None);
         assert_eq!(database_constraint_violation_code(None), None);
+    }
+
+    #[test]
+    fn row_not_found_classifies_as_not_found_and_db_err_converts_it() {
+        assert_eq!(
+            classify_database_error(&sqlx::Error::RowNotFound),
+            DatabaseErrorKind::NotFound
+        );
+        assert!(matches!(
+            db_err(sqlx::Error::RowNotFound),
+            AppError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn an_unclassified_error_stays_internal_and_db_err_preserves_it_as_database() {
+        let e = sqlx::Error::PoolClosed;
+        assert_eq!(classify_database_error(&e), DatabaseErrorKind::Internal);
+        assert!(matches!(
+            db_err(sqlx::Error::PoolClosed),
+            AppError::Database(sqlx::Error::PoolClosed)
+        ));
     }
 }

@@ -7,10 +7,13 @@
 //! The table name is looked up in a closed static match, not interpolated,
 //! so a caller cannot inject arbitrary SQL.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 /// Reject a mutation attempt on a row that was provisioned from the bootstrap
 /// YAML. Returns:
@@ -74,7 +77,7 @@ pub async fn ensure_not_config_managed(
 /// this helper. The row lock here is intentionally the final lock in that
 /// order: tenant -> hierarchy advisory lock (when applicable) -> owner row.
 pub(crate) async fn ensure_not_config_managed_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     table: &'static str,
     id: Uuid,
 ) -> Result<(), AppError> {
@@ -104,7 +107,7 @@ pub(crate) async fn ensure_not_config_managed_in_tx(
     };
     let managed_by: Option<Option<String>> = sqlx::query_scalar(sql)
         .bind(id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     reject_config_managed(table, id, managed_by)

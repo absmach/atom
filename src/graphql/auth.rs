@@ -118,7 +118,7 @@ impl AuthMutation {
                     crate::cache::CacheCategory::Session,
                     std::slice::from_ref(&crate::cache::keys::session(session_id)),
                     || async {
-                        let mut tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+                        let mut tx = state.begin().await.map_err(crate::error::db_err)?;
                         repo::revoke_session_in_tx(&mut tx, session_id).await?;
                         audit::commit_with_audit(
                             state.pool(),
@@ -134,7 +134,6 @@ impl AuthMutation {
             }
             None => {
                 let tx = state
-                    .pool()
                     .begin()
                     .await
                     .map_err(|e| gql_error(crate::error::db_err(e)))?;

@@ -153,7 +153,6 @@ impl OperationsMutation {
             .await
             .map_err(gql_error)?;
         let mut tx = state
-            .pool()
             .begin()
             .await
             .map_err(|e| gql_error(crate::error::db_err(e)))?;

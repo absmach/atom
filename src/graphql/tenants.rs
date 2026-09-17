@@ -450,7 +450,7 @@ impl TenantMutation {
                 .await?;
                 return Ok(());
             };
-            let mut tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+            let mut tx = state.begin().await.map_err(crate::error::db_err)?;
             let session_ids =
                 tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id).await?;
             let session_keys: Vec<String> = session_ids
@@ -541,7 +541,7 @@ impl TenantMutation {
                 )
                 .await;
             };
-            let mut tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+            let mut tx = state.begin().await.map_err(crate::error::db_err)?;
             let (tenant, credential_ids) =
                 tenant_repo::reactivate_tenant_and_collect_credential_ids_in_tx(
                     &mut tx,
@@ -960,7 +960,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
         // revoke must never be left reachable as a stale hit, or it survives
         // (with `revoked_at = None`) until the tenant is re-enabled and its
         // own fresh `tenant_status` hit stops masking the stale session.
-        let mut tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+        let mut tx = state.begin().await.map_err(crate::error::db_err)?;
         let session_ids =
             tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id).await?;
         let session_keys: Vec<String> = session_ids

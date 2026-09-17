@@ -1,9 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct CertificateCredential {
@@ -119,7 +122,7 @@ where
 }
 
 pub async fn insert_managed_certificate_credential(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     issuer_id: Uuid,
     serial_number: &str,
@@ -141,13 +144,13 @@ pub async fn insert_managed_certificate_credential(
     .bind(metadata)
     .bind(expires_at)
     .bind(issuer_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn claim_certificate_issuance_request(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     request_key_hash: &str,
     request_fingerprint_sha256: &str,
@@ -167,7 +170,7 @@ pub async fn claim_certificate_issuance_request(
     .bind(entity_id)
     .bind(request_key_hash)
     .bind(request_fingerprint_sha256)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
     if inserted.is_some() {
@@ -184,7 +187,7 @@ pub async fn claim_certificate_issuance_request(
     )
     .bind(entity_id)
     .bind(request_key_hash)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if existing.0 != request_fingerprint_sha256 {
@@ -203,7 +206,7 @@ pub async fn claim_certificate_issuance_request(
 }
 
 pub async fn complete_certificate_issuance_request(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     request_id: Uuid,
     credential_id: Uuid,
 ) -> Result<(), AppError> {
@@ -217,7 +220,7 @@ pub async fn complete_certificate_issuance_request(
     )
     .bind(request_id)
     .bind(credential_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
     if completed.is_none() {
@@ -229,7 +232,7 @@ pub async fn complete_certificate_issuance_request(
 }
 
 pub async fn claim_certificate_renewal(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     previous_credential_id: Uuid,
     request_key_hash: &str,
     request_fingerprint_sha256: &str,
@@ -252,7 +255,7 @@ pub async fn claim_certificate_renewal(
     .bind(request_key_hash)
     .bind(request_fingerprint_sha256)
     .bind(key_mode)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
     if inserted.is_some() {
@@ -269,7 +272,7 @@ pub async fn claim_certificate_renewal(
         "#,
     )
     .bind(previous_credential_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if existing.0 != request_key_hash
@@ -291,7 +294,7 @@ pub async fn claim_certificate_renewal(
 }
 
 pub async fn complete_certificate_renewal(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     renewal_id: Uuid,
     replacement_credential_id: Uuid,
 ) -> Result<(), AppError> {
@@ -305,7 +308,7 @@ pub async fn complete_certificate_renewal(
     )
     .bind(renewal_id)
     .bind(replacement_credential_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
     if completed.is_none() {
@@ -409,7 +412,7 @@ where
 }
 
 pub async fn lock_certificate_by_id(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     credential_id: Uuid,
 ) -> Result<CertificateCredential, AppError> {
     sqlx::query_as::<_, CertificateCredential>(
@@ -423,7 +426,7 @@ pub async fn lock_certificate_by_id(
         "#,
     )
     .bind(credential_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
@@ -452,7 +455,7 @@ where
 }
 
 pub async fn lock_certificate_by_fingerprint(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     fingerprint_sha256: &str,
 ) -> Result<CertificateCredential, AppError> {
     sqlx::query_as::<_, CertificateCredential>(
@@ -467,7 +470,7 @@ pub async fn lock_certificate_by_fingerprint(
         "#,
     )
     .bind(fingerprint_sha256)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
@@ -499,7 +502,7 @@ where
 }
 
 pub async fn lock_certificate_by_issuer_serial(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
     serial_number: &str,
 ) -> Result<CertificateCredential, AppError> {
@@ -517,7 +520,7 @@ pub async fn lock_certificate_by_issuer_serial(
     )
     .bind(issuer_id)
     .bind(serial_number)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
@@ -664,7 +667,7 @@ where
 }
 
 pub async fn revoke_certificate_if_active(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     credential_id: Uuid,
     metadata: Value,
 ) -> Result<bool, AppError> {
@@ -677,7 +680,7 @@ pub async fn revoke_certificate_if_active(
     )
     .bind(credential_id)
     .bind(metadata)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
     Ok(result.rows_affected() == 1)
@@ -769,7 +772,7 @@ pub async fn issuer_crl_state(
 }
 
 pub async fn issuer_crl_state_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
     issuer_fingerprint_sha256: &str,
 ) -> Result<CrlState, AppError> {
@@ -783,7 +786,7 @@ pub async fn issuer_crl_state_tx(
     )
     .bind(issuer_id)
     .bind(issuer_fingerprint_sha256)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
 
@@ -797,7 +800,7 @@ pub async fn issuer_crl_state_tx(
         "#,
     )
     .bind(issuer_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
 
@@ -811,7 +814,7 @@ pub async fn issuer_crl_state_tx(
 }
 
 pub async fn issuer_revocations_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
 ) -> Result<Vec<IssuerRevocationEntry>, AppError> {
     sqlx::query_as::<_, IssuerRevocationEntry>(
@@ -824,13 +827,13 @@ pub async fn issuer_revocations_tx(
         "#,
     )
     .bind(issuer_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn store_issuer_crl_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
     crl_number: i64,
     crl_der: &[u8],
@@ -857,7 +860,7 @@ pub async fn store_issuer_crl_tx(
     .bind(this_update)
     .bind(next_update)
     .bind(issuer_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
     if result.rows_affected() != 1 {

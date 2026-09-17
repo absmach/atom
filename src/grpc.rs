@@ -502,7 +502,6 @@ impl CertificateService for AtomCertificates {
         .map_err(Status::from)?;
         let mut tx = self
             .state
-            .pool()
             .begin()
             .await
             .map_err(crate::error::db_err)

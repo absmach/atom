@@ -1,9 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
 use rand::{rngs::OsRng, RngCore};
-use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::PgRow, PgPool, Row};
 use uuid::Uuid;
 
 use crate::{
+    db::DbTransaction,
     error::{db_err, restore_conflict, AppError},
     identity::service::{hash_secret, verify_secret},
     models::{
@@ -109,7 +110,7 @@ pub fn tenant_admin_bootstrap(tenant_id: Uuid, creator_id: Uuid) -> TenantAdminB
 }
 
 pub async fn lock_active_tenant(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
 ) -> Result<(), AppError> {
     let locked: Option<Uuid> = sqlx::query_scalar(
@@ -119,7 +120,7 @@ pub async fn lock_active_tenant(
            FOR UPDATE"#,
     )
     .bind(tenant_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
@@ -131,7 +132,7 @@ pub async fn lock_active_tenant(
 }
 
 pub async fn lock_optional_active_tenant(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     if let Some(tenant_id) = tenant_id {
@@ -149,7 +150,7 @@ pub async fn lock_optional_active_tenant(
 /// helper only proves that each referenced tenant row still exists; the caller
 /// remains responsible for any `active`/`deleted_at` policy check.
 pub(crate) async fn lock_tenant_rows_in_order(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_ids: &[Option<Uuid>],
 ) -> Result<(), AppError> {
     let mut tenant_ids = tenant_ids.iter().copied().flatten().collect::<Vec<_>>();
@@ -160,7 +161,7 @@ pub(crate) async fn lock_tenant_rows_in_order(
         let locked: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
                 .bind(tenant_id)
-                .fetch_optional(&mut **tx)
+                .fetch_optional(tx.as_postgres_mut())
                 .await
                 .map_err(db_err)?;
         if locked.is_none() {
@@ -177,7 +178,10 @@ pub async fn create_tenant_with_audit(
     req: CreateTenant,
     created_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let tenant = create_tenant_in_tx(&mut tx, req, created_by).await?;
     if let Some(creator_id) = created_by {
         bootstrap_tenant_admin(&mut tx, tenant_admin_bootstrap(tenant.id, creator_id)).await?;
@@ -206,7 +210,7 @@ pub async fn create_tenant(
 }
 
 async fn create_tenant_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     req: CreateTenant,
     created_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
@@ -228,13 +232,13 @@ async fn create_tenant_in_tx(
     .bind(&req.tags)
     .bind(attrs)
     .bind(created_by)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
 
 async fn bootstrap_tenant_admin(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     plan: TenantAdminBootstrap,
 ) -> Result<(), AppError> {
     use sqlx::Row;
@@ -247,7 +251,7 @@ async fn bootstrap_tenant_admin(
     .bind(role_id)
     .bind(plan.role_name)
     .bind(plan.tenant_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -257,7 +261,7 @@ async fn bootstrap_tenant_admin(
            RETURNING id"#,
     )
     .bind(plan.tenant_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -270,7 +274,7 @@ async fn bootstrap_tenant_admin(
     )
     .bind(permission_block_id)
     .bind(plan.capabilities.as_slice())
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -280,7 +284,7 @@ async fn bootstrap_tenant_admin(
     )
     .bind(role_id)
     .bind(permission_block_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -296,7 +300,7 @@ async fn bootstrap_tenant_admin(
     )
     .bind(plan.capabilities.as_slice())
     .bind(permission_block_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if !missing_names.is_empty() {
@@ -314,13 +318,13 @@ async fn bootstrap_tenant_admin(
     .bind(plan.tenant_id)
     .bind(plan.creator_id)
     .bind(role_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
     let creator = sqlx::query("SELECT kind FROM entities WHERE id = $1")
         .bind(plan.creator_id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
 
@@ -336,7 +340,7 @@ async fn bootstrap_tenant_admin(
         )
         .bind(plan.tenant_id)
         .bind(plan.creator_id)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     }
@@ -591,7 +595,10 @@ pub async fn update_tenant_with_audit(
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "tenants", id).await?;
     let tenant = sqlx::query_as::<_, Tenant>(&format!(
         r#"UPDATE tenants
@@ -611,7 +618,7 @@ pub async fn update_tenant_with_audit(
     .bind(req.tags)
     .bind(req.attributes)
     .bind(updated_by)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
@@ -662,14 +669,14 @@ pub async fn update_tenant(
 /// cache entry uninvalidated indefinitely. See `src/cache/mod.rs`'s
 /// consistency model.
 pub async fn lock_tenant_and_collect_session_ids_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "tenants", id).await?;
     let locked =
         sqlx::query("SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE")
             .bind(id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     if locked.is_none() {
@@ -682,7 +689,7 @@ pub async fn lock_tenant_and_collect_session_ids_in_tx(
              AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)"#,
     )
     .bind(id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -696,7 +703,7 @@ pub async fn lock_tenant_and_collect_session_ids_in_tx(
 /// commits after this succeeds, once the cache barrier established on the
 /// enumerated session ids covers the whole transaction.
 pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     deleted_by: Option<Uuid>,
@@ -711,7 +718,7 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     ))
     .bind(id)
     .bind(deleted_by)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
@@ -741,7 +748,7 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     )
     .bind(id)
     .bind(actor_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -751,7 +758,7 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
            AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
     )
     .bind(id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -804,7 +811,10 @@ pub async fn soft_delete_tenant_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     lock_tenant_and_collect_session_ids_in_tx(&mut tx, id).await?;
     let tenant = deactivate_and_finish_tenant_soft_delete_in_tx(
         &mut tx,
@@ -866,7 +876,7 @@ pub async fn soft_delete_tenant_with_audit(
 /// `soft_delete_tenant` ever stamps the `tenant_deleted` revocation reason,
 /// and it cannot run again against an already-deleted tenant.
 pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(Tenant, Vec<Uuid>), AppError> {
@@ -880,7 +890,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
     ))
     .bind(id)
     .bind(restored_by)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
@@ -900,7 +910,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
              AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
     )
     .bind(id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -913,7 +923,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
 /// commit — the caller commits after this succeeds, once the cache barrier
 /// established on those credential ids covers the whole transaction.
 pub async fn finish_tenant_restore_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -931,7 +941,7 @@ pub async fn finish_tenant_restore_in_tx(
              AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
     )
     .bind(id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -966,7 +976,10 @@ pub async fn restore_tenant_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let (tenant, _credential_ids) =
         reactivate_tenant_and_collect_credential_ids_in_tx(&mut tx, id, restored_by).await?;
     finish_tenant_restore_in_tx(&mut tx, events_enabled, actor_id, id).await?;
@@ -993,7 +1006,7 @@ pub async fn restore_tenant_with_audit(
 }
 
 pub(crate) async fn tenant_purge_object_ids(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_ids: &[Uuid],
 ) -> Result<Vec<Uuid>, AppError> {
     if tenant_ids.is_empty() {
@@ -1011,13 +1024,13 @@ pub(crate) async fn tenant_purge_object_ids(
            UNION ALL SELECT id FROM resources WHERE tenant_id = ANY($1)"#,
     )
     .bind(tenant_ids)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
 
 pub(crate) async fn purge_tenant_pki_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_ids: &[Uuid],
 ) -> Result<(), AppError> {
     if tenant_ids.is_empty() {
@@ -1035,7 +1048,7 @@ pub(crate) async fn purge_tenant_pki_in_tx(
                  ))"#,
     )
     .bind(tenant_ids)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1048,13 +1061,13 @@ pub(crate) async fn purge_tenant_pki_in_tx(
            )"#,
     )
     .bind(tenant_ids)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
     sqlx::query("DELETE FROM pki_authorities WHERE tenant_id = ANY($1)")
         .bind(tenant_ids)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
 
@@ -1067,7 +1080,10 @@ pub async fn purge_tenant_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<PurgedTenant, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
 
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "tenants", id).await?;
 
@@ -1080,7 +1096,7 @@ pub async fn purge_tenant_with_audit(
          RETURNING id, name",
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let Some((id, name)) = purged else {
@@ -1120,7 +1136,10 @@ pub async fn change_tenant_status_with_audit(
     status: TenantStatus,
     event_name: &str,
 ) -> Result<Tenant, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let tenant =
         change_tenant_status_in_tx(&mut tx, events_enabled, actor_id, id, status, event_name)
             .await?;
@@ -1149,7 +1168,7 @@ pub async fn change_tenant_status_with_audit(
 /// `revoked_at = None`) until the tenant is re-enabled and its own
 /// `tenant_status` cache entry stops masking the stale session.
 pub(crate) async fn change_tenant_status_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -1171,7 +1190,7 @@ pub(crate) async fn change_tenant_status_in_tx(
     .bind(id)
     .bind(&status)
     .bind(actor_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
@@ -1185,7 +1204,7 @@ pub(crate) async fn change_tenant_status_in_tx(
                AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
         )
         .bind(id)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     }
@@ -1595,7 +1614,10 @@ pub async fn remove_tenant_member_with_audit(
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
 
     // Tenant-member removal is also a bulk clear of this entity's principal
     // group memberships and tenant-scoped role assignments. Serialize it with
@@ -1612,7 +1634,7 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     for group_id in affected_group_ids {
@@ -1628,7 +1650,7 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     for assignment_id in affected_assignment_ids {
@@ -1649,7 +1671,7 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1661,7 +1683,7 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1672,7 +1694,7 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1709,7 +1731,10 @@ pub async fn add_tenant_member_with_audit(
     entity_id: Uuid,
     role_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     lock_active_tenant(&mut tx, tenant_id).await?;
     crate::authz::repo::lock_live_entity_subject_in_tx(&mut tx, Some(tenant_id), entity_id).await?;
 
@@ -1725,7 +1750,7 @@ pub async fn add_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     .rows_affected()
@@ -1836,7 +1861,10 @@ pub async fn accept_invitation(
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let role_id = accept_invitation_row(&mut tx, tenant_id, invitee_user_id).await?;
     grant_invitation_role(&mut tx, tenant_id, invitee_user_id, role_id).await?;
     tx.commit().await.map_err(db_err)?;
@@ -1851,7 +1879,10 @@ pub async fn accept_invitation_token(
     let (token_id, token_secret) = parse_secret_token(token, "atomi")
         .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let row = sqlx::query(
         r#"SELECT id, tenant_id, invitee_user_id, invitee_email, role_id,
                   secret_hash, expires_at, accepted_at, rejected_at, revoked_at
@@ -1860,7 +1891,7 @@ pub async fn accept_invitation_token(
            FOR UPDATE"#,
     )
     .bind(token_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found("invitation not found"),
@@ -1905,7 +1936,7 @@ pub async fn accept_invitation_token(
     )
     .bind(invitation_id)
     .bind(actor_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1915,7 +1946,7 @@ pub async fn accept_invitation_token(
 }
 
 async fn accept_invitation_row(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
@@ -1938,13 +1969,13 @@ async fn accept_invitation_row(
     )
     .bind(invitation_id)
     .bind(invitee_user_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
 
 async fn grant_invitation_role(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
     role_id: Option<Uuid>,
@@ -1960,7 +1991,7 @@ async fn grant_invitation_role(
     )
     .bind(tenant_id)
     .bind(invitee_user_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1986,7 +2017,10 @@ pub async fn reject_invitation(
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let row = invitation_row_for_invitee(&mut tx, tenant_id, invitee_user_id)
         .await?
         .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
@@ -1999,7 +2033,7 @@ pub async fn reject_invitation(
            WHERE id = $1"#,
     )
     .bind(invitation_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2011,7 +2045,10 @@ pub async fn revoke_invitation(
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let row = invitation_row_for_invitee(&mut tx, tenant_id, invitee_user_id)
         .await?
         .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
@@ -2024,7 +2061,7 @@ pub async fn revoke_invitation(
            WHERE id = $1"#,
     )
     .bind(invitation_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2036,7 +2073,10 @@ pub async fn revoke_invitation_by_id(
     tenant_id: Uuid,
     invitation_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let row = invitation_row_by_id(&mut tx, tenant_id, invitation_id)
         .await?
         .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
@@ -2049,7 +2089,7 @@ pub async fn revoke_invitation_by_id(
     )
     .bind(tenant_id)
     .bind(invitation_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2057,7 +2097,7 @@ pub async fn revoke_invitation_by_id(
 }
 
 async fn invitation_row_for_invitee(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<Option<PgRow>, AppError> {
@@ -2079,13 +2119,13 @@ async fn invitation_row_for_invitee(
     )
     .bind(tenant_id)
     .bind(invitee_user_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
 
 async fn invitation_row_by_id(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
     invitation_id: Uuid,
 ) -> Result<Option<PgRow>, AppError> {
@@ -2098,7 +2138,7 @@ async fn invitation_row_by_id(
     )
     .bind(tenant_id)
     .bind(invitation_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
@@ -2154,7 +2194,7 @@ async fn email_by_entity_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<Str
 }
 
 async fn entity_has_email(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     email: &str,
 ) -> Result<bool, AppError> {
@@ -2166,7 +2206,7 @@ async fn entity_has_email(
     )
     .bind(entity_id)
     .bind(email)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }

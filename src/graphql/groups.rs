@@ -445,7 +445,7 @@ impl GroupMutation {
                 crate::cache::invalidate::guarded_tx_mutation(
                     cache,
                     crate::cache::CacheCategory::Grants,
-                    state.pool(),
+                    &state.db,
                     |tx| {
                         Box::pin(async move {
                             authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
@@ -550,7 +550,7 @@ impl GroupMutation {
             let group = crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(async move {
                         authz_repo::prepare_group_hierarchy_mutation_in_tx(tx, id, Some(parent_id))
@@ -640,7 +640,7 @@ impl GroupMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(async move {
                         authz_repo::prepare_group_hierarchy_mutation_in_tx(tx, id, None).await
@@ -737,7 +737,7 @@ impl GroupMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(async move {
                         authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
@@ -824,7 +824,7 @@ impl GroupMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(async move {
                         authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await
@@ -1096,7 +1096,7 @@ impl GroupMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(async move {
                         authz_repo::lock_group_closures_and_collect_grants_keys(tx, &[id]).await

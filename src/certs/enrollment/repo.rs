@@ -1,8 +1,7 @@
 use chrono::Utc;
-use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{config::RateLimitPolicyConfig, error::AppError};
+use crate::{config::RateLimitPolicyConfig, db::DbTransaction, error::AppError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateLimitScope {
@@ -28,7 +27,7 @@ pub struct RateLimitDecision {
 /// Atomically consumes one fixed-window allowance. The conditional upsert is
 /// the serialization point, so concurrent replicas cannot exceed the limit.
 pub async fn consume_rate_limit(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     scope: RateLimitScope,
     scope_id: Uuid,
     policy: RateLimitPolicyConfig,
@@ -59,7 +58,7 @@ pub async fn consume_rate_limit(
     .bind(scope_id)
     .bind(window_secs)
     .bind(max_requests)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
 
@@ -76,7 +75,7 @@ pub async fn consume_rate_limit(
     .bind(scope.as_str())
     .bind(scope_id)
     .bind(window_secs)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
 

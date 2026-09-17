@@ -271,7 +271,7 @@ pub async fn logout(
                 crate::cache::CacheCategory::Session,
                 std::slice::from_ref(&crate::cache::keys::session(session_id)),
                 || async {
-                    let mut tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+                    let mut tx = state.begin().await.map_err(crate::error::db_err)?;
                     repo::revoke_session_in_tx(&mut tx, session_id).await?;
                     audit::commit_with_audit(
                         state.pool(),
@@ -285,7 +285,7 @@ pub async fn logout(
             .await?;
         }
         None => {
-            let tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+            let tx = state.begin().await.map_err(crate::error::db_err)?;
             audit::commit_with_audit(state.pool(), tx, state.config.events.enabled(), &event)
                 .await?;
         }
@@ -547,7 +547,7 @@ pub async fn create_password(
         .get("password")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("missing 'password' field"))?;
-    let mut tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+    let mut tx = state.begin().await.map_err(crate::error::db_err)?;
     let credential_id = service::create_password_in_tx(&mut tx, entity_id, password).await?;
     audit::commit_with_audit(
         state.pool(),
@@ -602,7 +602,7 @@ pub async fn revoke_credential(
         crate::cache::CacheCategory::Credential,
         std::slice::from_ref(&crate::cache::keys::credential(cred_id)),
         || async {
-            let mut tx = state.pool().begin().await.map_err(crate::error::db_err)?;
+            let mut tx = state.begin().await.map_err(crate::error::db_err)?;
             service::revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
             audit::commit_with_audit(
                 state.pool(),

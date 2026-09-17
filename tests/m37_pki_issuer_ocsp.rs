@@ -353,7 +353,10 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
             .await
             .unwrap();
     assert_status(&retiring_response, CertStatus::revoked(revoked));
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     provisioning::complete_retirement_in_tx(&mut tx, issuer_a.id)
         .await
         .unwrap();

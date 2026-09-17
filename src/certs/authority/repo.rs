@@ -1,8 +1,11 @@
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres};
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 use super::{
     key_provider::ManagedAuthorityKey, AuthorityKeyBackend, AuthorityKind, AuthorityRecord,
@@ -142,7 +145,7 @@ where
 /// The share lock prevents a lifecycle transition from retiring the authority
 /// after policy validation but before the issuer-bound credential commits.
 pub async fn lock_active_leaf_issuer_for_scope(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Option<Uuid>,
 ) -> Result<AuthorityRecord, AppError> {
     let query = format!(
@@ -164,7 +167,7 @@ pub async fn lock_active_leaf_issuer_for_scope(
     );
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(tenant_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(|error| match error {
             sqlx::Error::RowNotFound => {
@@ -178,7 +181,7 @@ pub async fn lock_active_leaf_issuer_for_scope(
 /// authentication. Lifecycle transitions may wait, but they cannot revoke or
 /// retire the presented issuer between validation and renewal commit.
 pub async fn lock_authority_for_certificate_authentication(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
     let query = format!(
@@ -191,7 +194,7 @@ pub async fn lock_authority_for_certificate_authentication(
     );
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(authority_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(db_err)
 }
@@ -321,56 +324,56 @@ pub struct CompletedAuthority {
     pub not_after: DateTime<Utc>,
 }
 
-pub async fn lock_provisioning(tx: &mut Transaction<'_, Postgres>) -> Result<(), AppError> {
+pub async fn lock_provisioning(tx: &mut DbTransaction<'_>) -> Result<(), AppError> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(PROVISIONING_ADVISORY_LOCK_ID)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     Ok(())
 }
 
 pub async fn lock_active_tenant(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
 ) -> Result<(), AppError> {
     sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM tenants WHERE id = $1 AND status = 'active' AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(tenant_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(())
 }
 
 pub async fn authority_by_id_for_update(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
     let query = format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1 FOR UPDATE");
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(authority_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(db_err)
 }
 
 pub async fn authority_by_fingerprint(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     fingerprint_sha256: &str,
 ) -> Result<Option<AuthorityRecord>, AppError> {
     let query =
         format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE fingerprint_sha256 = $1");
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(fingerprint_sha256)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.as_postgres_mut())
         .await
         .map_err(db_err)
 }
 
 pub async fn next_authority_version(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
 ) -> Result<i32, AppError> {
@@ -381,13 +384,13 @@ pub async fn next_authority_version(
     )
     .bind(kind)
     .bind(tenant_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
 
 pub async fn pending_authority_for_scope(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
 ) -> Result<Option<AuthorityRecord>, AppError> {
@@ -404,13 +407,13 @@ pub async fn pending_authority_for_scope(
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(kind)
         .bind(tenant_id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.as_postgres_mut())
         .await
         .map_err(db_err)
 }
 
 pub async fn active_authority_for_scope(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
 ) -> Result<Option<AuthorityRecord>, AppError> {
@@ -429,19 +432,19 @@ pub async fn active_authority_for_scope(
     sqlx::query_as::<_, AuthorityRecord>(&query)
         .bind(kind)
         .bind(tenant_id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.as_postgres_mut())
         .await
         .map_err(db_err)
 }
 
-pub async fn active_root(tx: &mut Transaction<'_, Postgres>) -> Result<AuthorityRecord, AppError> {
+pub async fn active_root(tx: &mut DbTransaction<'_>) -> Result<AuthorityRecord, AppError> {
     active_authority_for_scope(tx, AuthorityKind::Root, None)
         .await?
         .ok_or_else(|| AppError::not_found("no active root authority"))
 }
 
 pub async fn active_platform_intermediate(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
 ) -> Result<AuthorityRecord, AppError> {
     active_authority_for_scope(tx, AuthorityKind::PlatformIntermediate, None)
         .await?
@@ -449,7 +452,7 @@ pub async fn active_platform_intermediate(
 }
 
 pub async fn insert_root_authority(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
     version: i32,
     completed: &CompletedAuthority,
@@ -477,7 +480,7 @@ pub async fn insert_root_authority(
     .bind(&completed.chain_pem)
     .bind(completed.not_before)
     .bind(completed.not_after)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, id).await
@@ -501,7 +504,7 @@ pub struct ActiveAuthorityInsert<'a> {
 /// CSR/import round-trip. Used by config-driven bootstraps that persist a
 /// pre-signed authority together with its encrypted private key.
 pub async fn insert_active_authority(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     input: &ActiveAuthorityInsert<'_>,
 ) -> Result<AuthorityRecord, AppError> {
     let key = input.key.columns();
@@ -567,14 +570,14 @@ pub async fn insert_active_authority(
     .bind(ocsp_url)
     .bind(ca_issuers_url)
     .bind(crl_distribution_point_url)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, input.id).await
 }
 
 pub async fn insert_pending_authority(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     input: &PendingAuthorityInsert<'_>,
 ) -> Result<AuthorityRecord, AppError> {
     let key = input.key.columns();
@@ -607,14 +610,14 @@ pub async fn insert_pending_authority(
     .bind(key.encryption_algorithm)
     .bind(input.provisioning_mode)
     .bind(input.csr_pem)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, input.id).await
 }
 
 pub async fn activate_authority(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
     completed: &CompletedAuthority,
     issuance_enabled: bool,
@@ -656,14 +659,14 @@ pub async fn activate_authority(
     .bind(ocsp_url)
     .bind(ca_issuers_url)
     .bind(crl_distribution_point_url)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, authority_id).await
 }
 
 pub async fn mark_authority_failed(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
     reason: &str,
 ) -> Result<AuthorityRecord, AppError> {
@@ -675,14 +678,14 @@ pub async fn mark_authority_failed(
     )
     .bind(authority_id)
     .bind(reason)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, authority_id).await
 }
 
 pub async fn retire_other_active_authorities(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
@@ -700,13 +703,13 @@ pub async fn retire_other_active_authorities(
     .bind(authority_id)
     .bind(kind)
     .bind(tenant_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
 
 pub async fn transition_authority(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
     from: AuthorityStatus,
     to: AuthorityStatus,
@@ -723,7 +726,7 @@ pub async fn transition_authority(
     .bind(authority_id)
     .bind(from)
     .bind(to)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if result.rows_affected() != 1 {

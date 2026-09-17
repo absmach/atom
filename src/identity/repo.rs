@@ -1,9 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
+    db::DbTransaction,
     error::{db_err, entity_write_conflict, restore_conflict, AppError},
     models::{
         entity::{CreateEntity, Entity, EntityList, ListEntities, Ownership, UpdateEntity},
@@ -90,7 +91,7 @@ pub async fn ensure_not_config_managed_credential(
 }
 
 pub async fn lock_active_entity(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
 ) -> Result<Option<(EntityKind, Option<Uuid>)>, AppError> {
     let tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
@@ -99,7 +100,7 @@ pub async fn lock_active_entity(
            WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
     )
     .bind(id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -118,7 +119,7 @@ pub async fn lock_active_entity(
     )
     .bind(id)
     .bind(tenant_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
@@ -144,7 +145,10 @@ pub async fn create_entity_with_audit(
     let alias = crate::models::alias::validate_alias_opt(req.alias)?;
     let external_id = crate::models::external_id::validate_external_id_opt(req.external_id)?;
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let entity = sqlx::query_as::<_, Entity>(
         r#"INSERT INTO entities
@@ -164,7 +168,7 @@ pub async fn create_entity_with_audit(
     .bind(profile_id)
     .bind(profile_version_id)
     .bind(attrs)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(entity_write_conflict)?;
 
@@ -197,7 +201,7 @@ pub async fn create_entity(pool: &PgPool, req: CreateEntity) -> Result<Entity, A
 }
 
 pub async fn add_authenticated_user_membership_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
     sqlx::query(
@@ -207,7 +211,7 @@ pub async fn add_authenticated_user_membership_in_tx(
     )
     .bind(AUTHENTICATED_USERS_GROUP_ID)
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -389,11 +393,14 @@ pub async fn update_entity_with_audit(
     let external_id_is_set = external_id.is_some();
     let external_id = external_id.flatten();
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let current_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     let Some(current_tenant_id) = current_tenant_id else {
@@ -417,7 +424,7 @@ pub async fn update_entity_with_audit(
     )
     .bind(id)
     .bind(current_tenant_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let Some(current_kind) = locked else {
@@ -458,7 +465,7 @@ pub async fn update_entity_with_audit(
     .bind(alias)
     .bind(external_id_is_set)
     .bind(external_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("entity {id} not found")),
@@ -547,9 +554,12 @@ pub async fn add_entity_to_object_group_with_audit(
     entity_id: Uuid,
     group_id: Uuid,
 ) -> Result<Entity, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let inserted = add_entity_to_object_group_in_tx(&mut tx, entity_id, group_id).await?;
-    let entity = fetch_entity(&mut *tx, entity_id).await?;
+    let entity = fetch_entity(tx.as_postgres_mut(), entity_id).await?;
     if !inserted {
         tx.commit().await.map_err(db_err)?;
         return Ok(entity);
@@ -583,9 +593,12 @@ pub async fn remove_entity_from_object_group_with_audit(
     entity_id: Uuid,
     group_id: Uuid,
 ) -> Result<Entity, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let deleted = delete_entity_object_groups_in_tx(&mut tx, entity_id, Some(group_id)).await?;
-    let entity = fetch_entity(&mut *tx, entity_id).await?;
+    let entity = fetch_entity(tx.as_postgres_mut(), entity_id).await?;
     if deleted == 0 {
         tx.commit().await.map_err(db_err)?;
         return Ok(entity);
@@ -618,9 +631,12 @@ pub async fn clear_entity_object_groups_with_audit(
     actor_id: Option<Uuid>,
     entity_id: Uuid,
 ) -> Result<Entity, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let deleted = delete_entity_object_groups_in_tx(&mut tx, entity_id, None).await?;
-    let entity = fetch_entity(&mut *tx, entity_id).await?;
+    let entity = fetch_entity(tx.as_postgres_mut(), entity_id).await?;
     if deleted == 0 {
         tx.commit().await.map_err(db_err)?;
         return Ok(entity);
@@ -638,7 +654,7 @@ pub async fn clear_entity_object_groups_with_audit(
 }
 
 pub(crate) async fn add_entity_to_object_group_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     group_id: Uuid,
 ) -> Result<bool, AppError> {
@@ -650,7 +666,7 @@ pub(crate) async fn add_entity_to_object_group_in_tx(
 /// only after its exact declared membership has been validated, so it must be
 /// able to replay an already config-managed link idempotently.
 pub(crate) async fn add_config_entity_to_object_group_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     group_id: Uuid,
 ) -> Result<bool, AppError> {
@@ -658,7 +674,7 @@ pub(crate) async fn add_config_entity_to_object_group_in_tx(
 }
 
 async fn add_entity_to_object_group_in_tx_impl(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     group_id: Uuid,
     enforce_api_ownership: bool,
@@ -667,7 +683,7 @@ async fn add_entity_to_object_group_in_tx_impl(
     let entity_tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL")
             .bind(entity_id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     let Some(entity_tenant_id) = entity_tenant_id else {
@@ -690,7 +706,7 @@ async fn add_entity_to_object_group_in_tx_impl(
     .bind(entity_id)
     .bind(group_id)
     .bind(entity_tenant_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     .ok_or_else(|| AppError::bad_request("entity parent group reference is invalid"))?;
@@ -719,7 +735,7 @@ async fn add_entity_to_object_group_in_tx_impl(
     .bind(group_id)
     .bind(entity_id)
     .bind(tenant_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(result.rows_affected() > 0)
@@ -729,14 +745,14 @@ async fn add_entity_to_object_group_in_tx_impl(
 /// two callers name which they mean, so neither can inherit the other's
 /// behaviour by accident.
 async fn delete_entity_object_groups_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     group_id: Option<Uuid>,
 ) -> Result<u64, AppError> {
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL")
             .bind(entity_id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -752,7 +768,7 @@ async fn delete_entity_object_groups_in_tx(
     )
     .bind(entity_id)
     .bind(tenant_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
@@ -765,7 +781,7 @@ async fn delete_entity_object_groups_in_tx(
     )
     .bind(entity_id)
     .bind(group_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     affected_group_ids.dedup();
@@ -782,7 +798,7 @@ async fn delete_entity_object_groups_in_tx(
     )
     .bind(entity_id)
     .bind(group_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     .rows_affected();
@@ -899,7 +915,7 @@ fn normalize_attributes(attributes: Value) -> Value {
 }
 
 pub(crate) async fn sync_entity_email_from_attrs_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     kind: &EntityKind,
     attributes: &Value,
@@ -915,7 +931,7 @@ pub(crate) async fn sync_entity_email_from_attrs_in_tx(
     let existing: Option<(Uuid, String)> =
         sqlx::query_as("SELECT id, email FROM entity_emails WHERE entity_id = $1 FOR UPDATE")
             .bind(entity_id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
 
@@ -929,7 +945,7 @@ pub(crate) async fn sync_entity_email_from_attrs_in_tx(
             )
             .bind(email_id)
             .bind(&email)
-            .execute(&mut **tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(entity_write_conflict)?;
             sqlx::query(
@@ -939,7 +955,7 @@ pub(crate) async fn sync_entity_email_from_attrs_in_tx(
             )
             .bind(entity_id)
             .bind(&email)
-            .execute(&mut **tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
         } else {
@@ -948,7 +964,7 @@ pub(crate) async fn sync_entity_email_from_attrs_in_tx(
                  WHERE id = $1",
             )
             .bind(email_id)
-            .execute(&mut **tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
         }
@@ -962,14 +978,14 @@ pub(crate) async fn sync_entity_email_from_attrs_in_tx(
     .bind(Uuid::new_v4())
     .bind(entity_id)
     .bind(email)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(entity_write_conflict)?;
     Ok(())
 }
 
 async fn deactivate_entity_email_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
     sqlx::query(
@@ -979,7 +995,7 @@ async fn deactivate_entity_email_in_tx(
            AND consumed_at IS NULL",
     )
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     sqlx::query(
@@ -989,7 +1005,7 @@ async fn deactivate_entity_email_in_tx(
            AND consumed_at IS NULL",
     )
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     sqlx::query(
@@ -997,14 +1013,14 @@ async fn deactivate_entity_email_in_tx(
          WHERE entity_id = $1 AND deleted_at IS NULL",
     )
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(())
 }
 
 async fn invalidate_email_tokens_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     email_id: Uuid,
 ) -> Result<(), AppError> {
     sqlx::query(
@@ -1012,7 +1028,7 @@ async fn invalidate_email_tokens_in_tx(
          WHERE email_id = $1 AND consumed_at IS NULL",
     )
     .bind(email_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     sqlx::query(
@@ -1020,7 +1036,7 @@ async fn invalidate_email_tokens_in_tx(
          WHERE email_id = $1 AND consumed_at IS NULL",
     )
     .bind(email_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -1124,7 +1140,7 @@ pub async fn entity_active_access_token_ids(
 /// leaving its cache entry uninvalidated indefinitely. See
 /// `src/cache/mod.rs`'s consistency model.
 pub async fn lock_entity_and_collect_revocation_ids_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
 ) -> Result<(Vec<Uuid>, Vec<Uuid>), AppError> {
     // Discover ownership without locking, then take the canonical tenant ->
@@ -1133,7 +1149,7 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
             .bind(id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -1150,7 +1166,7 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     )
     .bind(id)
     .bind(tenant_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
@@ -1160,7 +1176,7 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     let session_ids: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL")
             .bind(id)
-            .fetch_all(&mut **tx)
+            .fetch_all(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     // Restricted to the one credential kind this codebase caches under
@@ -1171,7 +1187,7 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
     )
     .bind(id)
     .bind(crate::models::enums::CredentialKind::AccessToken)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1191,7 +1207,7 @@ pub async fn lock_entity_and_collect_revocation_ids_in_tx(
 /// misses the row and silently drops the tenant from the delete's audit
 /// trail.
 pub async fn deactivate_and_finish_entity_deletion_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     deleted_by: Option<Uuid>,
@@ -1205,7 +1221,7 @@ pub async fn deactivate_and_finish_entity_deletion_in_tx(
     )
     .bind(id)
     .bind(deleted_by)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     .ok_or_else(|| AppError::not_found(format!("entity {id} not found")))?;
@@ -1230,14 +1246,14 @@ pub async fn deactivate_and_finish_entity_deletion_in_tx(
     )
     .bind(id)
     .bind(actor_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     sqlx::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1247,7 +1263,7 @@ pub async fn deactivate_and_finish_entity_deletion_in_tx(
          WHERE entity_id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1302,7 +1318,10 @@ pub async fn delete_entity_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     lock_entity_and_collect_revocation_ids_in_tx(&mut tx, id).await?;
     let (tenant_id, details) = deactivate_and_finish_entity_deletion_in_tx(
         &mut tx,
@@ -1344,13 +1363,16 @@ pub async fn restore_entity_with_audit(
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     let _ = restored_by;
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
 
     let expected_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
         "SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let Some(expected_tenant_id) = expected_tenant_id else {
@@ -1371,7 +1393,7 @@ pub async fn restore_entity_with_audit(
     )
     .bind(id)
     .bind(expected_tenant_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let (tenant_id, _is_tenant_deleted, entity_deleted_at) = match tenant_info {
@@ -1395,7 +1417,7 @@ pub async fn restore_entity_with_audit(
     )
     .bind(id)
     .bind(entity_deleted_at)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(restore_conflict)?;
 
@@ -1405,7 +1427,7 @@ pub async fn restore_entity_with_audit(
          WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(restore_conflict)?;
 
@@ -1436,12 +1458,15 @@ pub async fn purge_entity_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
 
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     let Some(expected_tenant_id) = tenant_id else {
@@ -1455,7 +1480,7 @@ pub async fn purge_entity_with_audit(
     let credential_ids: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM credentials WHERE entity_id = $1")
             .bind(id)
-            .fetch_all(&mut *tx)
+            .fetch_all(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
 
@@ -1467,7 +1492,7 @@ pub async fn purge_entity_with_audit(
          WHERE scope_kind = 'entity' AND scope_id = $1",
     )
     .bind(id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -1475,7 +1500,7 @@ pub async fn purge_entity_with_audit(
         "DELETE FROM entities WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let tenant_id = purged_tenant_id
@@ -1509,7 +1534,10 @@ pub async fn create_session(
     entity_id: Uuid,
     expiry_secs: u64,
 ) -> Result<Session, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     if lock_active_entity(&mut tx, entity_id).await?.is_none() {
         return Err(AppError::not_found(format!(
             "active entity {entity_id} not found"
@@ -1521,7 +1549,7 @@ pub async fn create_session(
 }
 
 pub(crate) async fn create_session_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     expiry_secs: u64,
 ) -> Result<Session, AppError> {
@@ -1536,13 +1564,13 @@ pub(crate) async fn create_session_in_tx(
     .bind(id)
     .bind(entity_id)
     .bind(expires_at)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
 
 pub(crate) async fn refresh_session_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
     entity_id: Uuid,
     expiry_secs: u64,
@@ -1561,7 +1589,7 @@ pub(crate) async fn refresh_session_in_tx(
     .bind(id)
     .bind(entity_id)
     .bind(expires_at)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     .ok_or_else(|| AppError::unauthorized("session is not refreshable"))
@@ -1582,14 +1610,11 @@ pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Session, AppError> {
 
 /// The caller owns the commit, so a logout can bind the session revocation and
 /// its `auth.logout` event into one transaction.
-pub async fn revoke_session_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    id: Uuid,
-) -> Result<(), AppError> {
+pub async fn revoke_session_in_tx(tx: &mut DbTransaction<'_>, id: Uuid) -> Result<(), AppError> {
     let result =
         sqlx::query("UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
             .bind(id)
-            .execute(&mut **tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -1623,7 +1648,10 @@ pub async fn create_group_with_audit(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::bad_request("groupType is required: use object or principal"))?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
     let group = match group_type {
         "principal" => sqlx::query_as::<_, Group>(
@@ -1638,7 +1666,7 @@ pub async fn create_group_with_audit(
         .bind(tenant_id)
         .bind(description)
         .bind(attrs)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(db_err)?,
         "object" => sqlx::query_as::<_, Group>(
@@ -1653,7 +1681,7 @@ pub async fn create_group_with_audit(
         .bind(tenant_id)
         .bind(description)
         .bind(attrs)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(db_err)?,
         _ => {
@@ -1800,7 +1828,7 @@ pub async fn list_groups(pool: &PgPool, params: ListGroups) -> Result<GroupList,
 /// legacy database can contain the same UUID in both group tables, so every
 /// owning tenant participates in the canonical tenant-first order.
 async fn group_tenant_ids_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
 ) -> Result<Vec<Option<Uuid>>, AppError> {
     sqlx::query_scalar(
@@ -1809,7 +1837,7 @@ async fn group_tenant_ids_in_tx(
            ORDER BY CASE group_type WHEN 'object' THEN 0 ELSE 1 END"#,
     )
     .bind(id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)
 }
@@ -1818,7 +1846,7 @@ async fn group_tenant_ids_in_tx(
 /// acquired. Object-before-principal matches the existing hierarchy mutation
 /// compatibility path and makes duplicate legacy UUIDs deterministic.
 async fn ensure_group_not_config_managed_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     id: Uuid,
 ) -> Result<(), AppError> {
     let group_types: Vec<String> = sqlx::query_scalar(
@@ -1827,7 +1855,7 @@ async fn ensure_group_not_config_managed_in_tx(
            ORDER BY CASE group_type WHEN 'object' THEN 0 ELSE 1 END"#,
     )
     .bind(id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if group_types.is_empty() {
@@ -1853,7 +1881,7 @@ async fn ensure_group_not_config_managed_in_tx(
 /// `status`, the resolver must already hold this group's closure lock via
 /// `authz::repo::lock_group_closures_and_collect_grants_keys` on this `tx`.
 pub(crate) async fn update_group_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -1875,7 +1903,7 @@ pub(crate) async fn update_group_in_tx(
         "SELECT EXISTS (SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if !live {
@@ -1915,7 +1943,7 @@ pub(crate) async fn update_group_in_tx(
     .bind(req.description)
     .bind(req.status)
     .bind(attributes)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("group {id} not found")),
@@ -1955,7 +1983,10 @@ pub async fn update_group_with_audit(
     event_name: &str,
     audit_details: Value,
 ) -> Result<Group, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let group = update_group_in_tx(
         &mut tx,
         events_enabled,
@@ -1999,7 +2030,10 @@ pub async fn set_group_parent_with_audit(
     child_id: Uuid,
     parent_id: Uuid,
 ) -> Result<Group, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let group =
         set_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id, parent_id).await?;
     tx.commit().await.map_err(db_err)?;
@@ -2023,7 +2057,7 @@ pub async fn set_group_parent_with_audit(
 /// its descendants inherit from above, never hierarchy rows below it, so the
 /// child closure is exactly what this mutation can affect.
 pub(crate) async fn set_group_parent_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     child_id: Uuid,
@@ -2049,7 +2083,7 @@ pub(crate) async fn set_group_parent_in_tx(
            LIMIT 1"#,
     )
     .bind(child_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("group {child_id} not found")),
@@ -2063,7 +2097,7 @@ pub(crate) async fn set_group_parent_in_tx(
            LIMIT 1"#,
     )
     .bind(parent_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
@@ -2107,7 +2141,7 @@ pub(crate) async fn set_group_parent_in_tx(
     );
     let locked_ids: Vec<Uuid> = sqlx::query_scalar(&lock_sql)
         .bind(vec![child_id, parent_id])
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     if locked_ids.len() != 2 {
@@ -2126,7 +2160,7 @@ pub(crate) async fn set_group_parent_in_tx(
                ORDER BY id FOR UPDATE"#,
         )
         .bind(vec![child_id, parent_id])
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
         if principal_ids.len() == 2 {
@@ -2153,7 +2187,7 @@ pub(crate) async fn set_group_parent_in_tx(
     let creates_cycle: bool = sqlx::query_scalar(&creates_cycle_sql)
         .bind(parent_id)
         .bind(child_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     if creates_cycle {
@@ -2172,7 +2206,7 @@ pub(crate) async fn set_group_parent_in_tx(
         .bind(parent_id)
         .bind(child_id)
         .bind(child_tenant_id)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
 
@@ -2188,7 +2222,7 @@ pub(crate) async fn set_group_parent_in_tx(
         .bind(parent_id)
         .bind(child_id)
         .bind(child_tenant_id)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     }
@@ -2202,7 +2236,7 @@ pub(crate) async fn set_group_parent_in_tx(
     };
     let details = serde_json::json!({ "parent_id": parent_id });
     crate::audit::observe_in_tx(tx, events_enabled, &meta, &details).await?;
-    fetch_group(&mut **tx, child_id).await
+    fetch_group(tx.as_postgres_mut(), child_id).await
 }
 
 pub async fn remove_group_parent(pool: &PgPool, child_id: Uuid) -> Result<(), AppError> {
@@ -2215,7 +2249,10 @@ pub async fn remove_group_parent_with_audit(
     actor_id: Option<Uuid>,
     child_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let tenant_id = remove_group_parent_in_tx(&mut tx, events_enabled, actor_id, child_id).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -2235,7 +2272,7 @@ pub async fn remove_group_parent_with_audit(
 /// [`set_group_parent_in_tx`]. Returns the group's `tenant_id` for the
 /// caller's post-commit observability log.
 pub(crate) async fn remove_group_parent_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     child_id: Uuid,
@@ -2245,7 +2282,7 @@ pub(crate) async fn remove_group_parent_in_tx(
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1 AND deleted_at IS NULL")
             .bind(child_id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -2256,14 +2293,14 @@ pub(crate) async fn remove_group_parent_in_tx(
         "SELECT id FROM object_groups WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(child_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let principal_locked: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(child_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if object_locked.is_none() && principal_locked.is_none() {
@@ -2283,7 +2320,7 @@ pub(crate) async fn remove_group_parent_in_tx(
            DELETE FROM object_group_hierarchy WHERE child_id = $1"#,
     )
     .bind(child_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let meta = crate::audit::AuditMeta {
@@ -2330,7 +2367,10 @@ pub async fn delete_group_with_audit(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let tenant_id = delete_group_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -2355,7 +2395,7 @@ pub async fn delete_group_with_audit(
 /// group's `tenant_id` for the caller's post-commit observability log — a
 /// re-read after this commits would always miss the now-deleted row.
 pub(crate) async fn delete_group_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -2371,7 +2411,7 @@ pub(crate) async fn delete_group_in_tx(
         "SELECT EXISTS (SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if !live {
@@ -2393,7 +2433,7 @@ pub(crate) async fn delete_group_in_tx(
     )
     .bind(id)
     .bind(deleted_by)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if result.is_none() {
@@ -2427,7 +2467,10 @@ pub async fn restore_group_with_audit(
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     restore_group_in_tx(&mut tx, events_enabled, actor_id, id, restored_by).await?;
     tx.commit().await.map_err(db_err)?;
     // The audit_logs row is deliberately written after commit (fire-and-forget,
@@ -2457,7 +2500,7 @@ pub async fn restore_group_with_audit(
 /// hold this group's closure lock via
 /// `authz::repo::lock_group_closures_and_collect_grants_keys` on this `tx`.
 pub(crate) async fn restore_group_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -2479,7 +2522,7 @@ pub(crate) async fn restore_group_in_tx(
          WHERE g.id = $1 AND g.deleted_at IS NOT NULL",
     )
     .bind(id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let (tenant_id, _is_tenant_deleted) = match tenant_info {
@@ -2510,7 +2553,7 @@ pub(crate) async fn restore_group_in_tx(
            SELECT id FROM o"#,
     )
     .bind(id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(restore_conflict)?;
 
@@ -2539,7 +2582,10 @@ pub async fn purge_group_with_audit(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
 
     let tenant_ids = group_tenant_ids_in_tx(&mut tx, id).await?;
     if tenant_ids.is_empty() {
@@ -2564,7 +2610,7 @@ pub async fn purge_group_with_audit(
            SELECT tenant_id FROM o"#,
     )
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let tenant_id = purged_tenant_id
@@ -2604,7 +2650,10 @@ pub async fn add_group_member_with_audit(
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let (inserted, group_tenant_id) = add_group_member_in_tx(&mut tx, group_id, entity_id).await?;
     if !inserted {
         tx.commit().await.map_err(db_err)?;
@@ -2623,7 +2672,7 @@ pub async fn add_group_member_with_audit(
 }
 
 pub(crate) async fn add_group_member_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(bool, Option<Uuid>), AppError> {
@@ -2634,7 +2683,7 @@ pub(crate) async fn add_group_member_in_tx(
 /// callers use [`add_group_member_in_tx`] and cannot change a config-owned
 /// member set.
 pub(crate) async fn add_config_group_member_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(bool, Option<Uuid>), AppError> {
@@ -2642,7 +2691,7 @@ pub(crate) async fn add_config_group_member_in_tx(
 }
 
 async fn add_group_member_in_tx_impl(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     group_id: Uuid,
     entity_id: Uuid,
     enforce_api_ownership: bool,
@@ -2652,7 +2701,7 @@ async fn add_group_member_in_tx_impl(
            WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
     )
     .bind(group_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let entity_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
@@ -2660,7 +2709,7 @@ async fn add_group_member_in_tx_impl(
            WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
     )
     .bind(entity_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let (Some(group_tenant_id), Some(entity_tenant_id)) = (group_tenant_id, entity_tenant_id)
@@ -2688,7 +2737,7 @@ async fn add_group_member_in_tx_impl(
     )
     .bind(group_id)
     .bind(group_tenant_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let entity_locked: Option<Uuid> = sqlx::query_scalar(
@@ -2701,7 +2750,7 @@ async fn add_group_member_in_tx_impl(
     )
     .bind(entity_id)
     .bind(entity_tenant_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if group_locked.is_none() || entity_locked.is_none() {
@@ -2715,13 +2764,13 @@ async fn add_group_member_in_tx_impl(
     }
     // On this transaction's connection: reaching into the pool for a second one
     // while holding a transaction deadlocks a saturated pool.
-    crate::guardrails::validate_group_member(tx, group_id, entity_id).await?;
+    crate::guardrails::validate_group_member(tx.as_postgres_mut(), group_id, entity_id).await?;
     let inserted = sqlx::query(
         "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
     .bind(group_id)
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     .rows_affected();
@@ -2753,7 +2802,10 @@ pub async fn remove_group_member_with_audit(
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     // Removal stays idempotent: a missing group or a missing membership row is
     // not an error. But only an actual deletion is a domain event — publishing
     // `group_member.remove` for a no-op would lie to downstream consumers.
@@ -2767,7 +2819,7 @@ pub async fn remove_group_member_with_audit(
     let tenant_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT tenant_id FROM principal_groups WHERE id = $1")
             .bind(group_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -2781,7 +2833,7 @@ pub async fn remove_group_member_with_audit(
     )
     .bind(group_id)
     .bind(tenant_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
@@ -2793,7 +2845,7 @@ pub async fn remove_group_member_with_audit(
         sqlx::query("DELETE FROM principal_group_members WHERE group_id = $1 AND entity_id = $2")
             .bind(group_id)
             .bind(entity_id)
-            .execute(&mut *tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(db_err)?
             .rows_affected();
@@ -2849,13 +2901,16 @@ pub async fn create_ownership(
     owned_id: Uuid,
     relation: String,
 ) -> Result<Ownership, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let entity_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         r#"SELECT id, tenant_id FROM entities
            WHERE id = ANY($1::uuid[]) AND status = 'active' AND deleted_at IS NULL"#,
     )
     .bind(vec![owner_id, owned_id])
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let expected_entities = if owner_id == owned_id { 1 } else { 2 };
@@ -2882,7 +2937,7 @@ pub async fn create_ownership(
            ORDER BY id FOR UPDATE"#,
     )
     .bind(&entity_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if locked.len() != entity_ids.len() {
@@ -2899,7 +2954,7 @@ pub async fn create_ownership(
     .bind(owner_id)
     .bind(owned_id)
     .bind(relation)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;

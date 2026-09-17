@@ -13,13 +13,13 @@ use rcgen::{
     PublicKeyData, SerialNumber, SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
 };
 use ring::digest;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::{extensions::ParsedExtension, pem::parse_x509_pem, prelude::X509Certificate};
 use zeroize::Zeroizing;
 
-use crate::{config::PkiCaKeyConfig, error::AppError};
+use crate::{config::PkiCaKeyConfig, db::DbTransaction, error::AppError};
 
 use super::{
     key_provider::{
@@ -216,14 +216,14 @@ impl SigningKey for ProviderSigningKey<'_> {
 }
 
 pub async fn import_root_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     certificate_pem: &str,
 ) -> Result<AuthorityRecord, AppError> {
     Ok(import_root_mutation_in_tx(tx, certificate_pem).await?.value)
 }
 
 pub async fn import_root_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     certificate_pem: &str,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
@@ -251,7 +251,7 @@ pub async fn import_root_mutation_in_tx(
 /// encrypted-database provider before it hits the row. Idempotent by
 /// certificate fingerprint.
 pub async fn import_platform_intermediate_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     ca_keys: &PkiCaKeyConfig,
     certificate_pem: &str,
     private_key_pem: &str,
@@ -442,7 +442,7 @@ fn find_private_key_block(pem: &str) -> Option<String> {
 }
 
 pub async fn begin_tenant_authority_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
@@ -450,7 +450,7 @@ pub async fn begin_tenant_authority_in_tx(
 }
 
 pub async fn begin_tenant_authority_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
@@ -486,7 +486,7 @@ pub async fn begin_tenant_authority_mutation_in_tx(
 }
 
 pub async fn provision_tenant_automatically_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityImportOutcome>, AppError> {
@@ -494,7 +494,7 @@ pub async fn provision_tenant_automatically_in_tx(
 }
 
 pub async fn provision_tenant_automatically_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     ca_keys: &PkiCaKeyConfig,
     tenant_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityImportOutcome>, AppError> {
@@ -543,7 +543,7 @@ pub async fn provision_tenant_automatically_mutation_in_tx(
 }
 
 async fn import_signed_authority_locked(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     ca_keys: &PkiCaKeyConfig,
     authority: AuthorityRecord,
     certificate_pem: &str,
@@ -667,7 +667,7 @@ fn discovery_urls_for(
 }
 
 pub async fn begin_retirement_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
     Ok(begin_retirement_mutation_in_tx(tx, authority_id)
@@ -676,7 +676,7 @@ pub async fn begin_retirement_in_tx(
 }
 
 pub async fn begin_retirement_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
@@ -710,7 +710,7 @@ pub async fn begin_retirement_mutation_in_tx(
 }
 
 pub async fn complete_retirement_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
     Ok(complete_retirement_mutation_in_tx(tx, authority_id)
@@ -719,7 +719,7 @@ pub async fn complete_retirement_in_tx(
 }
 
 pub async fn complete_retirement_mutation_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     authority_id: Uuid,
 ) -> Result<AuthorityMutationOutcome<AuthorityRecord>, AppError> {
     repo::lock_provisioning(tx).await?;
@@ -768,7 +768,7 @@ pub async fn trust_bundle(pool: &PgPool) -> Result<TrustBundle, AppError> {
 }
 
 async fn create_pending_authority(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     ca_keys: &PkiCaKeyConfig,
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,

@@ -75,7 +75,10 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
 
     let issuer = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant).await;
     let other_issuer = {
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = atom::db::Database::from(pool.clone())
+            .begin()
+            .await
+            .unwrap();
         let mut provisioned = provisioning::provision_tenant_automatically_in_tx(
             &mut tx,
             &config.pki_ca_keys,
