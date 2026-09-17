@@ -52,6 +52,8 @@ impl GrpcRuntimeStatus {
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::PgPool,
+    /// Tracks database work that can outlive a request during runtime drain.
+    pub background_tasks: tokio_util::task::TaskTracker,
     pub config: Config,
     pub keys: Arc<RwLock<ActiveKeys>>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -83,6 +85,7 @@ impl AppState {
         let grpc_status = GrpcRuntimeStatus::starting(config.grpc_addr.clone());
         AppState {
             pool,
+            background_tasks: tokio_util::task::TaskTracker::new(),
             config,
             keys: Arc::new(RwLock::new(keys)),
             rate_limiter: Arc::new(RateLimiter::default()),

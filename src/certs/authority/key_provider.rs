@@ -26,6 +26,13 @@ use crate::{
 use super::{repo, AuthorityKeyBackend, AuthorityRecord};
 
 mod pkcs11;
+
+/// Wait for outstanding native operations after callers have stopped.
+/// The runtime owner must enforce its shutdown deadline and report failure
+/// rather than claim a graceful shutdown if an HSM worker remains outstanding.
+pub async fn wait_for_idle() {
+    pkcs11::wait_for_idle().await;
+}
 pub(crate) use pkcs11::circuit_state as pkcs11_circuit_state;
 pub use pkcs11::{Pkcs11AuthorityKey, Pkcs11KeyProvider};
 

@@ -28,18 +28,34 @@ pub struct PurgeSummary {
 }
 
 pub fn spawn_purge_cleanup(state: AppState) {
+    drop(spawn_purge_cleanup_with_shutdown(
+        state,
+        tokio_util::sync::CancellationToken::new(),
+    ));
+}
+
+/// Starts a tracked worker. An active pass finishes before observing shutdown.
+pub fn spawn_purge_cleanup_with_shutdown(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
     let cfg = state.config.purge;
     if !cfg.enabled {
         tracing::info!("soft-delete purge disabled");
-        return;
+        return None;
     }
 
-    tokio::spawn(async move {
+    let tasks = state.background_tasks.clone();
+    Some(tasks.spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
             match purge_expired(&state.pool, cfg).await {
                 Ok(summary) if summary.deleted_rows > 0 => {
                     audit::write(
@@ -66,7 +82,7 @@ pub fn spawn_purge_cleanup(state: AppState) {
                 Err(err) => tracing::warn!("soft-delete purge failed: {err}"),
             }
         }
-    });
+    }))
 }
 
 /// Bounded cleanup of expired refresh-token history, gated on
@@ -76,19 +92,35 @@ pub fn spawn_purge_cleanup(state: AppState) {
 /// `family_expires_at` has already passed, so replay detection stays
 /// available for the whole life of a family.
 pub fn spawn_refresh_token_cleanup(state: AppState) {
+    drop(spawn_refresh_token_cleanup_with_shutdown(
+        state,
+        tokio_util::sync::CancellationToken::new(),
+    ));
+}
+
+/// Starts a tracked worker. An active pass finishes before observing shutdown.
+pub fn spawn_refresh_token_cleanup_with_shutdown(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
     let refresh_cfg = state.config.refresh_tokens;
     if !refresh_cfg.enabled {
-        return;
+        return None;
     }
     let interval_secs = state.config.purge.interval_secs;
     let batch_size = state.config.purge.batch_size;
 
-    tokio::spawn(async move {
+    let tasks = state.background_tasks.clone();
+    Some(tasks.spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
             match crate::identity::refresh_tokens::purge_expired(&state.pool, batch_size).await {
                 Ok(0) => {}
                 Ok(deleted_rows) => {
@@ -110,7 +142,7 @@ pub fn spawn_refresh_token_cleanup(state: AppState) {
                 Err(err) => tracing::warn!("refresh token cleanup failed: {err}"),
             }
         }
-    });
+    }))
 }
 
 /// Physically delete one bounded batch of tombstoned rows per table.

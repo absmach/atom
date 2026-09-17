@@ -36,6 +36,7 @@ pub mod protected_objects;
 pub mod purge;
 pub mod rate_limit;
 pub mod routes;
+pub mod runtime;
 pub mod schema;
 pub mod shutdown;
 pub mod state;
