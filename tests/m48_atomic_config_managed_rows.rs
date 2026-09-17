@@ -14,6 +14,7 @@ mod common;
 
 use std::{fmt::Debug, future::Future};
 
+use atom::db::DbTransaction;
 use atom::{
     authz::repo as authz_repo,
     config::Config,
@@ -26,7 +27,7 @@ use atom::{
     tenants::repo as tenant_repo,
 };
 use common::pool;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 fn assert_config_conflict(err: AppError) {
@@ -68,14 +69,17 @@ async fn credential_create_waits_for_config_slot_ownership_and_then_conflicts() 
     .await
     .expect("insert password");
 
-    let mut stamp = p.begin().await.expect("begin bootstrap-like credential tx");
+    let mut stamp = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin bootstrap-like credential tx");
     identity_repo::lock_active_entity(&mut stamp, entity_id)
         .await
         .expect("lock entity")
         .expect("active entity");
     sqlx::query("UPDATE credentials SET managed_by = 'config' WHERE id = $1")
         .bind(credential_id)
-        .execute(&mut *stamp)
+        .execute(stamp.as_postgres_mut())
         .await
         .expect("stage credential ownership");
 
@@ -135,14 +139,17 @@ async fn shared_key_reveal_waits_for_config_stamp_and_hides_the_secret() {
     .await
     .expect("create shared key");
 
-    let mut stamp = p.begin().await.expect("begin bootstrap-like credential tx");
+    let mut stamp = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin bootstrap-like credential tx");
     identity_repo::lock_active_entity(&mut stamp, entity_id)
         .await
         .expect("lock entity")
         .expect("active entity");
     sqlx::query("UPDATE credentials SET managed_by = 'config' WHERE id = $1")
         .bind(shared.credential_id)
-        .execute(&mut *stamp)
+        .execute(stamp.as_postgres_mut())
         .await
         .expect("stage shared-key ownership");
 
@@ -183,12 +190,15 @@ async fn stage_config_stamp(
     table: &'static str,
     id: Uuid,
     tenant_id: Option<Uuid>,
-) -> Transaction<'static, Postgres> {
-    let mut tx = pool.begin().await.expect("begin bootstrap-like tx");
+) -> DbTransaction<'static> {
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .expect("begin bootstrap-like tx");
     if let Some(tenant_id) = tenant_id {
         sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
             .bind(tenant_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(tx.as_postgres_mut())
             .await
             .expect("lock owning tenant");
     }
@@ -196,14 +206,14 @@ async fn stage_config_stamp(
         "UPDATE {table} SET managed_by = 'config' WHERE id = $1"
     ))
     .bind(id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .expect("stage config ownership stamp");
     assert_eq!(result.rows_affected(), 1, "fixture row must exist");
     tx
 }
 
-async fn assert_waits_then_conflicts<T, F>(stamp_tx: Transaction<'static, Postgres>, mutation: F)
+async fn assert_waits_then_conflicts<T, F>(stamp_tx: DbTransaction<'static>, mutation: F)
 where
     T: Debug + Send + 'static,
     F: Future<Output = Result<T, AppError>> + Send + 'static,
@@ -506,10 +516,13 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     .await
     .expect("insert applicability");
 
-    let mut stamp = p.begin().await.expect("begin applicability stamp");
+    let mut stamp = atom::db::Database::from(p.clone())
+        .begin()
+        .await
+        .expect("begin applicability stamp");
     sqlx::query("SELECT id FROM actions WHERE id = $1 FOR UPDATE")
         .bind(action_id)
-        .fetch_one(&mut *stamp)
+        .fetch_one(stamp.as_postgres_mut())
         .await
         .expect("lock action");
     sqlx::query(
@@ -518,7 +531,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     )
     .bind(action_id)
     .bind(&object_type)
-    .execute(&mut *stamp)
+    .execute(stamp.as_postgres_mut())
     .await
     .expect("stage applicability stamp");
     let p2 = p.clone();

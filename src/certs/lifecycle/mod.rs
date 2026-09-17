@@ -11,6 +11,7 @@ use crate::{
     audit,
     certs::service::{self as certificates, CertificateRevocationSelector, RevokeCertificateV2},
     config::PkiLifecycleConfig,
+    db::Database,
     error::AppError,
     models::enums::AuditOutcome,
     state::AppState,
@@ -116,10 +117,13 @@ pub async fn sweep_once(
         return Ok(SweepSummary::default());
     }
 
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(AppError::Database)?;
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(LIFECYCLE_SWEEP_ADVISORY_LOCK_ID)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(AppError::Database)?;
     if !acquired {
@@ -167,7 +171,7 @@ pub async fn sweep_once(
                 "rotation_procedure": "PR-003",
             });
             crate::events::enqueue(
-                &mut *tx,
+                tx.as_postgres_mut(),
                 true,
                 None,
                 window.tenant_id,
@@ -210,7 +214,7 @@ pub async fn sweep_once(
                     "expires_at": window.expires_at,
                 });
                 crate::events::enqueue(
-                    &mut *tx,
+                    tx.as_postgres_mut(),
                     true,
                     None,
                     window.tenant_id,
@@ -348,7 +352,7 @@ async fn revoke_candidate(
     reason: Option<String>,
     candidate: &repo::BulkCandidate,
 ) -> Result<BulkRevocationItem, AppError> {
-    let mut tx = state.pool().begin().await.map_err(AppError::Database)?;
+    let mut tx = state.begin().await.map_err(AppError::Database)?;
     let revoked = certificates::revoke_certificate_v2_in_tx(
         &mut tx,
         RevokeCertificateV2 {

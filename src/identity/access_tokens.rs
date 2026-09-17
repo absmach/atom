@@ -6,13 +6,14 @@
 use argon2::password_hash::rand_core::OsRng;
 use chrono::Utc;
 use rand::RngCore;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
     auth::make_api_key,
     config::SigningKeyConfig,
     crypto,
+    db::DbTransaction,
     error::{db_err, AppError},
     models::{
         enums::{CredentialKind, CredentialStatus},
@@ -38,7 +39,10 @@ pub async fn create_access_token(
     req: CreateAccessToken,
     scoped: bool,
 ) -> Result<AccessTokenResponse, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let response = create_access_token_in_tx(&mut tx, signing_keys, entity_id, req, scoped).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(response)
@@ -48,7 +52,7 @@ pub async fn create_access_token(
 /// `credential.create` event into one transaction via
 /// [`crate::audit::commit_with_audit`].
 pub async fn create_access_token_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     req: CreateAccessToken,
@@ -127,7 +131,7 @@ pub async fn create_access_token_in_tx(
     .bind(scoped)
     .bind(req.expires_at)
     .bind(metadata)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -155,7 +159,10 @@ pub async fn replace_access_token_permissions(
     cred_id: Uuid,
     permissions: Vec<AccessTokenPermission>,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     replace_access_token_permissions_in_tx(&mut tx, entity_id, cred_id, permissions).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -164,7 +171,7 @@ pub async fn replace_access_token_permissions(
 /// See [`create_access_token_in_tx`] — the caller owns the commit so the
 /// ceiling rewrite and its `credential.update` event land atomically.
 pub async fn replace_access_token_permissions_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     cred_id: Uuid,
     permissions: Vec<AccessTokenPermission>,
@@ -189,7 +196,7 @@ pub async fn replace_access_token_permissions_in_tx(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     match row {
@@ -209,7 +216,7 @@ pub async fn replace_access_token_permissions_in_tx(
 
     sqlx::query("DELETE FROM credential_permission_limits WHERE credential_id = $1")
         .bind(cred_id)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     let action_ids = resolve_ceiling_action_ids(tx, &permissions).await?;
@@ -223,7 +230,7 @@ pub async fn replace_access_token_permissions_in_tx(
 /// `write_ceiling_limit`. Unknown names are a bad request. Resolved inside the
 /// open tx so the ids stay consistent with the FK inserts that follow.
 async fn resolve_ceiling_action_ids(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     permissions: &[AccessTokenPermission],
 ) -> Result<std::collections::HashMap<String, Uuid>, AppError> {
     use sqlx::Row;
@@ -235,7 +242,7 @@ async fn resolve_ceiling_action_ids(
         .collect();
     let rows = sqlx::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
         .bind(&names)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     let action_ids = rows
@@ -257,7 +264,7 @@ async fn resolve_ceiling_action_ids(
 /// scope/field combinations are rejected by the table CHECK; `action_ids` comes
 /// from `resolve_ceiling_action_ids` and covers every name in the permission.
 async fn write_ceiling_limit(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     cred_id: Uuid,
     permission: &AccessTokenPermission,
     action_ids: &std::collections::HashMap<String, Uuid>,
@@ -310,7 +317,7 @@ async fn write_ceiling_limit(
     .bind(&permission.object_type)
     .bind(permission.object_id)
     .bind(conditions)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::Database(db) if db.code().as_deref() == Some("23514") => {
@@ -329,7 +336,7 @@ async fn write_ceiling_limit(
         )
         .bind(limit_id)
         .bind(action_id)
-        .execute(&mut **tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     }
@@ -494,7 +501,10 @@ pub async fn revoke_access_token(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     revoke_access_token_in_tx(&mut tx, entity_id, cred_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -507,7 +517,7 @@ pub async fn revoke_access_token(
 /// list APIs so the UI can flag them read-only, but revoke returns 409
 /// conflict — rotation lives in the YAML.
 pub async fn revoke_access_token_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
@@ -519,7 +529,7 @@ pub async fn revoke_access_token_in_tx(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     match managed_by {
@@ -546,7 +556,7 @@ pub async fn revoke_access_token_in_tx(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {

@@ -21,7 +21,10 @@ pub async fn create_profile_with_audit(
     req: CreateProfile,
 ) -> Result<Profile, AppError> {
     let id = Uuid::new_v4();
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let profile = sqlx::query_as::<_, Profile>(
         r#"INSERT INTO profiles
            (id, tenant_id, object_kind, kind, key, display_name, description, status)
@@ -37,7 +40,7 @@ pub async fn create_profile_with_audit(
     .bind(req.display_name)
     .bind(req.description)
     .bind(req.status)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     crate::audit::commit_with_observation(
@@ -139,7 +142,10 @@ pub async fn update_profile_with_audit(
     id: Uuid,
     req: UpdateProfile,
 ) -> Result<Profile, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let profile = sqlx::query_as::<_, Profile>(
         r#"UPDATE profiles
            SET display_name = COALESCE($2, display_name),
@@ -154,7 +160,7 @@ pub async fn update_profile_with_audit(
     .bind(req.display_name)
     .bind(req.description)
     .bind(req.status)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("profile {id} not found")),
@@ -196,7 +202,10 @@ pub async fn create_profile_version_with_audit(
     let json_schema = json_object_or_default(req.json_schema);
     let ui_schema = json_object_or_default(req.ui_schema);
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let version = sqlx::query_as::<_, ProfileVersion>(
         r#"INSERT INTO profile_versions
            (id, profile_id, version, json_schema, ui_schema, status)
@@ -209,7 +218,7 @@ pub async fn create_profile_version_with_audit(
     .bind(json_schema)
     .bind(ui_schema)
     .bind(req.status)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     crate::audit::commit_with_observation(
@@ -244,7 +253,10 @@ pub async fn update_profile_version_with_audit(
     id: Uuid,
     req: UpdateProfileVersion,
 ) -> Result<ProfileVersion, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let version = sqlx::query_as::<_, ProfileVersion>(
         r#"UPDATE profile_versions
            SET json_schema = COALESCE($2, json_schema),
@@ -257,7 +269,7 @@ pub async fn update_profile_version_with_audit(
     .bind(req.json_schema)
     .bind(req.ui_schema)
     .bind(req.status)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("profile version {id} not found")),

@@ -192,15 +192,18 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     // this test binary retain their original data set.
     let duplicate_a = issue_managed(&pool, &config, tenant_a, entity_a, "duplicate-a").await;
     let duplicate_b = issue_managed(&pool, &config, tenant_b, entity_b, "duplicate-b").await;
-    let mut duplicate_tx = pool.begin().await.unwrap();
+    let mut duplicate_tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     sqlx::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
-        .execute(&mut *duplicate_tx)
+        .execute(duplicate_tx.as_postgres_mut())
         .await
         .unwrap();
     sqlx::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
         .bind(&duplicate_a.serial_number)
         .bind(duplicate_b.credential_id)
-        .execute(&mut *duplicate_tx)
+        .execute(duplicate_tx.as_postgres_mut())
         .await
         .unwrap();
     let duplicate_result = service::revoke_certificate_v2_in_tx(
@@ -225,7 +228,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT status FROM credentials WHERE id = $1")
             .bind(duplicate_a.credential_id)
-            .fetch_one(&mut *duplicate_tx)
+            .fetch_one(duplicate_tx.as_postgres_mut())
             .await
             .unwrap(),
         "active"
@@ -268,7 +271,10 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     // issuer dirtiness back together.
     let rollback_cert = issue_managed(&pool, &config, tenant_b, entity_b, "rollback").await;
     set_artifact_clean(&pool, issuer_b.id, issuer_b.fingerprint_sha256.as_deref()).await;
-    let mut rollback_tx = pool.begin().await.unwrap();
+    let mut rollback_tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     service::revoke_certificate_v2_in_tx(
         &mut rollback_tx,
         service::RevokeCertificateV2 {

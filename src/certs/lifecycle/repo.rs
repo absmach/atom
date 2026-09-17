@@ -1,8 +1,11 @@
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 use super::BulkRevocationSelector;
 
@@ -51,7 +54,7 @@ pub struct AuthorityMetricRow {
 /// The stored PR-007 snapshot wins; pre-PR-007 rows fall back to their
 /// referenced/effective profile, never to a process-wide renewal constant.
 pub async fn due_certificate_windows(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
     expiry_warning_secs: u64,
     limit: i64,
@@ -132,13 +135,13 @@ pub async fn due_certificate_windows(
     .bind(now)
     .bind(expiry_warning_secs)
     .bind(limit)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn due_authority_windows(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
     warning_secs: u64,
     limit: i64,
@@ -168,13 +171,13 @@ pub async fn due_authority_windows(
     .bind(now)
     .bind(warning_secs)
     .bind(limit)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn claim_notification(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     subject_kind: &str,
     subject_id: Uuid,
     window_kind: &str,
@@ -193,14 +196,14 @@ pub async fn claim_notification(
     .bind(subject_id)
     .bind(window_kind)
     .bind(window_at)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)?;
     Ok(claimed.unwrap_or(false))
 }
 
 pub async fn expiry_metrics(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
 ) -> Result<Vec<ExpiryMetricRow>, AppError> {
     sqlx::query_as::<_, ExpiryMetricRow>(
@@ -220,13 +223,13 @@ pub async fn expiry_metrics(
         "#,
     )
     .bind(now)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn authority_metrics(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
 ) -> Result<Vec<AuthorityMetricRow>, AppError> {
     sqlx::query_as::<_, AuthorityMetricRow>(
@@ -239,7 +242,7 @@ pub async fn authority_metrics(
         "#,
     )
     .bind(now)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(AppError::Database)
 }

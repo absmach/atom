@@ -286,11 +286,14 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
 
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-atomic-{action_id}");
-    let mut tx = pool.begin().await.expect("begin transaction");
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .expect("begin transaction");
     sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(action_id)
         .bind(&action_name)
-        .execute(&mut *tx)
+        .execute(tx.as_postgres_mut())
         .await
         .expect("insert action in transaction");
     let result = audit::commit_with_observation(
@@ -341,11 +344,14 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
 
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-audit-{action_id}");
-    let mut tx = pool.begin().await.expect("begin transaction");
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .expect("begin transaction");
     sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(action_id)
         .bind(&action_name)
-        .execute(&mut *tx)
+        .execute(tx.as_postgres_mut())
         .await
         .expect("insert action in transaction");
     let result = audit::commit_with_audit(

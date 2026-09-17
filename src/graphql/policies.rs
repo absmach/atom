@@ -457,7 +457,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(
                         async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
@@ -552,7 +552,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(async move {
                         authz_repo::lock_role_and_collect_grants_keys(tx, role_id).await
@@ -647,7 +647,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(
                         async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
@@ -729,7 +729,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                state.pool(),
+                &state.db,
                 |tx| {
                     Box::pin(
                         async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
@@ -1304,7 +1304,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        state.pool(),
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::prepare_role_assignment_in_tx(tx, &prepare_req).await
@@ -1408,7 +1408,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        state.pool(),
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::lock_group_closures_and_collect_grants_keys(
@@ -1527,7 +1527,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        state.pool(),
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::prepare_direct_policy_in_tx(tx, &prepare_req).await
@@ -1631,7 +1631,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        state.pool(),
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::lock_group_closures_and_collect_grants_keys(

@@ -10,7 +10,7 @@ use openidconnect::{
 };
 use rand::RngCore;
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Row};
 use url::Url;
 use uuid::Uuid;
 
@@ -19,6 +19,7 @@ use crate::{
     auth::{encode_jwt, require_any_capability, scope_for_tenant, AuthContext, Scope as AuthScope},
     config::{Config, OidcProviderConfig, SigningKeyConfig},
     crypto,
+    db::DbTransaction,
     error::{db_err, AppError},
     keys::LoadedKey,
     mail,
@@ -404,7 +405,10 @@ pub async fn signup_human(
         Err(err) => return Err(record_signup_rejection(pool, cfg, &name, &email, err).await),
     };
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     if let Err(err) = write_signup_human(&mut tx, &prepared).await {
         drop(tx);
         return Err(record_signup_rejection(pool, cfg, &name, &email, err).await);
@@ -528,7 +532,7 @@ fn prepare_signup_human(cfg: &Config, req: SignupRequest) -> Result<PreparedSign
 
 /// SQL only — every expensive step already ran in [`prepare_signup_human`].
 async fn write_signup_human(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     prepared: &PreparedSignup,
 ) -> Result<(), AppError> {
     sqlx::query(
@@ -539,7 +543,7 @@ async fn write_signup_human(
     .bind(EntityKind::Human)
     .bind(&prepared.name)
     .bind(&prepared.attributes)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(|err| signup_conflict(err, "Username already taken"))?;
 
@@ -552,7 +556,7 @@ async fn write_signup_human(
     .bind(prepared.email_id)
     .bind(prepared.entity_id)
     .bind(&prepared.email)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(|err| signup_conflict(err, "Email address already taken"))?;
 
@@ -565,7 +569,7 @@ async fn write_signup_human(
     .bind(CredentialKind::Password)
     .bind(&prepared.email)
     .bind(&prepared.password_hash)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -620,7 +624,10 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
 
     let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
         .is_none()
@@ -631,7 +638,7 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
         "UPDATE email_verification_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(token_id)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if updated.rows_affected() == 0 {
@@ -639,7 +646,7 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
     }
     sqlx::query("UPDATE entity_emails SET verified_at = now(), updated_at = now() WHERE id = $1")
         .bind(email_id)
-        .execute(&mut *tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -811,7 +818,10 @@ pub async fn reset_password(
         .map_err(db_err)?;
     let password_hash = hash_secret(req.password.as_bytes())?;
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
         .is_none()
@@ -832,7 +842,7 @@ pub async fn reset_password(
         "SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(entity_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     .into_iter()
@@ -868,7 +878,7 @@ pub async fn reset_password(
 }
 
 async fn finish_password_reset_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     token_id: Uuid,
     entity_id: Uuid,
     email: &str,
@@ -878,7 +888,7 @@ async fn finish_password_reset_in_tx(
         "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(token_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if updated.rows_affected() == 0 {
@@ -890,7 +900,7 @@ async fn finish_password_reset_in_tx(
            WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#,
     )
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     sqlx::query(
@@ -902,14 +912,14 @@ async fn finish_password_reset_in_tx(
     .bind(CredentialKind::Password)
     .bind(email)
     .bind(password_hash)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     sqlx::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -1092,7 +1102,10 @@ pub async fn refresh_session(
     entity_id: Uuid,
     session_id: Uuid,
 ) -> Result<LoginResponse, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let Some((_, tenant_id)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
         return Err(AppError::unauthorized("entity is not active"));
     };
@@ -1128,7 +1141,10 @@ async fn create_login_response(
     entity_id: Uuid,
     email_verified: Option<bool>,
 ) -> Result<LoginResponse, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let Some((_, tenant_id)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
         return Err(AppError::unauthorized("entity is not active"));
     };
@@ -1629,7 +1645,7 @@ async fn resolve_login_tenant(
 }
 
 async fn insert_email_token_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     token_id: Uuid,
     entity_id: Uuid,
     email_id: Uuid,
@@ -1646,7 +1662,7 @@ async fn insert_email_token_in_tx(
     .bind(email_id)
     .bind(token_hash)
     .bind(expires_at)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -1744,13 +1760,16 @@ async fn upsert_oauth_identity(
     email: &str,
     profile: Value,
 ) -> Result<Uuid, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     use sqlx::Row;
     if let Some(row) =
         sqlx::query("SELECT entity_id FROM oauth_identities WHERE provider = $1 AND subject = $2")
             .bind(provider)
             .bind(subject)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(tx.as_postgres_mut())
             .await
             .map_err(db_err)?
     {
@@ -1770,7 +1789,7 @@ async fn upsert_oauth_identity(
         .bind(subject)
         .bind(email)
         .bind(profile)
-        .execute(&mut *tx)
+        .execute(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
@@ -1785,7 +1804,7 @@ async fn upsert_oauth_identity(
          FOR UPDATE OF e",
     )
     .bind(email)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?
     {
@@ -1816,7 +1835,7 @@ async fn upsert_oauth_identity(
             .bind(entity_id)
             .bind(EntityKind::Human)
             .bind(name)
-            .execute(&mut *tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
             super::repo::add_authenticated_user_membership_in_tx(&mut tx, entity_id).await?;
@@ -1827,7 +1846,7 @@ async fn upsert_oauth_identity(
             .bind(Uuid::new_v4())
             .bind(entity_id)
             .bind(email)
-            .execute(&mut *tx)
+            .execute(tx.as_postgres_mut())
             .await
             .map_err(db_err)?;
             entity_id
@@ -1845,7 +1864,7 @@ async fn upsert_oauth_identity(
     .bind(subject)
     .bind(email)
     .bind(profile)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -1859,7 +1878,10 @@ async fn create_exchange_code(
 ) -> Result<String, AppError> {
     let (code_id, code_secret, code) = new_secret_token("atomx");
     let code_hash = hash_secret(code_secret.as_bytes())?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
         .is_none()
@@ -1877,7 +1899,7 @@ async fn create_exchange_code(
         "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
         expiry_secs,
     )?)
-    .execute(&mut *tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2081,7 +2103,10 @@ pub async fn create_password(
     entity_id: Uuid,
     password: &str,
 ) -> Result<Uuid, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let id = create_password_in_tx(&mut tx, entity_id, password).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(id)
@@ -2091,7 +2116,7 @@ pub async fn create_password(
 /// write and its domain event into one transaction via
 /// [`crate::audit::commit_with_audit`] instead of publishing after the fact.
 pub async fn create_password_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     password: &str,
 ) -> Result<Uuid, AppError> {
@@ -2113,14 +2138,14 @@ pub async fn create_password_in_tx(
     .bind(entity_id)
     .bind(CredentialKind::Password)
     .bind(hash)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     Ok(id)
 }
 
 pub async fn change_own_password_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     current_password: &str,
     new_password: &str,
@@ -2144,7 +2169,7 @@ pub async fn change_own_password_in_tx(
     .bind(entity_id)
     .bind(CredentialKind::Password)
     .bind(CredentialStatus::Active)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -2165,7 +2190,7 @@ pub async fn change_own_password_in_tx(
            LIMIT 1"#,
     )
     .bind(entity_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -2181,7 +2206,7 @@ pub async fn change_own_password_in_tx(
     .bind(CredentialKind::Password)
     .bind(CredentialStatus::Revoked)
     .bind(CredentialStatus::Active)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -2196,7 +2221,7 @@ pub async fn change_own_password_in_tx(
     .bind(CredentialKind::Password)
     .bind(identifier)
     .bind(hash)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -2224,7 +2249,10 @@ pub async fn create_shared_key(
     entity_id: Uuid,
     req: CreateSharedKey,
 ) -> Result<SharedKeyResponse, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     let response = create_shared_key_in_tx(&mut tx, signing_keys, entity_id, req).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(response)
@@ -2233,7 +2261,7 @@ pub async fn create_shared_key(
 /// See [`create_password_in_tx`] — the caller owns the commit so the credential
 /// write and its domain event land atomically.
 pub async fn create_shared_key_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     req: CreateSharedKey,
@@ -2283,7 +2311,7 @@ pub async fn create_shared_key_in_tx(
     .bind(lookup_hash)
     .bind(req.expires_at)
     .bind(metadata)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
 
@@ -2299,7 +2327,7 @@ pub async fn create_shared_key_in_tx(
 /// not add a competing row or replace the configured secret. Callers must
 /// hold the entity lock first, which serializes the no-row case with bootstrap.
 async fn ensure_no_active_config_managed_credential_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     kind: CredentialKind,
 ) -> Result<(), AppError> {
@@ -2325,7 +2353,7 @@ async fn ensure_no_active_config_managed_credential_in_tx(
     )
     .bind(entity_id)
     .bind(kind)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if managed_id.is_some() {
@@ -2649,7 +2677,10 @@ async fn delete_entity_with_expected_tenant(
         };
     };
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     // Lock and enumerate *before* establishing the barrier: the entity is
     // still fully active at this point, so a concurrent cache read has
     // nothing dirty to react to yet. Only once the barrier below is up does
@@ -2729,7 +2760,10 @@ pub async fn revoke_credential(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
+    let mut tx = crate::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .map_err(db_err)?;
     revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -2742,7 +2776,7 @@ pub async fn revoke_credential(
 /// list APIs so the UI can flag them read-only; this mutation refuses with
 /// 409 conflict so rotation stays in the YAML.
 pub async fn revoke_credential_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
@@ -2753,7 +2787,7 @@ pub async fn revoke_credential_in_tx(
     )
     .bind(cred_id)
     .bind(entity_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     let (kind, managed_by) = match row {
@@ -2786,7 +2820,7 @@ pub async fn revoke_credential_in_tx(
     )
     .bind(cred_id)
     .bind(entity_id)
-    .execute(&mut **tx)
+    .execute(tx.as_postgres_mut())
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {
