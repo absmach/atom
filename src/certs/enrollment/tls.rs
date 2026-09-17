@@ -254,7 +254,7 @@ async fn load_server_config(state: &AppState, tls: &EnrollmentTlsConfig) -> Resu
         .context("parse enrollment TLS private key")?
         .context("enrollment TLS private key is missing")?;
 
-    let bundle = provisioning::trust_bundle(&state.pool)
+    let bundle = provisioning::trust_bundle(state.pool())
         .await
         .map_err(|error| anyhow::anyhow!("load Atom enrollment trust bundle: {error}"))?;
     let trust_certificates = rustls_pemfile::certs(&mut Cursor::new(bundle.pem.as_bytes()))

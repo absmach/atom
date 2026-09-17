@@ -40,10 +40,10 @@ pub fn spawn_purge_cleanup(state: AppState) {
 
         loop {
             interval.tick().await;
-            match purge_expired(&state.pool, cfg).await {
+            match purge_expired(state.pool(), cfg).await {
                 Ok(summary) if summary.deleted_rows > 0 => {
                     audit::write(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         audit::AuditEvent {
                             actor_entity_id: None,

@@ -26,13 +26,18 @@ async fn main() -> anyhow::Result<()> {
     );
 
     metrics::init(cfg.metrics.enabled);
-    let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
+    let database = db::Database::connect(&cfg.database_url, &cfg.db_pool).await?;
+    match db::location(&cfg.database_url) {
+        Ok(loc) => tracing::info!(backend = %loc.kind, location = %loc, "database connected"),
+        Err(_) => tracing::info!(backend = %database.kind(), "database connected"),
+    }
+    let pool = database.as_postgres().clone();
     let bootstrap_cfg = match cfg.bootstrap_file.as_deref() {
         Some(path) => Some(bootstrap::load(std::path::Path::new(path)).await?),
         None => None,
     };
 
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    database.run_migrations().await?;
     tracing::info!("migrations applied");
 
     certs::authority::key_provider::validate_startup(&pool, &cfg.pki_ca_keys).await?;
@@ -89,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
 
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
-    let mut state =
-        state::AppState::new(pool, cfg.clone(), active_keys, cache).with_callouts(callout_service);
+    let mut state = state::AppState::new(database, cfg.clone(), active_keys, cache)
+        .with_callouts(callout_service);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await

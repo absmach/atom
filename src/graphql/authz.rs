@@ -38,7 +38,7 @@ impl AuthzQuery {
         let profile_id = parse_optional_id(input.profile_id, "profileId")?;
         let parent_group_id = parse_optional_id(input.parent_group_id, "parentGroupId")?;
         let entity_status = parse_optional_entity_status(input.entity_status);
-        access::require_authz_check_access(&state.pool, &auth, subject_id, tenant_id)
+        access::require_authz_check_access(state.pool(), &auth, subject_id, tenant_id)
             .await
             .map_err(gql_error)?;
         // A scoped token listing its own authorized set gets the ceiling-filtered
@@ -48,7 +48,7 @@ impl AuthzQuery {
         // they are conjunctive with it, applied in the query alongside the
         // ceiling, never a separate widening step.
         let response = authz_repo::authorized_object_ids(
-            &state.pool,
+            state.pool(),
             &auth,
             AuthorizedObjectIdsQuery {
                 subject_id,
@@ -92,20 +92,20 @@ impl AuthzMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let req = authz_request(input)?;
-        let tenant_id = access::authz_request_tenant_id(&state.pool, &req)
+        let tenant_id = access::authz_request_tenant_id(state.pool(), &req)
             .await
             .map_err(gql_error)?;
-        access::require_authz_check_access(&state.pool, &auth, req.subject_id, tenant_id)
+        access::require_authz_check_access(state.pool(), &auth, req.subject_id, tenant_id)
             .await
             .map_err(gql_error)?;
         // Self-check via a scoped token returns the token-limited answer (owner ∩
         // ceiling); a delegated check about another subject is unaffected — the
         // engine derives the ceiling from the caller's context.
-        let response = engine::evaluate(&state.pool, &req, &auth)
+        let response = engine::evaluate(state.pool(), &req, &auth)
             .await
             .map_err(gql_error)?;
         audit_authz_check(
-            &state.pool,
+            state.pool(),
             state.config.audit_policy,
             state.config.events.enabled(),
             auth.entity_id,
@@ -124,16 +124,16 @@ impl AuthzMutation {
     ) -> Result<AuthzExplainResponse> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_explain_access(&state.pool, &auth).await?;
+        require_explain_access(state.pool(), &auth).await?;
         let req = authz_request(input)?;
-        let tenant_id = access::authz_request_tenant_id(&state.pool, &req)
+        let tenant_id = access::authz_request_tenant_id(state.pool(), &req)
             .await
             .map_err(gql_error)?;
-        let response = engine::explain(&state.pool, &req, &auth)
+        let response = engine::explain(state.pool(), &req, &auth)
             .await
             .map_err(gql_error)?;
         audit_authz_explain(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             auth.entity_id,
             &req,
@@ -159,17 +159,17 @@ impl AuthzMutation {
         let mut responses = Vec::with_capacity(input.len());
         for item in input {
             let req = authz_request(item)?;
-            let tenant_id = access::authz_request_tenant_id(&state.pool, &req)
+            let tenant_id = access::authz_request_tenant_id(state.pool(), &req)
                 .await
                 .map_err(gql_error)?;
-            access::require_authz_check_access(&state.pool, &auth, req.subject_id, tenant_id)
+            access::require_authz_check_access(state.pool(), &auth, req.subject_id, tenant_id)
                 .await
                 .map_err(gql_error)?;
-            let response = engine::evaluate(&state.pool, &req, &auth)
+            let response = engine::evaluate(state.pool(), &req, &auth)
                 .await
                 .map_err(gql_error)?;
             audit_authz_check(
-                &state.pool,
+                state.pool(),
                 state.config.audit_policy,
                 state.config.events.enabled(),
                 auth.entity_id,

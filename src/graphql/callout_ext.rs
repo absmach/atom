@@ -211,7 +211,7 @@ async fn enrich_args(state: &AppState, resolver: &str, args: &mut JsonValue) {
     let Ok(id) = Uuid::parse_str(id_str) else {
         return;
     };
-    if let Ok(entity) = identity_repo::get_entity(&state.pool, id).await {
+    if let Ok(entity) = identity_repo::get_entity(state.pool(), id).await {
         if let Some(map) = args.as_object_mut() {
             if let Ok(kind) = serde_json::to_value(&entity.kind) {
                 map.insert("kind".into(), kind);
@@ -227,7 +227,7 @@ fn audit_callout_deny(
     endpoint: &str,
     reason: &str,
 ) {
-    let pool = state.pool.clone();
+    let pool = state.pool().clone();
     let actor_id = (!auth.entity_id.is_nil()).then_some(auth.entity_id);
     let tenant_id = auth.tenant_id;
     let events_enabled = state.config.events.enabled();

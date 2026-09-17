@@ -453,7 +453,7 @@ pub fn spawn_retention_cleanup(state: AppState) {
         loop {
             interval.tick().await;
             if let Err(err) = crate::events::cleanup_expired_outbox(
-                &state.pool,
+                state.pool(),
                 cfg.days,
                 state.config.events.outbox_max_attempts,
                 cfg.cleanup_batch_size,
@@ -464,10 +464,10 @@ pub fn spawn_retention_cleanup(state: AppState) {
             }
 
             if cfg.enabled {
-                match cleanup_expired(&state.pool, cfg).await {
+                match cleanup_expired(state.pool(), cfg).await {
                     Ok(summary) if summary.deleted_rows > 0 => {
                         write(
-                            &state.pool,
+                            state.pool(),
                             state.config.events.enabled(),
                             AuditEvent {
                                 actor_entity_id: None,

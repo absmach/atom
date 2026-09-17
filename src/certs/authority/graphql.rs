@@ -23,7 +23,7 @@ impl AuthorityQuery {
     async fn pki_authority(&self, ctx: &Context<'_>, id: ID) -> Result<Authority> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let authority = repo::authority_by_id(&state.pool, parse_id(id, "id")?)
+        let authority = repo::authority_by_id(state.pool(), parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
         require_authority_access(state, &auth, &authority).await?;
@@ -39,7 +39,7 @@ impl AuthorityQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = tenant_id.map(|id| parse_id(id, "tenantId")).transpose()?;
         require_pki_capability(state, &auth, scope_for_authority(tenant_id)).await?;
-        repo::list_authorities(&state.pool, tenant_id)
+        repo::list_authorities(state.pool(), tenant_id)
             .await
             .map(|items| items.into_iter().map(Authority::from).collect())
             .map_err(gql_error)
@@ -61,7 +61,7 @@ impl AuthorityMutation {
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         let result = async {
             require_mutation_access(state, &auth, Scope::Tenant(tenant_id)).await?;
-            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let mut tx = state.pool().begin().await.map_err(db_err)?;
             let mut outcome = provisioning::begin_tenant_authority_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
@@ -107,20 +107,20 @@ impl AuthorityMutation {
         let result = async {
             auth.reject_scoped_credential_management()?;
             require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "pki.provision",
                 Scope::Tenant(tenant_id),
             )
             .await?;
             require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "pki.provision_automated",
                 Scope::Platform,
             )
             .await?;
-            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let mut tx = state.pool().begin().await.map_err(db_err)?;
             let mut mutation = provisioning::provision_tenant_automatically_mutation_in_tx(
                 &mut tx,
                 &state.config.pki_ca_keys,
@@ -199,10 +199,10 @@ impl AuthorityMutation {
         };
         let mut observed_tenant_id = auth.tenant_id;
         let result = async {
-            let existing = repo::authority_by_id(&state.pool, authority_id).await?;
+            let existing = repo::authority_by_id(state.pool(), authority_id).await?;
             observed_tenant_id = existing.tenant_id;
             require_mutation_access(state, &auth, authority_scope(&existing)).await?;
-            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let mut tx = state.pool().begin().await.map_err(db_err)?;
             let mut outcome = if complete {
                 provisioning::complete_retirement_mutation_in_tx(&mut tx, authority_id).await?
             } else {
@@ -413,7 +413,7 @@ async fn require_mutation_access(
     scope: Scope,
 ) -> std::result::Result<(), AppError> {
     auth.reject_scoped_credential_management()?;
-    require_capability(&state.pool, auth, "pki.provision", scope).await
+    require_capability(state.pool(), auth, "pki.provision", scope).await
 }
 
 async fn require_pki_capability(
@@ -421,7 +421,7 @@ async fn require_pki_capability(
     auth: &crate::auth::AuthContext,
     scope: Scope,
 ) -> Result<()> {
-    require_capability(&state.pool, auth, "pki.provision", scope)
+    require_capability(state.pool(), auth, "pki.provision", scope)
         .await
         .map_err(gql_error)
 }
@@ -444,7 +444,7 @@ async fn commit_authority_event(
     details: serde_json::Value,
 ) -> std::result::Result<(), AppError> {
     audit::commit_with_audit(
-        &state.pool,
+        state.pool(),
         tx,
         state.config.events.enabled(),
         &audit::AuditEvent {
@@ -482,7 +482,7 @@ async fn commit_authority_mutation(
         object.insert("replay".to_string(), serde_json::Value::Bool(true));
     }
     audit::write(
-        &state.pool,
+        state.pool(),
         false,
         audit::AuditEvent {
             actor_entity_id: Some(auth.entity_id),
@@ -509,7 +509,7 @@ async fn observe_authority_result<T>(
 ) -> Result<T> {
     if let Err(ref error) = result {
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &audit::AuditMeta {
                 actor_entity_id: Some(auth.entity_id),

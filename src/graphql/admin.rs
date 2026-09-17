@@ -54,10 +54,10 @@ impl AdminQuery {
             limit: limit.map(i64::from).unwrap_or(50),
             offset: offset.map(i64::from).unwrap_or(0),
         };
-        let allowed_tenant_ids = audit_tenant_filter(&state.pool, &auth, tenant_id)
+        let allowed_tenant_ids = audit_tenant_filter(state.pool(), &auth, tenant_id)
             .await
             .map_err(gql_error)?;
-        let logs = authz_repo::audit_logs(&state.pool, params, allowed_tenant_ids)
+        let logs = authz_repo::audit_logs(state.pool(), params, allowed_tenant_ids)
             .await
             .map_err(gql_error)?;
         Ok(AuditLogList {
@@ -82,9 +82,9 @@ impl AdminQuery {
             offset: 0,
         };
         let logs = authz_repo::audit_logs(
-            &state.pool,
+            state.pool(),
             params,
-            audit_tenant_filter(&state.pool, &auth, None)
+            audit_tenant_filter(state.pool(), &auth, None)
                 .await
                 .map_err(gql_error)?,
         )
@@ -104,11 +104,11 @@ impl AdminQuery {
     ) -> Result<Vec<OrphanPolicy>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+        require_capability(state.pool(), &auth, "manage", Scope::Platform)
             .await
             .map_err(gql_error)?;
         let policies = authz_repo::orphan_policies(
-            &state.pool,
+            state.pool(),
             AdminPageQuery {
                 limit: limit.map(i64::from).unwrap_or(50),
                 offset: offset.map(i64::from).unwrap_or(0),
@@ -130,11 +130,11 @@ impl AdminQuery {
     ) -> Result<Vec<Credential>> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_capability(&state.pool, &auth, "manage", Scope::Platform)
+        require_capability(state.pool(), &auth, "manage", Scope::Platform)
             .await
             .map_err(gql_error)?;
         let credentials = authz_repo::expiring_credentials(
-            &state.pool,
+            state.pool(),
             ExpiringCredentialsQuery {
                 days: days.map(i64::from).unwrap_or(30),
                 entity_id: parse_optional_id(entity_id, "entityId")?,
