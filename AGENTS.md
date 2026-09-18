@@ -220,7 +220,7 @@ make proto-lint    # protos Atom owns
 make proto-check   # vendored broker contract vs upstream
 ```
 
-Environment variables: create `.env` in the repo root (gitignored) — see the Quick Start block in `README.md` for a working default. Required: `DATABASE_URL`. Signing uses ES256 keys bootstrapped/loaded at startup — there is no `JWT_SECRET`. `ATOM_KEY_ENCRYPTION_KEY` is the single root AES-256-GCM key encrypting all recoverable secrets at rest (signing private keys and retrievable credential secrets such as shared keys); it is required to create shared keys.
+Environment variables: create `.env` in the repo root (gitignored) — see the Quick Start block in `README.md` for a working default. Required: `DATABASE_URL`. Signing uses ES256 keys bootstrapped/loaded at startup — there is no `JWT_SECRET`. `ATOM_KEY_ENCRYPTION_KEY` is the single root AES-256-GCM key encrypting all recoverable secrets at rest (signing private keys and retrievable credential secrets such as shared keys); it is required to create shared keys, and also required whenever `ATOM_REFRESH_TOKENS_ENABLED=true` (opaque refresh tokens, off by default — see `docs/content/docs/authentication/jwt.mdx`).
 
 Optional: `ADMIN_SECRET` — if set, bootstraps the admin entity's password on first boot.
 Optional: `ADMIN_ENTITY_ID` — override the seeded admin UUID (default `00000000-0000-0000-0000-000000000001`).

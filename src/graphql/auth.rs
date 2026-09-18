@@ -13,7 +13,8 @@ use crate::{
 use crate::models::session::SignupRequest;
 
 use super::types::{
-    parse_id, parse_optional_id, LoginInput, LoginResponse, Session, SignupInput, SignupResponse,
+    parse_id, parse_optional_id, LoginInput, LoginResponse, RefreshTokenInput, Session,
+    SignupInput, SignupResponse, TokenPairResponse,
 };
 
 #[derive(Default)]
@@ -147,6 +148,45 @@ impl AuthMutation {
         Ok(true)
     }
 
+    /// Exchange a refresh token for a new access JWT + rotated refresh token.
+    /// Deliberately skips `require_auth`: the client sends no Authorization
+    /// header, so `graphql_handler`'s wrapper would otherwise reject an
+    /// expired JWT before this resolver ever runs (see `src/graphql/mod.rs`).
+    async fn refresh_token(
+        &self,
+        ctx: &Context<'_>,
+        input: RefreshTokenInput,
+    ) -> Result<TokenPairResponse> {
+        let state = ctx.data::<AppState>()?;
+        if !state.config.refresh_tokens.enabled {
+            return Err(gql_error(AppError::unauthorized("invalid refresh token")));
+        }
+        let signer = {
+            let keys = state.keys.read().await;
+            crate::auth::JwtSigner::from_key(&keys.primary).map_err(gql_error)?
+        };
+
+        // Cache-barrier orchestration lives inside `exchange_refresh_token`
+        // itself: whether a barrier is needed at all depends on which branch
+        // the locked read takes (only replay-detection revokes the session),
+        // which isn't known until partway through that transaction.
+        let response = service::exchange_refresh_token(
+            &state.pool,
+            &state.config,
+            &signer,
+            state.cache.as_deref(),
+            &input.refresh_token,
+        )
+        .await
+        .map_err(gql_error)?;
+
+        Ok(response.into())
+    }
+
+    #[graphql(
+        deprecation = "Use refreshToken instead. This mutation still requires a valid \
+        (non-expired) access JWT and will be removed in a future breaking release."
+    )]
     async fn refresh_session(&self, ctx: &Context<'_>) -> Result<LoginResponse> {
         let auth = require_auth(ctx)?;
         let session_id = auth.session_id.ok_or_else(|| {

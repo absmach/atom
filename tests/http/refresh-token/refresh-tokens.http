@@ -1,0 +1,201 @@
+# Run all requests in order; do not run them in parallel.
+# Setup and CLI command: tests/http/refresh-token/README.md
+# This creates a login session, then revokes that session through replay detection.
+# Optional environment: ATOM_TEST_BASE_URL, ATOM_TEST_IDENTIFIER, ATOM_TEST_SECRET.
+# Values saved between requests use $global in both templates and scripts.
+
+{{
+  exports.rtBaseUrl = process.env.ATOM_TEST_BASE_URL || 'http://localhost:8090';
+  exports.rtLoginPayload = JSON.stringify({
+    query: 'mutation Login($input: LoginInput!) { login(input: $input) { accessToken refreshToken accessTokenExpiresAt refreshTokenExpiresAt sessionId } }',
+    variables: {
+      input: {
+        identifier: process.env.ATOM_TEST_IDENTIFIER || 'admin',
+        secret: process.env.ATOM_TEST_SECRET || '12345678'
+      }
+    }
+  });
+}}
+
+### 1. Login creates access and refresh tokens
+# @name rtLogin
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+
+{{rtLoginPayload}}
+
+?? status == 200
+{{
+  const loginAssert = require('node:assert/strict');
+  test('login returns a short-lived JWT and a longer-lived refresh token', () => {
+    const pair = response.parsedBody.data?.login;
+    loginAssert.ok(!response.parsedBody.errors?.length, 'Login must succeed; check the credentials');
+    loginAssert.ok(pair?.accessToken, 'Missing access token');
+    loginAssert.ok(pair?.refreshToken?.startsWith('atom_rt_'), 'Enable ATOM_REFRESH_TOKENS_ENABLED');
+    loginAssert.ok(pair?.sessionId, 'Missing session ID');
+    const jwtClaims = JSON.parse(Buffer.from(pair.accessToken.split('.')[1], 'base64url').toString());
+    const accessExpires = jwtClaims.exp * 1000;
+    const familyExpires = Date.parse(pair.refreshTokenExpiresAt);
+    loginAssert.ok(Number.isFinite(accessExpires), 'Missing JWT expiry');
+    loginAssert.ok(Math.abs(Date.parse(pair.accessTokenExpiresAt) - accessExpires) < 2000, 'Access expiry must match JWT exp');
+    loginAssert.ok(accessExpires > Date.now(), 'Access token must start valid');
+    loginAssert.ok(accessExpires - Date.now() <= 60000, 'Use ATOM_ACCESS_TOKEN_EXPIRY_SECS=30 for this test');
+    loginAssert.ok(familyExpires > accessExpires + 120000, 'Use ATOM_REFRESH_TOKEN_EXPIRY_SECS=600 for this test');
+    $global.rtInitialAccess = pair.accessToken;
+    $global.rtOriginalRefresh = pair.refreshToken;
+    $global.rtFamilyDeadline = pair.refreshTokenExpiresAt;
+    $global.rtSessionId = pair.sessionId;
+    $global.rtAccessExpires = accessExpires;
+  });
+}}
+
+### 2. The original access token works
+# @name rtInitialAccessWorks
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+Authorization: Bearer {{$global.rtInitialAccess}}
+
+{"query":"query Session($id: ID!) { session(id: $id) { id revokedAt } }","variables":{"id":"{{$global.rtSessionId}}"}}
+
+?? status == 200
+{{
+  const initialAssert = require('node:assert/strict');
+  test('original JWT can read its active session', () => {
+    initialAssert.ok(!response.parsedBody.errors?.length, 'Session query must succeed');
+    initialAssert.equal(response.parsedBody.data?.session?.id, $global.rtSessionId);
+    initialAssert.equal(response.parsedBody.data?.session?.revokedAt, null);
+  });
+}}
+
+### 3. A refresh token cannot be used as a Bearer credential
+# @name rtRejectRefreshAsBearer
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+Authorization: Bearer {{$global.rtOriginalRefresh}}
+
+{"query":"query Session($id: ID!) { session(id: $id) { id } }","variables":{"id":"{{$global.rtSessionId}}"}}
+
+?? status == 200
+{{
+  const bearerAssert = require('node:assert/strict');
+  test('refresh token is rejected by normal Bearer authentication', () => {
+    bearerAssert.ok(response.parsedBody.errors?.some(e => e.message.includes('invalid credential')));
+    bearerAssert.ok(!response.parsedBody.data?.session);
+  });
+}}
+
+### 4. Wait for access expiry, then prove that the original JWT is rejected
+# @name rtExpiredAccessRejected
+{{
+  const waitAssert = require('node:assert/strict');
+  waitAssert.ok(Number.isFinite($global.rtAccessExpires), 'Run the login request first');
+  // Atom uses jsonwebtoken's 60-second clock tolerance. Add another 5 seconds.
+  const rtDelayMs = Math.max(0, $global.rtAccessExpires + 65000 - Date.now());
+  waitAssert.ok(rtDelayMs <= 125000, 'Use a short access-token lifetime for this test');
+  console.info(`Waiting ${Math.ceil(rtDelayMs / 1000)} seconds for access-token expiry...`);
+  exports.rtExpiryWait = sleep(rtDelayMs);
+}}
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+Authorization: Bearer {{$global.rtInitialAccess}}
+
+{"query":"query Session($id: ID!) { session(id: $id) { id } }","variables":{"id":"{{$global.rtSessionId}}"}}
+
+?? status == 200
+{{
+  const expiredAssert = require('node:assert/strict');
+  test('original access JWT has actually expired', () => {
+    expiredAssert.ok(response.parsedBody.errors?.some(e => /ExpiredSignature/i.test(e.message)), 'Expected an expired-JWT error');
+    expiredAssert.ok(!response.parsedBody.data?.session);
+  });
+}}
+
+### 5. Refresh without Authorization, after access expiry
+# @name rtRotate
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+
+{"query":"mutation Refresh($input: RefreshTokenInput!) { refreshToken(input: $input) { accessToken refreshToken accessTokenExpiresAt refreshTokenExpiresAt sessionId } }","variables":{"input":{"refreshToken":"{{$global.rtOriginalRefresh}}"}}}
+
+?? status == 200
+{{
+  const rotationAssert = require('node:assert/strict');
+  test('refresh rotates both tokens and preserves the session and absolute deadline', () => {
+    const rotated = response.parsedBody.data?.refreshToken;
+    rotationAssert.ok(!response.parsedBody.errors?.length, 'Refresh must succeed without a valid JWT');
+    rotationAssert.ok(rotated?.accessToken && rotated.accessToken !== $global.rtInitialAccess, 'Expected a new access JWT');
+    rotationAssert.ok(rotated?.refreshToken?.startsWith('atom_rt_') && rotated.refreshToken !== $global.rtOriginalRefresh, 'Expected a new refresh token');
+    rotationAssert.equal(rotated.sessionId, $global.rtSessionId);
+    rotationAssert.equal(rotated.refreshTokenExpiresAt, $global.rtFamilyDeadline);
+    rotationAssert.ok(Date.parse(rotated.accessTokenExpiresAt) > Date.now());
+    $global.rtRotatedAccess = rotated.accessToken;
+    $global.rtRotatedRefresh = rotated.refreshToken;
+  });
+}}
+
+### 6. The replacement access token works
+# @name rtRotatedAccessWorks
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+Authorization: Bearer {{$global.rtRotatedAccess}}
+
+{"query":"query Session($id: ID!) { session(id: $id) { id revokedAt } }","variables":{"id":"{{$global.rtSessionId}}"}}
+
+?? status == 200
+{{
+  const rotatedAssert = require('node:assert/strict');
+  test('replacement JWT authenticates before replay', () => {
+    rotatedAssert.ok(!response.parsedBody.errors?.length, 'Replacement JWT must work');
+    rotatedAssert.equal(response.parsedBody.data?.session?.id, $global.rtSessionId);
+    rotatedAssert.equal(response.parsedBody.data?.session?.revokedAt, null);
+  });
+}}
+
+### 7. Replay the ORIGINAL refresh token: reject and revoke the whole session
+# @name rtReplayOriginal
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+
+{"query":"mutation Refresh($input: RefreshTokenInput!) { refreshToken(input: $input) { accessToken } }","variables":{"input":{"refreshToken":"{{$global.rtOriginalRefresh}}"}}}
+
+?? status == 200
+{{
+  const replayAssert = require('node:assert/strict');
+  test('reusing the consumed refresh token is rejected', () => {
+    replayAssert.ok(response.parsedBody.errors?.some(e => e.message === 'invalid refresh token'));
+    replayAssert.ok(!response.parsedBody.data?.refreshToken);
+  });
+}}
+
+### 8. Even the replacement refresh token is now rejected
+# @name rtRejectDescendant
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+
+{"query":"mutation Refresh($input: RefreshTokenInput!) { refreshToken(input: $input) { accessToken } }","variables":{"input":{"refreshToken":"{{$global.rtRotatedRefresh}}"}}}
+
+?? status == 200
+{{
+  const descendantAssert = require('node:assert/strict');
+  test('replay revokes the replacement refresh token too', () => {
+    descendantAssert.ok(response.parsedBody.errors?.some(e => e.message === 'invalid refresh token'));
+    descendantAssert.ok(!response.parsedBody.data?.refreshToken);
+  });
+}}
+
+### 9. The replacement access JWT also loses access immediately
+# @name rtRejectRevokedSession
+POST {{rtBaseUrl}}/graphql
+Content-Type: application/json
+Authorization: Bearer {{$global.rtRotatedAccess}}
+
+{"query":"query Session($id: ID!) { session(id: $id) { id } }","variables":{"id":"{{$global.rtSessionId}}"}}
+
+?? status == 200
+{{
+  const revokedAssert = require('node:assert/strict');
+  test('replay revokes the session behind the replacement access JWT', () => {
+    revokedAssert.ok(response.parsedBody.errors?.some(e => e.message.includes('session revoked')), 'Expected session revocation, not merely JWT expiry');
+    revokedAssert.ok(!response.parsedBody.data?.session);
+  });
+}}

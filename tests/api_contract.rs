@@ -382,6 +382,58 @@ async fn contract_graphql_authentication_failures_use_graphql_errors_with_http_2
     }
 }
 
+/// A sole `refreshToken` call reaches the resolver even with an expired/
+/// invalid bearer token attached, since many clients attach a stored token
+/// to every request via a global interceptor. Anything else — a second
+/// field alongside it — keeps the existing strict behavior.
+#[tokio::test]
+async fn contract_refresh_token_mutation_tolerates_an_invalid_bearer_token_when_solo() {
+    let solo = Request::post("/graphql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer not-a-token")
+        .body(Body::from(
+            r#"{"query":"mutation { refreshToken(input: {refreshToken: \"atom_rt_garbage\"}) { accessToken } }"}"#,
+        ))
+        .expect("solo refreshToken request");
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(solo)
+        .await
+        .expect("solo refreshToken response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("solo refreshToken body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("solo refreshToken JSON");
+    let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("invalid refresh token"),
+        "expected the resolver's own generic error, got: {body}"
+    );
+
+    let batched = Request::post("/graphql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer not-a-token")
+        .body(Body::from(
+            r#"{"query":"mutation { refreshToken(input: {refreshToken: \"atom_rt_garbage\"}) { accessToken } health: __typename }"}"#,
+        ))
+        .expect("batched refreshToken request");
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(batched)
+        .await
+        .expect("batched refreshToken response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("batched refreshToken body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("batched refreshToken JSON");
+    let message = body["errors"][0]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("invalid refresh token"),
+        "a refreshToken call batched with another field must keep the strict \
+         transport-level rejection, got: {body}"
+    );
+}
+
 #[test]
 fn contract_openapi_documents_enrollment_authentication_modes() {
     let document = openapi_document();
@@ -431,6 +483,10 @@ fn contract_public_runtime_dtos_validate_against_openapi_components() {
         expires_at: instant,
         email_verified: Some(true),
         verification_required: true,
+        access_token: "signed-token".into(),
+        access_token_expires_at: instant,
+        refresh_token: Some("atom_rt_refresh-token".into()),
+        refresh_token_expires_at: Some(instant),
     };
     assert_runtime_value_matches_component(&document, "LoginResponse", &login, true);
 
@@ -441,14 +497,24 @@ fn contract_public_runtime_dtos_validate_against_openapi_components() {
         expires_at: instant,
         email_verified: None,
         verification_required: false,
+        access_token: "signed-token".into(),
+        access_token_expires_at: instant,
+        refresh_token: None,
+        refresh_token_expires_at: None,
     })
     .expect("LoginResponse serializes");
     assert!(omitted_login_fields.get("email_verified").is_none());
     assert!(omitted_login_fields.get("verification_required").is_none());
+    assert!(omitted_login_fields.get("refresh_token").is_none());
+    assert!(omitted_login_fields
+        .get("refresh_token_expires_at")
+        .is_none());
     let login_required =
         string_set(&document["components"]["schemas"]["LoginResponse"]["required"]);
     assert!(!login_required.contains("email_verified"));
     assert!(!login_required.contains("verification_required"));
+    assert!(!login_required.contains("refresh_token"));
+    assert!(!login_required.contains("refresh_token_expires_at"));
     assert_runtime_value_matches_component_value(
         &document,
         "LoginResponse",
