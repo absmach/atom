@@ -547,6 +547,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_token_worker_failure_stops_the_runtime() {
+        let mut cfg = config::Config::for_tests();
+        cfg.listen_addr = "127.0.0.1:0".into();
+        cfg.grpc_addr = "127.0.0.1:0".into();
+        cfg.refresh_tokens.enabled = true;
+        cfg.purge.enabled = false;
+        // Invalid only in this test: force the independent refresh worker to fail.
+        cfg.purge.interval_secs = 0;
+        let state = test_state(cfg);
+        let pool = state.pool.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            serve(state, CancellationToken::new(), Duration::from_secs(2)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(result.to_string().contains("refresh_tokens worker failed"));
+        assert!(pool.is_closed());
+    }
+
+    #[tokio::test]
+    async fn refresh_token_cleanup_observes_shutdown_without_database_work() {
+        let mut cfg = config::Config::for_tests();
+        cfg.refresh_tokens.enabled = true;
+        let state = test_state(cfg);
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let handle = purge::spawn_refresh_token_cleanup_with_shutdown(state, stop).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn occupied_listener_never_signals_runtime_readiness() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut cfg = config::Config::for_tests();

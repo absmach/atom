@@ -20,6 +20,7 @@ class ContractGateTests(unittest.TestCase):
         paths = {CONTRACTS, Path("scripts/check-v1-contracts.sh")}
         for manifest in (CONTRACTS, MIGRATIONS):
             paths.update(Path(line.split()[1]) for line in (ROOT / manifest).read_text().splitlines())
+        paths.update(path.relative_to(ROOT) for path in (ROOT / "migrations").glob("*.sql"))
         for path in paths:
             target = self.root / path
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -55,45 +56,38 @@ class ContractGateTests(unittest.TestCase):
         self.check()
 
     def test_launch_baseline_alone_passes(self):
-        (self.root / "migrations/002_object_coordination.sql").unlink()
-        self.register_migrations()
+        for path in (self.root / "migrations").glob("*.sql"):
+            if path.name != "001_initial.sql":
+                path.unlink()
         self.check()
 
-    def test_registered_forward_migration_passes(self):
-        (self.root / "migrations/003_next.sql").write_text("SELECT 1;\n")
-        self.register_migrations()
+    def test_forward_migration_needs_no_manifest_update(self):
+        (self.root / "migrations/004_next.sql").write_text("SELECT 1;\n")
         self.check()
 
-    def test_unregistered_migration_fails(self):
-        (self.root / "migrations/003_next.sql").write_text("SELECT 1;\n")
-        self.check("must enumerate every v1 SQL migration exactly once")
-
-    def test_missing_migration_fails(self):
-        (self.root / "migrations/002_object_coordination.sql").unlink()
-        self.check("must enumerate every v1 SQL migration exactly once")
+    def test_missing_launch_baseline_fails(self):
+        (self.root / "migrations/001_initial.sql").unlink()
+        self.check("migrations/001_initial.sql: FAILED")
 
     def test_missing_launch_baseline_fails_even_if_manifest_refreshed(self):
         (self.root / "migrations/001_initial.sql").unlink()
         self.register_migrations()
-        self.check("launch baseline migrations/001_initial.sql must be retained")
+        self.check("must contain the launch baseline exactly once")
 
     def test_duplicate_version_fails(self):
         (self.root / "migrations/002_duplicate.sql").write_text("SELECT 1;\n")
-        self.register_migrations()
         self.check("Duplicate migration version 2")
 
     def test_pre_baseline_version_fails(self):
         (self.root / "migrations/000_before.sql").write_text("SELECT 1;\n")
-        self.register_migrations()
         self.check("must follow the 001 launch baseline")
 
     def test_invalid_migration_name_fails(self):
         (self.root / "migrations/next.sql").write_text("SELECT 1;\n")
-        self.register_migrations()
         self.check("must use the NNN_name.sql form")
 
     def test_migration_checksum_drift_fails(self):
-        for name in ("001_initial.sql", "002_object_coordination.sql"):
+        for name in ("001_initial.sql",):
             with self.subTest(migration=name):
                 path = self.root / "migrations" / name
                 original = path.read_text()
@@ -111,7 +105,7 @@ class ContractGateTests(unittest.TestCase):
         text = path.read_text()
         path.write_text(text + text.splitlines(keepends=True)[0])
         self.refresh(CONTRACTS)
-        self.check("must enumerate every v1 SQL migration exactly once")
+        self.check("must contain the launch baseline exactly once")
 
     def test_migration_manifest_checksum_drift_fails(self):
         path = self.root / MIGRATIONS

@@ -39,6 +39,12 @@ sha384sum --check "${candidate_manifest}"
 # sync, for no benefit sqlx's own `migrate!` immutability doesn't already
 # provide at runtime. This check's job is narrower: prove every migration the
 # manifest lists is still present with its content unchanged.
+if ! diff -u <(printf '%s\n' 'migrations/001_initial.sql') \
+  <(awk '{print $2}' "${migration_manifest}"); then
+  echo "${migration_manifest} must contain the launch baseline exactly once" >&2
+  exit 1
+fi
+
 declare -A migration_versions=()
 while read -r migration; do
   if [[ ! "${migration}" =~ ^migrations/([0-9]{3})_[a-z0-9_]+\.sql$ ]]; then
