@@ -468,6 +468,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "tonic-health",
@@ -4623,6 +4624,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

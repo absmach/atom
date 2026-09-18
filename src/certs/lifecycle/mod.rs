@@ -73,10 +73,21 @@ pub struct SweepSummary {
 }
 
 pub fn spawn(state: AppState) {
+    drop(spawn_with_shutdown(
+        state,
+        tokio_util::sync::CancellationToken::new(),
+    ));
+}
+
+/// Starts a tracked worker. An active pass finishes before observing shutdown.
+pub fn spawn_with_shutdown(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
     let cfg = state.config.pki_lifecycle;
     if !cfg.enabled {
         tracing::info!("PKI lifecycle automation disabled");
-        return;
+        return None;
     }
     if !state.config.events.enabled() {
         tracing::warn!(
@@ -84,11 +95,16 @@ pub fn spawn(state: AppState) {
         );
     }
 
-    tokio::spawn(async move {
+    let tasks = state.background_tasks.clone();
+    Some(tasks.spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
             match sweep_once(&state.pool, cfg, state.config.events.enabled(), Utc::now()).await {
                 Ok(summary) if summary.certificate_events + summary.authority_events > 0 => {
                     tracing::info!(
@@ -101,7 +117,7 @@ pub fn spawn(state: AppState) {
                 Err(error) => tracing::warn!(%error, "PKI lifecycle sweep failed"),
             }
         }
-    });
+    }))
 }
 
 /// Run one bounded sweep at a caller-supplied time. Public for deterministic
