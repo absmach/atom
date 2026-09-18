@@ -36,13 +36,19 @@ async fn require_credential_management(
     target_entity_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
     auth.reject_scoped_credential_management()?;
-    let target = repo::get_entity(&state.pool, target_entity_id).await?;
-    if has_capability_in_scope(&state.pool, auth, "manage", Scope::Object(target_entity_id)).await?
+    let target = repo::get_entity(state.pool(), target_entity_id).await?;
+    if has_capability_in_scope(
+        state.pool(),
+        auth,
+        "manage",
+        Scope::Object(target_entity_id),
+    )
+    .await?
     {
         return Ok(target.tenant_id);
     }
     require_capability(
-        &state.pool,
+        state.pool(),
         auth,
         "manage",
         scope_for_tenant(target.tenant_id),
@@ -57,10 +63,10 @@ async fn require_ownership_management(
     owner_id: Uuid,
     owned_id: Uuid,
 ) -> Result<(), AppError> {
-    let owner = repo::get_entity(&state.pool, owner_id).await?;
-    let owned = repo::get_entity(&state.pool, owned_id).await?;
+    let owner = repo::get_entity(state.pool(), owner_id).await?;
+    let owned = repo::get_entity(state.pool(), owned_id).await?;
     require_any_capability(
-        &state.pool,
+        state.pool(),
         auth,
         &[
             ("manage", Scope::Object(owner_id)),
@@ -69,7 +75,7 @@ async fn require_ownership_management(
     )
     .await?;
     require_any_capability(
-        &state.pool,
+        state.pool(),
         auth,
         &[
             ("manage", Scope::Object(owned_id)),
@@ -83,7 +89,7 @@ async fn require_ownership_management(
 
 pub async fn health(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     sqlx::query("SELECT 1")
-        .execute(&state.pool)
+        .execute(state.pool())
         .await
         .map_err(AppError::Database)?;
     Ok(Json(serde_json::json!({"status": "ok"})))
@@ -121,7 +127,7 @@ pub async fn login(
         CredentialKind::Password | CredentialKind::SharedKey => {
             let keys = state.keys.read().await;
             let resp = service::login_credential_with_tenant(
-                &state.pool,
+                state.pool(),
                 &state.config,
                 &keys.primary,
                 service::CredentialLoginRequest {
@@ -161,7 +167,7 @@ pub async fn signup(
         return Err(AppError::Forbidden);
     }
 
-    let resp = service::signup_human(&state.pool, &state.config, req).await?;
+    let resp = service::signup_human(state.pool(), &state.config, req).await?;
     Ok((StatusCode::ACCEPTED, Json(resp)))
 }
 
@@ -169,7 +175,7 @@ pub async fn verify_email(
     State(state): State<AppState>,
     Query(query): Query<VerifyEmailQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    service::verify_email(&state.pool, &query.token).await?;
+    service::verify_email(state.pool(), &query.token).await?;
     Ok(Json(serde_json::json!({"verified": true})))
 }
 
@@ -177,7 +183,7 @@ pub async fn resend_verification(
     State(state): State<AppState>,
     Json(req): Json<ResendVerificationRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    service::resend_verification(&state.pool, &state.config, &req.email).await?;
+    service::resend_verification(state.pool(), &state.config, &req.email).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -185,7 +191,7 @@ pub async fn request_password_reset(
     State(state): State<AppState>,
     Json(req): Json<PasswordResetRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    service::request_password_reset(&state.pool, &state.config, req).await?;
+    service::request_password_reset(state.pool(), &state.config, req).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -193,7 +199,7 @@ pub async fn reset_password(
     State(state): State<AppState>,
     Json(req): Json<PasswordResetConfirmRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    service::reset_password(&state.pool, state.cache.as_deref(), req).await?;
+    service::reset_password(state.pool(), state.cache.as_deref(), req).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -205,7 +211,7 @@ pub async fn oauth_start(
     if !state.config.self_registration_enabled {
         return Err(AppError::Forbidden);
     }
-    let url = service::oauth_start(&state.pool, &state.config, &provider, query.return_to).await?;
+    let url = service::oauth_start(state.pool(), &state.config, &provider, query.return_to).await?;
     Ok(Redirect::temporary(&url))
 }
 
@@ -216,7 +222,7 @@ pub async fn oauth_callback(
 ) -> Result<impl IntoResponse, AppError> {
     let keys = state.keys.read().await;
     let url = service::oauth_callback(
-        &state.pool,
+        state.pool(),
         &state.config,
         &keys.primary,
         &provider,
@@ -234,7 +240,7 @@ pub async fn oauth_exchange(
 ) -> Result<impl IntoResponse, AppError> {
     let keys = state.keys.read().await;
     let resp =
-        service::oauth_exchange(&state.pool, &state.config, &keys.primary, &req.code).await?;
+        service::oauth_exchange(state.pool(), &state.config, &keys.primary, &req.code).await?;
     Ok(Json(resp))
 }
 
@@ -265,17 +271,22 @@ pub async fn logout(
                 crate::cache::CacheCategory::Session,
                 std::slice::from_ref(&crate::cache::keys::session(session_id)),
                 || async {
-                    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+                    let mut tx = state.begin().await.map_err(crate::error::db_err)?;
                     repo::revoke_session_in_tx(&mut tx, session_id).await?;
-                    audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
-                        .await
+                    audit::commit_with_audit(
+                        state.pool(),
+                        tx,
+                        state.config.events.enabled(),
+                        &event,
+                    )
+                    .await
                 },
             )
             .await?;
         }
         None => {
-            let tx = state.pool.begin().await.map_err(crate::error::db_err)?;
-            audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
+            let tx = state.begin().await.map_err(crate::error::db_err)?;
+            audit::commit_with_audit(state.pool(), tx, state.config.events.enabled(), &event)
                 .await?;
         }
     }
@@ -305,7 +316,11 @@ pub async fn current_session(
     auth: AuthContext,
 ) -> Result<impl IntoResponse, AppError> {
     let expires_at = if let Some(session_id) = auth.session_id {
-        Some(repo::get_session(&state.pool, session_id).await?.expires_at)
+        Some(
+            repo::get_session(state.pool(), session_id)
+                .await?
+                .expires_at,
+        )
     } else {
         None
     };
@@ -326,10 +341,10 @@ pub async fn get_session(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let session = repo::get_session(&state.pool, id).await?;
+    let session = repo::get_session(state.pool(), id).await?;
     if session.entity_id != auth.entity_id {
-        let entity = repo::get_entity(&state.pool, session.entity_id).await?;
-        require_read_access(&state.pool, &auth, entity.tenant_id, session.entity_id).await?;
+        let entity = repo::get_entity(state.pool(), session.entity_id).await?;
+        require_read_access(state.pool(), &auth, entity.tenant_id, session.entity_id).await?;
     }
     Ok(Json(session))
 }
@@ -368,13 +383,13 @@ pub async fn create_entity(
     Json(req): Json<CreateEntity>,
 ) -> Result<impl IntoResponse, AppError> {
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(req.tenant_id),
     )
     .await?;
-    let entity = repo::create_entity(&state.pool, req).await?;
+    let entity = repo::create_entity(state.pool(), req).await?;
     Ok((StatusCode::CREATED, Json(entity)))
 }
 
@@ -383,11 +398,11 @@ pub async fn get_entity(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let entity = repo::get_entity(&state.pool, id).await?;
+    let entity = repo::get_entity(state.pool(), id).await?;
     // Self-read is an owner-authority convenience; a scoped token still runs the
     // ceiling-aware gate rather than reading its own identity unconditionally.
     if auth.entity_id != id || auth.scoped {
-        require_read_access(&state.pool, &auth, entity.tenant_id, id).await?;
+        require_read_access(state.pool(), &auth, entity.tenant_id, id).await?;
     }
     Ok(Json(entity))
 }
@@ -397,8 +412,8 @@ pub async fn list_entities(
     auth: AuthContext,
     Query(params): Query<ListEntities>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_list_access(&state.pool, &auth, params.tenant_id).await?;
-    let list = repo::list_entities(&state.pool, params).await?;
+    require_list_access(state.pool(), &auth, params.tenant_id).await?;
+    let list = repo::list_entities(state.pool(), params).await?;
     Ok(Json(list))
 }
 
@@ -409,7 +424,7 @@ pub async fn update_entity(
     Json(req): Json<UpdateEntity>,
 ) -> Result<impl IntoResponse, AppError> {
     let entity = service::update_entity_authorized(
-        &state.pool,
+        state.pool(),
         state.cache.as_deref(),
         state.config.events.enabled(),
         &auth,
@@ -427,7 +442,7 @@ pub async fn delete_entity(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     service::delete_entity_authorized(
-        &state.pool,
+        state.pool(),
         state.cache.as_deref(),
         state.config.events.enabled(),
         &auth,
@@ -445,13 +460,13 @@ pub async fn create_profile(
     Json(req): Json<CreateProfile>,
 ) -> Result<impl IntoResponse, AppError> {
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(req.tenant_id),
     )
     .await?;
-    let profile = profile_repo::create_profile(&state.pool, req).await?;
+    let profile = profile_repo::create_profile(state.pool(), req).await?;
     Ok((StatusCode::CREATED, Json(profile)))
 }
 
@@ -460,8 +475,8 @@ pub async fn list_profiles(
     auth: AuthContext,
     Query(params): Query<ListProfiles>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_list_access(&state.pool, &auth, params.tenant_id).await?;
-    let list = profile_repo::list_profiles(&state.pool, params).await?;
+    require_list_access(state.pool(), &auth, params.tenant_id).await?;
+    let list = profile_repo::list_profiles(state.pool(), params).await?;
     Ok(Json(list))
 }
 
@@ -470,8 +485,8 @@ pub async fn get_profile(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let profile = profile_repo::get_profile(&state.pool, id).await?;
-    require_read_access(&state.pool, &auth, profile.tenant_id, id).await?;
+    let profile = profile_repo::get_profile(state.pool(), id).await?;
+    require_read_access(state.pool(), &auth, profile.tenant_id, id).await?;
     Ok(Json(profile))
 }
 
@@ -481,15 +496,15 @@ pub async fn create_profile_version(
     Path(profile_id): Path<Uuid>,
     Json(req): Json<CreateProfileVersion>,
 ) -> Result<impl IntoResponse, AppError> {
-    let profile = profile_repo::get_profile(&state.pool, profile_id).await?;
+    let profile = profile_repo::get_profile(state.pool(), profile_id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(profile.tenant_id),
     )
     .await?;
-    let version = profile_repo::create_profile_version(&state.pool, profile_id, req).await?;
+    let version = profile_repo::create_profile_version(state.pool(), profile_id, req).await?;
     Ok((StatusCode::CREATED, Json(version)))
 }
 
@@ -498,9 +513,9 @@ pub async fn list_profile_versions(
     auth: AuthContext,
     Path(profile_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let profile = profile_repo::get_profile(&state.pool, profile_id).await?;
-    require_read_access(&state.pool, &auth, profile.tenant_id, profile_id).await?;
-    let versions = profile_repo::list_profile_versions(&state.pool, profile_id).await?;
+    let profile = profile_repo::get_profile(state.pool(), profile_id).await?;
+    require_read_access(state.pool(), &auth, profile.tenant_id, profile_id).await?;
+    let versions = profile_repo::list_profile_versions(state.pool(), profile_id).await?;
     Ok(Json(serde_json::json!({"items": versions})))
 }
 
@@ -517,10 +532,10 @@ pub async fn create_password(
         .get("password")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("missing 'password' field"))?;
-    let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+    let mut tx = state.begin().await.map_err(crate::error::db_err)?;
     let credential_id = service::create_password_in_tx(&mut tx, entity_id, password).await?;
     audit::commit_with_audit(
-        &state.pool,
+        state.pool(),
         tx,
         state.config.events.enabled(),
         &audit::AuditEvent {
@@ -546,7 +561,7 @@ pub async fn list_credentials(
     Path(entity_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     require_credential_management(&state, &auth, entity_id).await?;
-    let creds = service::list_credentials(&state.pool, entity_id).await?;
+    let creds = service::list_credentials(state.pool(), entity_id).await?;
     Ok(Json(serde_json::json!({"items": creds})))
 }
 
@@ -559,8 +574,8 @@ pub async fn revoke_credential(
     // credentials even when its ceiling grants `revoke` on the object.
     auth.reject_scoped_credential_management()?;
     let tenant_id =
-        if has_capability_in_scope(&state.pool, &auth, "revoke", Scope::Object(cred_id)).await? {
-            credential_tenant_id(&state.pool, entity_id, cred_id).await?
+        if has_capability_in_scope(state.pool(), &auth, "revoke", Scope::Object(cred_id)).await? {
+            credential_tenant_id(state.pool(), entity_id, cred_id).await?
         } else {
             require_credential_management(&state, &auth, entity_id).await?
         };
@@ -572,10 +587,10 @@ pub async fn revoke_credential(
         crate::cache::CacheCategory::Credential,
         std::slice::from_ref(&crate::cache::keys::credential(cred_id)),
         || async {
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+            let mut tx = state.begin().await.map_err(crate::error::db_err)?;
             service::revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
             audit::commit_with_audit(
-                &state.pool,
+                state.pool(),
                 tx,
                 state.config.events.enabled(),
                 &audit::AuditEvent {
@@ -619,13 +634,13 @@ pub async fn create_group(
     Json(req): Json<CreateGroup>,
 ) -> Result<impl IntoResponse, AppError> {
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(req.tenant_id),
     )
     .await?;
-    let group = repo::create_group(&state.pool, req).await?;
+    let group = repo::create_group(state.pool(), req).await?;
     Ok((StatusCode::CREATED, Json(group)))
 }
 
@@ -634,8 +649,8 @@ pub async fn get_group(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, id).await?;
-    require_read_access(&state.pool, &auth, group.tenant_id, id).await?;
+    let group = repo::get_group(state.pool(), id).await?;
+    require_read_access(state.pool(), &auth, group.tenant_id, id).await?;
     Ok(Json(group))
 }
 
@@ -645,15 +660,15 @@ pub async fn update_group(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateGroup>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, id).await?;
+    let group = repo::get_group(state.pool(), id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    let group = repo::update_group(&state.pool, id, req).await?;
+    let group = repo::update_group(state.pool(), id, req).await?;
     Ok(Json(group))
 }
 
@@ -687,16 +702,16 @@ async fn change_group_status(
     id: Uuid,
     status: EntityStatus,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, id).await?;
+    let group = repo::get_group(state.pool(), id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(group.tenant_id),
     )
     .await?;
     let group = repo::update_group(
-        &state.pool,
+        state.pool(),
         id,
         UpdateGroup {
             name: None,
@@ -714,8 +729,8 @@ pub async fn list_groups(
     auth: AuthContext,
     Query(params): Query<ListGroups>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_list_access(&state.pool, &auth, params.tenant_id).await?;
-    let list = repo::list_groups(&state.pool, params).await?;
+    require_list_access(state.pool(), &auth, params.tenant_id).await?;
+    let list = repo::list_groups(state.pool(), params).await?;
     Ok(Json(list))
 }
 
@@ -724,15 +739,15 @@ pub async fn delete_group(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, id).await?;
+    let group = repo::get_group(state.pool(), id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    repo::delete_group(&state.pool, id, Some(auth.entity_id)).await?;
+    repo::delete_group(state.pool(), id, Some(auth.entity_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -742,15 +757,15 @@ pub async fn set_group_parent(
     Path(id): Path<Uuid>,
     Json(req): Json<SetGroupParent>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, id).await?;
+    let group = repo::get_group(state.pool(), id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    let group = repo::set_group_parent(&state.pool, id, req.parent_id).await?;
+    let group = repo::set_group_parent(state.pool(), id, req.parent_id).await?;
     Ok(Json(group))
 }
 
@@ -759,15 +774,15 @@ pub async fn remove_group_parent(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, id).await?;
+    let group = repo::get_group(state.pool(), id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(group.tenant_id),
     )
     .await?;
-    repo::remove_group_parent(&state.pool, id).await?;
+    repo::remove_group_parent(state.pool(), id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -777,9 +792,9 @@ pub async fn list_child_groups(
     Path(id): Path<Uuid>,
     Query(params): Query<ListGroups>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, id).await?;
-    require_read_access(&state.pool, &auth, group.tenant_id, id).await?;
-    let list = repo::list_child_groups(&state.pool, id, params.limit, params.offset).await?;
+    let group = repo::get_group(state.pool(), id).await?;
+    require_read_access(state.pool(), &auth, group.tenant_id, id).await?;
+    let list = repo::list_child_groups(state.pool(), id, params.limit, params.offset).await?;
     Ok(Json(list))
 }
 
@@ -789,9 +804,9 @@ pub async fn add_group_member(
     Path(group_id): Path<Uuid>,
     Json(req): Json<AddMember>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, group_id).await?;
+    let group = repo::get_group(state.pool(), group_id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(group.tenant_id),
@@ -801,7 +816,7 @@ pub async fn add_group_member(
         state.cache.as_deref(),
         crate::cache::CacheCategory::Grants,
         std::slice::from_ref(&crate::cache::keys::grants(req.entity_id)),
-        || repo::add_group_member(&state.pool, group_id, req.entity_id),
+        || repo::add_group_member(state.pool(), group_id, req.entity_id),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -812,9 +827,9 @@ pub async fn list_group_members(
     auth: AuthContext,
     Path(group_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, group_id).await?;
-    require_read_access(&state.pool, &auth, group.tenant_id, group_id).await?;
-    let members = repo::list_group_members(&state.pool, group_id).await?;
+    let group = repo::get_group(state.pool(), group_id).await?;
+    require_read_access(state.pool(), &auth, group.tenant_id, group_id).await?;
+    let members = repo::list_group_members(state.pool(), group_id).await?;
     Ok(Json(serde_json::json!({"items": members})))
 }
 
@@ -823,9 +838,9 @@ pub async fn remove_group_member(
     auth: AuthContext,
     Path((group_id, entity_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, AppError> {
-    let group = repo::get_group(&state.pool, group_id).await?;
+    let group = repo::get_group(state.pool(), group_id).await?;
     require_capability(
-        &state.pool,
+        state.pool(),
         &auth,
         "manage",
         scope_for_tenant(group.tenant_id),
@@ -835,7 +850,7 @@ pub async fn remove_group_member(
         state.cache.as_deref(),
         crate::cache::CacheCategory::Grants,
         std::slice::from_ref(&crate::cache::keys::grants(entity_id)),
-        || repo::remove_group_member(&state.pool, group_id, entity_id),
+        || repo::remove_group_member(state.pool(), group_id, entity_id),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -846,11 +861,11 @@ pub async fn get_entity_groups(
     auth: AuthContext,
     Path(entity_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let entity = repo::get_entity(&state.pool, entity_id).await?;
+    let entity = repo::get_entity(state.pool(), entity_id).await?;
     if auth.entity_id != entity_id {
-        require_read_access(&state.pool, &auth, entity.tenant_id, entity_id).await?;
+        require_read_access(state.pool(), &auth, entity.tenant_id, entity_id).await?;
     }
-    let group_ids = repo::get_entity_groups(&state.pool, entity_id).await?;
+    let group_ids = repo::get_entity_groups(state.pool(), entity_id).await?;
     Ok(Json(serde_json::json!({"items": group_ids})))
 }
 
@@ -864,7 +879,7 @@ pub async fn add_ownership(
 ) -> Result<impl IntoResponse, AppError> {
     require_ownership_management(&state, &auth, owner_id, req.owned_id).await?;
     let ownership =
-        repo::create_ownership(&state.pool, owner_id, req.owned_id, req.relation).await?;
+        repo::create_ownership(state.pool(), owner_id, req.owned_id, req.relation).await?;
     Ok((StatusCode::CREATED, Json(ownership)))
 }
 
@@ -873,11 +888,11 @@ pub async fn list_owned(
     auth: AuthContext,
     Path(owner_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let owner = repo::get_entity(&state.pool, owner_id).await?;
+    let owner = repo::get_entity(state.pool(), owner_id).await?;
     if auth.entity_id != owner_id {
-        require_read_access(&state.pool, &auth, owner.tenant_id, owner_id).await?;
+        require_read_access(state.pool(), &auth, owner.tenant_id, owner_id).await?;
     }
-    let entities = repo::list_owned(&state.pool, owner_id).await?;
+    let entities = repo::list_owned(state.pool(), owner_id).await?;
     Ok(Json(serde_json::json!({"items": entities})))
 }
 
@@ -887,6 +902,6 @@ pub async fn remove_ownership(
     Path((owner_id, owned_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, AppError> {
     require_ownership_management(&state, &auth, owner_id, owned_id).await?;
-    repo::delete_ownership(&state.pool, owner_id, owned_id).await?;
+    repo::delete_ownership(state.pool(), owner_id, owned_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

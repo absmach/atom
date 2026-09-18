@@ -79,7 +79,7 @@ async fn callout_check_grpc(
             reason,
             endpoint_id,
         } => {
-            let pool = state.pool.clone();
+            let pool = state.pool().clone();
             let actor_id = (!auth.entity_id.is_nil()).then_some(auth.entity_id);
             let tenant_id = auth.tenant_id;
             let events_enabled = state.config.events.enabled();
@@ -191,13 +191,13 @@ impl AuthzService for AtomAuthz {
         )
         .await?;
 
-        let tenant_id = access::authz_request_tenant_id(&self.state.pool, &authz_req)
+        let tenant_id = access::authz_request_tenant_id(self.state.pool(), &authz_req)
             .await
             .map_err(Status::from)?;
         // The caller's token ceiling caps its right to invoke check; enforced
         // inside the gate via AuthContext.
         access::require_authz_check_access(
-            &self.state.pool,
+            self.state.pool(),
             &auth,
             authz_req.subject_id,
             tenant_id,
@@ -208,12 +208,12 @@ impl AuthzService for AtomAuthz {
         // Self-check via a scoped token returns the token-limited answer; a
         // delegated check about another subject is unaffected — the engine
         // derives the ceiling from the caller's context.
-        let resp = engine::evaluate(&self.state.pool, &authz_req, &auth)
+        let resp = engine::evaluate(self.state.pool(), &authz_req, &auth)
             .await
             .map_err(Status::from)?;
         let (target_kind, target_id) = authz_request_target(&authz_req);
         audit::write_hot_path(
-            &self.state.pool,
+            self.state.pool(),
             self.state.config.audit_policy,
             self.state.config.events.enabled(),
             audit::HotPathAuditKind::AuthzCheck,
@@ -315,14 +315,14 @@ impl AuthService for AtomAuth {
             parse_optional_uuid(&req.tenant_id, "tenant_id").map_err(Status::from)?;
         let tenant_alias = (!req.tenant_alias.trim().is_empty()).then_some(req.tenant_alias.trim());
         let tenant_id = identity_service::resolve_credential_auth_tenant(
-            &self.state.pool,
+            self.state.pool(),
             requested_tenant_id,
             tenant_alias,
         )
         .await
         .map_err(Status::from)?;
 
-        require_credential_auth_access(&self.state.pool, &auth, tenant_id).await?;
+        require_credential_auth_access(self.state.pool(), &auth, tenant_id).await?;
 
         callout_check_grpc(
             &self.state,
@@ -337,7 +337,7 @@ impl AuthService for AtomAuth {
         .await?;
 
         let result = identity_service::authenticate_credential_in_tenant(
-            &self.state.pool,
+            self.state.pool(),
             &self.state.config,
             &req.identifier,
             &req.secret,
@@ -355,7 +355,7 @@ impl AuthService for AtomAuth {
         let credential_id = result.as_ref().ok().map(|auth| auth.credential_id);
         let credential_kind = result.as_ref().ok().map(|auth| auth.kind);
         audit::write_hot_path(
-            &self.state.pool,
+            self.state.pool(),
             self.state.config.audit_policy,
             self.state.config.events.enabled(),
             audit::HotPathAuditKind::AuthCredentialAuthenticate,
@@ -429,7 +429,7 @@ impl CertificateService for AtomCertificates {
         let expected_tenant_id = parse_optional_uuid(&req.expected_tenant_id, "expected_tenant_id")
             .map_err(Status::from)?;
         let identity = certs::service::resolve_certificate_identity_v2(
-            &self.state.pool,
+            self.state.pool(),
             certs::service::ResolveCertificateV2 {
                 certificate_der: (!req.certificate_der.is_empty()).then_some(req.certificate_der),
                 fingerprint_sha256: (!req.fingerprint_sha256.trim().is_empty())
@@ -443,7 +443,7 @@ impl CertificateService for AtomCertificates {
         .await
         .map_err(Status::from)?;
         require_any_capability(
-            &self.state.pool,
+            self.state.pool(),
             &auth,
             &[
                 ("authz.check", scope_for_tenant(identity.tenant_id)),
@@ -487,11 +487,11 @@ impl CertificateService for AtomCertificates {
             }),
         )
         .await?;
-        let tenant_id = certs::repo::entity_tenant_id(&self.state.pool, entity_id)
+        let tenant_id = certs::repo::entity_tenant_id(self.state.pool(), entity_id)
             .await
             .map_err(Status::from)?;
         require_any_capability(
-            &self.state.pool,
+            self.state.pool(),
             &auth,
             &[
                 ("manage", Scope::Object(entity_id)),
@@ -502,7 +502,6 @@ impl CertificateService for AtomCertificates {
         .map_err(Status::from)?;
         let mut tx = self
             .state
-            .pool
             .begin()
             .await
             .map_err(crate::error::db_err)
@@ -516,7 +515,7 @@ impl CertificateService for AtomCertificates {
         .await
         .map_err(Status::from)?;
         let commit = audit::commit_with_audit(
-            &self.state.pool,
+            self.state.pool(),
             tx,
             self.state.config.events.enabled(),
             &audit::AuditEvent {
@@ -590,7 +589,7 @@ impl AliasService for AtomAlias {
         })?;
 
         let resolved = repo::resolve_alias(
-            &self.state.pool,
+            self.state.pool(),
             tenant_id,
             tenant_alias,
             req.global,

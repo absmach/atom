@@ -655,7 +655,7 @@ async fn login_token(
 ) -> String {
     let primary = state.keys.read().await.primary.clone();
     identity_service::login_credential_with_tenant(
-        &state.pool,
+        state.pool(),
         &state.config,
         &primary,
         identity_service::CredentialLoginRequest {

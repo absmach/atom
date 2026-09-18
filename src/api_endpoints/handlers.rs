@@ -69,7 +69,7 @@ pub async fn custom_endpoint(
     // Authenticate before resolving the configured method/path. Otherwise an
     // unauthenticated caller can distinguish an existing endpoint (401) from
     // an unconfigured route (404) and enumerate the protected custom surface.
-    let endpoint = match api_endpoint_repo::find_api_endpoint(&state.pool, &method, &path).await {
+    let endpoint = match api_endpoint_repo::find_api_endpoint(state.pool(), &method, &path).await {
         Ok(endpoint) => endpoint,
         Err(err) => {
             let internal_error = err.to_string();
@@ -80,7 +80,7 @@ pub async fn custom_endpoint(
                     // endpoint they cannot execute. Platform operators retain a
                     // useful 404 for genuinely missing routes.
                     match require_any_capability(
-                        &state.pool,
+                        state.pool(),
                         &caller,
                         &[("execute", Scope::Platform), ("manage", Scope::Platform)],
                     )
@@ -108,7 +108,7 @@ pub async fn custom_endpoint(
     };
 
     if let Err(err) = require_any_on_object(
-        &state.pool,
+        state.pool(),
         &caller,
         "api_endpoint",
         endpoint.id,
@@ -380,7 +380,7 @@ async fn execution_auth_context(
                    WHERE e.id = $1"#,
             )
             .bind(service_entity_id)
-            .fetch_one(&state.pool)
+            .fetch_one(state.pool())
             .await
             .map_err(crate::error::db_err)?;
             use sqlx::Row;
@@ -626,7 +626,7 @@ async fn record_execution(
     error: Option<String>,
 ) {
     if let Err(err) = api_endpoint_repo::record_api_endpoint_execution(
-        &state.pool,
+        state.pool(),
         endpoint_id,
         caller_entity_id,
         status,

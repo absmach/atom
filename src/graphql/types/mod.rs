@@ -305,7 +305,7 @@ impl Entity {
     /// this is a set — there is no single "parent" group.
     async fn object_group_ids(&self, ctx: &Context<'_>) -> Result<Vec<ID>> {
         let state = ctx.data::<AppState>()?;
-        identity_repo::get_entity_object_groups(&state.pool, self.0.id)
+        identity_repo::get_entity_object_groups(state.pool(), self.0.id)
             .await
             .map(|group_ids| group_ids.into_iter().map(id).collect())
             .map_err(|err| async_graphql::Error::new(err.to_string()))
@@ -626,7 +626,7 @@ impl Resource {
     /// so this is a set — there is no single "parent" group.
     async fn object_group_ids(&self, ctx: &Context<'_>) -> Result<Vec<ID>> {
         let state = ctx.data::<AppState>()?;
-        authz_repo::get_resource_object_groups(&state.pool, self.0.id)
+        authz_repo::get_resource_object_groups(state.pool(), self.0.id)
             .await
             .map(|group_ids| group_ids.into_iter().map(id).collect())
             .map_err(|err| async_graphql::Error::new(err.to_string()))
@@ -1071,7 +1071,7 @@ impl Role {
 
     async fn derived_kind(&self, ctx: &Context<'_>) -> Result<String> {
         let state = ctx.data::<AppState>()?;
-        let kind = authz_repo::role_derived_kind(&state.pool, self.0.id)
+        let kind = authz_repo::role_derived_kind(state.pool(), self.0.id)
             .await
             .map_err(|err| async_graphql::Error::new(err.to_string()))?;
         Ok(match kind {
@@ -1083,7 +1083,7 @@ impl Role {
 
     async fn permission_blocks(&self, ctx: &Context<'_>) -> Result<Vec<PermissionBlock>> {
         let state = ctx.data::<AppState>()?;
-        let blocks = authz_repo::list_permission_blocks_for_role(&state.pool, self.0.id)
+        let blocks = authz_repo::list_permission_blocks_for_role(state.pool(), self.0.id)
             .await
             .map_err(|err| async_graphql::Error::new(err.to_string()))?;
         Ok(blocks.into_iter().map(PermissionBlock::from).collect())
@@ -1151,7 +1151,7 @@ impl RolePermissionBlock {
 
     async fn actions(&self, ctx: &Context<'_>) -> Result<Vec<Action>> {
         let state = ctx.data::<AppState>()?;
-        let actions = authz_repo::role_permission_block_capabilities(&state.pool, self.0.id)
+        let actions = authz_repo::role_permission_block_capabilities(state.pool(), self.0.id)
             .await
             .map_err(|err| async_graphql::Error::new(err.to_string()))?;
         Ok(actions.into_iter().map(Action::from).collect())
@@ -1186,7 +1186,7 @@ impl Capability {
 
     async fn applicability(&self, ctx: &Context<'_>) -> Result<Vec<CapabilityApplicability>> {
         let state = ctx.data::<AppState>()?;
-        let applicability = authz_repo::capability_applicability(&state.pool, self.0.id).await?;
+        let applicability = authz_repo::capability_applicability(state.pool(), self.0.id).await?;
         Ok(applicability
             .into_iter()
             .map(CapabilityApplicability)
@@ -1225,7 +1225,7 @@ impl Action {
 
     async fn applicability(&self, ctx: &Context<'_>) -> Result<Vec<ActionApplicability>> {
         let state = ctx.data::<AppState>()?;
-        let applicability = authz_repo::capability_applicability(&state.pool, self.0.id).await?;
+        let applicability = authz_repo::capability_applicability(state.pool(), self.0.id).await?;
         Ok(applicability.into_iter().map(ActionApplicability).collect())
     }
 
@@ -1537,7 +1537,7 @@ impl PermissionBlock {
 
     async fn actions(&self, ctx: &Context<'_>) -> Result<Vec<Action>> {
         let state = ctx.data::<AppState>()?;
-        let actions = authz_repo::permission_block_capabilities(&state.pool, self.0.id)
+        let actions = authz_repo::permission_block_capabilities(state.pool(), self.0.id)
             .await
             .map_err(|err| async_graphql::Error::new(err.to_string()))?;
         Ok(actions.into_iter().map(Action::from).collect())
@@ -1591,7 +1591,7 @@ impl RoleAssignment {
 
     async fn role(&self, ctx: &Context<'_>) -> Result<Role> {
         let state = ctx.data::<AppState>()?;
-        let role = authz_repo::get_role(&state.pool, self.0.role_id)
+        let role = authz_repo::get_role(state.pool(), self.0.role_id)
             .await
             .map_err(|err| async_graphql::Error::new(err.to_string()))?;
         Ok(role.into())
@@ -1639,7 +1639,7 @@ impl DirectPolicy {
 
     async fn permission_block(&self, ctx: &Context<'_>) -> Result<PermissionBlock> {
         let state = ctx.data::<AppState>()?;
-        let block = authz_repo::get_permission_block(&state.pool, self.0.permission_block_id)
+        let block = authz_repo::get_permission_block(state.pool(), self.0.permission_block_id)
             .await
             .map_err(|err| async_graphql::Error::new(err.to_string()))?;
         Ok(block.into())

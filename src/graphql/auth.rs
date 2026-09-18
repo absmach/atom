@@ -30,14 +30,14 @@ impl AuthQuery {
     async fn session(&self, ctx: &Context<'_>, id: ID) -> Result<Session> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let session = repo::get_session(&state.pool, parse_id(id, "id")?)
+        let session = repo::get_session(state.pool(), parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
         if session.entity_id != auth.entity_id {
-            let entity = repo::get_entity(&state.pool, session.entity_id)
+            let entity = repo::get_entity(state.pool(), session.entity_id)
                 .await
                 .map_err(gql_error)?;
-            require_read_access(&state.pool, &auth, entity.tenant_id, session.entity_id).await?;
+            require_read_access(state.pool(), &auth, entity.tenant_id, session.entity_id).await?;
         }
         Ok(session.into())
     }
@@ -54,7 +54,7 @@ impl AuthMutation {
         let state = ctx.data::<AppState>()?;
         let keys = state.keys.read().await;
         let response = service::login_credential_with_tenant(
-            &state.pool,
+            state.pool(),
             &state.config,
             &keys.primary,
             service::CredentialLoginRequest {
@@ -77,7 +77,7 @@ impl AuthMutation {
             return Err(async_graphql::Error::new("sign up is not enabled"));
         }
         let response = service::signup_human(
-            &state.pool,
+            state.pool(),
             &state.config,
             SignupRequest {
                 name: input.name,
@@ -119,10 +119,10 @@ impl AuthMutation {
                     crate::cache::CacheCategory::Session,
                     std::slice::from_ref(&crate::cache::keys::session(session_id)),
                     || async {
-                        let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+                        let mut tx = state.begin().await.map_err(crate::error::db_err)?;
                         repo::revoke_session_in_tx(&mut tx, session_id).await?;
                         audit::commit_with_audit(
-                            &state.pool,
+                            state.pool(),
                             tx,
                             state.config.events.enabled(),
                             &event,
@@ -135,11 +135,10 @@ impl AuthMutation {
             }
             None => {
                 let tx = state
-                    .pool
                     .begin()
                     .await
                     .map_err(|e| gql_error(crate::error::db_err(e)))?;
-                audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
+                audit::commit_with_audit(state.pool(), tx, state.config.events.enabled(), &event)
                     .await
                     .map_err(gql_error)?;
             }
@@ -215,7 +214,7 @@ impl AuthMutation {
             std::slice::from_ref(&crate::cache::keys::session(session_id)),
             || {
                 service::refresh_session(
-                    &state.pool,
+                    state.pool(),
                     &state.config,
                     &signer,
                     auth.entity_id,
@@ -360,20 +359,25 @@ pub(crate) async fn require_credential_management(
     target_entity_id: Uuid,
 ) -> Result<Option<Uuid>> {
     deny_scoped_token(auth)?;
-    let target = repo::get_entity(&state.pool, target_entity_id)
+    let target = repo::get_entity(state.pool(), target_entity_id)
         .await
         .map_err(gql_error)?;
     if auth.entity_id == target_entity_id {
         return Ok(target.tenant_id);
     }
-    if has_capability_in_scope(&state.pool, auth, "manage", Scope::Object(target_entity_id))
-        .await
-        .map_err(gql_error)?
+    if has_capability_in_scope(
+        state.pool(),
+        auth,
+        "manage",
+        Scope::Object(target_entity_id),
+    )
+    .await
+    .map_err(gql_error)?
     {
         return Ok(target.tenant_id);
     }
     require_capability(
-        &state.pool,
+        state.pool(),
         auth,
         "manage",
         scope_for_tenant(target.tenant_id),

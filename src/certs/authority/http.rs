@@ -14,7 +14,7 @@ pub async fn trust_bundle(
     State(state): State<AppState>,
     request_headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let bundle = provisioning::trust_bundle(&state.pool).await?;
+    let bundle = provisioning::trust_bundle(state.pool()).await?;
     let etag = format!("\"{}\"", bundle.version);
     let mut response_headers = HeaderMap::new();
     response_headers.insert(

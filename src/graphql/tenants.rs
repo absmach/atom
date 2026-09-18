@@ -76,16 +76,16 @@ impl TenantQuery {
             dir: parse_sort_dir(dir),
         };
         let list = if deleted != DeletedFilter::Live {
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
-            tenant_repo::list_tenants(&state.pool, params)
+            require_any_capability(state.pool(), &auth, &[("manage", Scope::Platform)]).await?;
+            tenant_repo::list_tenants(state.pool(), params)
                 .await
                 .map_err(gql_error)?
-        } else if can_list_all_tenants(&state.pool, &auth).await? {
-            tenant_repo::list_tenants(&state.pool, params)
+        } else if can_list_all_tenants(state.pool(), &auth).await? {
+            tenant_repo::list_tenants(state.pool(), params)
                 .await
                 .map_err(gql_error)?
         } else {
-            tenant_repo::list_tenants_for_entity(&state.pool, &auth, auth.entity_id, params)
+            tenant_repo::list_tenants_for_entity(state.pool(), &auth, auth.entity_id, params)
                 .await
                 .map_err(gql_error)?
         };
@@ -101,7 +101,7 @@ impl TenantQuery {
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
         require_tenant_read_access(state, &auth, id).await?;
-        let tenant = tenant_repo::get_tenant(&state.pool, id)
+        let tenant = tenant_repo::get_tenant(state.pool(), id)
             .await
             .map_err(gql_error)?;
         Ok(tenant.into())
@@ -122,7 +122,7 @@ impl TenantQuery {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_any_capability(
-            &state.pool,
+            state.pool(),
             &auth,
             &[
                 ("manage", Scope::Tenant(tenant_id)),
@@ -132,7 +132,7 @@ impl TenantQuery {
         )
         .await?;
         let list = tenant_repo::list_tenant_members(
-            &state.pool,
+            state.pool(),
             tenant_id,
             q,
             id,
@@ -167,7 +167,7 @@ impl TenantQuery {
             )));
         }
         require_any_capability(
-            &state.pool,
+            state.pool(),
             &auth,
             &[
                 ("manage", Scope::Tenant(tenant_id)),
@@ -177,7 +177,7 @@ impl TenantQuery {
         )
         .await?;
         let list = tenant_repo::list_tenant_assignable_entities(
-            &state.pool,
+            state.pool(),
             tenant_id,
             q,
             limit.map(i64::from).unwrap_or(20),
@@ -204,7 +204,7 @@ impl TenantQuery {
         let app_state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_any_capability(
-            &app_state.pool,
+            app_state.pool(),
             &auth,
             &[
                 ("manage", Scope::Tenant(tenant_id)),
@@ -213,7 +213,7 @@ impl TenantQuery {
         )
         .await?;
         let list = tenant_repo::list_tenant_invitations(
-            &app_state.pool,
+            app_state.pool(),
             tenant_id,
             tenant_model::ListTenantInvitations {
                 limit: limit.map(i64::from).unwrap_or(20),
@@ -240,7 +240,7 @@ impl TenantQuery {
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_tenant_read_access(state, &auth, tenant_id).await?;
         let roles =
-            tenant_repo::list_tenant_role_assignments(&state.pool, tenant_id, auth.entity_id)
+            tenant_repo::list_tenant_role_assignments(state.pool(), tenant_id, auth.entity_id)
                 .await
                 .map_err(gql_error)?;
         Ok(roles
@@ -264,7 +264,7 @@ impl TenantQuery {
         let auth = require_auth(ctx)?;
         let app_state = ctx.data::<AppState>()?;
         let list = tenant_repo::list_user_invitations(
-            &app_state.pool,
+            app_state.pool(),
             auth.entity_id,
             tenant_model::ListTenantInvitations {
                 limit: limit.map(i64::from).unwrap_or(20),
@@ -305,7 +305,7 @@ impl TenantMutation {
 
         let result = async {
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[("manage", Scope::Platform), ("create", Scope::Platform)],
             )
@@ -322,7 +322,7 @@ impl TenantMutation {
                 std::slice::from_ref(&crate::cache::keys::grants(auth.entity_id)),
                 || {
                     tenant_repo::create_tenant_with_audit(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         Some(auth.entity_id),
                         tenant_model::CreateTenant {
@@ -342,7 +342,7 @@ impl TenantMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -374,7 +374,7 @@ impl TenantMutation {
 
         let result = async {
             crate::auth::require_any_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 &[
                     ("manage", Scope::Platform),
@@ -383,7 +383,7 @@ impl TenantMutation {
             )
             .await?;
             tenant_repo::update_tenant_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 tenant_id,
@@ -401,7 +401,7 @@ impl TenantMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -427,7 +427,7 @@ impl TenantMutation {
         let details = serde_json::json!({});
 
         let result: std::result::Result<(), AppError> = async {
-            crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+            crate::auth::require_capability(state.pool(), &auth, "manage", Scope::Platform).await?;
             // `tenant_status` invalidation alone is *not* sufficient: this
             // also bulk-revokes sessions, which would otherwise become a
             // stale cache hit again the moment `restoreTenant` repopulates
@@ -441,7 +441,7 @@ impl TenantMutation {
             // established, not after the tenant is flipped to `deleted`.
             let Some(cache) = state.cache.as_deref() else {
                 tenant_repo::soft_delete_tenant_with_audit(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     Some(auth.entity_id),
                     tenant_id,
@@ -450,7 +450,7 @@ impl TenantMutation {
                 .await?;
                 return Ok(());
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+            let mut tx = state.begin().await.map_err(crate::error::db_err)?;
             let session_ids =
                 tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id).await?;
             let session_keys: Vec<String> = session_ids
@@ -490,7 +490,7 @@ impl TenantMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -520,7 +520,7 @@ impl TenantMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+            crate::auth::require_capability(state.pool(), &auth, "manage", Scope::Platform).await?;
             // Unlike the tenant-status-only case in `delete_tenant`, this
             // also reactivates credentials, which need their own
             // invalidation: `verify_api_key_snapshot` checks a credential's
@@ -533,7 +533,7 @@ impl TenantMutation {
             // transaction.
             let Some(cache) = state.cache.as_deref() else {
                 return tenant_repo::restore_tenant_with_audit(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     Some(auth.entity_id),
                     tenant_id,
@@ -541,7 +541,7 @@ impl TenantMutation {
                 )
                 .await;
             };
-            let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+            let mut tx = state.begin().await.map_err(crate::error::db_err)?;
             let (tenant, credential_ids) =
                 tenant_repo::reactivate_tenant_and_collect_credential_ids_in_tx(
                     &mut tx,
@@ -572,7 +572,7 @@ impl TenantMutation {
             match outcome {
                 Ok(()) => {
                     audit::commit_observed_with_cache_and_audit(
-                        &state.pool,
+                        state.pool(),
                         tx,
                         cache,
                         leases,
@@ -600,7 +600,7 @@ impl TenantMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -628,9 +628,9 @@ impl TenantMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+            crate::auth::require_capability(state.pool(), &auth, "manage", Scope::Platform).await?;
             tenant_repo::purge_tenant_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 tenant_id,
@@ -641,7 +641,7 @@ impl TenantMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -675,7 +675,7 @@ impl TenantMutation {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_any_capability(
-            &state.pool,
+            state.pool(),
             &auth,
             &[
                 ("manage", Scope::Tenant(tenant_id)),
@@ -690,7 +690,7 @@ impl TenantMutation {
             .filter(|url| !url.trim().is_empty())
             .unwrap_or_else(|| state.config.invitation_redirect.clone());
         let created = tenant_repo::create_invitation(
-            &state.pool,
+            state.pool(),
             tenant_id,
             auth.entity_id,
             tenant_model::CreateTenantInvitation {
@@ -726,7 +726,7 @@ impl TenantMutation {
             state.cache.as_deref(),
             crate::cache::CacheCategory::Grants,
             std::slice::from_ref(&crate::cache::keys::grants(auth.entity_id)),
-            || tenant_repo::accept_invitation(&state.pool, tenant_id, auth.entity_id),
+            || tenant_repo::accept_invitation(state.pool(), tenant_id, auth.entity_id),
         )
         .await
         .map_err(gql_error)?;
@@ -744,7 +744,7 @@ impl TenantMutation {
             state.cache.as_deref(),
             crate::cache::CacheCategory::Grants,
             std::slice::from_ref(&crate::cache::keys::grants(auth.entity_id)),
-            || tenant_repo::accept_invitation_token(&state.pool, &input.token, auth.entity_id),
+            || tenant_repo::accept_invitation_token(state.pool(), &input.token, auth.entity_id),
         )
         .await
         .map_err(gql_error)?;
@@ -755,7 +755,7 @@ impl TenantMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         tenant_repo::reject_invitation(
-            &state.pool,
+            state.pool(),
             parse_id(tenant_id, "tenantId")?,
             auth.entity_id,
         )
@@ -774,7 +774,7 @@ impl TenantMutation {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_id(tenant_id, "tenantId")?;
         require_capability(
-            &state.pool,
+            state.pool(),
             &auth,
             "policy.manage",
             Scope::Tenant(tenant_id),
@@ -782,7 +782,7 @@ impl TenantMutation {
         .await
         .map_err(gql_error)?;
         tenant_repo::revoke_invitation_by_id(
-            &state.pool,
+            state.pool(),
             tenant_id,
             parse_id(invitation_id, "invitationId")?,
         )
@@ -803,7 +803,7 @@ impl TenantMutation {
         let entity_id = parse_id(entity_id, "entityId")?;
         let result = async {
             crate::auth::require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy.manage",
                 Scope::Tenant(tenant_id),
@@ -815,7 +815,7 @@ impl TenantMutation {
                 std::slice::from_ref(&crate::cache::keys::grants(entity_id)),
                 || {
                     tenant_repo::remove_tenant_member_with_audit(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         Some(auth.entity_id),
                         tenant_id,
@@ -836,7 +836,7 @@ impl TenantMutation {
             };
             let details = serde_json::json!({ "entity_id": entity_id });
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -861,7 +861,7 @@ impl TenantMutation {
         let role_id = role_id.map(|id| parse_id(id, "roleId")).transpose()?;
         let result = async {
             crate::auth::require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy.manage",
                 Scope::Tenant(tenant_id),
@@ -873,7 +873,7 @@ impl TenantMutation {
                 std::slice::from_ref(&crate::cache::keys::grants(entity_id)),
                 || {
                     tenant_repo::add_tenant_member_with_audit(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         Some(auth.entity_id),
                         tenant_id,
@@ -895,7 +895,7 @@ impl TenantMutation {
             };
             let details = serde_json::json!({ "entity_id": entity_id, "role_id": role_id });
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -914,7 +914,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
     let event = tenant_status_event(&status);
     let status_detail = status.clone();
     let result = async {
-        crate::auth::require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+        crate::auth::require_capability(state.pool(), &auth, "manage", Scope::Platform).await?;
         // Only `tenant_status`, not `grants`: the PDP's tenant-lifecycle deny
         // check runs before grant matching (see `authz::engine::
         // load_decision_context`), so a stale tenant-membership-implicit
@@ -922,7 +922,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
         // key itself invalidates.
         let Some(cache) = state.cache.as_deref() else {
             return tenant_repo::change_tenant_status_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 tenant_id,
@@ -941,7 +941,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
                 std::slice::from_ref(&crate::cache::keys::tenant_status(tenant_id)),
                 || {
                     tenant_repo::change_tenant_status_with_audit(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         Some(auth.entity_id),
                         tenant_id,
@@ -960,7 +960,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
         // revoke must never be left reachable as a stale hit, or it survives
         // (with `revoked_at = None`) until the tenant is re-enabled and its
         // own fresh `tenant_status` hit stops masking the stale session.
-        let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+        let mut tx = state.begin().await.map_err(crate::error::db_err)?;
         let session_ids =
             tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id).await?;
         let session_keys: Vec<String> = session_ids
@@ -1020,7 +1020,7 @@ async fn change_tenant_status(ctx: &Context<'_>, id: ID, status: TenantStatus) -
         };
         let details = serde_json::json!({ "status": status_detail });
         audit::observe_error(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             &meta,
             &details,
@@ -1045,14 +1045,14 @@ async fn require_tenant_read_access(
     auth: &AuthContext,
     tenant_id: uuid::Uuid,
 ) -> Result<()> {
-    if can_list_all_tenants(&state.pool, auth).await?
-        || has_inactive_tenant_read_role(&state.pool, auth.entity_id, tenant_id).await?
+    if can_list_all_tenants(state.pool(), auth).await?
+        || has_inactive_tenant_read_role(state.pool(), auth.entity_id, tenant_id).await?
     {
         return Ok(());
     }
 
     if engine::allows_any(
-        &state.pool,
+        state.pool(),
         auth,
         auth.entity_id,
         "tenant",

@@ -26,13 +26,18 @@ async fn main() -> anyhow::Result<()> {
     );
 
     metrics::init(cfg.metrics.enabled);
-    let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
+    let database = db::Database::connect(&cfg.database_url, &cfg.db_pool).await?;
+    match db::location(&cfg.database_url) {
+        Ok(loc) => tracing::info!(backend = %loc.kind, location = %loc, "database connected"),
+        Err(_) => tracing::info!(backend = %database.kind(), "database connected"),
+    }
+    let pool = database.as_postgres().clone();
     let bootstrap_cfg = match cfg.bootstrap_file.as_deref() {
         Some(path) => Some(bootstrap::load(std::path::Path::new(path)).await?),
         None => None,
     };
 
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    database.run_migrations().await?;
     tracing::info!("migrations applied");
 
     certs::authority::key_provider::validate_startup(&pool, &cfg.pki_ca_keys).await?;
@@ -89,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
 
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
-    let mut state =
-        state::AppState::new(pool, cfg.clone(), active_keys, cache).with_callouts(callout_service);
+    let mut state = state::AppState::new(database, cfg.clone(), active_keys, cache)
+        .with_callouts(callout_service);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await
@@ -298,7 +303,7 @@ async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<(
     let pem = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("failed to read ATOM_PKI_ROOT_CERT_PATH ({path})"))?;
-    let mut tx = pool
+    let mut tx = atom::db::Database::from(pool.clone())
         .begin()
         .await
         .context("failed to open PKI root bootstrap transaction")?;
@@ -341,7 +346,7 @@ async fn bootstrap_platform_intermediate(
     let key_pem = tokio::fs::read_to_string(key_path).await.with_context(|| {
         format!("failed to read ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH ({key_path})")
     })?;
-    let mut tx = pool
+    let mut tx = atom::db::Database::from(pool.clone())
         .begin()
         .await
         .context("failed to open PKI platform intermediate bootstrap transaction")?;
@@ -390,7 +395,7 @@ async fn bootstrap_password_credentials(
     identity::service::validate_password_strength(secret).map_err(|e| anyhow::anyhow!("{e}"))?;
     let hash =
         identity::service::hash_secret(secret.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut tx = pool
+    let mut tx = atom::db::Database::from(pool.clone())
         .begin()
         .await
         .with_context(|| format!("failed to begin {label} password bootstrap transaction"))?;
@@ -405,7 +410,7 @@ async fn bootstrap_password_credentials(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
     .bind(entity_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.as_postgres_mut())
     .await?;
 
     let mut created = false;
@@ -416,7 +421,7 @@ async fn bootstrap_password_credentials(
         .bind(Uuid::new_v4())
         .bind(entity_id)
         .bind(hash)
-        .execute(&mut *tx)
+        .execute(tx.as_postgres_mut())
         .await?;
         created = true;
     }

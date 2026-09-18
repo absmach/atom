@@ -38,7 +38,10 @@ async fn tenant_purge_succeeds_after_revocation_and_ledger_survives() {
     .unwrap();
     let cert = issued.certificate;
 
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     service::revoke_certificate_v2_in_tx(
         &mut tx,
         service::RevokeCertificateV2 {

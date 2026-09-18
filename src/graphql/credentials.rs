@@ -29,7 +29,7 @@ impl CredentialQuery {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         require_credential_management(state, &auth, entity_id).await?;
-        let credentials = service::list_credentials(&state.pool, entity_id)
+        let credentials = service::list_credentials(state.pool(), entity_id)
             .await
             .map_err(gql_error)?;
         let total = credentials.len() as i64;
@@ -62,7 +62,7 @@ impl CredentialQuery {
         }
         let status = parse_credential_status(status.as_deref())?;
         let (tokens, total) = service::list_access_tokens(
-            &state.pool,
+            state.pool(),
             owner_id,
             service::ListAccessTokens {
                 status,
@@ -107,7 +107,7 @@ impl CredentialMutation {
 
         let result: std::result::Result<bool, AppError> = async {
             auth.reject_scoped_credential_management()?;
-            let mut tx = state.pool.begin().await.map_err(db_err)?;
+            let mut tx = state.begin().await.map_err(db_err)?;
             let credential_id = service::change_own_password_in_tx(
                 &mut tx,
                 auth.entity_id,
@@ -116,7 +116,7 @@ impl CredentialMutation {
             )
             .await?;
             audit::commit_with_audit(
-                &state.pool,
+                state.pool(),
                 tx,
                 state.config.events.enabled(),
                 &audit::AuditEvent {
@@ -136,7 +136,7 @@ impl CredentialMutation {
 
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -158,12 +158,12 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
         let credential_id = service::create_password_in_tx(&mut tx, entity_id, &password)
             .await
             .map_err(gql_error)?;
         audit::commit_with_audit(
-            &state.pool,
+            state.pool(),
             tx,
             state.config.events.enabled(),
             &audit::AuditEvent {
@@ -222,7 +222,7 @@ impl CredentialMutation {
             .into_iter()
             .map(permission_input_into_model)
             .collect::<Result<Vec<_>>>()?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
         let response = service::create_access_token_in_tx(
             &mut tx,
             &state.config.signing_keys,
@@ -238,7 +238,7 @@ impl CredentialMutation {
         .await
         .map_err(gql_error)?;
         audit::commit_with_audit(
-            &state.pool,
+            state.pool(),
             tx,
             state.config.events.enabled(),
             &audit::AuditEvent {
@@ -285,7 +285,7 @@ impl CredentialMutation {
             crate::cache::CacheCategory::CredentialCeiling,
             std::slice::from_ref(&crate::cache::keys::cred_ceiling(credential_id)),
             || async {
-                let mut tx = state.pool.begin().await.map_err(db_err)?;
+                let mut tx = state.begin().await.map_err(db_err)?;
                 service::replace_access_token_permissions_in_tx(
                     &mut tx,
                     owner_id,
@@ -294,7 +294,7 @@ impl CredentialMutation {
                 )
                 .await?;
                 audit::commit_with_audit(
-                    &state.pool,
+                    state.pool(),
                     tx,
                     state.config.events.enabled(),
                     &audit::AuditEvent {
@@ -332,10 +332,10 @@ impl CredentialMutation {
             crate::cache::CacheCategory::Credential,
             std::slice::from_ref(&crate::cache::keys::credential(credential_id)),
             || async {
-                let mut tx = state.pool.begin().await.map_err(db_err)?;
+                let mut tx = state.begin().await.map_err(db_err)?;
                 service::revoke_access_token_in_tx(&mut tx, owner_id, credential_id).await?;
                 audit::commit_with_audit(
-                    &state.pool,
+                    state.pool(),
                     tx,
                     state.config.events.enabled(),
                     &audit::AuditEvent {
@@ -371,7 +371,7 @@ impl CredentialMutation {
         let state = ctx.data::<AppState>()?;
         let entity_id = parse_id(entity_id, "entityId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
-        let mut tx = state.pool.begin().await.map_err(|e| gql_error(db_err(e)))?;
+        let mut tx = state.begin().await.map_err(|e| gql_error(db_err(e)))?;
         let response = service::create_shared_key_in_tx(
             &mut tx,
             &state.config.signing_keys,
@@ -385,7 +385,7 @@ impl CredentialMutation {
         .await
         .map_err(gql_error)?;
         audit::commit_with_audit(
-            &state.pool,
+            state.pool(),
             tx,
             state.config.events.enabled(),
             &audit::AuditEvent {
@@ -418,7 +418,7 @@ impl CredentialMutation {
         let credential_id = parse_id(credential_id, "credentialId")?;
         let tenant_id = require_credential_management(state, &auth, entity_id).await?;
         let response = service::reveal_shared_key(
-            &state.pool,
+            state.pool(),
             &state.config.signing_keys,
             entity_id,
             credential_id,
@@ -426,7 +426,7 @@ impl CredentialMutation {
         .await
         .map_err(gql_error)?;
         audit::write(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             audit::AuditEvent {
                 actor_entity_id: Some(auth.entity_id),
@@ -459,11 +459,11 @@ impl CredentialMutation {
         let entity_id = parse_id(entity_id, "entityId")?;
         let credential_id = parse_id(credential_id, "credentialId")?;
         let tenant_id =
-            if has_capability_in_scope(&state.pool, &auth, "revoke", Scope::Object(credential_id))
+            if has_capability_in_scope(state.pool(), &auth, "revoke", Scope::Object(credential_id))
                 .await
                 .map_err(gql_error)?
             {
-                credential_tenant_id(&state.pool, entity_id, credential_id).await?
+                credential_tenant_id(state.pool(), entity_id, credential_id).await?
             } else {
                 require_credential_management(state, &auth, entity_id).await?
             };
@@ -472,10 +472,10 @@ impl CredentialMutation {
             crate::cache::CacheCategory::Credential,
             std::slice::from_ref(&crate::cache::keys::credential(credential_id)),
             || async {
-                let mut tx = state.pool.begin().await.map_err(db_err)?;
+                let mut tx = state.begin().await.map_err(db_err)?;
                 service::revoke_credential_in_tx(&mut tx, entity_id, credential_id).await?;
                 audit::commit_with_audit(
-                    &state.pool,
+                    state.pool(),
                     tx,
                     state.config.events.enabled(),
                     &audit::AuditEvent {
@@ -509,7 +509,7 @@ async fn resolve_token_lifecycle_target(
     auth: &crate::auth::AuthContext,
     credential_id: Uuid,
 ) -> Result<(Uuid, bool, Option<Uuid>)> {
-    let owner_id = service::access_token_owner(&state.pool, credential_id)
+    let owner_id = service::access_token_owner(state.pool(), credential_id)
         .await
         .map_err(gql_error)?;
     if owner_id == auth.entity_id {

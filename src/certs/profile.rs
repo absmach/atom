@@ -7,10 +7,13 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 const PROFILE_COLUMNS: &str = r#"
     id,
@@ -255,7 +258,7 @@ pub async fn resolve_for_subject(
 /// override and its platform ceiling are read through the caller's existing
 /// connection, so a constrained pool cannot deadlock on a nested acquire.
 pub async fn resolve_for_subject_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     subject: &StoredSubject,
     name: &str,
 ) -> Result<CertificateProfile, AppError> {
@@ -272,12 +275,12 @@ pub async fn resolve_for_subject_in_tx(
     let row = sqlx::query_as::<_, ProfileRow>(&query)
         .bind(name)
         .bind(subject.tenant_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.as_postgres_mut())
         .await
         .map_err(db_err)?;
     let profile = CertificateProfile::try_from(row)?;
     if let Some(base_profile_id) = profile.base_profile_id {
-        let base = profile_by_id(&mut **tx, base_profile_id).await?;
+        let base = profile_by_id(tx.as_postgres_mut(), base_profile_id).await?;
         validate_override(&profile, &base)?;
     }
     Ok(profile)

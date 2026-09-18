@@ -88,7 +88,10 @@ pub async fn provision_tenant_issuer(
 ) -> AuthorityRecord {
     bootstrap_root_and_platform_intermediate(pool, config, root).await;
 
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     let mut provisioned =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
             .await
@@ -157,7 +160,10 @@ pub async fn rotate_tenant_issuer(
     .await
     .unwrap();
 
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     let mut provisioned =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
             .await
@@ -176,7 +182,10 @@ pub async fn rotate_tenant_issuer(
 
 /// Import a root PEM as the managed trust anchor.
 async fn bootstrap_root(pool: &PgPool, root: &TestRoot) -> AuthorityRecord {
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     let mut outcome = provisioning::import_root_mutation_in_tx(&mut tx, &root.pem)
         .await
         .unwrap();
@@ -193,7 +202,10 @@ async fn bootstrap_root_and_platform_intermediate(pool: &PgPool, config: &Config
 
     let (cert_pem, pkcs8_pem) =
         sign_platform_intermediate("Atom Platform Intermediate CA v1", root);
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     let mut outcome = provisioning::import_platform_intermediate_mutation_in_tx(
         &mut tx,
         &config.pki_ca_keys,
@@ -282,7 +294,10 @@ async fn insert_active_signing_authority(
     let ca_keys = &config.pki_ca_keys;
     let provider = ManagedAuthorityKeyProvider::for_provisioning(ca_keys).unwrap();
 
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = atom::db::Database::from(pool.clone())
+        .begin()
+        .await
+        .unwrap();
     let version = atom::certs::authority::repo::next_authority_version(&mut tx, kind, tenant_id)
         .await
         .unwrap();
