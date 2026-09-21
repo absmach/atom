@@ -29,7 +29,7 @@ fn slug(prefix: &str) -> String {
     format!("{prefix}-{}", &id[..12])
 }
 
-async fn make_tenant(pool: &sqlx::PgPool, alias: &str) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database, alias: &str) -> Uuid {
     tenant_repo::create_tenant(
         pool,
         CreateTenant {
@@ -319,12 +319,12 @@ async fn database_rejects_uuid_shaped_aliases() {
     let uuid_alias = "465358f9-07f4-4ea0-8cbb-2abc654442bd";
 
     for result in [
-        sqlx::query("INSERT INTO tenants (name, alias) VALUES ($1, $2)")
+        atom::db::query("INSERT INTO tenants (name, alias) VALUES ($1, $2)")
             .bind(slug("bad-tenant"))
             .bind(uuid_alias)
             .execute(&p)
             .await,
-        sqlx::query(
+        atom::db::query(
             "INSERT INTO entities (kind, name, alias, tenant_id) \
              VALUES ('device', $1, $2, $3)",
         )
@@ -333,7 +333,7 @@ async fn database_rejects_uuid_shaped_aliases() {
         .bind(tenant_id)
         .execute(&p)
         .await,
-        sqlx::query(
+        atom::db::query(
             "INSERT INTO resources (kind, name, alias, tenant_id) \
              VALUES ('resource:channel', $1, $2, $3)",
         )
@@ -344,11 +344,10 @@ async fn database_rejects_uuid_shaped_aliases() {
         .await,
     ] {
         let err = result.expect_err("UUID-shaped alias must violate a CHECK constraint");
-        let code = err
-            .as_database_error()
-            .and_then(|db| db.code())
-            .map(|code| code.into_owned());
-        assert_eq!(code.as_deref(), Some("23514"));
+        assert!(
+            atom::error::is_check_violation(&err),
+            "expected a CHECK violation, got {err}"
+        );
     }
 }
 

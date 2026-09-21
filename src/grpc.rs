@@ -391,7 +391,7 @@ impl AuthService for AtomAuth {
 // The caller is a Tonic service implementation and must propagate `Status`.
 #[allow(clippy::result_large_err)]
 async fn require_credential_auth_access(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), Status> {

@@ -7,7 +7,7 @@
 //! The table name is looked up in a closed static match, not interpolated,
 //! so a caller cannot inject arbitrary SQL.
 
-use sqlx::PgPool;
+use crate::db::Database;
 use uuid::Uuid;
 
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
 /// - `Err(AppError::conflict)` — the row is stamped `managed_by='config'`;
 ///   the operator must edit the YAML and restart Atom.
 pub async fn ensure_not_config_managed(
-    pool: &PgPool,
+    pool: &Database,
     table: &'static str,
     id: Uuid,
 ) -> Result<(), AppError> {

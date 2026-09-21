@@ -1,5 +1,5 @@
+use crate::db::Database;
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -69,7 +69,7 @@ fn profile_fields_only(req: &UpdateEntity) -> bool {
 /// administrative fields (`kind`, tenant/profile binding, status, external id,
 /// alias) can never use this path.
 pub(crate) async fn try_update(
-    pool: &PgPool,
+    pool: &Database,
     cache: Option<&crate::cache::CacheClient>,
     events_enabled: bool,
     auth: &AuthContext,

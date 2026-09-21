@@ -36,7 +36,7 @@ fn defaults(names: &[&str]) -> BootstrapConfig {
     }
 }
 
-async fn create_test_tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn create_test_tenant(pool: &atom::db::Database) -> Uuid {
     create_tenant(
         pool,
         CreateTenant {
@@ -53,8 +53,8 @@ async fn create_test_tenant(pool: &sqlx::PgPool) -> Uuid {
     .id
 }
 
-async fn tenant_admin_has(pool: &sqlx::PgPool, tenant_id: Uuid, capability: &str) -> bool {
-    sqlx::query_scalar(
+async fn tenant_admin_has(pool: &atom::db::Database, tenant_id: Uuid, capability: &str) -> bool {
+    atom::db::query_scalar(
         r#"SELECT EXISTS (
                SELECT 1
                FROM roles r
@@ -95,7 +95,7 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
         .expect("idempotent reapply");
     assert!(tenant_admin_has(&pool, existing_tenant, &capability).await);
 
-    let shared_block: Uuid = sqlx::query_scalar(
+    let shared_block: Uuid = atom::db::query_scalar(
         r#"SELECT rpb.permission_block_id
            FROM roles r
            JOIN role_permission_blocks rpb ON rpb.role_id = r.id
@@ -108,14 +108,14 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
     .await
     .expect("system tenant-admin block");
     let other_role = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(other_role)
         .bind(format!("shared-block-role-{}", Uuid::new_v4()))
         .bind(existing_tenant)
         .execute(&pool)
         .await
         .expect("create role sharing old block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
     )
     .bind(other_role)
@@ -130,7 +130,7 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
         .expect("replace tenant defaults");
     assert!(tenant_admin_has(&pool, existing_tenant, &replacement_capability).await);
     assert!(!tenant_admin_has(&pool, existing_tenant, &capability).await);
-    let shared_block_gained_replacement: bool = sqlx::query_scalar(
+    let shared_block_gained_replacement: bool = atom::db::query_scalar(
         r#"SELECT EXISTS (
                SELECT 1 FROM permission_block_actions pba
                JOIN actions a ON a.id = pba.action_id
@@ -200,7 +200,7 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
     apply(&pool, &signing_keys, &denied_cfg)
         .await
         .expect("install tenant-admin default");
-    sqlx::query(
+    atom::db::query(
         r#"
         INSERT INTO action_assignment_rules
             (entity_kind, action_name, object_kind, decision, is_absolute)

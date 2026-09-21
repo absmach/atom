@@ -1,5 +1,5 @@
+use crate::db::Database;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -248,7 +248,7 @@ pub async fn authority_metrics(
 }
 
 pub async fn selector_tenant_id(
-    pool: &PgPool,
+    pool: &Database,
     selector: BulkRevocationSelector,
 ) -> Result<Option<Uuid>, AppError> {
     match selector {
@@ -280,7 +280,7 @@ pub async fn selector_tenant_id(
 /// Database-clock cutoff used to freeze the membership of a paginated bulk
 /// operation. Credential creation also uses the database clock, avoiding
 /// process/DB clock skew at the page boundary.
-pub async fn bulk_snapshot_at(pool: &PgPool) -> Result<DateTime<Utc>, AppError> {
+pub async fn bulk_snapshot_at(pool: &Database) -> Result<DateTime<Utc>, AppError> {
     crate::db::query_scalar("SELECT clock_timestamp()")
         .fetch_one(pool)
         .await
@@ -288,7 +288,7 @@ pub async fn bulk_snapshot_at(pool: &PgPool) -> Result<DateTime<Utc>, AppError> 
 }
 
 pub async fn bulk_candidates(
-    pool: &PgPool,
+    pool: &Database,
     selector: BulkRevocationSelector,
     after: Option<Uuid>,
     snapshot_at: &DateTime<Utc>,

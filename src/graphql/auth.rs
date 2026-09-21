@@ -200,15 +200,15 @@ fn parse_login_credential_kind(value: &str) -> Result<CredentialKind> {
 
 pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {
     match &err {
-        AppError::Database(sqlx::Error::Database(db)) => match db.code().as_deref() {
-            Some("23505") => async_graphql::Error::new("already exists"),
-            Some("23503") => async_graphql::Error::new("invalid reference"),
-            Some("23514") => async_graphql::Error::new("invalid value"),
-            Some(_) | None => {
-                tracing::error!("db error: {}", db);
-                async_graphql::Error::new("database error")
-            }
-        },
+        AppError::Database(e) if crate::error::is_unique_violation(e) => {
+            async_graphql::Error::new("already exists")
+        }
+        AppError::Database(e) if crate::error::is_foreign_key_violation(e) => {
+            async_graphql::Error::new("invalid reference")
+        }
+        AppError::Database(e) if crate::error::is_check_violation(e) => {
+            async_graphql::Error::new("invalid value")
+        }
         AppError::Database(e) => {
             tracing::error!("db error: {}", e);
             async_graphql::Error::new("database error")
@@ -242,7 +242,7 @@ pub(crate) fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {
 }
 
 pub(crate) async fn require_any_capability(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     checks: &[(&str, Scope)],
 ) -> Result<()> {
@@ -260,7 +260,7 @@ pub(crate) async fn require_any_capability(
 // Keeping the logic in crate::auth avoids a divergent second copy.
 
 pub(crate) async fn require_list_access(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
@@ -270,7 +270,7 @@ pub(crate) async fn require_list_access(
 }
 
 pub(crate) async fn require_read_access(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
     object_id: Uuid,
@@ -281,7 +281,7 @@ pub(crate) async fn require_read_access(
 }
 
 pub(crate) async fn require_role_read(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
@@ -291,7 +291,7 @@ pub(crate) async fn require_role_read(
 }
 
 pub(crate) async fn require_policy_read(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
@@ -300,7 +300,10 @@ pub(crate) async fn require_policy_read(
         .map_err(gql_error)
 }
 
-pub(crate) async fn require_explain_access(pool: &sqlx::PgPool, auth: &AuthContext) -> Result<()> {
+pub(crate) async fn require_explain_access(
+    pool: &crate::db::Database,
+    auth: &AuthContext,
+) -> Result<()> {
     crate::auth::require_explain_access(pool, auth)
         .await
         .map_err(gql_error)

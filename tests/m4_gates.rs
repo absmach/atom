@@ -28,16 +28,16 @@ use common::pool;
 use serde_json::json;
 use uuid::Uuid;
 
-async fn manage_capability_id(pool: &sqlx::PgPool) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
+async fn manage_capability_id(pool: &atom::db::Database) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
         .fetch_one(pool)
         .await
         .expect("manage cap")
 }
 
-async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("gate-tenant-{id}"))
         .execute(pool)
@@ -46,9 +46,9 @@ async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
     id
 }
 
-async fn make_human(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+async fn make_human(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')",
     )
     .bind(id)
@@ -60,7 +60,7 @@ async fn make_human(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
     id
 }
 
-async fn make_principal_group(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+async fn make_principal_group(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     atom::identity::repo::create_group(
         pool,
         CreateGroup {
@@ -79,13 +79,17 @@ async fn make_principal_group(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
 
 /// Create a tenant-scoped role carrying a single unconditional block (the given
 /// effect) for `manage`, and return the role id.
-async fn role_with_manage_block(pool: &sqlx::PgPool, tenant_id: Uuid, effect: Effect) -> Uuid {
+async fn role_with_manage_block(
+    pool: &atom::db::Database,
+    tenant_id: Uuid,
+    effect: Effect,
+) -> Uuid {
     role_with_manage_block_cond(pool, tenant_id, effect, json!({})).await
 }
 
 /// As [`role_with_manage_block`], but with explicit ABAC `conditions` on the block.
 async fn role_with_manage_block_cond(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     effect: Effect,
     conditions: serde_json::Value,
@@ -128,39 +132,39 @@ async fn role_with_manage_block_cond(
 /// Best-effort tidy of the rows this suite creates. Ordered so member/hierarchy
 /// rows go before the groups they reference; role/block links are removed by the
 /// role cascade. Each statement is independent so a residual FK can't abort the rest.
-async fn cleanup(pool: &sqlx::PgPool, tenant_id: Uuid) {
-    let _ = sqlx::query("DELETE FROM role_assignments WHERE tenant_id = $1")
+async fn cleanup(pool: &atom::db::Database, tenant_id: Uuid) {
+    let _ = atom::db::query("DELETE FROM role_assignments WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM direct_policies WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query(
+    let _ = atom::db::query(
         "DELETE FROM principal_group_members pgm USING principal_groups g \
          WHERE pgm.group_id = g.id AND g.tenant_id = $1",
     )
     .bind(tenant_id)
     .execute(pool)
     .await;
-    let _ = sqlx::query("DELETE FROM principal_group_hierarchy WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM principal_group_hierarchy WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM principal_groups WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM principal_groups WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM roles WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM roles WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM entities WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
@@ -268,7 +272,12 @@ async fn role_with_only_deny_block_does_not_satisfy_gate() {
     cleanup(&p, tenant_id).await;
 }
 
-async fn assign_role_to_entity(pool: &sqlx::PgPool, tenant_id: Uuid, actor: Uuid, role: Uuid) {
+async fn assign_role_to_entity(
+    pool: &atom::db::Database,
+    tenant_id: Uuid,
+    actor: Uuid,
+    role: Uuid,
+) {
     atom::authz::repo::create_role_assignment(
         pool,
         CreateRoleAssignment {
@@ -350,19 +359,22 @@ async fn object_gate_honours_assignment_tenant_boundary() {
 
     // Object: a channel in owner_tenant.
     let object_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
-        .bind(object_id)
-        .bind(format!("gate-obj-{object_id}"))
-        .bind(owner_tenant)
-        .execute(&p)
-        .await
-        .expect("insert resource");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+    )
+    .bind(object_id)
+    .bind(format!("gate-obj-{object_id}"))
+    .bind(owner_tenant)
+    .execute(&p)
+    .await
+    .expect("insert resource");
 
-    let read_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-        .fetch_one(&p)
-        .await
-        .expect("read cap");
-    let block_id: Uuid = sqlx::query_scalar(
+    let read_id: Uuid =
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+            .fetch_one(&p)
+            .await
+            .expect("read cap");
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
            VALUES ('object', $1, 'allow', '{}') RETURNING id"#,
     )
@@ -370,7 +382,7 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     .fetch_one(&p)
     .await
     .expect("insert object block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -379,7 +391,7 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     .await
     .expect("block action");
     // Assignment bounded to other_tenant — not the object's owner.
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -398,7 +410,7 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     );
 
     // Control: rebind the assignment to the object's owning tenant → now valid.
-    sqlx::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
+    atom::db::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
         .bind(owner_tenant)
         .bind(block_id)
         .execute(&p)
@@ -411,7 +423,7 @@ async fn object_gate_honours_assignment_tenant_boundary() {
         "an object grant bounded to the object's tenant must satisfy the gate"
     );
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(object_id)
         .execute(&p)
         .await;
@@ -431,20 +443,23 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     let tenant_id = make_tenant(&p).await;
     let actor = make_human(&p, tenant_id).await;
     let object_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
-        .bind(object_id)
-        .bind(format!("gate-obj-{object_id}"))
-        .bind(tenant_id)
-        .execute(&p)
-        .await
-        .expect("insert resource");
-    let read_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-        .fetch_one(&p)
-        .await
-        .expect("read cap");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+    )
+    .bind(object_id)
+    .bind(format!("gate-obj-{object_id}"))
+    .bind(tenant_id)
+    .execute(&p)
+    .await
+    .expect("insert resource");
+    let read_id: Uuid =
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+            .fetch_one(&p)
+            .await
+            .expect("read cap");
 
     // Tenant-wide read allow.
-    let allow_block: Uuid = sqlx::query_scalar(
+    let allow_block: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions)
            VALUES ('tenant', $1, 'allow', '{}') RETURNING id"#,
     )
@@ -453,7 +468,7 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     .await
     .expect("allow block");
     // Exact-object read deny.
-    let deny_block: Uuid = sqlx::query_scalar(
+    let deny_block: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
            VALUES ('object', $1, 'deny', '{}') RETURNING id"#,
     )
@@ -462,7 +477,7 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     .await
     .expect("deny block");
     for block in [allow_block, deny_block] {
-        sqlx::query(
+        atom::db::query(
             "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
         )
         .bind(block)
@@ -470,7 +485,7 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
         .execute(&p)
         .await
         .expect("block action");
-        sqlx::query(
+        atom::db::query(
             r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
                VALUES ($1, 'entity', $2, $3)"#,
         )
@@ -490,7 +505,7 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     );
 
     // Control: drop the object deny; the tenant-wide allow alone grants read.
-    sqlx::query("DELETE FROM direct_policies WHERE permission_block_id = $1")
+    atom::db::query("DELETE FROM direct_policies WHERE permission_block_id = $1")
         .bind(deny_block)
         .execute(&p)
         .await
@@ -502,7 +517,7 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
         "the tenant-wide read allow alone must satisfy the read gate"
     );
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(object_id)
         .execute(&p)
         .await;

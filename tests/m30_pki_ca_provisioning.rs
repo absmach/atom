@@ -1,6 +1,7 @@
 mod common;
 
 use async_graphql::Request as GraphqlRequest;
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     certs::authority::provisioning,
@@ -13,7 +14,6 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, KeyIdMethod, KeyPair, KeyUsagePurpose,
 };
 use serde_json::Value;
-use sqlx::PgPool;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::prelude::FromDer;
@@ -63,7 +63,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
         .parse()
         .expect("authority UUID");
 
-    let audit_details: Value = sqlx::query_scalar(
+    let audit_details: Value = atom::db::query_scalar(
         "SELECT details FROM audit_logs WHERE event = 'pki.authority.provisioning_started' AND target_id = $1",
     )
     .bind(authority_id)
@@ -74,7 +74,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
     assert!(audit_details.get("csr_pem").is_none());
     assert!(audit_details.get("key_reference").is_none());
 
-    let outbox_payload: Value = sqlx::query_scalar(
+    let outbox_payload: Value = atom::db::query_scalar(
         "SELECT payload FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1",
     )
     .bind(authority_id)
@@ -115,7 +115,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
         authority_id.to_string()
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
+        atom::db::query_scalar::<i64>(
             "SELECT count(*) FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1",
         )
         .bind(authority_id)
@@ -126,7 +126,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
         "an idempotent replay must not publish another lifecycle transition"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
+        atom::db::query_scalar::<i64>(
             "SELECT count(*) FROM audit_logs WHERE event = 'pki.authority.provisioning_replayed' AND target_id = $1",
         )
         .bind(authority_id)
@@ -152,18 +152,15 @@ fn test_root(common_name: &str, starts_in_days: i64, lasts_days: i64) -> TestRoo
     TestRoot { params, key, pem }
 }
 
-async fn import_root(pool: &PgPool, pem: &str) {
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .unwrap();
+async fn import_root(pool: &Database, pem: &str) {
+    let mut tx = pool.clone().begin().await.unwrap();
     provisioning::import_root_in_tx(&mut tx, pem).await.unwrap();
     tx.commit().await.unwrap();
 }
 
-async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
+async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("{prefix}-{id}"))
         .execute(pool)
@@ -172,7 +169,7 @@ async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
     id
 }
 
-fn graphql_state(pool: PgPool) -> AppState {
+fn graphql_state(pool: Database) -> AppState {
     let mut config = Config::for_tests();
     config.events.amqp_url = Some("amqp://unused-in-this-test".to_string());
     let primary = LoadedKey {

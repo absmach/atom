@@ -12,20 +12,22 @@ use common::pool;
 use serde_json::json;
 use uuid::Uuid;
 
-async fn human(pool: &sqlx::PgPool) -> Uuid {
+async fn human(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')")
-        .bind(id)
-        .bind(format!("m5-human-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert human");
+    atom::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')",
+    )
+    .bind(id)
+    .bind(format!("m5-human-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert human");
     id
 }
 
-async fn device(pool: &sqlx::PgPool) -> Uuid {
+async fn device(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'device', $2, 'active')",
     )
     .bind(id)
@@ -36,7 +38,7 @@ async fn device(pool: &sqlx::PgPool) -> Uuid {
     id
 }
 
-async fn create_tenant(pool: &sqlx::PgPool, creator_id: Uuid) -> Uuid {
+async fn create_tenant(pool: &atom::db::Database, creator_id: Uuid) -> Uuid {
     atom::tenants::repo::create_tenant(
         pool,
         CreateTenant {
@@ -60,14 +62,15 @@ async fn tenant_creation_bootstraps_admin_role_capabilities_binding_and_membersh
     let creator = human(&p).await;
     let tenant_id = create_tenant(&p, creator).await;
 
-    let role_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM roles WHERE tenant_id = $1 AND name = 'tenant-admin'")
-            .bind(tenant_id)
-            .fetch_one(&p)
-            .await
-            .expect("tenant-admin role");
+    let role_id: Uuid = atom::db::query_scalar(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'tenant-admin'",
+    )
+    .bind(tenant_id)
+    .fetch_one(&p)
+    .await
+    .expect("tenant-admin role");
 
-    let capabilities: Vec<String> = sqlx::query_scalar(
+    let capabilities: Vec<String> = atom::db::query_scalar(
         r#"SELECT DISTINCT c.name
            FROM role_permission_blocks rpb
            JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
@@ -95,7 +98,7 @@ async fn tenant_creation_bootstraps_admin_role_capabilities_binding_and_membersh
     );
     assert!(!capabilities.iter().any(|c| c == "tenant.manage"));
 
-    let binding_count: i64 = sqlx::query_scalar(
+    let binding_count: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM role_assignments
            WHERE tenant_id = $1
@@ -111,7 +114,7 @@ async fn tenant_creation_bootstraps_admin_role_capabilities_binding_and_membersh
     .expect("binding count");
     assert_eq!(binding_count, 1);
 
-    let membership_count: i64 = sqlx::query_scalar(
+    let membership_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = $1 AND entity_id = $2 AND status = 'active'",
     )
     .bind(tenant_id)
@@ -129,7 +132,7 @@ async fn non_human_creator_gets_binding_but_no_tenant_membership() {
     let creator = device(&p).await;
     let tenant_id = create_tenant(&p, creator).await;
 
-    let binding_count: i64 = sqlx::query_scalar(
+    let binding_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM role_assignments WHERE tenant_id = $1 AND subject_id = $2",
     )
     .bind(tenant_id)
@@ -139,7 +142,7 @@ async fn non_human_creator_gets_binding_but_no_tenant_membership() {
     .expect("binding count");
     assert_eq!(binding_count, 1);
 
-    let membership_count: i64 = sqlx::query_scalar(
+    let membership_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = $1 AND entity_id = $2",
     )
     .bind(tenant_id)

@@ -11,12 +11,12 @@
 
 mod common;
 
+use atom::db::Database;
 use atom::{
     authz::repo as authz_repo, error::AppError, identity::repo as identity_repo,
     tenants::repo as tenant_repo,
 };
 use common::pool;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn assert_config_conflict(err: AppError) {
@@ -29,9 +29,9 @@ fn assert_config_conflict(err: AppError) {
     }
 }
 
-async fn tenant(pool: &PgPool) -> Uuid {
+async fn tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("m47-tenant-{id}"))
         .execute(pool)
@@ -40,9 +40,9 @@ async fn tenant(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn entity(pool: &PgPool, tenant_id: Uuid) -> Uuid {
+async fn entity(pool: &Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) \
          VALUES ($1, 'service', $2, $3, 'active')",
     )
@@ -55,21 +55,23 @@ async fn entity(pool: &PgPool, tenant_id: Uuid) -> Uuid {
     id
 }
 
-async fn resource(pool: &PgPool, tenant_id: Uuid) -> Uuid {
+async fn resource(pool: &Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)")
-        .bind(id)
-        .bind(format!("m47-resource-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)",
+    )
+    .bind(id)
+    .bind(format!("m47-resource-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
-async fn principal_group(pool: &PgPool, tenant_id: Uuid, managed: bool) -> Uuid {
+async fn principal_group(pool: &Database, tenant_id: Uuid, managed: bool) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO principal_groups (id, name, tenant_id, managed_by)
            VALUES ($1, $2, $3, $4)"#,
     )
@@ -83,9 +85,9 @@ async fn principal_group(pool: &PgPool, tenant_id: Uuid, managed: bool) -> Uuid 
     id
 }
 
-async fn object_group(pool: &PgPool, tenant_id: Uuid, managed: bool) -> Uuid {
+async fn object_group(pool: &Database, tenant_id: Uuid, managed: bool) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO object_groups (id, name, tenant_id, managed_by)
            VALUES ($1, $2, $3, $4)"#,
     )
@@ -99,9 +101,9 @@ async fn object_group(pool: &PgPool, tenant_id: Uuid, managed: bool) -> Uuid {
     id
 }
 
-async fn role(pool: &PgPool, managed: bool) -> Uuid {
+async fn role(pool: &Database, managed: bool) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name, managed_by) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO roles (id, name, managed_by) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(format!("m47-role-{id}"))
         .bind(managed.then_some("config"))
@@ -111,9 +113,9 @@ async fn role(pool: &PgPool, managed: bool) -> Uuid {
     id
 }
 
-async fn permission_block(pool: &PgPool, managed: bool) -> Uuid {
+async fn permission_block(pool: &Database, managed: bool) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO permission_blocks (id, scope_mode, effect, managed_by)
            VALUES ($1, 'platform', 'allow', $2)"#,
     )
@@ -125,9 +127,9 @@ async fn permission_block(pool: &PgPool, managed: bool) -> Uuid {
     id
 }
 
-async fn action(pool: &PgPool) -> Uuid {
+async fn action(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("m47.action.{id}"))
         .execute(pool)
@@ -158,7 +160,7 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
         .await
         .expect("API-owned principal membership can be removed");
 
-    sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
         .bind(config_principal)
         .bind(entity_id)
         .execute(&p)
@@ -172,7 +174,7 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
     identity_repo::add_group_member(&p, api_principal, entity_id)
         .await
         .expect("restore API principal membership for bulk-clear test");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')",
     )
     .bind(tenant_id)
@@ -185,7 +187,7 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
             .await
             .expect_err("tenant-member bulk clear must honor config group ownership"),
     );
-    let principal_links: Vec<Uuid> = sqlx::query_scalar(
+    let principal_links: Vec<Uuid> = atom::db::query_scalar(
         "SELECT group_id FROM principal_group_members WHERE entity_id = $1 ORDER BY group_id",
     )
     .bind(entity_id)
@@ -201,7 +203,7 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
     // The same tenant-member operation clears direct role assignments. A
     // config-stamped assignment is an independently protected link even after
     // no config-owned group membership remains.
-    sqlx::query("DELETE FROM principal_group_members WHERE group_id = $1 AND entity_id = $2")
+    atom::db::query("DELETE FROM principal_group_members WHERE group_id = $1 AND entity_id = $2")
         .bind(config_principal)
         .bind(entity_id)
         .execute(&p)
@@ -209,14 +211,14 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
         .expect("remove test-only config group edge directly");
     let managed_role = Uuid::new_v4();
     let managed_assignment = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(managed_role)
         .bind(format!("m47-tenant-role-{managed_role}"))
         .bind(tenant_id)
         .execute(&p)
         .await
         .expect("insert tenant role");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO role_assignments
              (id, tenant_id, subject_kind, subject_id, role_id, managed_by)
            VALUES ($1, $2, 'entity', $3, $4, 'config')"#,
@@ -234,7 +236,7 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
             .expect_err("tenant-member bulk clear must honor config role assignment ownership"),
     );
     let assignment_still_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM role_assignments WHERE id = $1)")
+        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM role_assignments WHERE id = $1)")
             .bind(managed_assignment)
             .fetch_one(&p)
             .await
@@ -251,7 +253,7 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
     identity_repo::add_entity_to_object_group(&p, entity_id, api_object)
         .await
         .expect("API-owned object membership remains mutable");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO object_group_entities (group_id, entity_id, tenant_id)
            VALUES ($1, $2, $3)"#,
     )
@@ -287,7 +289,7 @@ async fn config_owned_memberships_reject_api_drift_and_clear_is_atomic() {
     authz_repo::add_resource_to_object_group(&p, resource_id, api_object)
         .await
         .expect("API-owned resource membership remains mutable");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
            VALUES ($1, $2, $3)"#,
     )
@@ -322,7 +324,7 @@ async fn hierarchy_role_and_action_links_honor_their_config_owner() {
             .await
             .expect_err("a config-owned child parent edge is read-only"),
     );
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id)
            VALUES ($1, $2, $3)"#,
     )
@@ -351,7 +353,7 @@ async fn hierarchy_role_and_action_links_honor_their_config_owner() {
     let api_role = role(&p, false).await;
     let old_block = permission_block(&p, false).await;
     let new_block = permission_block(&p, false).await;
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
     )
     .bind(config_role)
@@ -364,7 +366,7 @@ async fn hierarchy_role_and_action_links_honor_their_config_owner() {
             .await
             .expect_err("a config-owned role link set is read-only"),
     );
-    let retained: Vec<Uuid> = sqlx::query_scalar(
+    let retained: Vec<Uuid> = atom::db::query_scalar(
         "SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1",
     )
     .bind(config_role)
@@ -378,7 +380,7 @@ async fn hierarchy_role_and_action_links_honor_their_config_owner() {
 
     let config_block = permission_block(&p, true).await;
     let config_action = action(&p).await;
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(config_block)
@@ -399,7 +401,7 @@ async fn hierarchy_role_and_action_links_honor_their_config_owner() {
 
     let api_block = permission_block(&p, false).await;
     let api_action = action(&p).await;
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(api_block)
@@ -423,19 +425,19 @@ async fn api_membership_waits_for_concurrent_bootstrap_stamp_and_then_conflicts(
     // Model the final bootstrap ownership step while holding the canonical
     // tenant -> group order. The marker is uncommitted when the API starts.
     let mut bootstrap_tx = p.begin().await.expect("begin bootstrap-like tx");
-    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+    atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(&mut *bootstrap_tx)
+        .fetch_one(&mut bootstrap_tx)
         .await
         .expect("lock tenant");
-    sqlx::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
+    atom::db::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
         .bind(group_id)
-        .fetch_one(&mut *bootstrap_tx)
+        .fetch_one(&mut bootstrap_tx)
         .await
         .expect("lock group");
-    sqlx::query("UPDATE principal_groups SET managed_by = 'config' WHERE id = $1")
+    atom::db::query("UPDATE principal_groups SET managed_by = 'config' WHERE id = $1")
         .bind(group_id)
-        .execute(&mut *bootstrap_tx)
+        .execute(&mut bootstrap_tx)
         .await
         .expect("stage config ownership stamp");
 
@@ -457,7 +459,7 @@ async fn api_membership_waits_for_concurrent_bootstrap_stamp_and_then_conflicts(
             .expect("join API mutation")
             .expect_err("API must re-read ownership after waiting"),
     );
-    let linked: bool = sqlx::query_scalar(
+    let linked: bool = atom::db::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM principal_group_members WHERE group_id = $1 AND entity_id = $2)",
     )
     .bind(group_id)

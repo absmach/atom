@@ -8,6 +8,7 @@
 mod common;
 
 use async_graphql::Request;
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     config::Config,
@@ -21,10 +22,9 @@ use atom::{
     state::AppState,
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn state(pool: PgPool) -> AppState {
+async fn state(pool: Database) -> AppState {
     let config = Config::for_tests();
     keys::bootstrap_if_needed(&pool, &config.signing_keys)
         .await
@@ -53,22 +53,24 @@ fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
     })
 }
 
-async fn create_human(pool: &PgPool) -> (Uuid, String) {
+async fn create_human(pool: &Database) -> (Uuid, String) {
     let id = Uuid::new_v4();
     let name = format!("graphql-human-{id}");
-    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')")
-        .bind(id)
-        .bind(&name)
-        .execute(pool)
-        .await
-        .expect("insert human");
+    atom::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')",
+    )
+    .bind(id)
+    .bind(&name)
+    .execute(pool)
+    .await
+    .expect("insert human");
     (id, name)
 }
 
-async fn create_device(pool: &PgPool) -> Uuid {
+async fn create_device(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
     let name = format!("graphql-device-{id}");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'device', $2, 'active')",
     )
     .bind(id)
@@ -79,8 +81,8 @@ async fn create_device(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn seeded_client_profile(pool: &PgPool) -> Uuid {
-    sqlx::query_scalar(
+async fn seeded_client_profile(pool: &Database) -> Uuid {
+    atom::db::query_scalar(
         "SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL",
     )
     .fetch_one(pool)
@@ -88,7 +90,7 @@ async fn seeded_client_profile(pool: &PgPool) -> Uuid {
     .expect("seeded client profile")
 }
 
-async fn profile_with_schema(pool: &PgPool, json_schema: Value) -> Uuid {
+async fn profile_with_schema(pool: &Database, json_schema: Value) -> Uuid {
     let suffix = Uuid::new_v4();
     let profile = profile_repo::create_profile(
         pool,
@@ -121,8 +123,8 @@ async fn profile_with_schema(pool: &PgPool, json_schema: Value) -> Uuid {
     profile.id
 }
 
-async fn delete_tenant_row(pool: &PgPool, tenant_id: Uuid) {
-    let _ = sqlx::query_as::<_, Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at")
+async fn delete_tenant_row(pool: &Database, tenant_id: Uuid) {
+    let _ = atom::db::query_as::<Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at")
         .bind(tenant_id)
         .fetch_optional(pool)
         .await;
@@ -253,7 +255,7 @@ async fn change_own_password_requires_current_password() {
         "{:?}",
         wrong_current.errors
     );
-    let failure_count: i64 = sqlx::query_scalar(
+    let failure_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM event_outbox
          WHERE event = 'credential.create'
            AND payload->>'outcome' = 'deny'
@@ -327,7 +329,7 @@ async fn change_own_password_rejects_config_managed_password() {
     let managed_password = "managed-password-123";
     let managed_hash = service::hash_secret(managed_password.as_bytes()).expect("hash password");
     let managed_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
          VALUES ($1, $2, 'password', $3, 'config')",
     )
@@ -338,10 +340,7 @@ async fn change_own_password_rejects_config_managed_password() {
     .await
     .expect("insert managed password");
 
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .expect("begin transaction");
+    let mut tx = pool.clone().begin().await.expect("begin transaction");
     let err = service::change_own_password_in_tx(
         &mut tx,
         entity_id,
@@ -353,13 +352,13 @@ async fn change_own_password_rejects_config_managed_password() {
     assert!(matches!(err, atom::error::AppError::Conflict(_)));
     tx.rollback().await.expect("roll back password change");
 
-    let status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+    let status: String = atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
         .bind(managed_id)
         .fetch_one(&pool)
         .await
         .expect("managed password status");
     assert_eq!(status, "active");
-    let active_count: i64 = sqlx::query_scalar(
+    let active_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
     .bind(entity_id)
@@ -412,7 +411,7 @@ async fn refresh_session_mutation_extends_current_session() {
     assert!(refresh["expiresAt"].as_str().is_some());
 
     let refreshed_expires_at: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id = $1")
+        atom::db::query_scalar("SELECT expires_at FROM sessions WHERE id = $1")
             .bind(session.id)
             .fetch_one(&pool)
             .await
@@ -494,7 +493,7 @@ async fn login_mutation_accepts_entity_uuid_identifier() {
 async fn login_mutation_accepts_email_attribute_for_admin_created_password() {
     let pool = common::pool().await;
     let tenant_id: Uuid =
-        sqlx::query_scalar("INSERT INTO tenants (name, alias) VALUES ($1, $2) RETURNING id")
+        atom::db::query_scalar("INSERT INTO tenants (name, alias) VALUES ($1, $2) RETURNING id")
             .bind(format!("graphql-login-tenant-{}", Uuid::new_v4()))
             .bind(format!("login-{}", Uuid::new_v4().simple()))
             .fetch_one(&pool)
@@ -503,7 +502,7 @@ async fn login_mutation_accepts_email_attribute_for_admin_created_password() {
     let entity_id = Uuid::new_v4();
     let name = format!("graphql-human-{entity_id}");
     let email = format!("{name}@example.test");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
            VALUES ($1, 'human', $2, $3, 'active', $4)"#,
     )
@@ -551,7 +550,7 @@ async fn login_mutation_accepts_canonical_email_with_unqualified_password() {
     let pool = common::pool().await;
     let (entity_id, name) = create_human(&pool).await;
     let email = format!("{name}@example.test");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())",
     )
     .bind(Uuid::new_v4())

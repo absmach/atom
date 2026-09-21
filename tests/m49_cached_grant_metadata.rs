@@ -11,6 +11,7 @@ mod common;
 use std::sync::Arc;
 
 use async_graphql::Request;
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     authz::{engine, repo as authz_repo},
@@ -28,10 +29,9 @@ use atom::{
 };
 use common::{cache_client, pool};
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn state_with_cache(pool: PgPool) -> (AppState, Arc<CacheClient>) {
+async fn state_with_cache(pool: Database) -> (AppState, Arc<CacheClient>) {
     let config = Config::for_tests();
     let active_keys = atom::keys::rotate(&pool, &config.signing_keys)
         .await
@@ -57,9 +57,9 @@ fn authed(entity_id: Uuid, cache: Arc<CacheClient>, query: impl Into<String>) ->
     Request::new(query).data(auth_context(entity_id, cache))
 }
 
-async fn active_entity(pool: &PgPool) -> Uuid {
+async fn active_entity(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
     )
     .bind(id)
@@ -70,9 +70,9 @@ async fn active_entity(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn channel(pool: &PgPool) -> Uuid {
+async fn channel(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
+    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
         .bind(id)
         .bind(format!("m49-channel-{id}"))
         .execute(pool)
@@ -81,11 +81,12 @@ async fn channel(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn read_block(pool: &PgPool) -> Uuid {
-    let action_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("read action");
+async fn read_block(pool: &Database) -> Uuid {
+    let action_id: Uuid =
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .expect("read action");
     authz_repo::create_permission_block(
         pool,
         CreatePermissionBlock {
@@ -106,7 +107,7 @@ async fn read_block(pool: &PgPool) -> Uuid {
 }
 
 async fn explain_read(
-    pool: &PgPool,
+    pool: &Database,
     cache: Arc<CacheClient>,
     subject_id: Uuid,
     resource_id: Uuid,

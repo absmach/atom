@@ -21,11 +21,10 @@ use atom::models::policy::AuthzRequest;
 use atom::models::token::CreateSharedKey;
 use common::pool;
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-async fn count_active_credentials(pool: &sqlx::PgPool, entity_id: Uuid, kind: &str) -> i64 {
-    sqlx::query_scalar(
+async fn count_active_credentials(pool: &atom::db::Database, entity_id: Uuid, kind: &str) -> i64 {
+    atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active'",
     )
     .bind(entity_id)
@@ -35,21 +34,10 @@ async fn count_active_credentials(pool: &sqlx::PgPool, entity_id: Uuid, kind: &s
     .expect("count credentials")
 }
 
-async fn single_connection_pool() -> sqlx::PgPool {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .expect("single-connection bootstrap pool");
-    sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
-        .await
-        .expect("load migrations")
-        .run(&pool)
-        .await
-        .expect("apply migrations");
-    pool
+async fn single_connection_pool() -> atom::db::Database {
+    atom::db::testing::single_connection_database().await
 }
+
 fn credentials_config(human: Uuid, service: Uuid) -> BootstrapConfig {
     BootstrapConfig {
         entities: vec![
@@ -96,14 +84,14 @@ async fn bootstrap_creates_entities_and_credentials() {
         .await
         .expect("apply bootstrap");
 
-    let human_kind: String = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
+    let human_kind: String = atom::db::query_scalar("SELECT kind FROM entities WHERE id = $1")
         .bind(human)
         .fetch_one(&p)
         .await
         .expect("human entity exists");
     assert_eq!(human_kind, "human");
 
-    let service_kind: String = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
+    let service_kind: String = atom::db::query_scalar("SELECT kind FROM entities WHERE id = $1")
         .bind(service)
         .fetch_one(&p)
         .await
@@ -145,7 +133,7 @@ async fn bootstrap_is_idempotent() {
     apply(&p, &signing_keys, &cfg).await.expect("first apply");
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
-    let entity_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id = $1")
+    let entity_count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM entities WHERE id = $1")
         .bind(human)
         .fetch_one(&p)
         .await
@@ -183,7 +171,7 @@ async fn concurrent_identical_bootstrap_reconciles_each_credential_once() {
 
     assert_eq!(count_active_credentials(&p, human, "password").await, 1);
     assert_eq!(count_active_credentials(&p, service, "shared_key").await, 1);
-    let access_token_count: i64 = sqlx::query_scalar(
+    let access_token_count: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM credentials
            WHERE id = $1 AND entity_id = $2
@@ -221,7 +209,7 @@ async fn bootstrap_human_email_is_canonical_and_semantic_drift_is_rejected() {
 
     apply(&p, &signing_keys, &cfg).await.expect("first apply");
     let canonical: String =
-        sqlx::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
+        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
             .bind(human)
             .fetch_one(&p)
             .await
@@ -234,11 +222,12 @@ async fn bootstrap_human_email_is_canonical_and_semantic_drift_is_rejected() {
         .await
         .expect_err("semantic drift");
     assert!(err.to_string().contains("different semantics"));
-    let after: String = sqlx::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-        .bind(human)
-        .fetch_one(&p)
-        .await
-        .expect("canonical email after rerun");
+    let after: String =
+        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
+            .bind(human)
+            .fetch_one(&p)
+            .await
+            .expect("canonical email after rerun");
     assert_eq!(after, normalized_email);
 }
 
@@ -278,7 +267,7 @@ async fn bootstrap_duplicate_human_email_fails_without_inserting_second_entity()
         .expect_err("duplicate email must fail");
     assert!(err.to_string().contains("email"));
     let second_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM entities WHERE id = $1)")
+        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM entities WHERE id = $1)")
             .bind(second)
             .fetch_one(&p)
             .await
@@ -299,7 +288,7 @@ async fn bootstrap_does_not_clobber_existing_credentials() {
         .expect("first apply");
 
     let original_hash: String =
-        sqlx::query_scalar("SELECT secret_hash FROM credentials WHERE entity_id = $1")
+        atom::db::query_scalar("SELECT secret_hash FROM credentials WHERE entity_id = $1")
             .bind(human)
             .fetch_one(&p)
             .await
@@ -316,7 +305,7 @@ async fn bootstrap_does_not_clobber_existing_credentials() {
         .expect_err("credential drift must reject bootstrap");
 
     let after_hash: String =
-        sqlx::query_scalar("SELECT secret_hash FROM credentials WHERE entity_id = $1")
+        atom::db::query_scalar("SELECT secret_hash FROM credentials WHERE entity_id = $1")
             .bind(human)
             .fetch_one(&p)
             .await
@@ -349,7 +338,7 @@ async fn bootstrap_rejects_one_matching_and_one_drifted_active_singleton_credent
         (drift_password_id, "different-password-123"),
     ] {
         let hash = atom::identity::service::hash_secret(secret.as_bytes()).expect("hash password");
-        sqlx::query(
+        atom::db::query(
             "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
         )
         .bind(id)
@@ -365,7 +354,7 @@ async fn bootstrap_rejects_one_matching_and_one_drifted_active_singleton_credent
     ] {
         let hash =
             atom::identity::service::hash_secret(secret.as_bytes()).expect("hash shared key");
-        sqlx::query(
+        atom::db::query(
             r#"INSERT INTO credentials
                  (id, entity_id, kind, secret_hash, metadata)
                VALUES ($1, $2, 'shared_key', $3, $4)"#,
@@ -384,16 +373,16 @@ async fn bootstrap_rejects_one_matching_and_one_drifted_active_singleton_credent
         .await
         .expect_err("multiple active password rows must fail");
     assert!(err.to_string().contains("password"));
-    let managed: i64 = sqlx::query_scalar(
+    let managed: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = ANY($1) AND managed_by = 'config'",
     )
-    .bind(&[human, service])
+    .bind(vec![human, service])
     .fetch_one(&p)
     .await
     .expect("managed credential count");
     assert_eq!(managed, 0, "failed reconciliation must stamp no credential");
 
-    sqlx::query("UPDATE credentials SET status = 'revoked' WHERE id = $1")
+    atom::db::query("UPDATE credentials SET status = 'revoked' WHERE id = $1")
         .bind(drift_password_id)
         .execute(&p)
         .await
@@ -402,7 +391,7 @@ async fn bootstrap_rejects_one_matching_and_one_drifted_active_singleton_credent
         .await
         .expect_err("multiple active shared-key rows must fail");
     assert!(err.to_string().contains("shared key"));
-    sqlx::query(
+    atom::db::query(
         "UPDATE credentials SET status = 'revoked' WHERE entity_id = $1 AND kind = 'shared_key' AND metadata->>'description' = 'drift'",
     )
     .bind(service)
@@ -456,7 +445,7 @@ async fn late_bootstrap_failure_rolls_back_earlier_sections() {
     apply(&p, &signing_keys, &cfg)
         .await
         .expect_err("late missing permission block must fail bootstrap");
-    let rows: i64 = sqlx::query_scalar(
+    let rows: i64 = atom::db::query_scalar(
         "SELECT (SELECT COUNT(*) FROM tenants WHERE id = $1) + (SELECT COUNT(*) FROM entities WHERE id = $2) + (SELECT COUNT(*) FROM credentials WHERE entity_id = $2)",
     )
     .bind(tenant)
@@ -565,14 +554,14 @@ async fn bootstrap_provisions_full_rbac_graph() {
 
     // Rows exist and are linked.
     let entity_tenant: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
             .bind(device)
             .fetch_one(&p)
             .await
             .expect("device entity");
     assert_eq!(entity_tenant, Some(tenant));
 
-    let link_count: i64 = sqlx::query_scalar(
+    let link_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2",
     )
     .bind(role)
@@ -582,7 +571,7 @@ async fn bootstrap_provisions_full_rbac_graph() {
     .expect("role/block link");
     assert_eq!(link_count, 1, "block linked to role exactly once");
 
-    let action_count: i64 = sqlx::query_scalar(
+    let action_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM permission_block_actions WHERE permission_block_id = $1",
     )
     .bind(block)
@@ -596,7 +585,7 @@ async fn bootstrap_provisions_full_rbac_graph() {
 
     // End-to-end: the assigned device now effectively holds `publish` via the
     // canonical grant expansion the PDP consumes.
-    let publish_grants: i64 = sqlx::query_scalar(
+    let publish_grants: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM subject_effective_grants($1) g
            JOIN actions a ON a.id = g.capability_id
@@ -677,7 +666,7 @@ async fn bootstrap_supports_group_subjects_and_direct_policies() {
 
     apply(&p, &signing_keys, &cfg).await.expect("apply");
 
-    let member_count: i64 = sqlx::query_scalar(
+    let member_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM principal_group_members WHERE group_id = $1 AND entity_id = $2",
     )
     .bind(group)
@@ -689,7 +678,7 @@ async fn bootstrap_supports_group_subjects_and_direct_policies() {
 
     // The device inherits the group's direct policy: it should effectively hold
     // an allow-read grant through group membership.
-    let read_grants: i64 = sqlx::query_scalar(
+    let read_grants: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM subject_effective_grants($1) g
            JOIN actions a ON a.id = g.capability_id
@@ -804,7 +793,7 @@ async fn bootstrap_provisions_resources_and_object_group_scoped_grant() {
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
     // Resource + object-group membership landed.
-    let membership: i64 = sqlx::query_scalar(
+    let membership: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_resources WHERE group_id = $1 AND resource_id = $2",
     )
     .bind(object_group)
@@ -835,7 +824,7 @@ async fn bootstrap_provisions_resources_and_object_group_scoped_grant() {
 
     // A different channel outside the object group must NOT be allowed.
     let other_channel = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', 'other', $2)",
     )
     .bind(other_channel)
@@ -907,7 +896,7 @@ async fn bootstrap_rejects_capability_that_is_not_applicable_to_block_scope() {
         .expect_err("inapplicable capability");
     assert!(err.to_string().contains("not applicable"));
     let block_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM permission_blocks WHERE id = $1)")
+        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM permission_blocks WHERE id = $1)")
             .bind(block)
             .fetch_one(&p)
             .await
@@ -935,12 +924,12 @@ async fn bootstrap_rejects_undeclared_persisted_capability_applicability() {
     apply(&p, &signing_keys, &cfg)
         .await
         .expect("initial exact capability");
-    let action_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+    let action_id: Uuid = atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
         .bind(&name)
         .fetch_one(&p)
         .await
         .expect("action id");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            VALUES ($1, 'entity', 'entity:device')"#,
     )
@@ -954,7 +943,7 @@ async fn bootstrap_rejects_undeclared_persisted_capability_applicability() {
         .expect_err("undeclared applicability must fail");
     assert!(err.to_string().contains("not declared in config"));
     let description: Option<String> =
-        sqlx::query_scalar("SELECT description FROM actions WHERE id = $1")
+        atom::db::query_scalar("SELECT description FROM actions WHERE id = $1")
             .bind(action_id)
             .fetch_one(&p)
             .await
@@ -1047,7 +1036,7 @@ async fn bootstrap_role_assignment_obeys_assignment_guardrails() {
         .expect_err("guardrail must reject assignment");
     assert!(err.to_string().contains("guardrail rejected"));
     let assignment_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM role_assignments WHERE id = $1)")
+        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM role_assignments WHERE id = $1)")
             .bind(assignment)
             .fetch_one(&p)
             .await
@@ -1191,7 +1180,7 @@ async fn bootstrap_object_group_child_before_parent_works_with_one_connection() 
     .expect("single-connection bootstrap must not deadlock")
     .expect("child-before-parent bootstrap");
 
-    let linked: bool = sqlx::query_scalar(
+    let linked: bool = atom::db::query_scalar(
         r#"SELECT EXISTS (
                SELECT 1 FROM object_group_hierarchy
                WHERE child_id = $1 AND parent_id = $2
@@ -1308,13 +1297,13 @@ async fn bootstrap_object_group_late_failure_rolls_back_the_whole_batch() {
     assert!(err.to_string().contains("platform entity"));
 
     let group_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])")
+        atom::db::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])")
             .bind(vec![valid_group, invalid_group])
             .fetch_one(&p)
             .await
             .expect("count rolled-back object groups");
     assert_eq!(group_count, 0, "all object-group rows must roll back");
-    let membership_count: i64 = sqlx::query_scalar(
+    let membership_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_entities WHERE group_id = ANY($1::uuid[])",
     )
     .bind(vec![valid_group, invalid_group])
@@ -1401,7 +1390,7 @@ async fn bootstrap_object_group_rejects_deleted_resource_membership() {
         ..Default::default()
     };
     apply(&p, &signing_keys, &base).await.expect("base apply");
-    sqlx::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
+    atom::db::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
         .bind(resource)
         .execute(&p)
         .await
@@ -1461,13 +1450,13 @@ async fn bootstrap_object_group_hierarchy_rejects_cycle() {
     assert!(err.to_string().contains("cycle"));
 
     let group_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])")
+        atom::db::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])")
             .bind(vec![first, second])
             .fetch_one(&p)
             .await
             .expect("count cycle object groups");
     assert_eq!(group_count, 0, "cycle must roll back inserted groups");
-    let hierarchy_count: i64 = sqlx::query_scalar(
+    let hierarchy_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_hierarchy WHERE child_id = ANY($1::uuid[])",
     )
     .bind(vec![first, second])

@@ -1,5 +1,5 @@
+use crate::db::Database;
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -10,21 +10,18 @@ use crate::{
     },
 };
 
-pub async fn create_profile(pool: &PgPool, req: CreateProfile) -> Result<Profile, AppError> {
+pub async fn create_profile(pool: &Database, req: CreateProfile) -> Result<Profile, AppError> {
     create_profile_with_audit(pool, false, None, req).await
 }
 
 pub async fn create_profile_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateProfile,
 ) -> Result<Profile, AppError> {
     let id = Uuid::new_v4();
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let profile = crate::db::query_as::<Profile>(
         r#"INSERT INTO profiles
            (id, tenant_id, object_kind, kind, key, display_name, description, status)
@@ -59,7 +56,7 @@ pub async fn create_profile_with_audit(
     Ok(profile)
 }
 
-pub async fn get_profile(pool: &PgPool, id: Uuid) -> Result<Profile, AppError> {
+pub async fn get_profile(pool: &Database, id: Uuid) -> Result<Profile, AppError> {
     crate::db::query_as::<Profile>(
         r#"SELECT id, tenant_id, object_kind, kind, key, display_name, description,
                   status, created_at, updated_at
@@ -75,7 +72,7 @@ pub async fn get_profile(pool: &PgPool, id: Uuid) -> Result<Profile, AppError> {
     })
 }
 
-pub async fn list_profiles(pool: &PgPool, params: ListProfiles) -> Result<ProfileList, AppError> {
+pub async fn list_profiles(pool: &Database, params: ListProfiles) -> Result<ProfileList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let tenant_id = params.tenant_id;
@@ -128,7 +125,7 @@ pub async fn list_profiles(pool: &PgPool, params: ListProfiles) -> Result<Profil
 }
 
 pub async fn update_profile(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     req: UpdateProfile,
 ) -> Result<Profile, AppError> {
@@ -136,16 +133,13 @@ pub async fn update_profile(
 }
 
 pub async fn update_profile_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     req: UpdateProfile,
 ) -> Result<Profile, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let profile = crate::db::query_as::<Profile>(
         r#"UPDATE profiles
            SET display_name = COALESCE($2, display_name),
@@ -183,7 +177,7 @@ pub async fn update_profile_with_audit(
 }
 
 pub async fn create_profile_version(
-    pool: &PgPool,
+    pool: &Database,
     profile_id: Uuid,
     req: CreateProfileVersion,
 ) -> Result<ProfileVersion, AppError> {
@@ -191,7 +185,7 @@ pub async fn create_profile_version(
 }
 
 pub async fn create_profile_version_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     tenant_id: Option<Uuid>,
@@ -202,10 +196,7 @@ pub async fn create_profile_version_with_audit(
     let json_schema = json_object_or_default(req.json_schema);
     let ui_schema = json_object_or_default(req.ui_schema);
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let version = crate::db::query_as::<ProfileVersion>(
         r#"INSERT INTO profile_versions
            (id, profile_id, version, json_schema, ui_schema, status)
@@ -238,7 +229,7 @@ pub async fn create_profile_version_with_audit(
 }
 
 pub async fn update_profile_version(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     req: UpdateProfileVersion,
 ) -> Result<ProfileVersion, AppError> {
@@ -246,17 +237,14 @@ pub async fn update_profile_version(
 }
 
 pub async fn update_profile_version_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     tenant_id: Option<Uuid>,
     id: Uuid,
     req: UpdateProfileVersion,
 ) -> Result<ProfileVersion, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let version = crate::db::query_as::<ProfileVersion>(
         r#"UPDATE profile_versions
            SET json_schema = COALESCE($2, json_schema),
@@ -291,7 +279,7 @@ pub async fn update_profile_version_with_audit(
     Ok(version)
 }
 
-pub async fn get_profile_version(pool: &PgPool, id: Uuid) -> Result<ProfileVersion, AppError> {
+pub async fn get_profile_version(pool: &Database, id: Uuid) -> Result<ProfileVersion, AppError> {
     crate::db::query_as::<ProfileVersion>(
         r#"SELECT id, profile_id, version, json_schema, ui_schema, status, created_at
            FROM profile_versions
@@ -307,7 +295,7 @@ pub async fn get_profile_version(pool: &PgPool, id: Uuid) -> Result<ProfileVersi
 }
 
 pub async fn get_active_profile_version(
-    pool: &PgPool,
+    pool: &Database,
     profile_id: Uuid,
 ) -> Result<Option<ProfileVersion>, AppError> {
     crate::db::query_as::<ProfileVersion>(
@@ -325,7 +313,7 @@ pub async fn get_active_profile_version(
 }
 
 pub async fn list_profile_versions(
-    pool: &PgPool,
+    pool: &Database,
     profile_id: Uuid,
 ) -> Result<Vec<ProfileVersion>, AppError> {
     crate::db::query_as::<ProfileVersion>(

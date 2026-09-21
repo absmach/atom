@@ -11,9 +11,9 @@ mod common;
 use atom::{config::PurgeConfig, error::AppError};
 use uuid::Uuid;
 
-async fn make_entity(pool: &sqlx::PgPool, name: &str, tenant_id: Option<Uuid>) -> Uuid {
+async fn make_entity(pool: &atom::db::Database, name: &str, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')")
+    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')")
         .bind(id)
         .bind(name)
         .bind(tenant_id)
@@ -23,9 +23,9 @@ async fn make_entity(pool: &sqlx::PgPool, name: &str, tenant_id: Option<Uuid>) -
     id
 }
 
-async fn make_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(name)
         .execute(pool)
@@ -40,7 +40,7 @@ async fn restore_entity_reverses_soft_delete_but_keeps_credentials_revoked() {
     let pool = common::pool().await;
     let id = make_entity(&pool, &format!("rs-entity-{}", Uuid::new_v4()), None).await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
+    atom::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(id)
         .bind(format!("rs-key-{cred_id}"))
@@ -65,7 +65,7 @@ async fn restore_entity_reverses_soft_delete_but_keeps_credentials_revoked() {
         String,
         Option<chrono::DateTime<chrono::Utc>>,
         Option<Uuid>,
-    ) = sqlx::query_as("SELECT status, deleted_at, deleted_by FROM entities WHERE id = $1")
+    ) = atom::db::query_as("SELECT status, deleted_at, deleted_by FROM entities WHERE id = $1")
         .bind(id)
         .fetch_one(&pool)
         .await
@@ -75,11 +75,12 @@ async fn restore_entity_reverses_soft_delete_but_keeps_credentials_revoked() {
     assert!(deleted_by.is_none(), "deleted_by must be cleared");
 
     // Credentials revoked on delete are NOT reinstated — re-auth is required.
-    let cred_status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
-        .bind(cred_id)
-        .fetch_one(&pool)
-        .await
-        .expect("credential");
+    let cred_status: String =
+        atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
+            .bind(cred_id)
+            .fetch_one(&pool)
+            .await
+            .expect("credential");
     assert_eq!(
         cred_status, "revoked",
         "restore must not silently reinstate revoked credentials"
@@ -172,7 +173,7 @@ async fn restore_already_live_entity_is_not_found() {
 async fn restore_role_makes_it_readable_again() {
     let pool = common::pool().await;
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
         .bind(role_id)
         .bind(format!("rs-role-{role_id}"))
         .execute(&pool)
@@ -198,7 +199,7 @@ async fn restore_role_makes_it_readable_again() {
 async fn restore_resource_makes_it_readable_again() {
     let pool = common::pool().await;
     let resource_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
+    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
         .bind(resource_id)
         .bind(format!("rs-res-{resource_id}"))
         .execute(&pool)
@@ -228,7 +229,7 @@ async fn restore_resource_makes_it_readable_again() {
 async fn restore_group_makes_it_readable_again() {
     let pool = common::pool().await;
     let group_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO principal_groups (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO principal_groups (id, name) VALUES ($1, $2)")
         .bind(group_id)
         .bind(format!("rs-grp-{group_id}"))
         .execute(&pool)
@@ -265,7 +266,7 @@ async fn restore_tenant_reactivates_and_unhides_children() {
     )
     .await;
     let api_key_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
+    atom::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(api_key_id)
         .bind(child)
         .bind(format!("rs-rt-key-{api_key_id}"))
@@ -274,7 +275,7 @@ async fn restore_tenant_reactivates_and_unhides_children() {
         .expect("insert api credential");
     let issuer_id = common::pki::insert_bare_tenant_authority(&pool, tenant_id).await;
     let cert_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO credentials (id, entity_id, kind, identifier, issuer_id, status)
          VALUES ($1, $2, 'certificate', $3, $4, 'active')",
     )
@@ -300,7 +301,7 @@ async fn restore_tenant_reactivates_and_unhides_children() {
     assert_eq!(restored.id, tenant_id);
 
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        sqlx::query_as("SELECT status, deleted_at FROM tenants WHERE id = $1")
+        atom::db::query_as("SELECT status, deleted_at FROM tenants WHERE id = $1")
             .bind(tenant_id)
             .fetch_one(&pool)
             .await
@@ -317,7 +318,7 @@ async fn restore_tenant_reactivates_and_unhides_children() {
     // The non-certificate credential is reactivated (existing API key works
     // again) and its revocation marker is cleared, so the tenant is operational.
     let (api_status, api_metadata): (String, serde_json::Value) =
-        sqlx::query_as("SELECT status, metadata FROM credentials WHERE id = $1")
+        atom::db::query_as("SELECT status, metadata FROM credentials WHERE id = $1")
             .bind(api_key_id)
             .fetch_one(&pool)
             .await
@@ -333,11 +334,12 @@ async fn restore_tenant_reactivates_and_unhides_children() {
 
     // The certificate stays revoked — its revocation is published via the CRL
     // and must not be silently undone; re-issue is required.
-    let cert_status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
-        .bind(cert_id)
-        .fetch_one(&pool)
-        .await
-        .expect("certificate credential");
+    let cert_status: String =
+        atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
+            .bind(cert_id)
+            .fetch_one(&pool)
+            .await
+            .expect("certificate credential");
     assert_eq!(
         cert_status, "revoked",
         "restore must not reinstate revoked certificates"
@@ -350,14 +352,14 @@ async fn purge_entity_physically_removes_a_tombstoned_row_and_cascades() {
     let pool = common::pool().await;
     let id = make_entity(&pool, &format!("pg-entity-{}", Uuid::new_v4()), None).await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
+    atom::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(id)
         .bind(format!("pg-key-{cred_id}"))
         .execute(&pool)
         .await
         .expect("insert credential");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO pki_enrollment_rate_windows
          (scope_kind, scope_id, window_start, request_count)
          VALUES ('entity', $1, now(), 1)",
@@ -375,19 +377,21 @@ async fn purge_entity_physically_removes_a_tombstoned_row_and_cascades() {
         .expect("purge entity");
 
     // Row and its cascaded credential are physically gone.
-    let entity_exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM entities WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&pool)
-        .await
-        .expect("entity lookup");
+    let entity_exists: Option<Uuid> =
+        atom::db::query_scalar("SELECT id FROM entities WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&pool)
+            .await
+            .expect("entity lookup");
     assert!(entity_exists.is_none(), "purged entity row must be removed");
-    let cred_exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM credentials WHERE id = $1")
-        .bind(cred_id)
-        .fetch_optional(&pool)
-        .await
-        .expect("credential lookup");
+    let cred_exists: Option<Uuid> =
+        atom::db::query_scalar("SELECT id FROM credentials WHERE id = $1")
+            .bind(cred_id)
+            .fetch_optional(&pool)
+            .await
+            .expect("credential lookup");
     assert!(cred_exists.is_none(), "FK cascade must drop credentials");
-    let rate_window_exists: bool = sqlx::query_scalar(
+    let rate_window_exists: bool = atom::db::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM pki_enrollment_rate_windows
             WHERE scope_kind = 'entity' AND scope_id = $1
@@ -427,21 +431,21 @@ async fn purge_requires_a_prior_soft_delete() {
 async fn purge_role_removes_it_and_gcs_orphaned_blocks() {
     let pool = common::pool().await;
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
         .bind(role_id)
         .bind(format!("pg-role-{role_id}"))
         .execute(&pool)
         .await
         .expect("insert role");
     let block_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks (id, scope_mode, effect) VALUES ($1, 'platform', 'allow')",
     )
     .bind(block_id)
     .execute(&pool)
     .await
     .expect("insert permission block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
     )
     .bind(role_id)
@@ -457,14 +461,14 @@ async fn purge_role_removes_it_and_gcs_orphaned_blocks() {
         .await
         .expect("purge role");
 
-    let role_exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM roles WHERE id = $1")
+    let role_exists: Option<Uuid> = atom::db::query_scalar("SELECT id FROM roles WHERE id = $1")
         .bind(role_id)
         .fetch_optional(&pool)
         .await
         .expect("role lookup");
     assert!(role_exists.is_none(), "purged role row must be removed");
     let block_exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM permission_blocks WHERE id = $1")
+        atom::db::query_scalar("SELECT id FROM permission_blocks WHERE id = $1")
             .bind(block_id)
             .fetch_optional(&pool)
             .await
@@ -476,9 +480,9 @@ async fn purge_role_removes_it_and_gcs_orphaned_blocks() {
 }
 
 /// Inserts an object-scoped permission block granting access *on* `object_id`.
-async fn make_object_block(pool: &sqlx::PgPool, object_id: Uuid) -> Uuid {
+async fn make_object_block(pool: &atom::db::Database, object_id: Uuid) -> Uuid {
     let block_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks (id, scope_mode, object_id, effect)
          VALUES ($1, 'object', $2, 'allow')",
     )
@@ -490,8 +494,8 @@ async fn make_object_block(pool: &sqlx::PgPool, object_id: Uuid) -> Uuid {
     block_id
 }
 
-async fn row_exists(pool: &sqlx::PgPool, sql: &str, id: Uuid) -> bool {
-    sqlx::query_scalar::<_, Uuid>(sql)
+async fn row_exists(pool: &atom::db::Database, sql: &str, id: Uuid) -> bool {
+    atom::db::query_scalar::<Uuid>(sql)
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -510,7 +514,7 @@ async fn purge_entity_clears_object_blocks_and_subject_grants() {
     // via a direct policy and via a role link. Both must disappear with it.
     let object_block = make_object_block(&pool, entity).await;
     let dp_on = Uuid::new_v4();
-    sqlx::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+    atom::db::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
         .bind(dp_on)
         .bind(other)
         .bind(object_block)
@@ -518,13 +522,13 @@ async fn purge_entity_clears_object_blocks_and_subject_grants() {
         .await
         .expect("direct policy referencing object block");
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
         .bind(role_id)
         .bind(format!("pg-authz-role-{role_id}"))
         .execute(&pool)
         .await
         .expect("insert role");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
     )
     .bind(role_id)
@@ -535,7 +539,7 @@ async fn purge_entity_clears_object_blocks_and_subject_grants() {
 
     // Grants TO the entity as a subject (bare-UUID references, no FK).
     let subject_block = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks (id, scope_mode, effect) VALUES ($1, 'platform', 'allow')",
     )
     .bind(subject_block)
@@ -543,7 +547,7 @@ async fn purge_entity_clears_object_blocks_and_subject_grants() {
     .await
     .expect("insert platform block");
     let dp_to = Uuid::new_v4();
-    sqlx::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+    atom::db::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
         .bind(dp_to)
         .bind(entity)
         .bind(subject_block)
@@ -551,7 +555,7 @@ async fn purge_entity_clears_object_blocks_and_subject_grants() {
         .await
         .expect("direct policy granting to entity");
     let ra_to = Uuid::new_v4();
-    sqlx::query("INSERT INTO role_assignments (id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
+    atom::db::query("INSERT INTO role_assignments (id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
         .bind(ra_to)
         .bind(entity)
         .bind(role_id)
@@ -579,7 +583,7 @@ async fn purge_entity_clears_object_blocks_and_subject_grants() {
         !row_exists(&pool, "SELECT id FROM direct_policies WHERE id = $1", dp_on).await,
         "direct policy referencing the object block must cascade away"
     );
-    let role_link_present: Option<Uuid> = sqlx::query_scalar(
+    let role_link_present: Option<Uuid> = atom::db::query_scalar(
         "SELECT role_id FROM role_permission_blocks WHERE permission_block_id = $1",
     )
     .bind(object_block)
@@ -617,7 +621,7 @@ async fn purge_entity_clears_object_blocks_and_subject_grants() {
 async fn purge_resource_clears_object_scoped_blocks() {
     let pool = common::pool().await;
     let resource_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
+    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
         .bind(resource_id)
         .bind(format!("pg-res-authz-{resource_id}"))
         .execute(&pool)
@@ -648,7 +652,7 @@ async fn purge_resource_clears_object_scoped_blocks() {
 async fn purge_role_clears_object_scoped_blocks() {
     let pool = common::pool().await;
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
         .bind(role_id)
         .bind(format!("pg-role-obj-{role_id}"))
         .execute(&pool)
@@ -690,7 +694,7 @@ async fn purge_tenant_clears_child_authz_references() {
     // Grant ON the child (object-scoped block) and TO the child (direct policy).
     let object_block = make_object_block(&pool, child).await;
     let dp_to = Uuid::new_v4();
-    sqlx::query("INSERT INTO direct_policies (id, tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, $2, 'entity', $3, $4)")
+    atom::db::query("INSERT INTO direct_policies (id, tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, $2, 'entity', $3, $4)")
         .bind(dp_to)
         .bind(tenant_id)
         .bind(child)
@@ -733,13 +737,13 @@ async fn background_purge_clears_authz_references() {
     let object_block = make_object_block(&pool, entity).await;
     let ra_to = Uuid::new_v4();
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
         .bind(role_id)
         .bind(format!("bg-purge-role-{role_id}"))
         .execute(&pool)
         .await
         .expect("insert role");
-    sqlx::query("INSERT INTO role_assignments (id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
+    atom::db::query("INSERT INTO role_assignments (id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
         .bind(ra_to)
         .bind(entity)
         .bind(role_id)
@@ -751,7 +755,7 @@ async fn background_purge_clears_authz_references() {
     atom::identity::repo::delete_entity(&pool, entity, None)
         .await
         .expect("soft delete entity");
-    sqlx::query("UPDATE entities SET deleted_at = now() - interval '100 days' WHERE id = $1")
+    atom::db::query("UPDATE entities SET deleted_at = now() - interval '100 days' WHERE id = $1")
         .bind(entity)
         .execute(&pool)
         .await
@@ -797,7 +801,7 @@ async fn purge_entity_clears_blocks_targeting_its_policy_objects() {
     let pool = common::pool().await;
     let entity = make_entity(&pool, &format!("pg-pol-{}", Uuid::new_v4()), None).await;
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
         .bind(role_id)
         .bind(format!("pg-pol-role-{role_id}"))
         .execute(&pool)
@@ -806,7 +810,7 @@ async fn purge_entity_clears_blocks_targeting_its_policy_objects() {
     // A role assignment whose subject is the entity. The assignment row is itself
     // a 'policy' protected object, so a block can target it by object_id.
     let assignment_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO role_assignments (id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
+    atom::db::query("INSERT INTO role_assignments (id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
         .bind(assignment_id)
         .bind(entity)
         .bind(role_id)
@@ -848,7 +852,7 @@ async fn delete_direct_policy_clears_blocks_targeting_it() {
     let pool = common::pool().await;
     let subject = make_entity(&pool, &format!("dp-subj-{}", Uuid::new_v4()), None).await;
     let granted_block = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks (id, scope_mode, effect) VALUES ($1, 'platform', 'allow')",
     )
     .bind(granted_block)
@@ -856,7 +860,7 @@ async fn delete_direct_policy_clears_blocks_targeting_it() {
     .await
     .expect("insert granted block");
     let policy_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+    atom::db::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
         .bind(policy_id)
         .bind(subject)
         .bind(granted_block)
@@ -894,7 +898,7 @@ async fn cascaded_policy_deletion_clears_blocks_targeting_it() {
     // purging the entity (which deletes the block) cascade-deletes the policy.
     let block_on_entity = make_object_block(&pool, entity).await;
     let policy_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+    atom::db::query("INSERT INTO direct_policies (id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
         .bind(policy_id)
         .bind(other)
         .bind(block_on_entity)
@@ -944,14 +948,14 @@ async fn remove_tenant_member_clears_blocks_targeting_its_assignment() {
     )
     .await;
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(role_id)
         .bind(format!("rtm-role-{role_id}"))
         .bind(tenant_id)
         .execute(&pool)
         .await
         .expect("insert role");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')",
     )
     .bind(tenant_id)
@@ -960,7 +964,7 @@ async fn remove_tenant_member_clears_blocks_targeting_its_assignment() {
     .await
     .expect("insert membership");
     let assignment_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO role_assignments (id, tenant_id, subject_kind, subject_id, role_id) VALUES ($1, $2, 'entity', $3, $4)")
+    atom::db::query("INSERT INTO role_assignments (id, tenant_id, subject_kind, subject_id, role_id) VALUES ($1, $2, 'entity', $3, $4)")
         .bind(assignment_id)
         .bind(tenant_id)
         .bind(member)
@@ -1006,7 +1010,7 @@ async fn tenant_restore_does_not_undo_an_explicit_credential_revocation() {
     )
     .await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
+    atom::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(child)
         .bind(format!("tr-expl-key-{cred_id}"))
@@ -1027,7 +1031,7 @@ async fn tenant_restore_does_not_undo_an_explicit_credential_revocation() {
         .await
         .expect("restore tenant");
 
-    let (status, reason): (String, Option<String>) = sqlx::query_as(
+    let (status, reason): (String, Option<String>) = atom::db::query_as(
         "SELECT status, metadata->>'revocation_reason' FROM credentials WHERE id = $1",
     )
     .bind(cred_id)
@@ -1053,7 +1057,7 @@ async fn tenant_restore_does_not_reactivate_credentials_of_a_deleted_child() {
     )
     .await;
     let cred_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
+    atom::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
         .bind(cred_id)
         .bind(child)
         .bind(format!("tr-del-key-{cred_id}"))
@@ -1075,7 +1079,7 @@ async fn tenant_restore_does_not_reactivate_credentials_of_a_deleted_child() {
         .await
         .expect("restore tenant");
 
-    let status: String = sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+    let status: String = atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
         .bind(cred_id)
         .fetch_one(&pool)
         .await
@@ -1085,7 +1089,7 @@ async fn tenant_restore_does_not_reactivate_credentials_of_a_deleted_child() {
         "a deleted child's credential must not be reactivated by tenant restore"
     );
     let child_deleted: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT deleted_at FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT deleted_at FROM entities WHERE id = $1")
             .bind(child)
             .fetch_one(&pool)
             .await

@@ -1,6 +1,6 @@
+use crate::db::Database;
 use chrono::{Duration, Utc};
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -117,7 +117,7 @@ fn should_write_hot_path_allow(policy: AuditPolicyConfig) -> bool {
 /// is deliberate: it's what naturally excludes high-volume AuthN/AuthZ noise
 /// from the event stream without needing a separate filter.
 pub async fn write_hot_path(
-    pool: &PgPool,
+    pool: &Database,
     policy: AuditPolicyConfig,
     events_enabled: bool,
     kind: HotPathAuditKind,
@@ -143,7 +143,7 @@ pub async fn write_hot_path(
 /// caller performed beforehand: audit writes have never been strictly
 /// transactional with their triggering mutation, and this does not change
 /// that).
-pub async fn write(pool: &PgPool, events_enabled: bool, event: AuditEvent<'_>) {
+pub async fn write(pool: &Database, events_enabled: bool, event: AuditEvent<'_>) {
     log_audit_event(&event);
 
     if let Err(e) = write_and_enqueue(pool, events_enabled, &event).await {
@@ -164,14 +164,14 @@ pub async fn write(pool: &PgPool, events_enabled: bool, event: AuditEvent<'_>) {
 /// loses the audit row — accepted, and unchanged from this codebase's original
 /// contract that audit writes never propagate failures to the caller.
 pub async fn commit_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     mut tx: DbTransaction<'_>,
     events_enabled: bool,
     event: &AuditEvent<'_>,
 ) -> Result<(), crate::error::AppError> {
     if events_enabled {
         crate::events::enqueue(
-            tx.as_postgres_mut(),
+            &mut tx,
             events_enabled,
             event.actor_entity_id,
             event.tenant_id,
@@ -224,7 +224,7 @@ pub(crate) async fn observe_in_tx(
 
     if events_enabled {
         crate::events::enqueue(
-            tx.as_postgres_mut(),
+            tx,
             events_enabled,
             event.actor_entity_id,
             event.tenant_id,
@@ -294,7 +294,7 @@ pub(crate) async fn commit_observed_with_cache_groups<T>(
 /// The repository has already enqueued the observation in `tx`; this helper
 /// owns the remaining commit, audit write, and barrier release as one unit.
 pub(crate) async fn commit_observed_with_cache_and_audit<T>(
-    pool: &PgPool,
+    pool: &Database,
     tx: DbTransaction<'_>,
     cache: &crate::cache::CacheClient,
     leases: Vec<crate::cache::CacheLease>,
@@ -339,7 +339,7 @@ pub(crate) fn log_observe_allow(meta: &AuditMeta<'_>, details: &Value) {
 
 /// Emits an audit log tracing line and enqueues a domain event outbox row for a failed or denied operation (observe path).
 pub async fn observe_error(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     meta: &AuditMeta<'_>,
     details: &Value,
@@ -406,7 +406,7 @@ where
 }
 
 async fn write_and_enqueue(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     event: &AuditEvent<'_>,
 ) -> Result<(), crate::error::AppError> {
@@ -425,10 +425,10 @@ async fn write_and_enqueue(
         .await
         .map_err(crate::error::AppError::Database)?;
 
-    insert_audit_log(&mut *tx, event).await?;
+    insert_audit_log(&mut tx, event).await?;
 
     crate::events::enqueue(
-        &mut *tx,
+        &mut tx,
         events_enabled,
         event.actor_entity_id,
         event.tenant_id,
@@ -496,7 +496,7 @@ pub fn spawn_retention_cleanup(state: AppState) {
 }
 
 pub async fn cleanup_expired(
-    pool: &PgPool,
+    pool: &Database,
     cfg: AuditRetentionConfig,
 ) -> Result<AuditCleanupSummary, sqlx::Error> {
     let cutoff = Utc::now() - Duration::days(cfg.days);

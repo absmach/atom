@@ -4,7 +4,6 @@ pub mod repo;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -108,7 +107,7 @@ pub fn spawn(state: AppState) {
 /// Run one bounded sweep at a caller-supplied time. Public for deterministic
 /// restart/replica tests and future operator-triggered maintenance.
 pub async fn sweep_once(
-    pool: &PgPool,
+    pool: &Database,
     cfg: PkiLifecycleConfig,
     events_enabled: bool,
     now: DateTime<Utc>,
@@ -117,10 +116,7 @@ pub async fn sweep_once(
         return Ok(SweepSummary::default());
     }
 
-    let mut tx = Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(AppError::Database)?;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(LIFECYCLE_SWEEP_ADVISORY_LOCK_ID)
         .fetch_one(tx.exec())
@@ -171,7 +167,7 @@ pub async fn sweep_once(
                 "rotation_procedure": "PR-003",
             });
             crate::events::enqueue(
-                tx.as_postgres_mut(),
+                &mut tx,
                 true,
                 None,
                 window.tenant_id,
@@ -214,7 +210,7 @@ pub async fn sweep_once(
                     "expires_at": window.expires_at,
                 });
                 crate::events::enqueue(
-                    tx.as_postgres_mut(),
+                    &mut tx,
                     true,
                     None,
                     window.tenant_id,
@@ -236,7 +232,7 @@ pub async fn sweep_once(
 }
 
 pub async fn selector_tenant_id(
-    pool: &PgPool,
+    pool: &Database,
     selector: BulkRevocationSelector,
 ) -> Result<Option<Uuid>, AppError> {
     repo::selector_tenant_id(pool, selector).await

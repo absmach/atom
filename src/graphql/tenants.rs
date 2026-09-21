@@ -1069,7 +1069,7 @@ async fn require_tenant_read_access(
 }
 
 async fn has_inactive_tenant_read_role(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     entity_id: uuid::Uuid,
     tenant_id: uuid::Uuid,
 ) -> Result<bool> {
@@ -1083,7 +1083,7 @@ async fn has_inactive_tenant_read_role(
     }))
 }
 
-async fn can_list_all_tenants(pool: &sqlx::PgPool, auth: &AuthContext) -> Result<bool> {
+async fn can_list_all_tenants(pool: &crate::db::Database, auth: &AuthContext) -> Result<bool> {
     for capability in ["read", "manage"] {
         if has_capability_in_scope(pool, auth, capability, Scope::Platform)
             .await

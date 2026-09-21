@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(loc) => tracing::info!(backend = %loc.kind, location = %loc, "database connected"),
         Err(_) => tracing::info!(backend = %database.kind(), "database connected"),
     }
-    let pool = database.as_postgres().clone();
+    let pool = database.clone();
     let bootstrap_cfg = match cfg.bootstrap_file.as_deref() {
         Some(path) => Some(bootstrap::load(std::path::Path::new(path)).await?),
         None => None,
@@ -298,11 +298,11 @@ mod tracing_tests {
     }
 }
 
-async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<()> {
+async fn bootstrap_pki_root(pool: &atom::db::Database, path: &str) -> anyhow::Result<()> {
     let pem = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("failed to read ATOM_PKI_ROOT_CERT_PATH ({path})"))?;
-    let mut tx = atom::db::Database::from(pool.clone())
+    let mut tx = pool
         .begin()
         .await
         .context("failed to open PKI root bootstrap transaction")?;
@@ -332,7 +332,7 @@ async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<(
 }
 
 async fn bootstrap_platform_intermediate(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     ca_keys: &config::PkiCaKeyConfig,
     cert_path: &str,
     key_path: &str,
@@ -345,7 +345,7 @@ async fn bootstrap_platform_intermediate(
     let key_pem = tokio::fs::read_to_string(key_path).await.with_context(|| {
         format!("failed to read ATOM_PKI_PLATFORM_INTERMEDIATE_KEY_PATH ({key_path})")
     })?;
-    let mut tx = atom::db::Database::from(pool.clone())
+    let mut tx = pool
         .begin()
         .await
         .context("failed to open PKI platform intermediate bootstrap transaction")?;
@@ -378,7 +378,7 @@ async fn bootstrap_platform_intermediate(
 }
 
 async fn bootstrap_admin_credentials(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     admin_entity_id: Uuid,
     secret: &str,
 ) -> anyhow::Result<()> {
@@ -386,7 +386,7 @@ async fn bootstrap_admin_credentials(
 }
 
 async fn bootstrap_password_credentials(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     entity_id: Uuid,
     secret: &str,
     label: &str,
@@ -394,7 +394,7 @@ async fn bootstrap_password_credentials(
     identity::service::validate_password_strength(secret).map_err(|e| anyhow::anyhow!("{e}"))?;
     let hash =
         identity::service::hash_secret(secret.as_bytes()).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut tx = atom::db::Database::from(pool.clone())
+    let mut tx = pool
         .begin()
         .await
         .with_context(|| format!("failed to begin {label} password bootstrap transaction"))?;

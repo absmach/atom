@@ -2,6 +2,7 @@
 
 use std::{fs, process::Command};
 
+use atom::db::Database;
 use atom::{
     certs::authority::{provisioning, repo as authority_repo, AuthorityRecord},
     config::Config,
@@ -17,7 +18,6 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyIdMethod, KeyPair,
     KeyUsagePurpose,
 };
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -41,7 +41,7 @@ pub fn managed_config(generated_key_issuance_enabled: bool, events_enabled: bool
     config
 }
 
-pub fn graphql_state(pool: PgPool, config: Config) -> AppState {
+pub fn graphql_state(pool: Database, config: Config) -> AppState {
     let primary = LoadedKey {
         kid: "test".into(),
         public_key_pem: String::new(),
@@ -81,17 +81,14 @@ pub fn test_root(label: &str) -> TestRoot {
 /// This mirrors the runtime flow where the operator ships in a pre-signed
 /// platform intermediate and Atom onboards tenants automatically.
 pub async fn provision_tenant_issuer(
-    pool: &PgPool,
+    pool: &Database,
     config: &Config,
     root: &TestRoot,
     tenant_id: Uuid,
 ) -> AuthorityRecord {
     bootstrap_root_and_platform_intermediate(pool, config, root).await;
 
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .unwrap();
+    let mut tx = pool.clone().begin().await.unwrap();
     let mut provisioned =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
             .await
@@ -114,7 +111,7 @@ pub async fn provision_tenant_issuer(
 /// active authority through the same `insert_active_authority` helper the
 /// runtime bootstrap uses.
 pub async fn provision_platform_leaf_issuer(
-    pool: &PgPool,
+    pool: &Database,
     config: &Config,
     root: &TestRoot,
 ) -> AuthorityRecord {
@@ -140,14 +137,14 @@ pub async fn provision_platform_leaf_issuer(
 /// provisioning mutation. In practice for tests we simply re-run the auto
 /// provisioning after retiring the previous active row.
 pub async fn rotate_tenant_issuer(
-    pool: &PgPool,
+    pool: &Database,
     config: &Config,
     _root: &TestRoot,
     tenant_id: Uuid,
 ) -> AuthorityRecord {
     // Retire the currently-active tenant intermediate so
     // `provision_tenant_automatically_in_tx` mints a new one.
-    sqlx::query(
+    atom::db::query(
         r#"UPDATE pki_authorities
            SET status = 'retiring', issuance_enabled = false,
                retiring_at = now(), updated_at = now()
@@ -160,10 +157,7 @@ pub async fn rotate_tenant_issuer(
     .await
     .unwrap();
 
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .unwrap();
+    let mut tx = pool.clone().begin().await.unwrap();
     let mut provisioned =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &config.pki_ca_keys, tenant_id)
             .await
@@ -181,11 +175,8 @@ pub async fn rotate_tenant_issuer(
 }
 
 /// Import a root PEM as the managed trust anchor.
-async fn bootstrap_root(pool: &PgPool, root: &TestRoot) -> AuthorityRecord {
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .unwrap();
+async fn bootstrap_root(pool: &Database, root: &TestRoot) -> AuthorityRecord {
+    let mut tx = pool.clone().begin().await.unwrap();
     let mut outcome = provisioning::import_root_mutation_in_tx(&mut tx, &root.pem)
         .await
         .unwrap();
@@ -197,15 +188,16 @@ async fn bootstrap_root(pool: &PgPool, root: &TestRoot) -> AuthorityRecord {
 }
 
 /// Bootstrap root + platform intermediate through the config-bootstrap paths.
-async fn bootstrap_root_and_platform_intermediate(pool: &PgPool, config: &Config, root: &TestRoot) {
+async fn bootstrap_root_and_platform_intermediate(
+    pool: &Database,
+    config: &Config,
+    root: &TestRoot,
+) {
     bootstrap_root(pool, root).await;
 
     let (cert_pem, pkcs8_pem) =
         sign_platform_intermediate("Atom Platform Intermediate CA v1", root);
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .unwrap();
+    let mut tx = pool.clone().begin().await.unwrap();
     let mut outcome = provisioning::import_platform_intermediate_mutation_in_tx(
         &mut tx,
         &config.pki_ca_keys,
@@ -277,7 +269,7 @@ fn sign_leaf_issuer(common_name: &str, root: &TestRoot, path_len: u8) -> (String
 /// provisioning entry point (e.g. platform leaf issuer).
 #[allow(clippy::too_many_arguments)]
 async fn insert_active_signing_authority(
-    pool: &PgPool,
+    pool: &Database,
     config: &Config,
     parent: &AuthorityRecord,
     kind: atom::certs::authority::AuthorityKind,
@@ -294,10 +286,7 @@ async fn insert_active_signing_authority(
     let ca_keys = &config.pki_ca_keys;
     let provider = ManagedAuthorityKeyProvider::for_provisioning(ca_keys).unwrap();
 
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .unwrap();
+    let mut tx = pool.clone().begin().await.unwrap();
     let version = atom::certs::authority::repo::next_authority_version(&mut tx, kind, tenant_id)
         .await
         .unwrap();
@@ -406,9 +395,9 @@ fn normalize_hex(value: &str) -> String {
     }
 }
 
-pub async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
+pub async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("{prefix}-{id}"))
         .execute(pool)
@@ -417,9 +406,9 @@ pub async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
     id
 }
 
-pub async fn create_entity(pool: &PgPool, tenant_id: Uuid, prefix: &str) -> Uuid {
+pub async fn create_entity(pool: &Database, tenant_id: Uuid, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
     )
     .bind(id)
@@ -431,9 +420,9 @@ pub async fn create_entity(pool: &PgPool, tenant_id: Uuid, prefix: &str) -> Uuid
     id
 }
 
-pub async fn create_global_entity(pool: &PgPool, prefix: &str) -> Uuid {
+pub async fn create_global_entity(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
     )
     .bind(id)
@@ -448,7 +437,7 @@ pub async fn create_global_entity(pool: &PgPool, prefix: &str) -> Uuid {
 /// via raw SQL and return the tenant_intermediate id. Suitable for tests
 /// that need a valid `issuer_id` on a certificate credential without
 /// exercising full CSR issuance.
-pub async fn insert_bare_tenant_authority(pool: &PgPool, tenant_id: Uuid) -> Uuid {
+pub async fn insert_bare_tenant_authority(pool: &Database, tenant_id: Uuid) -> Uuid {
     let root_id = Uuid::new_v4();
     let platform_id = Uuid::new_v4();
     let tenant_authority_id = Uuid::new_v4();
@@ -498,7 +487,7 @@ pub async fn insert_bare_tenant_authority(pool: &PgPool, tenant_id: Uuid) -> Uui
 /// Insert a bare platform_leaf_issuer chain (root → platform_intermediate →
 /// platform_leaf_issuer) and return the platform_leaf_issuer id. Used to
 /// bind certificate credentials for globally-scoped entities.
-pub async fn insert_bare_platform_leaf_authority(pool: &PgPool) -> Uuid {
+pub async fn insert_bare_platform_leaf_authority(pool: &Database) -> Uuid {
     let root_id = Uuid::new_v4();
     let platform_id = Uuid::new_v4();
     let leaf_id = Uuid::new_v4();
@@ -547,7 +536,7 @@ pub async fn insert_bare_platform_leaf_authority(pool: &PgPool) -> Uuid {
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_bare_authority_row(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     tenant_id: Option<Uuid>,
     parent_id: Option<Uuid>,
@@ -558,7 +547,7 @@ async fn insert_bare_authority_row(
     not_after: chrono::DateTime<chrono::Utc>,
 ) {
     let issuance_enabled = matches!(kind, "platform_leaf_issuer" | "tenant_intermediate");
-    sqlx::query(
+    atom::db::query(
         r#"
         INSERT INTO pki_authorities (
             id, tenant_id, parent_id, kind, version, status, issuance_enabled,

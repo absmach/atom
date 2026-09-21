@@ -8,6 +8,7 @@
 mod common;
 
 use async_graphql::{Request, Response};
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     authz::repo::CredentialCeiling,
@@ -20,13 +21,10 @@ use atom::{
     state::AppState,
 };
 use serde_json::Value;
-use sqlx::{
-    postgres::{PgConnectOptions, PgPoolOptions},
-    PgPool,
-};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
 
-fn state(pool: PgPool) -> AppState {
+fn state(pool: Database) -> AppState {
     let primary = LoadedKey {
         kid: "test".into(),
         public_key_pem: String::new(),
@@ -76,9 +74,9 @@ fn assert_forbidden(response: &Response, context: &str) {
     assert_eq!(response.errors[0].message, "forbidden", "{context}");
 }
 
-async fn tenant(pool: &PgPool) -> Uuid {
+async fn tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("entity-auth-tenant-{id}"))
         .execute(pool)
@@ -87,9 +85,9 @@ async fn tenant(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn entity(pool: &PgPool, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
+async fn entity(pool: &Database, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) \
          VALUES ($1, $2, $3, $4, 'active')",
     )
@@ -103,8 +101,8 @@ async fn entity(pool: &PgPool, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
     id
 }
 
-async fn add_tenant_member(pool: &PgPool, tenant_id: Uuid, entity_id: Uuid) {
-    sqlx::query(
+async fn add_tenant_member(pool: &Database, tenant_id: Uuid, entity_id: Uuid) {
+    atom::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id, status) \
          VALUES ($1, $2, 'active')",
     )
@@ -115,7 +113,7 @@ async fn add_tenant_member(pool: &PgPool, tenant_id: Uuid, entity_id: Uuid) {
     .expect("insert tenant membership");
 }
 
-async fn race_pool(application_name: &str) -> PgPool {
+async fn race_pool(application_name: &str) -> Database {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let connect_options: PgConnectOptions = database_url
         .parse()
@@ -125,11 +123,12 @@ async fn race_pool(application_name: &str) -> PgPool {
         .connect_with(connect_options.application_name(application_name))
         .await
         .expect("connect race pool")
+        .into()
 }
 
-async fn wait_for_application_lock(pool: &PgPool, application_name: &str) -> bool {
+async fn wait_for_application_lock(pool: &Database, application_name: &str) -> bool {
     for _ in 0..200 {
-        let waiting = sqlx::query_scalar(
+        let waiting = atom::db::query_scalar(
             "SELECT EXISTS(\
                  SELECT 1 FROM pg_stat_activity \
                  WHERE application_name = $1 AND wait_event_type = 'Lock'\
@@ -147,9 +146,9 @@ async fn wait_for_application_lock(pool: &PgPool, application_name: &str) -> boo
     false
 }
 
-async fn allow_tenant_action(pool: &PgPool, subject_id: Uuid, tenant_id: Uuid, action: &str) {
+async fn allow_tenant_action(pool: &Database, subject_id: Uuid, tenant_id: Uuid, action: &str) {
     let block_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks (id, tenant_id, scope_mode, effect) \
          VALUES ($1, $2, 'tenant', 'allow')",
     )
@@ -158,7 +157,7 @@ async fn allow_tenant_action(pool: &PgPool, subject_id: Uuid, tenant_id: Uuid, a
     .execute(pool)
     .await
     .expect("insert tenant permission block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) \
          SELECT $1, id FROM actions WHERE name = $2",
     )
@@ -167,7 +166,7 @@ async fn allow_tenant_action(pool: &PgPool, subject_id: Uuid, tenant_id: Uuid, a
     .execute(pool)
     .await
     .expect("link tenant action");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO direct_policies \
          (tenant_id, subject_kind, subject_id, permission_block_id) \
          VALUES ($1, 'entity', $2, $3)",
@@ -180,15 +179,15 @@ async fn allow_tenant_action(pool: &PgPool, subject_id: Uuid, tenant_id: Uuid, a
     .expect("assign tenant policy");
 }
 
-async fn allow_object_action(pool: &PgPool, subject_id: Uuid, object_id: Uuid, action: &str) {
+async fn allow_object_action(pool: &Database, subject_id: Uuid, object_id: Uuid, action: &str) {
     let tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
             .bind(object_id)
             .fetch_one(pool)
             .await
             .expect("object tenant");
     let block_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks \
          (id, tenant_id, scope_mode, object_id, effect) \
          VALUES ($1, $2, 'object', $3, 'allow')",
@@ -199,7 +198,7 @@ async fn allow_object_action(pool: &PgPool, subject_id: Uuid, object_id: Uuid, a
     .execute(pool)
     .await
     .expect("insert object permission block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) \
          SELECT $1, id FROM actions WHERE name = $2",
     )
@@ -208,7 +207,7 @@ async fn allow_object_action(pool: &PgPool, subject_id: Uuid, object_id: Uuid, a
     .execute(pool)
     .await
     .expect("link object action");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO direct_policies \
          (tenant_id, subject_kind, subject_id, permission_block_id) \
          VALUES ($1, 'entity', $2, $3)",
@@ -221,10 +220,10 @@ async fn allow_object_action(pool: &PgPool, subject_id: Uuid, object_id: Uuid, a
     .expect("assign object policy");
 }
 
-async fn entity_profile(pool: &PgPool, kind: &str, json_schema: Value) -> (Uuid, Uuid) {
+async fn entity_profile(pool: &Database, kind: &str, json_schema: Value) -> (Uuid, Uuid) {
     let profile_id = Uuid::new_v4();
     let profile_version_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO profiles \
          (id, object_kind, kind, key, display_name, status) \
          VALUES ($1, 'entity', $2, $3, $4, 'active')",
@@ -236,7 +235,7 @@ async fn entity_profile(pool: &PgPool, kind: &str, json_schema: Value) -> (Uuid,
     .execute(pool)
     .await
     .expect("insert profile");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO profile_versions \
          (id, profile_id, version, json_schema, ui_schema, status) \
          VALUES ($1, $2, 1, $3, '{}', 'active')",
@@ -269,7 +268,7 @@ async fn self_update_and_delete_require_real_grants() {
         &update,
         "self-targeting must not bypass update authorization",
     );
-    let name: String = sqlx::query_scalar("SELECT name FROM entities WHERE id = $1")
+    let name: String = atom::db::query_scalar("SELECT name FROM entities WHERE id = $1")
         .bind(caller)
         .fetch_one(&pool)
         .await
@@ -287,7 +286,7 @@ async fn self_update_and_delete_require_real_grants() {
         "self-targeting must not bypass delete authorization",
     );
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        sqlx::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
+        atom::db::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
             .bind(caller)
             .fetch_one(&pool)
             .await
@@ -331,7 +330,7 @@ async fn entity_move_requires_source_and_destination_authority() {
         "source authority alone must not authorize a tenant move",
     );
     let persisted_tenant: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
             .bind(target)
             .fetch_one(&pool)
             .await
@@ -346,7 +345,7 @@ async fn entity_move_requires_source_and_destination_authority() {
         destination_tenant.to_string()
     );
     let persisted_tenant: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
             .bind(target)
             .fetch_one(&pool)
             .await
@@ -357,6 +356,12 @@ async fn entity_move_requires_source_and_destination_authority() {
 #[tokio::test]
 #[ignore]
 async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
+    // These races are observed through PostgreSQL's `pg_stat_activity` lock
+    // waits. SQLite has a single writer, so the same interleavings serialize
+    // at BEGIN IMMEDIATE and there is no per-row wait to observe.
+    if atom::db::testing::is_sqlite() {
+        return;
+    }
     let pool = common::pool().await;
     let source_tenant = tenant(&pool).await;
     let requested_destination = tenant(&pool).await;
@@ -380,9 +385,9 @@ async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
     let mut tenant_ids = [source_tenant, requested_destination, concurrent_destination];
     tenant_ids.sort_unstable();
     for tenant_id in tenant_ids {
-        sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+        atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
             .bind(tenant_id)
-            .fetch_one(&mut *competing)
+            .fetch_one(&mut competing)
             .await
             .expect("lock tenant for competing move");
     }
@@ -420,10 +425,10 @@ async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
         "authorized mutation never reached the tenant-lock serialization point"
     );
 
-    sqlx::query("UPDATE entities SET tenant_id = $2 WHERE id = $1")
+    atom::db::query("UPDATE entities SET tenant_id = $2 WHERE id = $1")
         .bind(target)
         .bind(concurrent_destination)
-        .execute(&mut *competing)
+        .execute(&mut competing)
         .await
         .expect("commit competing tenant move");
     competing.commit().await.expect("commit competing move");
@@ -438,7 +443,7 @@ async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
         "unexpected stale-snapshot error: {error}"
     );
     let (tenant_id, name): (Option<Uuid>, String) =
-        sqlx::query_as("SELECT tenant_id, name FROM entities WHERE id = $1")
+        atom::db::query_as("SELECT tenant_id, name FROM entities WHERE id = $1")
             .bind(target)
             .fetch_one(&pool)
             .await
@@ -450,6 +455,12 @@ async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
 #[tokio::test]
 #[ignore]
 async fn concurrent_tenant_freeze_blocks_authorized_delete() {
+    // These races are observed through PostgreSQL's `pg_stat_activity` lock
+    // waits. SQLite has a single writer, so the same interleavings serialize
+    // at BEGIN IMMEDIATE and there is no per-row wait to observe.
+    if atom::db::testing::is_sqlite() {
+        return;
+    }
     let pool = common::pool().await;
     let tenant_id = tenant(&pool).await;
     let caller = entity(&pool, None, "human").await;
@@ -460,9 +471,9 @@ async fn concurrent_tenant_freeze_blocks_authorized_delete() {
     let application_name = format!("atom-entity-delete-race-{}", target.simple());
     let race_pool = race_pool(&application_name).await;
     let mut freezing = pool.begin().await.expect("begin concurrent freeze");
-    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+    atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(&mut *freezing)
+        .fetch_one(&mut freezing)
         .await
         .expect("lock tenant for freeze");
 
@@ -485,9 +496,9 @@ async fn concurrent_tenant_freeze_blocks_authorized_delete() {
         wait_for_application_lock(&pool, &application_name).await,
         "authorized delete never reached the tenant-lock serialization point"
     );
-    sqlx::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
         .bind(tenant_id)
-        .execute(&mut *freezing)
+        .execute(&mut freezing)
         .await
         .expect("freeze tenant");
     freezing.commit().await.expect("commit concurrent freeze");
@@ -502,7 +513,7 @@ async fn concurrent_tenant_freeze_blocks_authorized_delete() {
         "unexpected frozen-tenant error: {error}"
     );
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        sqlx::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
+        atom::db::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
             .bind(target)
             .fetch_one(&pool)
             .await
@@ -527,7 +538,7 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         }),
     )
     .await;
-    sqlx::query(
+    atom::db::query(
         "UPDATE entities \
          SET profile_id = $2, profile_version_id = $3, attributes = $4 \
          WHERE id = $1",
@@ -555,7 +566,7 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         "the owner's live grant must not exceed an empty token ceiling",
     );
     let name_after_denied_update: String =
-        sqlx::query_scalar("SELECT name FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT name FROM entities WHERE id = $1")
             .bind(target)
             .fetch_one(&pool)
             .await
@@ -572,7 +583,7 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         "delete must also honor the scoped-token ceiling",
     );
     let deleted_at_after_denied_delete: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT deleted_at FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT deleted_at FROM entities WHERE id = $1")
             .bind(target)
             .fetch_one(&pool)
             .await
@@ -637,7 +648,7 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         Option<Uuid>,
         String,
         Value,
-    ) = sqlx::query_as(
+    ) = atom::db::query_as(
         "SELECT name, kind, alias, external_id, profile_id, profile_version_id, status, attributes \
          FROM entities WHERE id = $1",
     )
@@ -666,7 +677,7 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         authorized_delete.errors
     );
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        sqlx::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
+        atom::db::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
             .bind(target)
             .fetch_one(&pool)
             .await

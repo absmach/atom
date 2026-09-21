@@ -22,16 +22,16 @@ use common::pool;
 use serde_json::json;
 use uuid::Uuid;
 
-async fn read_capability_id(pool: &sqlx::PgPool) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+async fn read_capability_id(pool: &atom::db::Database) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
         .fetch_one(pool)
         .await
         .expect("read cap")
 }
 
-async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("rb-tenant-{id}"))
         .execute(pool)
@@ -40,21 +40,23 @@ async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
     id
 }
 
-async fn make_channel(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+async fn make_channel(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
-        .bind(id)
-        .bind(format!("rb-res-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+    )
+    .bind(id)
+    .bind(format!("rb-res-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
-async fn make_service_entity(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+async fn make_service_entity(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')",
     )
     .bind(id)
@@ -66,31 +68,31 @@ async fn make_service_entity(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
     id
 }
 
-async fn cleanup(pool: &sqlx::PgPool, tenant_id: Uuid, entity_id: Uuid, resource_id: Uuid) {
+async fn cleanup(pool: &atom::db::Database, tenant_id: Uuid, entity_id: Uuid, resource_id: Uuid) {
     // role_assignments / role_permission_blocks / permission_blocks / direct_policies
     // owned by this tenant are removed by the tenant cascade where applicable; clean
     // the explicit rows we created to keep the test database tidy.
-    let _ = sqlx::query("DELETE FROM role_assignments WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM role_assignments WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM direct_policies WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(resource_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
         .bind(entity_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM roles WHERE tenant_id = $1")
+    let _ = atom::db::query("DELETE FROM roles WHERE tenant_id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
         .bind(tenant_id)
         .execute(pool)
         .await;
@@ -335,7 +337,7 @@ async fn explain_binding_carries_assignment_and_block_ids() {
     .expect("create direct policy");
 
     let block_id: Uuid =
-        sqlx::query_scalar("SELECT permission_block_id FROM direct_policies WHERE id = $1")
+        atom::db::query_scalar("SELECT permission_block_id FROM direct_policies WHERE id = $1")
             .bind(policy.id)
             .fetch_one(&p)
             .await

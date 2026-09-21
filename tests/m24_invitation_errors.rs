@@ -7,6 +7,7 @@
 
 mod common;
 
+use atom::db::Database;
 use atom::{
     error::AppError,
     models::{
@@ -15,23 +16,24 @@ use atom::{
     },
     tenants::repo as tenant_repo,
 };
-use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
-async fn make_entity(pool: &PgPool, name: &str) -> Uuid {
+async fn make_entity(pool: &Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')")
-        .bind(id)
-        .bind(name)
-        .execute(pool)
-        .await
-        .expect("insert entity");
+    atom::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')",
+    )
+    .bind(id)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("insert entity");
     id
 }
 
-async fn make_tenant(pool: &PgPool, name: &str) -> Uuid {
+async fn make_tenant(pool: &Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(name)
         .execute(pool)
@@ -40,8 +42,8 @@ async fn make_tenant(pool: &PgPool, name: &str) -> Uuid {
     id
 }
 
-async fn add_email(pool: &PgPool, entity_id: Uuid, email: &str) {
-    sqlx::query(
+async fn add_email(pool: &Database, entity_id: Uuid, email: &str) {
+    atom::db::query(
         "INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())",
     )
     .bind(Uuid::new_v4())
@@ -52,8 +54,8 @@ async fn add_email(pool: &PgPool, entity_id: Uuid, email: &str) {
     .expect("insert entity email");
 }
 
-async fn add_unverified_email(pool: &PgPool, entity_id: Uuid, email: &str) {
-    sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+async fn add_unverified_email(pool: &Database, entity_id: Uuid, email: &str) {
+    atom::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
         .bind(Uuid::new_v4())
         .bind(entity_id)
         .bind(email)
@@ -63,12 +65,12 @@ async fn add_unverified_email(pool: &PgPool, entity_id: Uuid, email: &str) {
 }
 
 async fn insert_user_invitation(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     inviter_id: Uuid,
     invitee_id: Uuid,
 ) -> Uuid {
-    sqlx::query_scalar(
+    atom::db::query_scalar(
         r#"INSERT INTO tenant_invitations
              (id, tenant_id, invitee_user_id, invited_by, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 hour')
@@ -84,7 +86,7 @@ async fn insert_user_invitation(
 }
 
 async fn create_email_invitation(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     inviter_id: Uuid,
     email: &str,
@@ -110,7 +112,7 @@ async fn create_email_invitation(
     )
 }
 
-async fn set_invitation_state(pool: &PgPool, invitation_id: Uuid, state: &str) {
+async fn set_invitation_state(pool: &Database, invitation_id: Uuid, state: &str) {
     let query = match state {
         "accepted" => "UPDATE tenant_invitations SET accepted_at = now() WHERE id = $1",
         "rejected" => "UPDATE tenant_invitations SET rejected_at = now() WHERE id = $1",
@@ -120,7 +122,7 @@ async fn set_invitation_state(pool: &PgPool, invitation_id: Uuid, state: &str) {
         }
         _ => panic!("unknown invitation state {state}"),
     };
-    sqlx::query(query)
+    atom::db::query(query)
         .bind(invitation_id)
         .execute(pool)
         .await
@@ -239,7 +241,7 @@ async fn email_invitation_token_proves_and_records_address_ownership() {
     let (invitation_id, token) = create_email_invitation(&pool, tenant, inviter, &email).await;
 
     let bound_invitee: Option<Uuid> =
-        sqlx::query_scalar("SELECT invitee_user_id FROM tenant_invitations WHERE id = $1")
+        atom::db::query_scalar("SELECT invitee_user_id FROM tenant_invitations WHERE id = $1")
             .bind(invitation_id)
             .fetch_one(&pool)
             .await
@@ -272,7 +274,7 @@ async fn email_invitation_token_proves_and_records_address_ownership() {
         "invalid invitation token",
     );
     let still_unverified: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
+        atom::db::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
             .bind(claimant)
             .fetch_one(&pool)
             .await
@@ -285,14 +287,14 @@ async fn email_invitation_token_proves_and_records_address_ownership() {
     assert_eq!(accepted_tenant, tenant);
 
     let verified_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
+        atom::db::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
             .bind(claimant)
             .fetch_one(&pool)
             .await
             .expect("verification timestamp after token acceptance");
     assert!(verified_at.is_some());
 
-    let accepted_by: Option<Uuid> = sqlx::query_scalar(
+    let accepted_by: Option<Uuid> = atom::db::query_scalar(
         "SELECT accepted_by FROM tenant_invitations WHERE id = $1 AND invitee_user_id = $2",
     )
     .bind(invitation_id)
@@ -351,12 +353,7 @@ async fn email_invitation_acceptance_works_with_a_single_connection_pool() {
     let (_, token) = create_email_invitation(&setup_pool, tenant, inviter, &email).await;
     drop(setup_pool);
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .expect("connect single-connection pool");
+    let pool = atom::db::testing::single_connection_database().await;
 
     let accepted_tenant = tokio::time::timeout(
         std::time::Duration::from_secs(2),

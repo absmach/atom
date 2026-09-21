@@ -1,6 +1,6 @@
+use crate::db::Database;
 use chrono::{DateTime, Duration, Utc};
 use rand::{rngs::OsRng, RngCore};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -195,16 +195,13 @@ pub(crate) async fn lock_tenant_rows_in_order(
 }
 
 pub async fn create_tenant_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateTenant,
     created_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant = create_tenant_in_tx(&mut tx, req, created_by).await?;
     if let Some(creator_id) = created_by {
         bootstrap_tenant_admin(&mut tx, tenant_admin_bootstrap(tenant.id, creator_id)).await?;
@@ -225,7 +222,7 @@ pub async fn create_tenant_with_audit(
 }
 
 pub async fn create_tenant(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateTenant,
     created_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
@@ -325,7 +322,7 @@ async fn bootstrap_tenant_admin(
     .map_err(db_err)?;
 
     crate::guardrails::validate_role_assignment_on_connection(
-        tx.as_postgres_mut(),
+        tx,
         Some(plan.tenant_id),
         SubjectKind::Entity,
         plan.creator_id,
@@ -393,7 +390,7 @@ async fn bootstrap_tenant_admin(
     Ok(())
 }
 
-pub async fn get_tenant(pool: &PgPool, id: Uuid) -> Result<Tenant, AppError> {
+pub async fn get_tenant(pool: &Database, id: Uuid) -> Result<Tenant, AppError> {
     crate::db::query_as::<Tenant>(&format!(
         "SELECT {TENANT_COLS} FROM tenants WHERE id = $1 AND deleted_at IS NULL"
     ))
@@ -406,7 +403,7 @@ pub async fn get_tenant(pool: &PgPool, id: Uuid) -> Result<Tenant, AppError> {
     })
 }
 
-pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantList, AppError> {
+pub async fn list_tenants(pool: &Database, params: ListTenants) -> Result<TenantList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let id = params.id;
@@ -481,7 +478,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
 /// (`ceiling_credential_for`), never passed by hand — same rule as
 /// `engine::evaluate` and `authz::repo::authorized_object_ids`.
 pub async fn list_tenants_for_entity(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     entity_id: Uuid,
     params: ListTenants,
@@ -493,7 +490,7 @@ pub async fn list_tenants_for_entity(
 /// Low-level visibility listing taking an explicit ceiling credential. For
 /// tests; production code must call [`list_tenants_for_entity`].
 pub async fn list_tenants_for_entity_with_ceiling(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     ceiling_credential_id: Option<Uuid>,
     params: ListTenants,
@@ -630,7 +627,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
 }
 
 pub async fn update_tenant_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -640,10 +637,7 @@ pub async fn update_tenant_with_audit(
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "tenants", id).await?;
     let tenant = crate::db::query_as::<Tenant>(&format!(
         r#"UPDATE tenants
@@ -683,7 +677,7 @@ pub async fn update_tenant_with_audit(
 }
 
 pub async fn update_tenant(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     req: UpdateTenant,
     updated_by: Option<Uuid>,
@@ -774,28 +768,30 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     // certificates) so restore_tenant can reverse exactly the revocations this
     // delete caused, without disturbing credentials revoked earlier for other
     // reasons.
-    let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = crate::db::query_as(
-        r#"WITH revoked AS (
-               UPDATE credentials c
-               SET status = 'revoked',
-                   metadata = c.metadata || jsonb_build_object(
-                       'revoked_at', now(),
-                       'revocation_reason', 'tenant_deleted',
-                       'revoked_by_entity_id', $2::uuid
-                   )
-               FROM entities e
-               WHERE c.entity_id = e.id
-                 AND e.tenant_id = $1
-                 AND c.status = 'active'
-               RETURNING c.id, c.kind, c.issuer_id
-           )
-           SELECT id, issuer_id FROM revoked WHERE kind = 'certificate'"#,
+    let revoked: Vec<(Uuid, String, Option<Uuid>)> = crate::db::query_as(
+        r#"UPDATE credentials c
+           SET status = 'revoked',
+               metadata = c.metadata || jsonb_build_object(
+                   'revoked_at', now(),
+                   'revocation_reason', 'tenant_deleted',
+                   'revoked_by_entity_id', $2::uuid
+               )
+           FROM entities e
+           WHERE c.entity_id = e.id
+             AND e.tenant_id = $1
+             AND c.status = 'active'
+           RETURNING c.id, c.kind, c.issuer_id"#,
     )
     .bind(id)
     .bind(actor_id)
     .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
+    let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = revoked
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "certificate")
+        .map(|(id, _, issuer_id)| (id, issuer_id))
+        .collect();
 
     crate::db::query(
         "UPDATE sessions SET revoked_at = now()
@@ -837,7 +833,7 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
 /// tenant. Physical removal (and the entity cascade) is deferred to the purge
 /// cron.
 pub async fn soft_delete_tenant(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
@@ -850,16 +846,13 @@ pub async fn soft_delete_tenant(
 /// [`deactivate_and_finish_tenant_soft_delete_in_tx`] itself so it can
 /// establish the cache barrier between them.
 pub async fn soft_delete_tenant_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     lock_tenant_and_collect_session_ids_in_tx(&mut tx, id).await?;
     let tenant = deactivate_and_finish_tenant_soft_delete_in_tx(
         &mut tx,
@@ -1002,7 +995,7 @@ pub async fn finish_tenant_restore_in_tx(
 }
 
 pub async fn restore_tenant(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
@@ -1015,16 +1008,13 @@ pub async fn restore_tenant(
 /// [`finish_tenant_restore_in_tx`] itself so it can establish the cache
 /// barrier between them.
 pub async fn restore_tenant_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<Tenant, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let (tenant, _credential_ids) =
         reactivate_tenant_and_collect_credential_ids_in_tx(&mut tx, id, restored_by).await?;
     finish_tenant_restore_in_tx(&mut tx, events_enabled, actor_id, id).await?;
@@ -1120,15 +1110,12 @@ pub(crate) async fn purge_tenant_pki_in_tx(
 }
 
 pub async fn purge_tenant_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<PurgedTenant, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
 
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "tenants", id).await?;
 
@@ -1167,24 +1154,21 @@ pub async fn purge_tenant_with_audit(
     Ok(PurgedTenant { id, name })
 }
 
-pub async fn purge_tenant(pool: &PgPool, id: Uuid) -> Result<PurgedTenant, AppError> {
+pub async fn purge_tenant(pool: &Database, id: Uuid) -> Result<PurgedTenant, AppError> {
     purge_tenant_with_audit(pool, false, None, id).await
 }
 
 /// `actor_id` is both the audited actor and the row's `updated_by` — they are
 /// the same principal, so this takes it once.
 pub async fn change_tenant_status_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     status: TenantStatus,
     event_name: &str,
 ) -> Result<Tenant, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant =
         change_tenant_status_in_tx(&mut tx, events_enabled, actor_id, id, status, event_name)
             .await?;
@@ -1267,7 +1251,7 @@ pub(crate) async fn change_tenant_status_in_tx(
 }
 
 pub async fn change_tenant_status(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     status: TenantStatus,
     updated_by: Option<Uuid>,
@@ -1282,8 +1266,83 @@ fn search_pattern(q: Option<String>) -> Option<String> {
         .map(|value| format!("%{value}%"))
 }
 
+/// SQLite cannot express the update-else-insert upsert as one statement (no
+/// data-modifying CTEs), so it runs as two steps inside one write transaction.
+#[allow(clippy::too_many_arguments)]
+async fn upsert_invitation_sqlite(
+    pool: &Database,
+    tenant_id: Uuid,
+    invitee_user_id: Option<Uuid>,
+    email: Option<String>,
+    invited_by: Uuid,
+    role_id: Option<Uuid>,
+    token_hash: String,
+    expires_at: DateTime<Utc>,
+) -> Result<TenantInvitation, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let updated: Option<Uuid> = crate::db::query_scalar(
+        r#"UPDATE tenant_invitations
+           SET invitee_user_id = COALESCE($2, invitee_user_id),
+               invitee_email = COALESCE($3, invitee_email),
+               invited_by = $4,
+               role_id = $5,
+               secret_hash = $6,
+               expires_at = $7,
+               rejected_at = NULL,
+               revoked_at = NULL,
+               accepted_at = NULL,
+               accepted_by = NULL,
+               updated_at = now()
+           WHERE tenant_id = $1
+             AND (($2 IS NOT NULL AND invitee_user_id = $2)
+                  OR ($3 IS NOT NULL AND lower(invitee_email) = lower($3)))
+           RETURNING id"#,
+    )
+    .bind(tenant_id)
+    .bind(invitee_user_id)
+    .bind(email.clone())
+    .bind(invited_by)
+    .bind(role_id)
+    .bind(token_hash.clone())
+    .bind(expires_at)
+    .fetch_optional(&mut tx)
+    .await?;
+    let id = match updated {
+        Some(id) => id,
+        None => {
+            crate::db::query_scalar(
+                r#"INSERT INTO tenant_invitations
+                       (tenant_id, invitee_user_id, invitee_email, invited_by, role_id,
+                        secret_hash, expires_at, rejected_at, revoked_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, now())
+                   RETURNING id"#,
+            )
+            .bind(tenant_id)
+            .bind(invitee_user_id)
+            .bind(email)
+            .bind(invited_by)
+            .bind(role_id)
+            .bind(token_hash)
+            .bind(expires_at)
+            .fetch_one(&mut tx)
+            .await?
+        }
+    };
+    tx.commit().await?;
+    crate::db::query_as::<TenantInvitation>(&format!(
+        "SELECT {INVITATION_COLS}
+         FROM tenant_invitations ti
+         LEFT JOIN roles r ON r.id = ti.role_id
+         LEFT JOIN entities e ON e.id = ti.invitee_user_id AND e.deleted_at IS NULL
+         WHERE ti.id = $1"
+    ))
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn create_invitation(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     invited_by: Uuid,
     req: CreateTenantInvitation,
@@ -1324,8 +1383,22 @@ pub async fn create_invitation(
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = checked_invitation_expiration(expiry_secs)?;
 
-    let invitation = crate::db::query_as::<TenantInvitation>(&format!(
-        r#"WITH updated AS (
+    let invitation = if pool.kind() == crate::db::DatabaseKind::Sqlite {
+        upsert_invitation_sqlite(
+            pool,
+            tenant_id,
+            invitee_user_id,
+            email.clone(),
+            invited_by,
+            req.role_id,
+            token_hash,
+            expires_at,
+        )
+        .await
+        .map_err(db_err)?
+    } else {
+        crate::db::query_as::<TenantInvitation>(&format!(
+            r#"WITH updated AS (
                UPDATE tenant_invitations
                SET invitee_user_id = COALESCE($2, invitee_user_id),
                    invitee_email = COALESCE($3, invitee_email),
@@ -1360,17 +1433,18 @@ pub async fn create_invitation(
            LEFT JOIN roles r ON r.id = ti.role_id
            LEFT JOIN entities e ON e.id = ti.invitee_user_id AND e.deleted_at IS NULL
            LIMIT 1"#
-    ))
-    .bind(tenant_id)
-    .bind(invitee_user_id)
-    .bind(email.clone())
-    .bind(invited_by)
-    .bind(req.role_id)
-    .bind(token_hash)
-    .bind(expires_at)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+        ))
+        .bind(tenant_id)
+        .bind(invitee_user_id)
+        .bind(email.clone())
+        .bind(invited_by)
+        .bind(req.role_id)
+        .bind(token_hash)
+        .bind(expires_at)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?
+    };
 
     let token = format!(
         "atomi_{}_{}",
@@ -1398,7 +1472,7 @@ fn invitation_state_str(state: Option<InvitationState>) -> Option<&'static str> 
 }
 
 pub async fn list_tenant_invitations(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     params: ListTenantInvitations,
 ) -> Result<TenantInvitationList, AppError> {
@@ -1452,7 +1526,7 @@ pub async fn list_tenant_invitations(
 }
 
 pub async fn list_user_invitations(
-    pool: &PgPool,
+    pool: &Database,
     invitee_user_id: Uuid,
     params: ListTenantInvitations,
 ) -> Result<TenantInvitationList, AppError> {
@@ -1520,7 +1594,7 @@ pub async fn list_user_invitations(
 }
 
 pub async fn list_tenant_members(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     q: Option<String>,
     id: Option<String>,
@@ -1583,7 +1657,7 @@ pub async fn list_tenant_members(
 }
 
 pub async fn list_tenant_assignable_entities(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     q: String,
     limit: i64,
@@ -1645,7 +1719,7 @@ pub async fn list_tenant_assignable_entities(
 }
 
 pub async fn remove_tenant_member(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
@@ -1653,16 +1727,13 @@ pub async fn remove_tenant_member(
 }
 
 pub async fn remove_tenant_member_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
 
     // Tenant-member removal is also a bulk clear of this entity's principal
     // group memberships and tenant-scoped role assignments. Serialize it with
@@ -1760,7 +1831,7 @@ pub async fn remove_tenant_member_with_audit(
 }
 
 pub async fn add_tenant_member(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     entity_id: Uuid,
     role_id: Option<Uuid>,
@@ -1769,17 +1840,14 @@ pub async fn add_tenant_member(
 }
 
 pub async fn add_tenant_member_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     tenant_id: Uuid,
     entity_id: Uuid,
     role_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     lock_active_tenant(&mut tx, tenant_id).await?;
     crate::authz::repo::lock_live_entity_subject_in_tx(&mut tx, Some(tenant_id), entity_id).await?;
 
@@ -1835,7 +1903,7 @@ pub async fn add_tenant_member_with_audit(
 }
 
 pub async fn list_tenant_role_assignments(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<Vec<TenantRoleAssignmentSummary>, AppError> {
@@ -1908,14 +1976,11 @@ pub async fn list_tenant_role_assignments(
 }
 
 pub async fn accept_invitation(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let role_id = accept_invitation_row(&mut tx, tenant_id, invitee_user_id).await?;
     grant_invitation_role(&mut tx, tenant_id, invitee_user_id, role_id).await?;
     tx.commit().await.map_err(db_err)?;
@@ -1923,17 +1988,14 @@ pub async fn accept_invitation(
 }
 
 pub async fn accept_invitation_token(
-    pool: &PgPool,
+    pool: &Database,
     token: &str,
     actor_id: Uuid,
 ) -> Result<Uuid, AppError> {
     let (token_id, token_secret) = parse_secret_token(token, "atomi")
         .ok_or_else(|| AppError::bad_request("invalid invitation token"))?;
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let row = crate::db::query(
         r#"SELECT id, tenant_id, invitee_user_id, invitee_email, role_id,
                   secret_hash, expires_at, accepted_at, rejected_at, revoked_at
@@ -2069,14 +2131,11 @@ async fn grant_invitation_role(
 }
 
 pub async fn reject_invitation(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let row = invitation_row_for_invitee(&mut tx, tenant_id, invitee_user_id)
         .await?
         .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
@@ -2097,14 +2156,11 @@ pub async fn reject_invitation(
 }
 
 pub async fn revoke_invitation(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let row = invitation_row_for_invitee(&mut tx, tenant_id, invitee_user_id)
         .await?
         .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
@@ -2125,14 +2181,11 @@ pub async fn revoke_invitation(
 }
 
 pub async fn revoke_invitation_by_id(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     invitation_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let row = invitation_row_by_id(&mut tx, tenant_id, invitation_id)
         .await?
         .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
@@ -2227,7 +2280,7 @@ fn invitation_wrong_user() -> AppError {
     AppError::bad_request("invitation does not belong to this user")
 }
 
-async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, AppError> {
+async fn entity_id_by_email(pool: &Database, email: &str) -> Result<Option<Uuid>, AppError> {
     crate::db::query_scalar(
         r#"SELECT entity_id
            FROM entity_emails
@@ -2241,7 +2294,7 @@ async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, 
     .map_err(db_err)
 }
 
-async fn email_by_entity_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<String>, AppError> {
+async fn email_by_entity_id(pool: &Database, entity_id: Uuid) -> Result<Option<String>, AppError> {
     crate::db::query_scalar(
         "SELECT email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL",
     )
@@ -2313,23 +2366,15 @@ mod tests {
     //!
     //!     DATABASE_URL=postgres://... cargo test tenants:: -- --ignored
     use super::*;
+    use crate::db::Database;
     use crate::models::tenant::{CreateTenant, ListTenants, UpdateTenant};
     use serde_json::{json, Value};
-    use sqlx::PgPool;
 
-    async fn pool() -> PgPool {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-        let pool = PgPool::connect(&url).await.expect("connect");
-        sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
-            .await
-            .expect("load migrations")
-            .run(&pool)
-            .await
-            .expect("migrate");
-        pool
+    async fn pool() -> Database {
+        crate::db::testing::database().await
     }
 
-    async fn cleanup(pool: &PgPool, ids: &[Uuid]) {
+    async fn cleanup(pool: &Database, ids: &[Uuid]) {
         for id in ids {
             let _ = crate::db::query("DELETE FROM tenants WHERE id = $1")
                 .bind(id)

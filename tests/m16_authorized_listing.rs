@@ -16,9 +16,9 @@ use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-async fn make_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("{name}-{id}"))
         .execute(pool)
@@ -27,9 +27,9 @@ async fn make_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
     id
 }
 
-async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str, name: &str) -> Uuid {
+async fn make_entity(pool: &atom::db::Database, tenant_id: Uuid, kind: &str, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
     )
     .bind(id)
@@ -42,9 +42,9 @@ async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str, name: &st
     id
 }
 
-async fn make_global_entity(pool: &sqlx::PgPool, kind: &str, name: &str) -> Uuid {
+async fn make_global_entity(pool: &atom::db::Database, kind: &str, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
+    atom::db::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
         .bind(id)
         .bind(kind)
         .bind(format!("{name}-{id}"))
@@ -54,9 +54,9 @@ async fn make_global_entity(pool: &sqlx::PgPool, kind: &str, name: &str) -> Uuid
     id
 }
 
-async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str, name: &str) -> Uuid {
+async fn make_resource(pool: &atom::db::Database, tenant_id: Uuid, kind: &str, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
+    atom::db::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
         .bind(id)
         .bind(kind)
         .bind(format!("{name}-{id}"))
@@ -68,7 +68,7 @@ async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, kind: &str, name: &
 }
 
 async fn make_resource_with_attributes_at(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     kind: &str,
     name: &str,
@@ -76,7 +76,7 @@ async fn make_resource_with_attributes_at(
     created_at: chrono::DateTime<Utc>,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO resources (id, kind, name, tenant_id, attributes, created_at)
            VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
@@ -93,13 +93,13 @@ async fn make_resource_with_attributes_at(
 }
 
 async fn grant_resource_read(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     subject_id: Uuid,
     resource_id: Uuid,
     action_id: Uuid,
 ) {
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
     )
@@ -108,7 +108,7 @@ async fn grant_resource_read(
     .fetch_one(pool)
     .await
     .expect("insert read block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -116,7 +116,7 @@ async fn grant_resource_read(
     .execute(pool)
     .await
     .expect("insert read action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies
            (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
@@ -129,7 +129,12 @@ async fn grant_resource_read(
     .expect("assign read policy");
 }
 
-async fn make_group(pool: &sqlx::PgPool, tenant_id: Uuid, group_type: &str, name: &str) -> Uuid {
+async fn make_group(
+    pool: &atom::db::Database,
+    tenant_id: Uuid,
+    group_type: &str,
+    name: &str,
+) -> Uuid {
     let id = Uuid::new_v4();
     let table = if group_type == "principal" {
         "principal_groups"
@@ -137,7 +142,7 @@ async fn make_group(pool: &sqlx::PgPool, tenant_id: Uuid, group_type: &str, name
         "object_groups"
     };
     let sql = format!("INSERT INTO {table} (id, name, tenant_id) VALUES ($1, $2, $3)");
-    sqlx::query(&sql)
+    atom::db::query(&sql)
         .bind(id)
         .bind(format!("{name}-{id}"))
         .bind(tenant_id)
@@ -147,8 +152,8 @@ async fn make_group(pool: &sqlx::PgPool, tenant_id: Uuid, group_type: &str, name
     id
 }
 
-async fn action_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
+async fn action_id(pool: &atom::db::Database, name: &str) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -156,7 +161,7 @@ async fn action_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
 }
 
 async fn make_role_with_block(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     applies_to: &str,
     object_kind: Option<&str>,
@@ -165,7 +170,7 @@ async fn make_role_with_block(
     action_id: Uuid,
 ) -> Uuid {
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(role_id)
         .bind(format!("role-{role_id}"))
         .bind(tenant_id)
@@ -180,7 +185,7 @@ async fn make_role_with_block(
         "object_group_descendant_kind" => "group_descendant_groups",
         other => other,
     };
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks
            (scope_mode, object_kind, object_type, tenant_id, group_id, effect)
            VALUES ($1, $2, $3, $4, $5, 'allow')
@@ -195,7 +200,7 @@ async fn make_role_with_block(
     .await
     .expect("insert permission block");
 
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
     )
     .bind(role_id)
@@ -204,7 +209,7 @@ async fn make_role_with_block(
     .await
     .expect("insert role permission block");
 
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -217,12 +222,12 @@ async fn make_role_with_block(
 }
 
 async fn assign_role_to_entity(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     entity_id: Uuid,
     role_id: Uuid,
 ) {
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO role_assignments
            (tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, 'entity', $2, $3)"#,
@@ -235,8 +240,13 @@ async fn assign_role_to_entity(
     .expect("assign role to entity");
 }
 
-async fn assign_role_to_group(pool: &sqlx::PgPool, tenant_id: Uuid, group_id: Uuid, role_id: Uuid) {
-    sqlx::query(
+async fn assign_role_to_group(
+    pool: &atom::db::Database,
+    tenant_id: Uuid,
+    group_id: Uuid,
+    role_id: Uuid,
+) {
+    atom::db::query(
         r#"INSERT INTO role_assignments
            (tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, 'group', $2, $3)"#,
@@ -250,7 +260,7 @@ async fn assign_role_to_group(pool: &sqlx::PgPool, tenant_id: Uuid, group_id: Uu
 }
 
 async fn authorized(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     subject_id: Uuid,
     action: &str,
     object_kind: &str,
@@ -301,14 +311,14 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
     let read_id = action_id(&pool, "read").await;
 
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
         .bind(role_id)
         .bind(format!("platform-device-reader-{role_id}"))
         .execute(&pool)
         .await
         .expect("insert platform role");
 
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks
            (scope_mode, object_kind, object_type, effect)
            VALUES ('object_type', 'entity', 'entity:device', 'allow')
@@ -318,7 +328,7 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
     .await
     .expect("insert platform object_type block");
 
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
     )
     .bind(role_id)
@@ -326,7 +336,7 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
     .execute(&pool)
     .await
     .expect("link platform role block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -334,7 +344,7 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
     .execute(&pool)
     .await
     .expect("link read action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO role_assignments (subject_kind, subject_id, role_id)
            VALUES ('entity', $1, $2)"#,
     )
@@ -577,7 +587,7 @@ async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     .await;
     assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
 
-    let deny_block_id: Uuid = sqlx::query_scalar(
+    let deny_block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks
            (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'deny')
@@ -588,7 +598,7 @@ async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     .fetch_one(&pool)
     .await
     .expect("insert deny block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(deny_block_id)
@@ -596,7 +606,7 @@ async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     .execute(&pool)
     .await
     .expect("insert deny action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies
            (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
@@ -630,7 +640,7 @@ async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     .await;
     assert!(rule_ids.is_empty(), "channel role must not list rules");
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
         .bind(&[allowed_channel_id, denied_channel_id, rule_id][..])
         .execute(&pool)
         .await;
@@ -654,7 +664,7 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     let parent_object_group_id = make_group(&pool, tenant_id, "object", "parent-object").await;
     let child_object_group_id = make_group(&pool, tenant_id, "object", "child-object").await;
 
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2), ($3, $4)",
     )
     .bind(direct_principal_group_id)
@@ -665,7 +675,7 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     .await
     .expect("insert principal group members");
 
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(parent_object_group_id)
@@ -675,7 +685,7 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     .await
     .expect("insert object hierarchy");
 
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO object_group_entities (group_id, entity_id, tenant_id) VALUES ($1, $2, $3), ($4, $5, $6)",
     )
     .bind(parent_object_group_id)
@@ -765,7 +775,7 @@ async fn authorized_listing_honours_ancestor_group_deny() {
     // Subject is a direct member of the child group; the parent is its ancestor.
     let parent_group = make_group(&pool, tenant_id, "principal", "parent").await;
     let child_group = make_group(&pool, tenant_id, "principal", "child").await;
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO principal_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(parent_group)
@@ -774,7 +784,7 @@ async fn authorized_listing_honours_ancestor_group_deny() {
     .execute(&pool)
     .await
     .expect("principal hierarchy");
-    sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
         .bind(child_group)
         .bind(subject_id)
         .execute(&pool)
@@ -782,7 +792,7 @@ async fn authorized_listing_honours_ancestor_group_deny() {
         .expect("child membership");
 
     // Deny read on the channel, assigned to the ancestor (parent) group.
-    let deny_block: Uuid = sqlx::query_scalar(
+    let deny_block: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
     )
@@ -791,7 +801,7 @@ async fn authorized_listing_honours_ancestor_group_deny() {
     .fetch_one(&pool)
     .await
     .expect("insert deny block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(deny_block)
@@ -799,7 +809,7 @@ async fn authorized_listing_honours_ancestor_group_deny() {
     .execute(&pool)
     .await
     .expect("deny action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'group', $2, $3)"#,
     )
@@ -824,7 +834,7 @@ async fn authorized_listing_honours_ancestor_group_deny() {
         "a deny on an ancestor principal group must remove the object from the listing, got: {ids:?}"
     );
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(channel_id)
         .execute(&pool)
         .await;
@@ -845,7 +855,7 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     let read_id = action_id(&pool, "read").await;
 
     // Exact-object read allow on the owner_tenant object.
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (scope_mode, object_id, effect)
            VALUES ('object', $1, 'allow') RETURNING id"#,
     )
@@ -853,7 +863,7 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     .fetch_one(&pool)
     .await
     .expect("insert object block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -862,7 +872,7 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     .await
     .expect("block action");
     // Assignment bounded to other_tenant — not the object's owner.
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -888,7 +898,7 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     );
 
     // Control: rebind the assignment to the object's tenant → now listed.
-    sqlx::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
+    atom::db::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
         .bind(owner_tenant)
         .bind(block_id)
         .execute(&pool)
@@ -908,14 +918,14 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
         "a same-tenant exact-object grant must surface the object"
     );
 
-    let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
         .bind(channel_id)
         .execute(&pool)
         .await;
 }
 
 async fn authorized_groups(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     subject_id: Uuid,
     tenant_id: Uuid,
     group_type: Option<&str>,
@@ -952,8 +962,13 @@ async fn authorized_groups(
     .expect("authorized group listing")
 }
 
-async fn link_object_groups(pool: &sqlx::PgPool, tenant_id: Uuid, parent_id: Uuid, child_id: Uuid) {
-    sqlx::query(
+async fn link_object_groups(
+    pool: &atom::db::Database,
+    tenant_id: Uuid,
+    parent_id: Uuid,
+    child_id: Uuid,
+) {
+    atom::db::query(
         "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(parent_id)
@@ -1105,7 +1120,7 @@ async fn authorized_group_listing_object_deny_overrides_allow() {
     .await;
     assign_role_to_entity(&pool, tenant_id, subject_id, allow_role).await;
 
-    let deny_block: Uuid = sqlx::query_scalar(
+    let deny_block: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
     )
@@ -1114,7 +1129,7 @@ async fn authorized_group_listing_object_deny_overrides_allow() {
     .fetch_one(&pool)
     .await
     .expect("insert deny block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(deny_block)
@@ -1122,7 +1137,7 @@ async fn authorized_group_listing_object_deny_overrides_allow() {
     .execute(&pool)
     .await
     .expect("deny action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )

@@ -70,7 +70,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::SigningKeyConfig;
@@ -801,7 +800,7 @@ pub fn v1_json_schema() -> Result<Value> {
 /// Apply the bootstrap config against the database, in dependency order.
 /// Idempotent.
 pub async fn apply(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     cfg: &BootstrapConfig,
 ) -> Result<()> {
@@ -809,12 +808,12 @@ pub async fn apply(
 }
 
 pub async fn apply_with_cache(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     cfg: &BootstrapConfig,
     cache: Option<&crate::cache::CacheClient>,
 ) -> Result<()> {
-    let mut tx = Database::from(pool.clone())
+    let mut tx = pool
         .begin()
         .await
         .context("failed to begin bootstrap transaction")?;
@@ -1045,13 +1044,9 @@ async fn reconcile_tenant_admin_defaults(
         .await
         .with_context(|| format!("failed to populate replacement block {replacement_id}"))?;
 
-        crate::guardrails::validate_role_permission_block_links(
-            tx.as_postgres_mut(),
-            role_id,
-            &[replacement_id],
-        )
-        .await
-        .map_err(|err| anyhow!("tenant-admin role {role_id}: {err}"))?;
+        crate::guardrails::validate_role_permission_block_links(tx, role_id, &[replacement_id])
+            .await
+            .map_err(|err| anyhow!("tenant-admin role {role_id}: {err}"))?;
 
         crate::db::query(
             r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
@@ -2148,12 +2143,9 @@ async fn ensure_permission_block(
         conditions: conditions.clone(),
         action_ids: configured_action_ids.clone(),
     };
-    crate::authz::repo::validate_permission_block_input_on_connection(
-        tx.as_postgres_mut(),
-        &desired,
-    )
-    .await
-    .map_err(|e| anyhow!("bootstrap permission block {}: {e}", block.id))?;
+    crate::authz::repo::validate_permission_block_input_on_connection(&mut *tx, &desired)
+        .await
+        .map_err(|e| anyhow!("bootstrap permission block {}: {e}", block.id))?;
 
     configured_action_ids.sort_unstable();
     configured_action_ids.dedup();
@@ -2209,17 +2201,14 @@ async fn ensure_permission_block(
                 block.id
             );
         }
-        crate::authz::repo::validate_permission_block_input_on_connection(
-            tx.as_postgres_mut(),
-            &persisted,
-        )
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "existing bootstrap permission block {} is incompatible: {e}",
-                block.id
-            )
-        })?;
+        crate::authz::repo::validate_permission_block_input_on_connection(&mut *tx, &persisted)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "existing bootstrap permission block {} is incompatible: {e}",
+                    block.id
+                )
+            })?;
     }
 
     let result = crate::db::query(
@@ -2395,18 +2384,14 @@ async fn ensure_role(tx: &mut DbTransaction<'_>, role: &BootstrapRole) -> Result
                 role.id
             );
         }
-        crate::guardrails::validate_role_permission_block_links(
-            tx.as_postgres_mut(),
-            role.id,
-            &[*block_id],
-        )
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "bootstrap role {} permission block {block_id}: {e}",
-                role.id
-            )
-        })?;
+        crate::guardrails::validate_role_permission_block_links(tx, role.id, &[*block_id])
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "bootstrap role {} permission block {block_id}: {e}",
+                    role.id
+                )
+            })?;
         crate::db::query(
             r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
                VALUES ($1, $2)
@@ -2681,7 +2666,7 @@ async fn ensure_action_assignment_rule(
 ) -> Result<()> {
     let normalized =
         crate::authz::repo::validate_and_normalize_action_assignment_rule_on_connection(
-            tx.as_postgres_mut(),
+            tx,
             CreateActionAssignmentRule {
                 tenant_id: rule.tenant_id,
                 entity_kind: rule.entity_kind.clone(),
@@ -2815,13 +2800,13 @@ async fn ensure_direct_policy(
         subject_id: policy.subject.id,
         permission_block_id: policy.permission_block_id,
     };
-    crate::authz::repo::prepare_direct_policy_in_tx(tx, &desired)
+    crate::authz::repo::prepare_direct_policy_in_tx(&mut *tx, &desired)
         .await
         .map_err(|e| anyhow!("bootstrap direct policy {}: {e}", policy.id))?;
-    crate::authz::repo::validate_direct_policy_in_tx(tx, &desired)
+    crate::authz::repo::validate_direct_policy_in_tx(&mut *tx, &desired)
         .await
         .map_err(|e| anyhow!("bootstrap direct policy {}: {e}", policy.id))?;
-    crate::guardrails::validate_direct_policy(tx.as_postgres_mut(), &desired)
+    crate::guardrails::validate_direct_policy(&mut *tx, &desired)
         .await
         .map_err(|e| anyhow!("bootstrap direct policy {}: {e}", policy.id))?;
 
@@ -2865,7 +2850,7 @@ async fn ensure_direct_policy(
             policy.id
         );
     }
-    crate::authz::repo::validate_direct_policy_in_tx(tx, &persisted)
+    crate::authz::repo::validate_direct_policy_in_tx(&mut *tx, &persisted)
         .await
         .map_err(|e| {
             anyhow!(
@@ -2873,7 +2858,7 @@ async fn ensure_direct_policy(
                 policy.id
             )
         })?;
-    crate::guardrails::validate_direct_policy(tx.as_postgres_mut(), &persisted)
+    crate::guardrails::validate_direct_policy(&mut *tx, &persisted)
         .await
         .map_err(|e| {
             anyhow!(

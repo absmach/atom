@@ -8,6 +8,7 @@
 
 mod common;
 
+use atom::db::Database;
 use atom::{
     authz::repo as authz_repo,
     broker_auth::service::proto::{
@@ -31,7 +32,6 @@ use rcgen::{
     KeyUsagePurpose,
 };
 use serde_json::json;
-use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
 use tonic::{
     transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity, ServerTlsConfig},
@@ -61,7 +61,7 @@ fn broker_config(template: &str, topic_ref: BrokerTopicRef) -> Config {
     }
 }
 
-async fn active_keys(pool: &PgPool) -> ActiveKeys {
+async fn active_keys(pool: &Database) -> ActiveKeys {
     keys::rotate(pool, &Config::for_tests().signing_keys)
         .await
         .expect("rotate signing key")
@@ -147,7 +147,7 @@ async fn configure_mtls(cfg: &mut Config) -> (ServerTlsConfig, ClientTlsConfig) 
     )
 }
 
-async fn make_tenant(pool: &PgPool) -> (Uuid, String) {
+async fn make_tenant(pool: &Database) -> (Uuid, String) {
     let alias = slug("dom");
     let tenant = tenant_repo::create_tenant(
         pool,
@@ -166,7 +166,7 @@ async fn make_tenant(pool: &PgPool) -> (Uuid, String) {
 }
 
 /// A device with a password credential, standing in for an MQTT client.
-async fn make_device(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) {
+async fn make_device(pool: &Database, tenant_id: Option<Uuid>) -> (Uuid, String) {
     let name = slug("dev");
     let device = identity_repo::create_entity(
         pool,
@@ -191,7 +191,7 @@ async fn make_device(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) {
 }
 
 /// A resource with an alias, standing in for an MQTT channel.
-async fn make_channel(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) {
+async fn make_channel(pool: &Database, tenant_id: Option<Uuid>) -> (Uuid, String) {
     // `publish` / `subscribe` applicability on `resource:channel` is
     // product-specific and migration 007 strips the rows seeded by
     // migration 001 — so the authz engine's capability lookup returns empty
@@ -199,7 +199,7 @@ async fn make_channel(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) 
     // file trips the "unknown action" deny path. Seeded inline (idempotent
     // via ON CONFLICT) so the file stays product-agnostic without another
     // shared fixture.
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            SELECT id, 'resource', 'resource:channel'
              FROM actions WHERE name IN ('publish', 'subscribe')
@@ -228,7 +228,13 @@ async fn make_channel(pool: &PgPool, tenant_id: Option<Uuid>) -> (Uuid, String) 
 }
 
 /// Grant `action` on exactly one object, via a role assignment.
-async fn grant(pool: &PgPool, subject: Uuid, tenant_id: Option<Uuid>, object: Uuid, action: &str) {
+async fn grant(
+    pool: &Database,
+    subject: Uuid,
+    tenant_id: Option<Uuid>,
+    object: Uuid,
+    action: &str,
+) {
     let role = authz_repo::create_role(
         pool,
         atom::models::role::CreateRole {
@@ -240,13 +246,13 @@ async fn grant(pool: &PgPool, subject: Uuid, tenant_id: Option<Uuid>, object: Uu
     .await
     .expect("create role");
 
-    let action_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+    let action_id: Uuid = atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
         .bind(action)
         .fetch_one(pool)
         .await
         .expect("seeded action");
 
-    let block: Uuid = sqlx::query_scalar(
+    let block: Uuid = atom::db::query_scalar(
         "INSERT INTO permission_blocks (scope_mode, tenant_id, object_id, effect)
          VALUES ('object', $1, $2, 'allow') RETURNING id",
     )
@@ -256,7 +262,7 @@ async fn grant(pool: &PgPool, subject: Uuid, tenant_id: Option<Uuid>, object: Uu
     .await
     .expect("permission block");
 
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block)
@@ -281,7 +287,7 @@ async fn grant(pool: &PgPool, subject: Uuid, tenant_id: Option<Uuid>, object: Uu
     .expect("assign role");
 }
 
-async fn serve(pool: &PgPool, mut cfg: Config) -> AuthServiceClient<Channel> {
+async fn serve(pool: &Database, mut cfg: Config) -> AuthServiceClient<Channel> {
     let (server_tls, client_tls) = if cfg.broker_auth.enabled {
         let (server_tls, client_tls) = configure_mtls(&mut cfg).await;
         (Some(server_tls), Some(client_tls))

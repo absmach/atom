@@ -536,7 +536,7 @@ fn parse_credential_status(
 }
 
 async fn credential_tenant_id(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<Uuid>> {

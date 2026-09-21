@@ -1,3 +1,4 @@
+use crate::db::Database;
 use axum::{
     async_trait,
     extract::{FromRef, FromRequestParts},
@@ -8,7 +9,6 @@ use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -248,7 +248,7 @@ struct SessionEntityTenantSnapshot {
 /// introduced. This remains the single cache-miss loader — it is never split
 /// into per-field queries.
 async fn load_session_entity_tenant(
-    pool: &PgPool,
+    pool: &Database,
     session_id: Uuid,
     entity_id: Uuid,
 ) -> Result<SessionEntityTenantSnapshot, AppError> {
@@ -543,7 +543,10 @@ fn credential_cache_entry(snapshot: &CredentialSnapshot) -> CredentialCacheEntry
 /// The existing credential/entity/tenant join, unchanged from before caching
 /// was introduced. This remains the single cache-miss loader for all three
 /// cached entities it touches — it is never split into per-field queries.
-async fn load_credential_row(pool: &PgPool, cred_id: Uuid) -> Result<CredentialSnapshot, AppError> {
+async fn load_credential_row(
+    pool: &Database,
+    cred_id: Uuid,
+) -> Result<CredentialSnapshot, AppError> {
     // Only access-token credentials enter this cache. Password credentials
     // remain uncached and are verified through the normal password path.
     let row = crate::db::query(
@@ -924,7 +927,7 @@ impl AuthContext {
     /// `load_decision_context`, keyed the same way.
     pub async fn effective_grants(
         &self,
-        pool: &PgPool,
+        pool: &Database,
     ) -> Result<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>, AppError> {
         crate::cache::cached_or_load(
             self.cache.as_deref(),
@@ -1094,7 +1097,7 @@ pub enum Scope {
 /// object grants do the same for `scope_kind = object`, and both inherit from
 /// platform-scope bindings for the same capability.
 pub async fn has_capability_in_scope(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     capability_name: &str,
     scope: Scope,
@@ -1125,7 +1128,7 @@ pub async fn has_capability_in_scope(
 /// platform gate has no tenant; a tenant gate is that tenant; an object gate is
 /// the object's owning tenant, resolved here exactly as the PDP resolves it.
 /// A missing object and a platform/global object both resolve to `None`.
-async fn gate_tenant_context(pool: &PgPool, scope: Scope) -> Result<Option<Uuid>, AppError> {
+async fn gate_tenant_context(pool: &Database, scope: Scope) -> Result<Option<Uuid>, AppError> {
     Ok(match scope {
         Scope::Platform => None,
         Scope::Tenant(tenant_id) => Some(tenant_id),
@@ -1220,7 +1223,7 @@ fn is_unconditional(conditions: &serde_json::Value) -> bool {
     conditions.as_object().is_some_and(|map| map.is_empty())
 }
 
-async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppError> {
+async fn actor_is_active(pool: &Database, entity_id: Uuid) -> Result<bool, AppError> {
     let active: Option<bool> = crate::db::query_scalar(
         r#"SELECT (actor.status = 'active'
                    AND actor.deleted_at IS NULL
@@ -1236,7 +1239,7 @@ async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppErro
     Ok(active.unwrap_or(false))
 }
 
-async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppError> {
+async fn tenant_is_active(pool: &Database, tenant_id: Uuid) -> Result<bool, AppError> {
     let active: Option<bool> = crate::db::query_scalar(
         "SELECT status = 'active' AND deleted_at IS NULL FROM tenants WHERE id = $1",
     )
@@ -1247,7 +1250,7 @@ async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppErr
     Ok(active.unwrap_or(false))
 }
 
-async fn action_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>, AppError> {
+async fn action_id_by_name(pool: &Database, name: &str) -> Result<Option<Uuid>, AppError> {
     crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
         .bind(name)
         .fetch_optional(pool)
@@ -1256,7 +1259,7 @@ async fn action_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>, Ap
 }
 
 pub async fn require_any_capability(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     checks: &[(&str, Scope)],
 ) -> Result<(), AppError> {
@@ -1332,7 +1335,7 @@ pub async fn require_any_capability(
 }
 
 async fn action_ids_by_name(
-    pool: &PgPool,
+    pool: &Database,
     names: &[&str],
 ) -> Result<std::collections::HashMap<String, Uuid>, AppError> {
     let owned: Vec<String> = names.iter().map(|name| name.to_string()).collect();
@@ -1359,7 +1362,7 @@ pub fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {
 }
 
 pub async fn require_list_access(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -1368,7 +1371,7 @@ pub async fn require_list_access(
 }
 
 pub async fn require_read_access(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
     object_id: Uuid,
@@ -1388,7 +1391,7 @@ pub async fn require_read_access(
 }
 
 pub async fn require_role_read(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -1399,7 +1402,7 @@ pub async fn require_role_read(
 /// Gate for reading policy records in a tenant (or platform when `tenant_id` is
 /// `None`): `policy.manage`, `read`, or `manage` at that scope.
 pub async fn require_policy_read(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -1412,7 +1415,7 @@ pub async fn require_policy_read(
     .await
 }
 
-pub async fn require_explain_access(pool: &PgPool, auth: &AuthContext) -> Result<(), AppError> {
+pub async fn require_explain_access(pool: &Database, auth: &AuthContext) -> Result<(), AppError> {
     require_any_capability(
         pool,
         auth,
@@ -1426,7 +1429,7 @@ pub async fn require_explain_access(pool: &PgPool, auth: &AuthContext) -> Result
 
 /// Convenience for the common platform-`manage` check used by the existing
 /// `RequireManage` extractor and admin hygiene endpoints.
-pub async fn has_global_manage(pool: &PgPool, auth: &AuthContext) -> Result<bool, AppError> {
+pub async fn has_global_manage(pool: &Database, auth: &AuthContext) -> Result<bool, AppError> {
     has_capability_in_scope(pool, auth, "manage", Scope::Platform).await
 }
 
@@ -1434,7 +1437,7 @@ pub async fn has_global_manage(pool: &PgPool, auth: &AuthContext) -> Result<bool
 /// requested capability at the given scope. Use from handlers that need a
 /// finer check than `RequireManage`.
 pub async fn require_capability(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     capability_name: &str,
     scope: Scope,

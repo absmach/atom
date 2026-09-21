@@ -8,7 +8,6 @@ use p256::{
 };
 use rand::rngs::OsRng;
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -262,7 +261,7 @@ fn kek(cfg: &SigningKeyConfig) -> Result<&[u8], AppError> {
 
 /// Load primary and standby keys from the database into memory.
 pub async fn load_active_keys(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError> {
     fetch_active_keys(pool, cfg).await
@@ -326,7 +325,7 @@ where
 }
 
 /// On first boot, generate the initial primary key if none exists.
-pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<(), AppError> {
+pub async fn bootstrap_if_needed(pool: &Database, cfg: &SigningKeyConfig) -> Result<(), AppError> {
     encrypt_legacy_plaintext_keys(pool, cfg).await?;
 
     let count: i64 =
@@ -373,8 +372,8 @@ pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Resul
 ///
 /// All three steps run in a single transaction.
 /// After the JWT TTL elapses, no outstanding tokens reference the retired key.
-pub async fn rotate(pool: &PgPool, cfg: &SigningKeyConfig) -> Result<ActiveKeys, AppError> {
-    let mut tx = Database::from(pool.clone()).begin().await.map_err(db_err)?;
+pub async fn rotate(pool: &Database, cfg: &SigningKeyConfig) -> Result<ActiveKeys, AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let keys = rotate_in_tx(&mut tx, cfg).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(keys)
@@ -426,7 +425,7 @@ pub async fn rotate_in_tx(
 
     // Read inside the transaction: loading after the commit would let a
     // transient failure report an already-applied rotation as an error.
-    fetch_active_keys(tx.as_postgres_mut(), cfg).await
+    fetch_active_keys(tx, cfg).await
 }
 
 fn private_key_from_row(
@@ -483,7 +482,7 @@ fn private_key_from_row(
 }
 
 pub async fn encrypt_legacy_plaintext_keys(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &SigningKeyConfig,
 ) -> Result<u64, AppError> {
     if cfg.key_encryption_key.is_none() {
@@ -531,7 +530,7 @@ pub async fn encrypt_legacy_plaintext_keys(
     Ok(encrypted)
 }
 
-pub async fn list_metadata(pool: &PgPool) -> Result<Vec<SigningKeyMetadata>, AppError> {
+pub async fn list_metadata(pool: &Database) -> Result<Vec<SigningKeyMetadata>, AppError> {
     let rows = crate::db::query(
         r#"SELECT kid,
                   algorithm,
@@ -572,7 +571,7 @@ pub async fn list_metadata(pool: &PgPool) -> Result<Vec<SigningKeyMetadata>, App
         .collect()
 }
 
-pub async fn storage_summary(pool: &PgPool) -> Result<SigningKeyStorageSummary, AppError> {
+pub async fn storage_summary(pool: &Database) -> Result<SigningKeyStorageSummary, AppError> {
     let row = crate::db::query(
         r#"SELECT COUNT(*)::bigint AS total,
                   COUNT(*) FILTER (WHERE private_key_ciphertext IS NOT NULL)::bigint AS encrypted,

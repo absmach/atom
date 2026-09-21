@@ -1,5 +1,5 @@
+use crate::db::Database;
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -14,7 +14,7 @@ const API_ENDPOINT_COLS: &str = "id, tenant_id, key, name, description, method, 
 const API_ENDPOINT_EXECUTION_COLS: &str = "id, endpoint_id, caller_entity_id, status, request_summary, response_summary, error, created_at";
 
 pub async fn create_api_endpoint(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateApiEndpoint,
     created_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
@@ -22,7 +22,7 @@ pub async fn create_api_endpoint(
 }
 
 pub async fn create_api_endpoint_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateApiEndpoint,
@@ -40,10 +40,7 @@ pub async fn create_api_endpoint_with_audit(
     validate_json_object("response_mapping", &req.response_mapping)?;
 
     let id = Uuid::new_v4();
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let endpoint = crate::db::query_as::<ApiEndpoint>(&format!(
         r#"INSERT INTO api_endpoints
            (id, tenant_id, key, name, description, method, path, operation_kind,
@@ -88,7 +85,7 @@ pub async fn create_api_endpoint_with_audit(
     Ok(endpoint)
 }
 
-pub async fn get_api_endpoint(pool: &PgPool, id: Uuid) -> Result<ApiEndpoint, AppError> {
+pub async fn get_api_endpoint(pool: &Database, id: Uuid) -> Result<ApiEndpoint, AppError> {
     crate::db::query_as::<ApiEndpoint>(&format!(
         "SELECT {API_ENDPOINT_COLS} FROM api_endpoints WHERE id = $1",
     ))
@@ -102,7 +99,7 @@ pub async fn get_api_endpoint(pool: &PgPool, id: Uuid) -> Result<ApiEndpoint, Ap
 }
 
 pub async fn list_api_endpoints(
-    pool: &PgPool,
+    pool: &Database,
     params: ListApiEndpoints,
 ) -> Result<ApiEndpointList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -143,7 +140,7 @@ pub async fn list_api_endpoints(
 }
 
 pub async fn update_api_endpoint(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     req: UpdateApiEndpoint,
     updated_by: Option<Uuid>,
@@ -152,7 +149,7 @@ pub async fn update_api_endpoint(
 }
 
 pub async fn update_api_endpoint_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -191,10 +188,7 @@ pub async fn update_api_endpoint_with_audit(
     let service_entity_id = req.service_entity_id.or(existing.service_entity_id);
     validate_auth_mode(&auth_mode, service_entity_id)?;
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let endpoint = crate::db::query_as::<ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET key               = COALESCE($2, key),
@@ -253,7 +247,7 @@ pub async fn update_api_endpoint_with_audit(
 }
 
 pub async fn enable_api_endpoint(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     updated_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
@@ -261,7 +255,7 @@ pub async fn enable_api_endpoint(
 }
 
 pub async fn enable_api_endpoint_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -280,7 +274,7 @@ pub async fn enable_api_endpoint_with_audit(
 }
 
 pub async fn disable_api_endpoint(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     updated_by: Option<Uuid>,
 ) -> Result<ApiEndpoint, AppError> {
@@ -288,7 +282,7 @@ pub async fn disable_api_endpoint(
 }
 
 pub async fn disable_api_endpoint_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -305,7 +299,7 @@ pub async fn disable_api_endpoint_with_audit(
 }
 
 pub async fn find_api_endpoint(
-    pool: &PgPool,
+    pool: &Database,
     method: &str,
     path: &str,
 ) -> Result<ApiEndpoint, AppError> {
@@ -327,7 +321,7 @@ pub async fn find_api_endpoint(
 }
 
 pub async fn record_api_endpoint_execution(
-    pool: &PgPool,
+    pool: &Database,
     endpoint_id: Option<Uuid>,
     caller_entity_id: Option<Uuid>,
     status: &str,
@@ -355,7 +349,7 @@ pub async fn record_api_endpoint_execution(
 }
 
 pub async fn list_api_endpoint_executions(
-    pool: &PgPool,
+    pool: &Database,
     params: ListApiEndpointExecutions,
 ) -> Result<ApiEndpointExecutionList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -387,7 +381,7 @@ pub async fn list_api_endpoint_executions(
 }
 
 async fn set_api_endpoint_status_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -395,10 +389,7 @@ async fn set_api_endpoint_status_with_audit(
     event: &str,
 ) -> Result<ApiEndpoint, AppError> {
     validate_status(status)?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let endpoint = crate::db::query_as::<ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET status = $2, updated_by = $3, updated_at = now()
@@ -526,13 +517,11 @@ fn json_object_or_default(value: Value) -> Value {
 }
 
 fn endpoint_db_err(err: sqlx::Error) -> AppError {
-    if let sqlx::Error::Database(db) = &err {
-        if db.code().as_deref() == Some("23505") {
-            if db.constraint() == Some("protected_object_ids_pkey") {
-                return AppError::conflict("api endpoint id is already used by another object");
-            }
-            return AppError::conflict("api endpoint key or active method/path already exists");
+    if crate::error::is_unique_violation(&err) {
+        if crate::error::unique_violation_constraint(&err) == Some("protected_object_ids_pkey") {
+            return AppError::conflict("api endpoint id is already used by another object");
         }
+        return AppError::conflict("api endpoint key or active method/path already exists");
     }
     db_err(err)
 }

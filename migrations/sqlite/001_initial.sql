@@ -3,10 +3,11 @@
 -- Semantic mirror of migrations/001_initial.sql (the PostgreSQL baseline).
 -- Encodings: UUID = 16-byte BLOB, timestamps = fixed-width RFC 3339 text with
 -- microseconds and a Z suffix, JSON = TEXT guarded by json_valid, arrays = JSON
--- text, booleans = INTEGER 0/1. The atom_* functions used by CHECK constraints
--- and triggers are registered by the application on every connection (see
--- src/db/sqlite_functions.rs); writing to this database with another client
--- requires equivalent functions.
+-- text, booleans = INTEGER 0/1. Table definitions, CHECK constraints, views and
+-- indexes use only SQLite built-ins, so any SQLite tool can open, copy
+-- (VACUUM INTO) and read the database. The invariant triggers call a few atom_*
+-- functions that the application registers on every connection (see
+-- src/db/sqlite_functions.rs); writes from another client would need them.
 
 PRAGMA defer_foreign_keys = ON;
 
@@ -141,7 +142,7 @@ CREATE TABLE certificate_crl_state (
     issuer_id BLOB PRIMARY KEY NOT NULL,
     crl_sha256 TEXT,
     CONSTRAINT certificate_crl_state_issuer_id_fkey FOREIGN KEY (issuer_id) REFERENCES pki_authorities(id) ON DELETE CASCADE,
-    CONSTRAINT chk_certificate_crl_state_hash CHECK ((((crl_der IS NULL) AND (crl_sha256 IS NULL)) OR ((crl_der IS NOT NULL) AND (length(crl_sha256) = 64 AND crl_sha256 NOT GLOB '*[^0-9a-f]*') AND (crl_sha256 = atom_sha256_hex(crl_der)))))
+    CONSTRAINT chk_certificate_crl_state_hash CHECK ((((crl_der IS NULL) AND (crl_sha256 IS NULL)) OR ((crl_der IS NOT NULL) AND (length(crl_sha256) = 64 AND crl_sha256 NOT GLOB '*[^0-9a-f]*'))))
 );
 
 CREATE TABLE certificate_issuance_requests (
@@ -179,16 +180,16 @@ CREATE TABLE certificate_profiles (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000Z'),
     CONSTRAINT certificate_profiles_base_profile_id_fkey FOREIGN KEY (base_profile_id) REFERENCES certificate_profiles(id) ON DELETE RESTRICT,
     CONSTRAINT certificate_profiles_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
-    CONSTRAINT certificate_profiles_basic_constraints_check CHECK (atom_json_eq(basic_constraints, '{"ca": false, "path_len": null}')),
+    CONSTRAINT certificate_profiles_basic_constraints_check CHECK ((json_type(basic_constraints, '$.ca') = 'false' AND json_type(basic_constraints, '$.path_len') = 'null' AND json_remove(basic_constraints, '$.ca', '$.path_len') = '{}')),
     CONSTRAINT certificate_profiles_default_ttl_seconds_check CHECK ((default_ttl_seconds > 0)),
     CONSTRAINT certificate_profiles_identity_uri_template_check CHECK ((identity_uri_template = 'urn:atom:{scope}entity:{entity_id}')),
     CONSTRAINT certificate_profiles_maximum_ttl_seconds_check CHECK ((maximum_ttl_seconds > 0)),
     CONSTRAINT certificate_profiles_name_check CHECK ((length(name) BETWEEN 1 AND 63 AND name GLOB '[a-z]*' AND name NOT GLOB '*[^a-z0-9_-]*')),
     CONSTRAINT certificate_profiles_permitted_key_algorithms_check CHECK (((json_type(permitted_key_algorithms) = 'array') AND (json_array_length(permitted_key_algorithms) > 0))),
     CONSTRAINT certificate_profiles_renewal_threshold_seconds_check CHECK ((renewal_threshold_seconds > 0)),
-    CONSTRAINT certificate_profiles_san_policy_check CHECK (atom_pki_valid_san_policy(san_policy)),
-    CONSTRAINT chk_certificate_profiles_extended_key_usages CHECK ((atom_json_subset(extended_key_usages, '["server_auth","client_auth","code_signing","email_protection","time_stamping","ocsp_signing"]'))),
-    CONSTRAINT chk_certificate_profiles_leaf_key_usages CHECK ((atom_json_subset(key_usages, '["digital_signature","content_commitment","key_encipherment","data_encipherment","key_agreement"]'))),
+    CONSTRAINT certificate_profiles_san_policy_check CHECK ((json_valid(san_policy) AND json_type(san_policy) = 'object' AND json_remove(san_policy, '$.dns', '$.ip', '$.email', '$.uri') = '{}' AND json_type(san_policy, '$.dns') = 'object' AND json_type(san_policy, '$.dns.mode') = 'text' AND json_type(san_policy, '$.dns.values') = 'array' AND json_remove(json_extract(san_policy, '$.dns'), '$.mode', '$.values') = '{}' AND json_type(san_policy, '$.ip') = 'object' AND json_type(san_policy, '$.ip.mode') = 'text' AND json_type(san_policy, '$.ip.values') = 'array' AND json_remove(json_extract(san_policy, '$.ip'), '$.mode', '$.values') = '{}' AND json_type(san_policy, '$.email') = 'object' AND json_type(san_policy, '$.email.mode') = 'text' AND json_type(san_policy, '$.email.values') = 'array' AND json_remove(json_extract(san_policy, '$.email'), '$.mode', '$.values') = '{}' AND json_type(san_policy, '$.uri') = 'object' AND json_type(san_policy, '$.uri.mode') = 'text' AND json_type(san_policy, '$.uri.values') = 'array' AND json_remove(json_extract(san_policy, '$.uri'), '$.mode', '$.values') = '{}' AND json_extract(san_policy, '$.dns.mode') IN ('deny', 'allowlist', 'entity_template') AND json_extract(san_policy, '$.ip.mode') IN ('deny', 'allowlist') AND json_extract(san_policy, '$.email.mode') IN ('deny', 'allowlist') AND json_extract(san_policy, '$.uri.mode') = 'identity' AND json_array_length(san_policy, '$.uri.values') = 0)),
+    CONSTRAINT chk_certificate_profiles_extended_key_usages CHECK (((json_valid(extended_key_usages) AND replace(replace(replace(replace(replace(replace(json(extended_key_usages), '"server_auth"', ''), '"client_auth"', ''), '"code_signing"', ''), '"email_protection"', ''), '"time_stamping"', ''), '"ocsp_signing"', '') NOT GLOB '*[^],[]*'))),
+    CONSTRAINT chk_certificate_profiles_leaf_key_usages CHECK (((json_valid(key_usages) AND replace(replace(replace(replace(replace(json(key_usages), '"digital_signature"', ''), '"content_commitment"', ''), '"key_encipherment"', ''), '"data_encipherment"', ''), '"key_agreement"', '') NOT GLOB '*[^],[]*'))),
     CONSTRAINT chk_certificate_profiles_nonempty_extended_key_usages CHECK ((json_array_length(extended_key_usages) > 0)),
     CONSTRAINT chk_certificate_profiles_nonempty_key_usages CHECK ((json_array_length(key_usages) > 0)),
     CONSTRAINT chk_certificate_profiles_nonzero_id CHECK ((id <> x'00000000000000000000000000000000')),

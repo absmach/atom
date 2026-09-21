@@ -20,6 +20,7 @@ mod common;
 use std::sync::Arc;
 
 use async_graphql::Request;
+use atom::db::Database;
 use atom::{
     auth::{self, AuthContext},
     authz::{engine, repo as authz_repo},
@@ -39,7 +40,6 @@ use atom::{
 };
 use common::{cache_client, pool};
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Builds an `AppState` wired to a fresh Redis-backed cache, plus an
@@ -48,7 +48,7 @@ use uuid::Uuid;
 /// cache` — see `auth_from_jwt`/`auth_from_api_key`'s `cache:
 /// state.cache.clone()`). Uses a real rotated EC signing key (not an empty
 /// placeholder) since several tests here actually encode/verify JWTs.
-async fn state_with_cache(pool: PgPool) -> (AppState, Arc<CacheClient>) {
+async fn state_with_cache(pool: Database) -> (AppState, Arc<CacheClient>) {
     let cfg = Config::for_tests();
     let active_keys = atom::keys::rotate(&pool, &cfg.signing_keys)
         .await
@@ -74,9 +74,9 @@ fn authed(entity_id: Uuid, cache: Arc<CacheClient>, query: impl Into<String>) ->
     Request::new(query).data(auth_context(entity_id, cache))
 }
 
-async fn active_entity(pool: &PgPool, kind: &str) -> Uuid {
+async fn active_entity(pool: &Database, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
+    atom::db::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
         .bind(id)
         .bind(kind)
         .bind(format!("cache-test-{kind}-{id}"))
@@ -86,9 +86,9 @@ async fn active_entity(pool: &PgPool, kind: &str) -> Uuid {
     id
 }
 
-async fn resource(pool: &PgPool, kind: &str) -> Uuid {
+async fn resource(pool: &Database, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(kind)
         .bind(format!("cache-test-res-{id}"))
@@ -98,8 +98,8 @@ async fn resource(pool: &PgPool, kind: &str) -> Uuid {
     id
 }
 
-async fn read_action_id(pool: &PgPool) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+async fn read_action_id(pool: &Database) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
         .fetch_one(pool)
         .await
         .expect("read action")
@@ -107,7 +107,7 @@ async fn read_action_id(pool: &PgPool) -> Uuid {
 
 /// A platform-scope allow block granting `read`, ready to attach via a
 /// direct policy or a role.
-async fn make_read_block(pool: &PgPool) -> Uuid {
+async fn make_read_block(pool: &Database) -> Uuid {
     let action_id = read_action_id(pool).await;
     authz_repo::create_permission_block(
         pool,
@@ -128,7 +128,7 @@ async fn make_read_block(pool: &PgPool) -> Uuid {
     .id
 }
 
-async fn new_group(pool: &PgPool, label: &str) -> Uuid {
+async fn new_group(pool: &Database, label: &str) -> Uuid {
     identity_repo::create_group(
         pool,
         CreateGroup {
@@ -146,7 +146,7 @@ async fn new_group(pool: &PgPool, label: &str) -> Uuid {
 }
 
 async fn new_group_in_tenant(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     group_type: &str,
     label: &str,
@@ -181,7 +181,7 @@ async fn raw_redis_conn() -> redis::aio::MultiplexedConnection {
 }
 
 async fn evaluate_read(
-    pool: &PgPool,
+    pool: &Database,
     subject_id: Uuid,
     resource_id: Uuid,
     cache: Arc<CacheClient>,
@@ -488,7 +488,7 @@ async fn session_revoke_immediately_rejects_the_next_authentication() {
     let entity_id = active_entity(&p, "service").await;
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -562,7 +562,7 @@ async fn logout_cannot_leave_a_stale_valid_session_cached_during_the_revoke() {
     let entity_id = active_entity(&p, "service").await;
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -614,7 +614,7 @@ async fn logout_cannot_leave_a_stale_valid_session_cached_during_the_revoke() {
             }
             if saw_dirty && !is_dirty {
                 let revoked_at: Option<chrono::DateTime<chrono::Utc>> =
-                    sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
+                    atom::db::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
                         .bind(session_id)
                         .fetch_one(&p_poll)
                         .await
@@ -663,7 +663,7 @@ async fn entity_deactivation_immediately_rejects_an_existing_valid_session() {
     let entity_id = active_entity(&p, "service").await;
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -763,7 +763,7 @@ async fn replacing_access_token_permissions_invalidates_the_cached_ceiling() {
     let entity_id = active_entity(&p, "service").await;
     let read_action_id = read_action_id(&p).await;
     let manage_action_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
             .fetch_one(&p)
             .await
             .expect("manage action");
@@ -843,9 +843,9 @@ async fn replacing_access_token_permissions_invalidates_the_cached_ceiling() {
 
 // ─── Tenant delete / restore ────────────────────────────────────────────────
 
-async fn tenant(pool: &PgPool) -> Uuid {
+async fn tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("cache-test-tenant-{id}"))
         .execute(pool)
@@ -854,9 +854,9 @@ async fn tenant(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn active_entity_in_tenant(pool: &PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
+async fn active_entity_in_tenant(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
     )
     .bind(id)
@@ -886,7 +886,7 @@ async fn tenant_delete_immediately_rejects_an_existing_session_of_a_member() {
     let entity_id = active_entity_in_tenant(&p, tenant_id, "service").await;
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -958,7 +958,7 @@ async fn disabling_a_tenant_invalidates_its_members_session_cache_entries() {
     let entity_id = active_entity_in_tenant(&p, tenant_id, "service").await;
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -1144,7 +1144,7 @@ async fn tenant_delete_then_restore_immediately_rejects_a_pre_existing_session()
     let entity_id = active_entity_in_tenant(&p, tenant_id, "service").await;
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -1219,7 +1219,7 @@ async fn entity_delete_then_restore_immediately_rejects_a_pre_existing_session()
     let entity_id = active_entity(&p, "service").await;
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -1383,10 +1383,7 @@ async fn concurrent_session_creation_cannot_evade_the_entity_delete_enumeration(
     let p = pool().await;
     let entity = active_entity(&p, "service").await;
 
-    let mut tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin tx");
+    let mut tx = p.clone().begin().await.expect("begin tx");
     let (session_ids, credential_ids) =
         identity_repo::lock_entity_and_collect_revocation_ids_in_tx(&mut tx, entity)
             .await
@@ -1450,10 +1447,7 @@ async fn concurrent_session_creation_cannot_evade_the_tenant_delete_enumeration(
     let tenant_id = tenant(&p).await;
     let entity = active_entity_in_tenant(&p, tenant_id, "service").await;
 
-    let mut tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin tx");
+    let mut tx = p.clone().begin().await.expect("begin tx");
     let session_ids = tenant_repo::lock_tenant_and_collect_session_ids_in_tx(&mut tx, tenant_id)
         .await
         .expect("lock and enumerate");
@@ -1578,13 +1572,13 @@ async fn api_key_auth_reflects_the_current_tenant_after_an_entity_moves_tenants(
 /// `tid` claim, so tests can exercise `auth_from_jwt` end to end.
 async fn session_jwt(
     state: &AppState,
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     tenant_id: Option<Uuid>,
 ) -> String {
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    sqlx::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, $3)")
         .bind(session_id)
         .bind(entity_id)
         .bind(expires_at)
@@ -1688,9 +1682,9 @@ async fn a_stale_jwt_from_before_a_tenant_move_cannot_poison_the_old_tenants_sta
 
 /// A platform-scope allow block granting `create`, so a non-admin subject can
 /// be given exactly the capability `createTenant`'s gate requires.
-async fn make_platform_create_block(pool: &PgPool) -> Uuid {
+async fn make_platform_create_block(pool: &Database) -> Uuid {
     let action_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'create' LIMIT 1")
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'create' LIMIT 1")
             .fetch_one(pool)
             .await
             .expect("create action");
@@ -1798,13 +1792,10 @@ async fn group_hierarchy_mutation_locks_tenant_before_advisory() {
     let parent = new_group_in_tenant(&p, tenant_id, "principal", "lock-order-parent").await;
     let child = new_group_in_tenant(&p, tenant_id, "principal", "lock-order-child").await;
 
-    let mut tenant_tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin tenant-locking tx");
-    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+    let mut tenant_tx = p.clone().begin().await.expect("begin tenant-locking tx");
+    atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(tenant_tx.as_postgres_mut())
+        .fetch_one(&mut tenant_tx)
         .await
         .expect("lock tenant");
 
@@ -1817,10 +1808,10 @@ async fn group_hierarchy_mutation_locks_tenant_before_advisory() {
         "hierarchy mutation must wait for the tenant lock"
     );
 
-    let advisory_available: bool = sqlx::query_scalar(
+    let advisory_available: bool = atom::db::query_scalar(
         "SELECT pg_try_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))",
     )
-    .fetch_one(tenant_tx.as_postgres_mut())
+    .fetch_one(&mut tenant_tx)
     .await
     .expect("try hierarchy advisory lock");
     assert!(
@@ -1849,19 +1840,17 @@ async fn object_group_closure_preparation_locks_tenant_before_advisory() {
     let tenant_id = tenant(&p).await;
     let object_group = new_group_in_tenant(&p, tenant_id, "object", "object-lock-order").await;
 
-    let mut tenant_tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin tenant-locking tx");
-    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+    let mut tenant_tx = p.clone().begin().await.expect("begin tenant-locking tx");
+    atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(tenant_tx.as_postgres_mut())
+        .fetch_one(&mut tenant_tx)
         .await
         .expect("lock tenant");
 
     let p2 = p.clone();
     let handle = tokio::spawn(async move {
-        let mut mutation_tx = atom::db::Database::from(p2.clone())
+        let mut mutation_tx = p2
+            .clone()
             .begin()
             .await
             .expect("begin closure-preparation tx");
@@ -1870,9 +1859,9 @@ async fn object_group_closure_preparation_locks_tenant_before_advisory() {
             .expect("prepare object-group closure");
         // Mirrors the old mutation/bootstrap body which reached for the tenant
         // only after preparation had already acquired the advisory lock.
-        sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+        atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
             .bind(tenant_id)
-            .fetch_one(mutation_tx.as_postgres_mut())
+            .fetch_one(&mut mutation_tx)
             .await
             .expect("re-lock tenant in mutation body");
         mutation_tx.commit().await.expect("commit preparation tx");
@@ -1883,10 +1872,10 @@ async fn object_group_closure_preparation_locks_tenant_before_advisory() {
         "object-group preparation must wait for the tenant lock"
     );
 
-    let advisory_available: bool = sqlx::query_scalar(
+    let advisory_available: bool = atom::db::query_scalar(
         "SELECT pg_try_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))",
     )
-    .fetch_one(tenant_tx.as_postgres_mut())
+    .fetch_one(&mut tenant_tx)
     .await
     .expect("try hierarchy advisory lock");
     assert!(
@@ -1914,22 +1903,16 @@ async fn group_closure_preparation_locks_object_rows_before_principal_rows() {
     let principal_group_id =
         new_group_in_tenant(&p, tenant_id, "principal", "principal-physical-lock").await;
 
-    let mut object_tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin object-locking tx");
-    sqlx::query("SELECT id FROM object_groups WHERE id = $1 FOR UPDATE")
+    let mut object_tx = p.clone().begin().await.expect("begin object-locking tx");
+    atom::db::query("SELECT id FROM object_groups WHERE id = $1 FOR UPDATE")
         .bind(object_group_id)
-        .fetch_one(object_tx.as_postgres_mut())
+        .fetch_one(&mut object_tx)
         .await
         .expect("lock object-group row");
 
     let p2 = p.clone();
     let handle = tokio::spawn(async move {
-        let mut closure_tx = atom::db::Database::from(p2.clone())
-            .begin()
-            .await
-            .expect("begin closure tx");
+        let mut closure_tx = p2.clone().begin().await.expect("begin closure tx");
         authz_repo::lock_group_closures_and_collect_member_ids(
             &mut closure_tx,
             &[principal_group_id, object_group_id],
@@ -1946,9 +1929,9 @@ async fn group_closure_preparation_locks_object_rows_before_principal_rows() {
 
     tokio::time::timeout(
         std::time::Duration::from_millis(500),
-        sqlx::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
+        atom::db::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
             .bind(principal_group_id)
-            .fetch_one(object_tx.as_postgres_mut()),
+            .fetch_one(&mut object_tx),
     )
     .await
     .expect("principal row must remain unlocked while closure preparation waits for the object row")
@@ -1987,13 +1970,14 @@ async fn concurrent_group_membership_change_serializes_against_the_group_subject
         .await
         .expect("seed existing member");
 
+    // Created up front: SQLite admits one writer at a time, so no other write
+    // may be issued while the lock-holding transaction below is open.
+    let new_member = active_entity(&p, "service").await;
+
     // Hold the lock a group-subject mutation resolver would (e.g.
     // `deleteDirectPolicy`'s) — the exact enumeration step, kept open (not
     // yet committed).
-    let mut tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin tx");
+    let mut tx = p.clone().begin().await.expect("begin tx");
     let member_ids = authz_repo::lock_group_closures_and_collect_member_ids(&mut tx, &[group])
         .await
         .expect("lock and enumerate");
@@ -2007,7 +1991,6 @@ async fn concurrent_group_membership_change_serializes_against_the_group_subject
     // the transaction above commits — not silently add a member our
     // (already-captured) enumeration has already missed.
     let p2 = p.clone();
-    let new_member = active_entity(&p, "service").await;
     let handle =
         tokio::spawn(async move { identity_repo::add_group_member(&p2, group, new_member).await });
 
@@ -2052,13 +2035,10 @@ async fn cached_role_mutation_locks_tenant_before_role() {
     .await
     .expect("create tenant role");
 
-    let mut tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin tenant-locking tx");
-    sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+    let mut tx = p.clone().begin().await.expect("begin tenant-locking tx");
+    atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
         .bind(tenant_id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(&mut tx)
         .await
         .expect("lock tenant");
 
@@ -2067,7 +2047,8 @@ async fn cached_role_mutation_locks_tenant_before_role() {
     let (prepared_sender, mut prepared_receiver) = tokio::sync::oneshot::channel();
     let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        let mut mutation_tx = atom::db::Database::from(p2.clone())
+        let mut mutation_tx = p2
+            .clone()
             .begin()
             .await
             .expect("begin cached-preparation tx");
@@ -2089,9 +2070,9 @@ async fn cached_role_mutation_locks_tenant_before_role() {
 
     tokio::time::timeout(
         std::time::Duration::from_millis(500),
-        sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+        atom::db::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
             .bind(role_id)
-            .fetch_one(tx.as_postgres_mut()),
+            .fetch_one(&mut tx),
     )
     .await
     .expect(
@@ -2178,13 +2159,10 @@ async fn create_role_assignment_for_group_subject_locks_the_role_before_the_grou
     // (`lock_role_and_collect_grants_keys`) holds at the point it's already
     // past its own first step, before it reaches for the assigned groups'
     // closures.
-    let mut tx = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin tx");
-    sqlx::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
+    let mut tx = p.clone().begin().await.expect("begin tx");
+    atom::db::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
         .bind(role.id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(&mut tx)
         .await
         .expect("lock role");
 
@@ -2223,9 +2201,9 @@ async fn create_role_assignment_for_group_subject_locks_the_role_before_the_grou
     // the role).
     tokio::time::timeout(
         std::time::Duration::from_millis(500),
-        sqlx::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
+        atom::db::query("SELECT id FROM principal_groups WHERE id = $1 FOR UPDATE")
             .bind(descendant)
-            .fetch_one(tx.as_postgres_mut()),
+            .fetch_one(&mut tx),
     )
     .await
     .expect(
@@ -2311,7 +2289,7 @@ async fn tenant_status_change_does_not_touch_the_grants_cache_key() {
     let member = active_entity(&p, "service").await;
 
     let tenant_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(tenant_id)
         .bind(format!("cache-test-tenant-{tenant_id}"))
         .execute(&p)

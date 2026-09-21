@@ -5,9 +5,10 @@
 
 use std::collections::HashSet;
 
+use crate::db::Database;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
@@ -227,7 +228,7 @@ where
 /// The scope is taken only from [`StoredSubject`], which itself can only be
 /// created by loading the entity row above.
 pub async fn resolve_for_subject(
-    pool: &PgPool,
+    pool: &Database,
     subject: &StoredSubject,
     name: &str,
 ) -> Result<CertificateProfile, AppError> {
@@ -282,7 +283,7 @@ pub async fn resolve_for_subject_in_tx(
         .map_err(db_err)?;
     let profile = CertificateProfile::try_from(row)?;
     if let Some(base_profile_id) = profile.base_profile_id {
-        let base = profile_by_id(tx.as_postgres_mut(), base_profile_id).await?;
+        let base = profile_by_id(tx, base_profile_id).await?;
         validate_override(&profile, &base)?;
     }
     Ok(profile)

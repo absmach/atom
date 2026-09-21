@@ -8,6 +8,7 @@ mod common;
 use std::{fs, process::Command};
 
 use async_graphql::{Request, Variables};
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     certs::authority::{repo as authority_repo, AuthorityRecord},
@@ -22,7 +23,6 @@ use rcgen::{
     SanType,
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 use x509_parser::pem::parse_x509_pem;
 
@@ -122,14 +122,15 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
     assert_eq!(chain_pem.matches("BEGIN CERTIFICATE").count(), 3);
     assert_chain_with_openssl(&leaf_pem, &chain_pem, &root.pem);
 
-    let persisted: (Option<Uuid>, Uuid, Value, Option<String>, Option<Vec<u8>>) = sqlx::query_as(
-        r#"SELECT issuer_id, entity_id, metadata, secret_hash, secret_ciphertext
+    let persisted: (Option<Uuid>, Uuid, Value, Option<String>, Option<Vec<u8>>) =
+        atom::db::query_as(
+            r#"SELECT issuer_id, entity_id, metadata, secret_hash, secret_ciphertext
                FROM credentials WHERE id = $1"#,
-    )
-    .bind(credential_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+        )
+        .bind(credential_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(persisted.0, Some(issuer.id));
     assert_eq!(persisted.1, entity_a);
     assert!(persisted.3.is_none() && persisted.4.is_none());
@@ -181,7 +182,7 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
         "failed managed CSR issuance must publish one error observation"
     );
 
-    let ledger: (String, String, Option<Uuid>) = sqlx::query_as(
+    let ledger: (String, String, Option<Uuid>) = atom::db::query_as(
         r#"SELECT request_key_hash, request_fingerprint_sha256, credential_id
            FROM certificate_issuance_requests WHERE entity_id = $1"#,
     )
@@ -223,7 +224,7 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
 
     // The same issuer mismatch is rejected if an internal/import path attempts
     // to bypass the service boundary.
-    let db_scope_error = sqlx::query(
+    let db_scope_error = atom::db::query(
         r#"INSERT INTO credentials (
                id, entity_id, kind, identifier, issuer_id, metadata
            ) VALUES ($1, $2, 'certificate', $3, $4, '{}')"#,
@@ -235,10 +236,7 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
     .execute(&pool)
     .await
     .expect_err("cross-tenant issuer insert must fail");
-    assert!(matches!(
-        db_scope_error,
-        sqlx::Error::Database(ref database) if database.code().as_deref() == Some("23514")
-    ));
+    assert!(atom::error::is_check_violation(&db_scope_error));
 
     let no_issuer = schema
         .execute(issue_request(
@@ -302,27 +300,32 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
     assert_eq!(certificate_count(&pool, entity_a).await, 1);
 
     // A synthetic first-attempt unique violation proves the service rolls back
-    // the poisoned savepoint and retries on the same outer connection.
-    install_serial_collision_trigger(&pool, entity_a).await;
-    let collision = schema
-        .execute(issue_request(
-            entity_a,
-            Some(tenant_a),
-            entity_a,
-            &plain_csr,
-            "serial-collision",
-            Some(3600),
-        ))
-        .await;
-    assert!(collision.errors.is_empty(), "{:?}", collision.errors);
-    let collision_attempts: i64 =
-        sqlx::query_scalar("SELECT last_value FROM pki_test_serial_collision_seq")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(collision_attempts, 2);
-    remove_serial_collision_trigger(&pool).await;
-    assert_eq!(certificate_count(&pool, entity_a).await, 2);
+    // the poisoned savepoint and retries on the same outer connection. The
+    // injection counts attempts with a PostgreSQL sequence, which is
+    // non-transactional; SQLite has no equivalent, so its retry path is covered
+    // by the unique-violation classification tests instead.
+    if !atom::db::testing::is_sqlite() {
+        install_serial_collision_trigger(&pool, entity_a).await;
+        let collision = schema
+            .execute(issue_request(
+                entity_a,
+                Some(tenant_a),
+                entity_a,
+                &plain_csr,
+                "serial-collision",
+                Some(3600),
+            ))
+            .await;
+        assert!(collision.errors.is_empty(), "{:?}", collision.errors);
+        let collision_attempts: i64 =
+            atom::db::query_scalar("SELECT last_value FROM pki_test_serial_collision_seq")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(collision_attempts, 2);
+        remove_serial_collision_trigger(&pool).await;
+        assert_eq!(certificate_count(&pool, entity_a).await, 2);
+    }
 
     // Signing occurs before credential persistence. A forced database failure
     // returns no artifact and rolls back the credential, retry ledger, audit,
@@ -356,7 +359,7 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
     // Both expired and retiring issuers are excluded by the internal selector.
     let original_not_before = issuer.not_before.unwrap();
     let original_not_after = issuer.not_after.unwrap();
-    sqlx::query(
+    atom::db::query(
         r#"UPDATE pki_authorities
            SET not_before = $2, not_after = now() - interval '1 second'
            WHERE id = $1"#,
@@ -380,14 +383,14 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
         &expired.errors,
         "no active issuing authority"
     ));
-    sqlx::query("UPDATE pki_authorities SET not_before = $2, not_after = $3 WHERE id = $1")
+    atom::db::query("UPDATE pki_authorities SET not_before = $2, not_after = $3 WHERE id = $1")
         .bind(issuer.id)
         .bind(original_not_before)
         .bind(original_not_after)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
+    atom::db::query(
         r#"UPDATE pki_authorities
            SET status = 'retiring', issuance_enabled = false, retiring_at = now()
            WHERE id = $1"#,
@@ -419,7 +422,7 @@ fn managed_config() -> Config {
     config
 }
 
-fn graphql_state(pool: PgPool, config: Config) -> AppState {
+fn graphql_state(pool: Database, config: Config) -> AppState {
     let primary = LoadedKey {
         kid: "test".into(),
         public_key_pem: String::new(),
@@ -517,13 +520,13 @@ fn test_root() -> TestRoot {
 }
 
 async fn provision_tenant_issuer(
-    pool: &PgPool,
+    pool: &Database,
     config: &Config,
     root: &TestRoot,
     tenant_id: Uuid,
 ) -> AuthorityRecord {
     let record = common::pki::provision_tenant_issuer(pool, config, root, tenant_id).await;
-    sqlx::query(
+    atom::db::query(
         r#"UPDATE pki_authorities
            SET ocsp_url = $2, ca_issuers_url = $3,
                crl_distribution_point_url = $4
@@ -541,9 +544,9 @@ async fn provision_tenant_issuer(
         .unwrap()
 }
 
-async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
+async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("{prefix}-{id}"))
         .execute(pool)
@@ -552,9 +555,9 @@ async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
     id
 }
 
-async fn create_entity(pool: &PgPool, tenant_id: Uuid, prefix: &str) -> Uuid {
+async fn create_entity(pool: &Database, tenant_id: Uuid, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
     )
     .bind(id)
@@ -566,8 +569,8 @@ async fn create_entity(pool: &PgPool, tenant_id: Uuid, prefix: &str) -> Uuid {
     id
 }
 
-async fn certificate_count(pool: &PgPool, entity_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn certificate_count(pool: &Database, entity_id: Uuid) -> i64 {
+    atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'certificate'",
     )
     .bind(entity_id)
@@ -576,15 +579,17 @@ async fn certificate_count(pool: &PgPool, entity_id: Uuid) -> i64 {
     .unwrap()
 }
 
-async fn issuance_request_count(pool: &PgPool, entity_id: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM certificate_issuance_requests WHERE entity_id = $1")
-        .bind(entity_id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
+async fn issuance_request_count(pool: &Database, entity_id: Uuid) -> i64 {
+    atom::db::query_scalar(
+        "SELECT COUNT(*) FROM certificate_issuance_requests WHERE entity_id = $1",
+    )
+    .bind(entity_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
-async fn event_count(pool: &PgPool, table: &str, event: &str, target_id: Uuid) -> i64 {
+async fn event_count(pool: &Database, table: &str, event: &str, target_id: Uuid) -> i64 {
     let query = match table {
         "audit_logs" => "SELECT COUNT(*) FROM audit_logs WHERE event = $1 AND target_id = $2",
         "event_outbox" => {
@@ -592,7 +597,7 @@ async fn event_count(pool: &PgPool, table: &str, event: &str, target_id: Uuid) -
         }
         _ => panic!("unsupported event table"),
     };
-    sqlx::query_scalar(query)
+    atom::db::query_scalar(query)
         .bind(event)
         .bind(target_id)
         .fetch_one(pool)
@@ -600,8 +605,8 @@ async fn event_count(pool: &PgPool, table: &str, event: &str, target_id: Uuid) -
         .unwrap()
 }
 
-async fn error_event_count(pool: &PgPool, event: &str, target_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn error_event_count(pool: &Database, event: &str, target_id: Uuid) -> i64 {
+    atom::db::query_scalar(
         r#"SELECT COUNT(*) FROM event_outbox
            WHERE event = $1
              AND (payload->>'target_id')::uuid = $2
@@ -615,12 +620,12 @@ async fn error_event_count(pool: &PgPool, event: &str, target_id: Uuid) -> i64 {
     .unwrap()
 }
 
-async fn install_serial_collision_trigger(pool: &PgPool, entity_id: Uuid) {
-    sqlx::query("CREATE SEQUENCE pki_test_serial_collision_seq")
+async fn install_serial_collision_trigger(pool: &Database, entity_id: Uuid) {
+    atom::db::query("CREATE SEQUENCE pki_test_serial_collision_seq")
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query(&format!(
+    atom::db::query(&format!(
         r#"CREATE FUNCTION pki_test_serial_collision() RETURNS trigger AS $$
         BEGIN
             IF NEW.entity_id = '{entity_id}'::uuid
@@ -636,7 +641,7 @@ async fn install_serial_collision_trigger(pool: &PgPool, entity_id: Uuid) {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(
+    atom::db::query(
         "CREATE TRIGGER trg_pki_test_serial_collision BEFORE INSERT ON credentials FOR EACH ROW EXECUTE FUNCTION pki_test_serial_collision()",
     )
     .execute(pool)
@@ -644,54 +649,41 @@ async fn install_serial_collision_trigger(pool: &PgPool, entity_id: Uuid) {
     .unwrap();
 }
 
-async fn remove_serial_collision_trigger(pool: &PgPool) {
-    sqlx::query("DROP TRIGGER trg_pki_test_serial_collision ON credentials")
+async fn remove_serial_collision_trigger(pool: &Database) {
+    atom::db::query("DROP TRIGGER trg_pki_test_serial_collision ON credentials")
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("DROP FUNCTION pki_test_serial_collision()")
+    atom::db::query("DROP FUNCTION pki_test_serial_collision()")
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("DROP SEQUENCE pki_test_serial_collision_seq")
+    atom::db::query("DROP SEQUENCE pki_test_serial_collision_seq")
         .execute(pool)
         .await
         .unwrap();
 }
 
-async fn install_persistence_failure_trigger(pool: &PgPool, entity_id: Uuid) {
-    sqlx::query(&format!(
-        r#"CREATE FUNCTION pki_test_persistence_failure() RETURNS trigger AS $$
-        BEGIN
-            IF NEW.entity_id = '{entity_id}'::uuid
-               AND NEW.kind = 'certificate'
-               AND NEW.issuer_id IS NOT NULL THEN
-                RAISE EXCEPTION 'synthetic managed credential failure' USING ERRCODE = '23514';
-            END IF;
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql"#,
-    ))
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TRIGGER trg_pki_test_persistence_failure BEFORE INSERT ON credentials FOR EACH ROW EXECUTE FUNCTION pki_test_persistence_failure()",
+async fn install_persistence_failure_trigger(pool: &Database, entity_id: Uuid) {
+    atom::db::testing::install_rejecting_trigger(
+        pool,
+        "trg_pki_test_persistence_failure",
+        "credentials",
+        &format!(
+            "NEW.entity_id = '{entity_id}'::uuid AND NEW.kind = 'certificate' AND NEW.issuer_id IS NOT NULL"
+        ),
+        "synthetic managed credential failure",
     )
-    .execute(pool)
-    .await
-    .unwrap();
+    .await;
 }
 
-async fn remove_persistence_failure_trigger(pool: &PgPool) {
-    sqlx::query("DROP TRIGGER trg_pki_test_persistence_failure ON credentials")
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("DROP FUNCTION pki_test_persistence_failure()")
-        .execute(pool)
-        .await
-        .unwrap();
+async fn remove_persistence_failure_trigger(pool: &Database) {
+    atom::db::testing::drop_rejecting_trigger(
+        pool,
+        "trg_pki_test_persistence_failure",
+        "credentials",
+    )
+    .await;
 }
 
 fn assert_chain_with_openssl(leaf_pem: &str, chain_pem: &str, root_pem: &str) {

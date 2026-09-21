@@ -7,7 +7,6 @@
 //! disabled by default — see [`crate::config::PurgeConfig`].
 
 use chrono::{Duration, Utc};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -85,9 +84,9 @@ pub fn spawn_purge_cleanup(state: AppState) {
 /// [`crate::authz::repo::purge_authz_references_for_ids`] so no bare-UUID authz
 /// reference (`permission_blocks.object_id`, `*_id` subject grants) is left
 /// dangling — the same cleanup the explicit purge mutations use.
-pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSummary, AppError> {
+pub async fn purge_expired(pool: &Database, cfg: PurgeConfig) -> Result<PurgeSummary, AppError> {
     let cutoff = Utc::now() - Duration::days(cfg.retention_days);
-    let mut tx = Database::from(pool.clone()).begin().await?;
+    let mut tx = pool.begin().await?;
     let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(PURGE_ADVISORY_LOCK_ID)
         .fetch_one(tx.exec())

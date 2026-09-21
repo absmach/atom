@@ -14,6 +14,7 @@ mod common;
 
 use std::{fmt::Debug, future::Future};
 
+use atom::db::Database;
 use atom::db::DbTransaction;
 use atom::{
     authz::repo as authz_repo,
@@ -27,7 +28,6 @@ use atom::{
     tenants::repo as tenant_repo,
 };
 use common::pool;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn assert_config_conflict(err: AppError) {
@@ -46,7 +46,7 @@ async fn credential_create_waits_for_config_slot_ownership_and_then_conflicts() 
     let p = pool().await;
     let tenant_id = active_tenant(&p, "credential-slot").await;
     let entity_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) \
          VALUES ($1, 'service', $2, $3, 'active')",
     )
@@ -59,7 +59,7 @@ async fn credential_create_waits_for_config_slot_ownership_and_then_conflicts() 
     let credential_id = Uuid::new_v4();
     let hash =
         identity_service::hash_secret(b"managed-machine-secret").expect("hash managed password");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
     )
     .bind(credential_id)
@@ -69,7 +69,8 @@ async fn credential_create_waits_for_config_slot_ownership_and_then_conflicts() 
     .await
     .expect("insert password");
 
-    let mut stamp = atom::db::Database::from(p.clone())
+    let mut stamp = p
+        .clone()
         .begin()
         .await
         .expect("begin bootstrap-like credential tx");
@@ -77,9 +78,9 @@ async fn credential_create_waits_for_config_slot_ownership_and_then_conflicts() 
         .await
         .expect("lock entity")
         .expect("active entity");
-    sqlx::query("UPDATE credentials SET managed_by = 'config' WHERE id = $1")
+    atom::db::query("UPDATE credentials SET managed_by = 'config' WHERE id = $1")
         .bind(credential_id)
-        .execute(stamp.as_postgres_mut())
+        .execute(&mut stamp)
         .await
         .expect("stage credential ownership");
 
@@ -99,7 +100,7 @@ async fn credential_create_waits_for_config_slot_ownership_and_then_conflicts() 
             .expect("join credential create")
             .expect_err("config-owned slot must reject API create"),
     );
-    let active: i64 = sqlx::query_scalar(
+    let active: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
     .bind(entity_id)
@@ -115,7 +116,7 @@ async fn shared_key_reveal_waits_for_config_stamp_and_hides_the_secret() {
     let p = pool().await;
     let tenant_id = active_tenant(&p, "shared-key-reveal").await;
     let entity_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) \
          VALUES ($1, 'service', $2, $3, 'active')",
     )
@@ -139,7 +140,8 @@ async fn shared_key_reveal_waits_for_config_stamp_and_hides_the_secret() {
     .await
     .expect("create shared key");
 
-    let mut stamp = atom::db::Database::from(p.clone())
+    let mut stamp = p
+        .clone()
         .begin()
         .await
         .expect("begin bootstrap-like credential tx");
@@ -147,9 +149,9 @@ async fn shared_key_reveal_waits_for_config_stamp_and_hides_the_secret() {
         .await
         .expect("lock entity")
         .expect("active entity");
-    sqlx::query("UPDATE credentials SET managed_by = 'config' WHERE id = $1")
+    atom::db::query("UPDATE credentials SET managed_by = 'config' WHERE id = $1")
         .bind(shared.credential_id)
-        .execute(stamp.as_postgres_mut())
+        .execute(&mut stamp)
         .await
         .expect("stage shared-key ownership");
 
@@ -174,9 +176,9 @@ async fn shared_key_reveal_waits_for_config_stamp_and_hides_the_secret() {
     ));
 }
 
-async fn active_tenant(pool: &PgPool, label: &str) -> Uuid {
+async fn active_tenant(pool: &Database, label: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("m48-{label}-{id}"))
         .execute(pool)
@@ -186,27 +188,24 @@ async fn active_tenant(pool: &PgPool, label: &str) -> Uuid {
 }
 
 async fn stage_config_stamp(
-    pool: &PgPool,
+    pool: &Database,
     table: &'static str,
     id: Uuid,
     tenant_id: Option<Uuid>,
 ) -> DbTransaction<'static> {
-    let mut tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .expect("begin bootstrap-like tx");
+    let mut tx = pool.clone().begin().await.expect("begin bootstrap-like tx");
     if let Some(tenant_id) = tenant_id {
-        sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+        atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
             .bind(tenant_id)
-            .fetch_one(tx.as_postgres_mut())
+            .fetch_one(&mut tx)
             .await
             .expect("lock owning tenant");
     }
-    let result = sqlx::query(&format!(
+    let result = atom::db::query(&format!(
         "UPDATE {table} SET managed_by = 'config' WHERE id = $1"
     ))
     .bind(id)
-    .execute(tx.as_postgres_mut())
+    .execute(&mut tx)
     .await
     .expect("stage config ownership stamp");
     assert_eq!(result.rows_affected(), 1, "fixture row must exist");
@@ -260,7 +259,7 @@ async fn row_updates_recheck_config_ownership_inside_the_write_transaction() {
     let owner_tenant = active_tenant(&p, "owned-rows").await;
 
     let entity_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) \
          VALUES ($1, 'service', $2, $3, 'active')",
     )
@@ -293,13 +292,15 @@ async fn row_updates_recheck_config_ownership_inside_the_write_transaction() {
     .await;
 
     let resource_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)")
-        .bind(resource_id)
-        .bind(format!("m48-resource-{resource_id}"))
-        .bind(owner_tenant)
-        .execute(&p)
-        .await
-        .expect("insert resource");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)",
+    )
+    .bind(resource_id)
+    .bind(format!("m48-resource-{resource_id}"))
+    .bind(owner_tenant)
+    .execute(&p)
+    .await
+    .expect("insert resource");
     let stamp = stage_config_stamp(&p, "resources", resource_id, Some(owner_tenant)).await;
     let p2 = p.clone();
     assert_waits_then_conflicts(stamp, async move {
@@ -317,7 +318,7 @@ async fn row_updates_recheck_config_ownership_inside_the_write_transaction() {
     .await;
 
     let group_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO principal_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO principal_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(group_id)
         .bind(format!("m48-group-{group_id}"))
         .bind(owner_tenant)
@@ -342,7 +343,7 @@ async fn row_updates_recheck_config_ownership_inside_the_write_transaction() {
     .await;
 
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(role_id)
         .bind(format!("m48-role-{role_id}"))
         .bind(owner_tenant)
@@ -365,7 +366,7 @@ async fn row_updates_recheck_config_ownership_inside_the_write_transaction() {
     .await;
 
     let action_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(action_id)
         .bind(format!("m48.action.{action_id}"))
         .execute(&p)
@@ -394,7 +395,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     let p = pool().await;
     let tenant_id = active_tenant(&p, "delete-rows").await;
     let entity_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) \
          VALUES ($1, 'service', $2, $3, 'active')",
     )
@@ -406,7 +407,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     .expect("insert entity");
 
     let block_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks (id, tenant_id, scope_mode, effect) \
          VALUES ($1, $2, 'tenant', 'allow')",
     )
@@ -423,7 +424,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     .await;
 
     let rule_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO action_assignment_rules
              (id, tenant_id, entity_kind, action_name, object_kind, decision)
            VALUES ($1, $2, 'service', 'read', 'resource', 'deny')"#,
@@ -441,7 +442,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     .await;
 
     let role_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(role_id)
         .bind(format!("m48-delete-role-{role_id}"))
         .bind(tenant_id)
@@ -449,7 +450,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
         .await
         .expect("insert role");
     let assignment_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO role_assignments
              (id, tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, $2, 'entity', $3, $4)"#,
@@ -469,7 +470,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     .await;
 
     let direct_block_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_blocks (id, tenant_id, scope_mode, effect) \
          VALUES ($1, $2, 'tenant', 'allow')",
     )
@@ -479,7 +480,7 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     .await
     .expect("insert direct-policy block");
     let policy_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies
              (id, tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, $2, 'entity', $3, $4)"#,
@@ -500,13 +501,13 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
 
     let action_id = Uuid::new_v4();
     let object_type = format!("resource:m48-{action_id}");
-    sqlx::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
         .bind(action_id)
         .bind(format!("m48.applicability.{action_id}"))
         .execute(&p)
         .await
         .expect("insert applicability action");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO action_applicability (action_id, object_kind, object_type) \
          VALUES ($1, 'resource', $2)",
     )
@@ -516,22 +517,19 @@ async fn row_deletes_recheck_config_ownership_inside_the_write_transaction() {
     .await
     .expect("insert applicability");
 
-    let mut stamp = atom::db::Database::from(p.clone())
-        .begin()
-        .await
-        .expect("begin applicability stamp");
-    sqlx::query("SELECT id FROM actions WHERE id = $1 FOR UPDATE")
+    let mut stamp = p.clone().begin().await.expect("begin applicability stamp");
+    atom::db::query("SELECT id FROM actions WHERE id = $1 FOR UPDATE")
         .bind(action_id)
-        .fetch_one(stamp.as_postgres_mut())
+        .fetch_one(&mut stamp)
         .await
         .expect("lock action");
-    sqlx::query(
+    atom::db::query(
         r#"UPDATE action_applicability SET managed_by = 'config'
            WHERE action_id = $1 AND object_kind = 'resource' AND object_type = $2"#,
     )
     .bind(action_id)
     .bind(&object_type)
-    .execute(stamp.as_postgres_mut())
+    .execute(&mut stamp)
     .await
     .expect("stage applicability stamp");
     let p2 = p.clone();

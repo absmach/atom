@@ -203,7 +203,7 @@ fn authz_request_target(req: &AuthzRequest) -> (Option<&str>, Option<Uuid>) {
 }
 
 async fn audit_authz_check(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     audit_policy: AuditPolicyConfig,
     events_enabled: bool,
     actor_id: Uuid,
@@ -255,7 +255,7 @@ async fn audit_authz_check(
 }
 
 async fn audit_authz_explain(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     events_enabled: bool,
     actor_id: Uuid,
     req: &AuthzRequest,

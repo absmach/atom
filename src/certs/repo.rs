@@ -1,6 +1,7 @@
+use crate::db::Database;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
@@ -320,7 +321,7 @@ pub async fn complete_certificate_renewal(
 }
 
 pub async fn runtime_certificate_by_fingerprint(
-    pool: &PgPool,
+    pool: &Database,
     fingerprint_sha256: &str,
 ) -> Result<RuntimeCertificateCredential, AppError> {
     crate::db::query_as::<RuntimeCertificateCredential>(
@@ -349,7 +350,7 @@ pub async fn runtime_certificate_by_fingerprint(
 }
 
 pub async fn runtime_certificate_by_issuer_fingerprint_serial(
-    pool: &PgPool,
+    pool: &Database,
     issuer_fingerprint_sha256: &str,
     serial_number: &str,
 ) -> Result<RuntimeCertificateCredential, AppError> {
@@ -381,7 +382,7 @@ pub async fn runtime_certificate_by_issuer_fingerprint_serial(
 }
 
 pub async fn certificate_by_id(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
 ) -> Result<CertificateCredential, AppError> {
     fetch_certificate_by_id(pool, credential_id).await
@@ -526,7 +527,7 @@ pub async fn lock_certificate_by_issuer_serial(
 }
 
 pub async fn list_certificates(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Option<Uuid>,
     tenant_id: Option<Uuid>,
     status: Option<&str>,
@@ -548,7 +549,7 @@ pub async fn list_certificates(
 }
 
 pub async fn list_certificates_filtered(
-    pool: &PgPool,
+    pool: &Database,
     filter: &CertificateListFilter,
 ) -> Result<Vec<CertificateCredential>, AppError> {
     let mut query = crate::db::QueryBuilder::new(
@@ -601,7 +602,7 @@ pub async fn list_certificates_filtered(
 }
 
 pub async fn count_certificates(
-    pool: &PgPool,
+    pool: &Database,
     filter: &CertificateListFilter,
 ) -> Result<i64, AppError> {
     let mut query = crate::db::QueryBuilder::new(
@@ -754,7 +755,7 @@ where
 }
 
 pub async fn issuer_crl_state(
-    pool: &PgPool,
+    pool: &Database,
     issuer_id: Uuid,
 ) -> Result<Option<CrlState>, AppError> {
     crate::db::query_as::<CrlState>(

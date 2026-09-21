@@ -1,5 +1,5 @@
+use crate::db::Database;
 use async_graphql::{Context, Object, Result, ID};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -154,7 +154,7 @@ impl AdminQuery {
 }
 
 async fn audit_tenant_filter(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     requested_tenant_id: Option<Uuid>,
 ) -> std::result::Result<Option<Vec<Uuid>>, AppError> {

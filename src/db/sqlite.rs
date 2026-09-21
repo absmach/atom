@@ -122,6 +122,40 @@ pub async fn connect(url: &str, cfg: &DbPoolConfig) -> anyhow::Result<SqliteDb> 
         }
     };
 
+    let pool = open_pool(options, &location, max_connections, cfg).await?;
+
+    Ok(SqliteDb {
+        pool,
+        location,
+        _lock: lock,
+    })
+}
+
+impl SqliteDb {
+    /// A second pool over the same database with its own connection limit,
+    /// sharing this handle's ownership lock. Tests use it to prove a code path
+    /// never needs a second connection while it holds one.
+    pub async fn with_max_connections(
+        &self,
+        max_connections: u32,
+        cfg: &DbPoolConfig,
+    ) -> anyhow::Result<SqliteDb> {
+        let options = (*self.pool.connect_options()).clone();
+        let pool = open_pool(options, &self.location, max_connections, cfg).await?;
+        Ok(SqliteDb {
+            pool,
+            location: self.location.clone(),
+            _lock: self._lock.clone(),
+        })
+    }
+}
+
+async fn open_pool(
+    options: SqliteConnectOptions,
+    location: &SqliteLocation,
+    max_connections: u32,
+    cfg: &DbPoolConfig,
+) -> anyhow::Result<SqlitePool> {
     let options = options
         .foreign_keys(true)
         .synchronous(SqliteSynchronous::Full)
@@ -132,7 +166,7 @@ pub async fn connect(url: &str, cfg: &DbPoolConfig) -> anyhow::Result<SqliteDb> 
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(cfg.acquire_timeout_secs))
         .after_connect(|conn, _meta| Box::pin(super::sqlite_functions::register(conn)));
-    if location == SqliteLocation::Memory {
+    if *location == SqliteLocation::Memory {
         // An in-memory database lives and dies with its only connection.
         pool_options = pool_options
             .min_connections(1)
@@ -140,18 +174,13 @@ pub async fn connect(url: &str, cfg: &DbPoolConfig) -> anyhow::Result<SqliteDb> 
             .max_lifetime(None);
     }
 
-    let pool = tokio::time::timeout(
+    tokio::time::timeout(
         Duration::from_secs(cfg.connect_timeout_secs),
         pool_options.connect_with(options),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("database connect timed out"))??;
-
-    Ok(SqliteDb {
-        pool,
-        location,
-        _lock: lock,
-    })
+    .map_err(|_| anyhow::anyhow!("database connect timed out"))?
+    .map_err(Into::into)
 }
 
 /// The configured pool size when the operator set one, else the SQLite default.

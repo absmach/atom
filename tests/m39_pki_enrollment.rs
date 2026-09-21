@@ -265,7 +265,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     assert_eq!(replay["idempotent_replay"], true);
 
     // Headers never substitute for the connection-bound extension.
-    let native_denials_before: i64 = sqlx::query_scalar(
+    let native_denials_before: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -294,7 +294,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     // Missing-peer failures happen before authentication on this public
     // endpoint. They are observable through metrics and tracing, but must not
     // let anonymous traffic amplify durable outbox writes.
-    let native_denials_after: i64 = sqlx::query_scalar(
+    let native_denials_after: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -356,7 +356,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     };
 
     // Runtime lifecycle state remains authoritative after TLS verification.
-    sqlx::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
         .bind(access_entity)
         .execute(&pool)
         .await
@@ -368,13 +368,13 @@ async fn native_enrollment_enforces_the_pr014_contract() {
         "inactive-entity",
     )
     .await;
-    sqlx::query("UPDATE entities SET status = 'active' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'active' WHERE id = $1")
         .bind(access_entity)
         .execute(&pool)
         .await
         .unwrap();
 
-    sqlx::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
         .bind(tenant)
         .execute(&pool)
         .await
@@ -386,19 +386,20 @@ async fn native_enrollment_enforces_the_pr014_contract() {
         "frozen-tenant",
     )
     .await;
-    sqlx::query("UPDATE tenants SET status = 'active' WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'active' WHERE id = $1")
         .bind(tenant)
         .execute(&pool)
         .await
         .unwrap();
 
-    let original_fingerprint: String =
-        sqlx::query_scalar("SELECT metadata->>'fingerprint_sha256' FROM credentials WHERE id = $1")
-            .bind(renewed_credential)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    sqlx::query(
+    let original_fingerprint: String = atom::db::query_scalar(
+        "SELECT metadata->>'fingerprint_sha256' FROM credentials WHERE id = $1",
+    )
+    .bind(renewed_credential)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    atom::db::query(
         "UPDATE credentials SET metadata = jsonb_set(metadata, '{fingerprint_sha256}', to_jsonb($2::text)) WHERE id = $1",
     )
     .bind(renewed_credential)
@@ -407,7 +408,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     .await
     .unwrap();
     assert_reenrollment_denied(address, &server_cert_pem, &renewed_identity, "unknown-peer").await;
-    sqlx::query(
+    atom::db::query(
         "UPDATE credentials SET metadata = jsonb_set(metadata, '{fingerprint_sha256}', to_jsonb($2::text)) WHERE id = $1",
     )
     .bind(renewed_credential)
@@ -416,11 +417,13 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     .await
     .unwrap();
 
-    sqlx::query("UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1")
-        .bind(renewed_credential)
-        .execute(&pool)
-        .await
-        .unwrap();
+    atom::db::query(
+        "UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(renewed_credential)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_reenrollment_denied(address, &server_cert_pem, &renewed_identity, "expired-peer").await;
 
     // Documented recovery: the expired certificate is not accepted, but the
@@ -467,7 +470,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
         profile_shape(&management.certificate_pem),
         profile_shape(&first_certificate)
     );
-    let expected_threshold: i64 = sqlx::query_scalar(
+    let expected_threshold: i64 = atom::db::query_scalar(
         "SELECT renewal_threshold_seconds FROM certificate_profiles WHERE id = $1",
     )
     .bind(uuid(&first, "profile_id"))
@@ -571,7 +574,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
             ..
         })
     ));
-    let rate_count: i64 = sqlx::query_scalar(
+    let rate_count: i64 = atom::db::query_scalar(
         "SELECT request_count FROM pki_enrollment_rate_windows WHERE scope_kind = 'entity' AND scope_id = $1 ORDER BY window_start DESC LIMIT 1",
     )
     .bind(rate_entity)
@@ -580,7 +583,7 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     .unwrap();
     assert_eq!(rate_count, 1);
 
-    sqlx::query(
+    atom::db::query(
         "DELETE FROM pki_enrollment_rate_windows WHERE scope_kind = 'tenant' AND scope_id = $1",
     )
     .bind(tenant)
@@ -911,16 +914,16 @@ fn profile_shape(pem: &str) -> (bool, bool, bool, usize) {
     )
 }
 
-async fn audit_count(pool: &sqlx::PgPool, event: &str) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE event = $1")
+async fn audit_count(pool: &atom::db::Database, event: &str) -> i64 {
+    atom::db::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE event = $1")
         .bind(event)
         .fetch_one(pool)
         .await
         .unwrap()
 }
 
-async fn outbox_count(pool: &sqlx::PgPool, event: &str) -> i64 {
-    sqlx::query_scalar(
+async fn outbox_count(pool: &atom::db::Database, event: &str) -> i64 {
+    atom::db::query_scalar(
         "SELECT COUNT(*) FROM event_outbox
          WHERE event = $1 AND payload->>'outcome' = 'allow'",
     )

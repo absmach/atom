@@ -1,9 +1,10 @@
+use crate::db::DbExecutor;
 use std::collections::{HashMap, HashSet};
 
+use crate::db::Database;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -53,7 +54,7 @@ use crate::{
 /// the authorized total, not the raw candidate count.
 #[allow(clippy::too_many_arguments)]
 async fn authorize_flat_candidate_query(
-    pool: &PgPool,
+    pool: &Database,
     subject_id: Uuid,
     ceiling_id: Option<Uuid>,
     object_kind: &str,
@@ -170,7 +171,7 @@ const API_ENDPOINT_CANDIDATES: &str = r#"
       AND (NULLIF($5->>'status', '') IS NULL OR status = ($5->>'status'))"#;
 
 pub async fn list_api_endpoints_authorized(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     params: ListApiEndpoints,
 ) -> Result<ApiEndpointList, AppError> {
@@ -281,7 +282,7 @@ fn authorized_group_order_by(order: GroupOrderField, dir: SortDir) -> &'static s
 }
 
 pub async fn create_resource_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateResource,
@@ -294,10 +295,7 @@ pub async fn create_resource_with_audit(
     };
     reject_parent_group_attribute(&attrs)?;
     let alias = crate::models::alias::validate_alias_opt(req.alias)?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let resource = crate::db::query_as::<Resource>(
         r#"INSERT INTO resources (id, kind, name, alias, tenant_id, owner_id, attributes)
@@ -332,11 +330,11 @@ pub async fn create_resource_with_audit(
     Ok(resource)
 }
 
-pub async fn create_resource(pool: &PgPool, req: CreateResource) -> Result<Resource, AppError> {
+pub async fn create_resource(pool: &Database, req: CreateResource) -> Result<Resource, AppError> {
     create_resource_with_audit(pool, false, None, req).await
 }
 
-pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError> {
+pub async fn get_resource(pool: &Database, id: Uuid) -> Result<Resource, AppError> {
     fetch_resource(pool, id).await
 }
 
@@ -358,7 +356,10 @@ where
     })
 }
 
-pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Resource>, AppError> {
+pub async fn list_resources_by_ids(
+    pool: &Database,
+    ids: &[Uuid],
+) -> Result<Vec<Resource>, AppError> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -376,7 +377,7 @@ pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Re
 }
 
 pub async fn list_resources(
-    pool: &PgPool,
+    pool: &Database,
     params: ListResources,
 ) -> Result<ResourceList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -469,7 +470,7 @@ pub async fn list_resources(
 }
 
 pub async fn update_resource_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -482,10 +483,7 @@ pub async fn update_resource_with_audit(
     let alias = crate::models::alias::validate_alias_update(req.alias)?;
     let alias_is_set = alias.is_some();
     let alias = alias.flatten();
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
         "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -548,7 +546,7 @@ pub async fn update_resource_with_audit(
 }
 
 pub async fn update_resource(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     req: UpdateResource,
 ) -> Result<Resource, AppError> {
@@ -556,16 +554,13 @@ pub async fn update_resource(
 }
 
 pub async fn delete_resource_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
         "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -614,7 +609,7 @@ pub async fn delete_resource_with_audit(
 }
 
 pub async fn delete_resource(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -622,17 +617,14 @@ pub async fn delete_resource(
 }
 
 pub async fn restore_resource_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     let _ = restored_by;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
 
     let expected_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
         "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NOT NULL",
@@ -699,7 +691,7 @@ pub async fn restore_resource_with_audit(
 }
 
 pub async fn restore_resource(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -761,15 +753,12 @@ pub(crate) async fn purge_authz_references_for_ids(
 /// (deleting a block cascades to its actions, role links, and direct policies).
 /// Resources are never a subject, so there is no subject-side cleanup.
 pub async fn purge_resource_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
 
     let tenant_id: Option<Option<Uuid>> =
         crate::db::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
@@ -810,7 +799,7 @@ pub async fn purge_resource_with_audit(
     Ok(tenant_id)
 }
 
-pub async fn purge_resource(pool: &PgPool, id: Uuid) -> Result<Option<Uuid>, AppError> {
+pub async fn purge_resource(pool: &Database, id: Uuid) -> Result<Option<Uuid>, AppError> {
     purge_resource_with_audit(pool, false, None, id).await
 }
 
@@ -830,7 +819,7 @@ pub struct ResolvedAlias {
 /// authorization gate is the subsequent `authz` check by UUID. Returns
 /// `NotFound` if either level is missing.
 pub async fn resolve_alias(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Option<Uuid>,
     tenant_alias: Option<&str>,
     global: bool,
@@ -915,7 +904,7 @@ pub async fn resolve_alias(
 }
 
 pub async fn get_resource_object_groups(
-    pool: &PgPool,
+    pool: &Database,
     resource_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
     crate::db::query_scalar(
@@ -932,7 +921,7 @@ pub async fn get_resource_object_groups(
 }
 
 pub async fn add_resource_to_object_group(
-    pool: &PgPool,
+    pool: &Database,
     resource_id: Uuid,
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
@@ -940,18 +929,15 @@ pub async fn add_resource_to_object_group(
 }
 
 pub async fn add_resource_to_object_group_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     resource_id: Uuid,
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let inserted = add_resource_to_object_group_in_tx(&mut tx, resource_id, group_id).await?;
-    let resource = fetch_resource(tx.as_postgres_mut(), resource_id).await?;
+    let resource = fetch_resource(&mut tx, resource_id).await?;
     if !inserted {
         tx.commit().await.map_err(db_err)?;
         return Ok(resource);
@@ -971,7 +957,7 @@ pub async fn add_resource_to_object_group_with_audit(
 /// Remove the resource from **one** group, leaving its other memberships (and
 /// the grants that flow through them) intact.
 pub async fn remove_resource_from_object_group(
-    pool: &PgPool,
+    pool: &Database,
     resource_id: Uuid,
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
@@ -979,18 +965,15 @@ pub async fn remove_resource_from_object_group(
 }
 
 pub async fn remove_resource_from_object_group_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     resource_id: Uuid,
     group_id: Uuid,
 ) -> Result<Resource, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let deleted = delete_resource_object_groups_in_tx(&mut tx, resource_id, Some(group_id)).await?;
-    let resource = fetch_resource(tx.as_postgres_mut(), resource_id).await?;
+    let resource = fetch_resource(&mut tx, resource_id).await?;
     if deleted == 0 {
         tx.commit().await.map_err(db_err)?;
         return Ok(resource);
@@ -1012,24 +995,21 @@ pub async fn remove_resource_from_object_group_with_audit(
 /// membership "clear the group" is ambiguous, so each caller states which it
 /// means.
 pub async fn clear_resource_object_groups(
-    pool: &PgPool,
+    pool: &Database,
     resource_id: Uuid,
 ) -> Result<Resource, AppError> {
     clear_resource_object_groups_with_audit(pool, false, None, resource_id).await
 }
 
 pub async fn clear_resource_object_groups_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     resource_id: Uuid,
 ) -> Result<Resource, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let deleted = delete_resource_object_groups_in_tx(&mut tx, resource_id, None).await?;
-    let resource = fetch_resource(tx.as_postgres_mut(), resource_id).await?;
+    let resource = fetch_resource(&mut tx, resource_id).await?;
     if deleted == 0 {
         tx.commit().await.map_err(db_err)?;
         return Ok(resource);
@@ -1270,7 +1250,7 @@ pub struct CredentialCeiling {
 /// Load the ceiling for a scoped access-token credential. Returns the (possibly
 /// empty) set of allow grants the token is limited to.
 pub async fn load_credential_ceiling(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
 ) -> Result<CredentialCeiling, AppError> {
     let rows = crate::db::query(
@@ -1319,16 +1299,13 @@ pub async fn load_credential_ceiling(
 }
 
 pub async fn create_role_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateRole,
 ) -> Result<Role, AppError> {
     let id = Uuid::new_v4();
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let role = crate::db::query_as::<Role>(
         r#"INSERT INTO roles (id, name, tenant_id, description)
@@ -1355,12 +1332,12 @@ pub async fn create_role_with_audit(
     Ok(role)
 }
 
-pub async fn create_role(pool: &PgPool, req: CreateRole) -> Result<Role, AppError> {
+pub async fn create_role(pool: &Database, req: CreateRole) -> Result<Role, AppError> {
     create_role_with_audit(pool, false, None, req).await
 }
 
 pub async fn create_role_with_assignments(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateRole,
     capability_ids: &[Uuid],
     child_role_ids: &[Uuid],
@@ -1418,10 +1395,7 @@ pub async fn create_role_with_assignments(
         .await?;
     }
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let mut locked_member_ids = member_entity_ids.to_vec();
     locked_member_ids.sort_unstable();
@@ -1504,7 +1478,7 @@ pub async fn create_role_with_assignments(
 }
 
 pub async fn create_role_with_permission_blocks(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateRole,
     permission_blocks: &[CreateRolePermissionBlock],
     member_entity_ids: &[Uuid],
@@ -1516,10 +1490,7 @@ pub async fn create_role_with_permission_blocks(
     validate_role_permission_blocks(pool, permission_blocks).await?;
     ensure_entities_exist(pool, member_entity_ids).await?;
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let mut locked_member_ids = member_entity_ids.to_vec();
     locked_member_ids.sort_unstable();
@@ -1631,7 +1602,7 @@ async fn lock_live_role_row(
 }
 
 pub async fn replace_role_permission_block_links(
-    pool: &PgPool,
+    pool: &Database,
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
@@ -1640,16 +1611,13 @@ pub async fn replace_role_permission_block_links(
 }
 
 pub async fn replace_role_permission_block_links_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id = replace_role_permission_block_links_in_tx(
         &mut tx,
         events_enabled,
@@ -1732,12 +1700,7 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
     // assignment mutator blocks on this lock and re-validates against our result.
     // Runs on this transaction's own connection — borrowing a second one from
     // the pool here would deadlock a saturated pool.
-    crate::guardrails::validate_role_permission_block_links(
-        tx.as_postgres_mut(),
-        role_id,
-        &unique_block_ids,
-    )
-    .await?;
+    crate::guardrails::validate_role_permission_block_links(tx, role_id, &unique_block_ids).await?;
     crate::db::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
         .bind(role_id)
         .execute(tx.exec())
@@ -2178,7 +2141,7 @@ fn permission_block_from_legacy_scope(
 }
 
 async fn validate_role_permission_blocks(
-    pool: &PgPool,
+    pool: &Database,
     blocks: &[CreateRolePermissionBlock],
 ) -> Result<(), AppError> {
     for block in blocks {
@@ -2237,7 +2200,7 @@ fn validate_permission_block_shape(block: &CreateRolePermissionBlock) -> Result<
 }
 
 async fn permission_block_target(
-    pool: &PgPool,
+    pool: &Database,
     block: &CreateRolePermissionBlock,
 ) -> Result<Option<CapabilityValidationTarget>, AppError> {
     match block.applies_to.as_str() {
@@ -2280,7 +2243,7 @@ async fn permission_block_target(
 }
 
 pub async fn list_role_permission_blocks(
-    pool: &PgPool,
+    pool: &Database,
     role_id: Uuid,
 ) -> Result<Vec<RolePermissionBlock>, AppError> {
     crate::db::query_as::<RolePermissionBlock>(
@@ -2312,7 +2275,7 @@ pub async fn list_role_permission_blocks(
 }
 
 pub async fn list_permission_blocks_for_role(
-    pool: &PgPool,
+    pool: &Database,
     role_id: Uuid,
 ) -> Result<Vec<PermissionBlock>, AppError> {
     crate::db::query_as::<PermissionBlock>(
@@ -2339,7 +2302,7 @@ pub async fn list_permission_blocks_for_role(
 }
 
 pub async fn role_permission_block_capabilities(
-    pool: &PgPool,
+    pool: &Database,
     block_id: Uuid,
 ) -> Result<Vec<Capability>, AppError> {
     crate::db::query_as::<Capability>(
@@ -2356,13 +2319,13 @@ pub async fn role_permission_block_capabilities(
 }
 
 pub async fn permission_block_capabilities(
-    pool: &PgPool,
+    pool: &Database,
     block_id: Uuid,
 ) -> Result<Vec<Capability>, AppError> {
     role_permission_block_capabilities(pool, block_id).await
 }
 
-pub async fn get_permission_block(pool: &PgPool, id: Uuid) -> Result<PermissionBlock, AppError> {
+pub async fn get_permission_block(pool: &Database, id: Uuid) -> Result<PermissionBlock, AppError> {
     fetch_permission_block(pool, id).await
 }
 
@@ -2388,7 +2351,7 @@ where
 }
 
 pub async fn list_permission_blocks(
-    pool: &PgPool,
+    pool: &Database,
     params: ListPermissionBlocks,
 ) -> Result<PermissionBlockList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -2439,24 +2402,21 @@ fn normalize_conditions(conditions: Value) -> Result<Value, AppError> {
 }
 
 pub async fn create_permission_block(
-    pool: &PgPool,
+    pool: &Database,
     req: CreatePermissionBlock,
 ) -> Result<PermissionBlock, AppError> {
     create_permission_block_with_audit(pool, false, None, req).await
 }
 
 pub async fn create_permission_block_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreatePermissionBlock,
 ) -> Result<PermissionBlock, AppError> {
     validate_permission_block_input(pool, &req).await?;
     let conditions = normalize_conditions(req.conditions)?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
     let id: Uuid = crate::db::query_scalar(
         r#"INSERT INTO permission_blocks
@@ -2488,7 +2448,7 @@ pub async fn create_permission_block_with_audit(
         .await
         .map_err(db_err)?;
     }
-    let block = fetch_permission_block(tx.as_postgres_mut(), id).await?;
+    let block = fetch_permission_block(&mut tx, id).await?;
     crate::audit::commit_with_observation(
         tx,
         events_enabled,
@@ -2505,12 +2465,12 @@ pub async fn create_permission_block_with_audit(
     Ok(block)
 }
 
-pub async fn delete_permission_block(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+pub async fn delete_permission_block(pool: &Database, id: Uuid) -> Result<(), AppError> {
     delete_permission_block_with_audit(pool, false, None, id).await
 }
 
 pub async fn delete_permission_block_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
@@ -2525,10 +2485,7 @@ pub async fn delete_permission_block_with_audit(
     // into role_permission_blocks / direct_policies takes a FOR KEY SHARE lock on
     // the referenced block row, which conflicts with FOR UPDATE, so no link can
     // slip in between the reference check and the delete.
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
             .bind(id)
@@ -2577,7 +2534,7 @@ pub async fn delete_permission_block_with_audit(
 }
 
 pub(crate) async fn validate_permission_block_input(
-    pool: &PgPool,
+    pool: &Database,
     req: &CreatePermissionBlock,
 ) -> Result<(), AppError> {
     let mut connection = pool.acquire().await.map_err(db_err)?;
@@ -2585,7 +2542,7 @@ pub(crate) async fn validate_permission_block_input(
 }
 
 pub(crate) async fn validate_permission_block_input_on_connection(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut impl DbExecutor,
     req: &CreatePermissionBlock,
 ) -> Result<(), AppError> {
     if req.action_ids.is_empty() {
@@ -2598,7 +2555,7 @@ pub(crate) async fn validate_permission_block_input_on_connection(
 }
 
 async fn permission_block_input_target_on_connection(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut impl DbExecutor,
     req: &CreatePermissionBlock,
 ) -> Result<Option<CapabilityValidationTarget>, AppError> {
     match req.scope_mode.as_str() {
@@ -2681,7 +2638,7 @@ async fn permission_block_input_target_on_connection(
 }
 
 async fn validate_object_group_boundary(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut impl DbExecutor,
     tenant_id: Option<Uuid>,
     group_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -2703,7 +2660,7 @@ async fn validate_object_group_boundary(
     Ok(())
 }
 
-pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
+pub async fn get_role(pool: &Database, id: Uuid) -> Result<Role, AppError> {
     crate::db::query_as::<Role>(
         r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
            FROM roles WHERE id = $1 AND deleted_at IS NULL"#,
@@ -2717,7 +2674,7 @@ pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
     })
 }
 
-pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, AppError> {
+pub async fn list_roles(pool: &Database, params: ListRoles) -> Result<RoleList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let q = search_pattern(params.q);
@@ -2800,7 +2757,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
 }
 
 pub async fn list_roles_authorized(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     params: ListRoles,
 ) -> Result<RoleList, AppError> {
@@ -2877,7 +2834,10 @@ pub async fn list_roles_authorized(
     })
 }
 
-pub async fn role_derived_kind(pool: &PgPool, role_id: Uuid) -> Result<RoleDerivedKind, AppError> {
+pub async fn role_derived_kind(
+    pool: &Database,
+    role_id: Uuid,
+) -> Result<RoleDerivedKind, AppError> {
     let row = crate::db::query(
         r#"SELECT
               EXISTS (SELECT 1 FROM role_permission_blocks WHERE role_id = $1) AS has_permission_blocks,
@@ -2902,7 +2862,7 @@ pub async fn role_derived_kind(pool: &PgPool, role_id: Uuid) -> Result<RoleDeriv
     })
 }
 
-async fn ensure_entities_exist(pool: &PgPool, entity_ids: &[Uuid]) -> Result<(), AppError> {
+async fn ensure_entities_exist(pool: &Database, entity_ids: &[Uuid]) -> Result<(), AppError> {
     if entity_ids.is_empty() {
         return Ok(());
     }
@@ -2922,7 +2882,7 @@ async fn ensure_entities_exist(pool: &PgPool, entity_ids: &[Uuid]) -> Result<(),
 }
 
 async fn validate_composite_children(
-    pool: &PgPool,
+    pool: &Database,
     parent_role_id: Uuid,
     parent_tenant_id: Option<Uuid>,
     child_role_ids: &[Uuid],
@@ -2990,7 +2950,7 @@ fn parse_scope_kind_text(value: &str) -> Result<ScopeKind, AppError> {
 }
 
 async fn validate_role_scope(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Option<Uuid>,
     scope_kind: &ScopeKind,
     scope_ref: Option<&str>,
@@ -3103,7 +3063,7 @@ impl CapabilityValidationTarget {
 }
 
 async fn validate_capabilities_against_role_scope(
-    pool: &PgPool,
+    pool: &Database,
     scope_kind: &ScopeKind,
     scope_ref: Option<&str>,
     capability_ids: &[Uuid],
@@ -3113,7 +3073,7 @@ async fn validate_capabilities_against_role_scope(
 }
 
 async fn role_scope_capability_target(
-    pool: &PgPool,
+    pool: &Database,
     scope_kind: &ScopeKind,
     scope_ref: Option<&str>,
 ) -> Result<Option<CapabilityValidationTarget>, AppError> {
@@ -3169,7 +3129,7 @@ async fn role_scope_capability_target(
 }
 
 async fn validate_capabilities_against_target(
-    pool: &PgPool,
+    pool: &Database,
     capability_ids: &[Uuid],
     target: Option<CapabilityValidationTarget>,
 ) -> Result<(), AppError> {
@@ -3179,7 +3139,7 @@ async fn validate_capabilities_against_target(
 }
 
 async fn validate_capabilities_against_target_on_connection(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut impl DbExecutor,
     capability_ids: &[Uuid],
     target: Option<CapabilityValidationTarget>,
 ) -> Result<(), AppError> {
@@ -3261,7 +3221,7 @@ fn parse_namespaced_object_type(value: Option<&str>) -> Result<(String, String),
 }
 
 async fn resolve_exact_object_target(
-    pool: &PgPool,
+    pool: &Database,
     object_id: Uuid,
 ) -> Result<Option<CapabilityValidationTarget>, AppError> {
     let mut connection = pool.acquire().await.map_err(db_err)?;
@@ -3269,7 +3229,7 @@ async fn resolve_exact_object_target(
 }
 
 async fn resolve_exact_object_target_on_connection(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut impl DbExecutor,
     object_id: Uuid,
 ) -> Result<Option<CapabilityValidationTarget>, AppError> {
     Ok(
@@ -3284,16 +3244,13 @@ async fn resolve_exact_object_target_on_connection(
 }
 
 pub async fn update_role_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     req: UpdateRole,
 ) -> Result<Role, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let role = update_role_in_tx(&mut tx, events_enabled, actor_id, id, req).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -3366,21 +3323,18 @@ pub(crate) async fn update_role_in_tx(
     Ok(role)
 }
 
-pub async fn update_role(pool: &PgPool, id: Uuid, req: UpdateRole) -> Result<Role, AppError> {
+pub async fn update_role(pool: &Database, id: Uuid, req: UpdateRole) -> Result<Role, AppError> {
     update_role_with_audit(pool, false, None, id, req).await
 }
 
 pub async fn delete_role_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id = delete_role_in_tx(&mut tx, events_enabled, actor_id, id, deleted_by).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -3455,7 +3409,7 @@ pub(crate) async fn delete_role_in_tx(
 }
 
 pub async fn delete_role(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -3463,16 +3417,13 @@ pub async fn delete_role(
 }
 
 pub async fn restore_role_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     restore_role_in_tx(&mut tx, events_enabled, actor_id, id, restored_by).await?;
     tx.commit().await.map_err(db_err)?;
     // The audit_logs row is deliberately written after commit (fire-and-forget,
@@ -3570,7 +3521,7 @@ pub(crate) async fn restore_role_in_tx(
 }
 
 pub async fn restore_role(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -3578,15 +3529,12 @@ pub async fn restore_role(
 }
 
 pub async fn purge_role_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
 
     let tenant_id: Option<Option<Uuid>> =
         crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
@@ -3653,12 +3601,12 @@ pub async fn purge_role_with_audit(
     Ok(tenant_id)
 }
 
-pub async fn purge_role(pool: &PgPool, id: Uuid) -> Result<Option<Uuid>, AppError> {
+pub async fn purge_role(pool: &Database, id: Uuid) -> Result<Option<Uuid>, AppError> {
     purge_role_with_audit(pool, false, None, id).await
 }
 
 pub async fn add_role_capability(
-    pool: &PgPool,
+    pool: &Database,
     role_id: Uuid,
     cap_id: Uuid,
 ) -> Result<(), AppError> {
@@ -3674,10 +3622,7 @@ pub async fn add_role_capability(
     let mut conn = pool.acquire().await.map_err(db_err)?;
     crate::guardrails::validate_role_capability(&mut conn, role_id, cap_id).await?;
     drop(conn);
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, role_id).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", role_id).await?;
     insert_role_capability_as_permission_block(
@@ -3694,16 +3639,13 @@ pub async fn add_role_capability(
 }
 
 pub async fn add_composite_role_child(
-    pool: &PgPool,
+    pool: &Database,
     parent_role_id: Uuid,
     child_role_id: Uuid,
 ) -> Result<(), AppError> {
     let parent = get_role(pool, parent_role_id).await?;
     validate_composite_children(pool, parent_role_id, parent.tenant_id, &[child_role_id]).await?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, parent_role_id).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", parent_role_id).await?;
     lock_role(&mut tx, child_role_id).await?;
@@ -3713,16 +3655,13 @@ pub async fn add_composite_role_child(
 }
 
 pub async fn replace_composite_role_children(
-    pool: &PgPool,
+    pool: &Database,
     parent_role_id: Uuid,
     child_role_ids: &[Uuid],
 ) -> Result<(), AppError> {
     let parent = get_role(pool, parent_role_id).await?;
     validate_composite_children(pool, parent_role_id, parent.tenant_id, child_role_ids).await?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, parent_role_id).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", parent_role_id).await?;
     let mut locked_child_role_ids = child_role_ids.to_vec();
@@ -3741,14 +3680,11 @@ pub async fn replace_composite_role_children(
 }
 
 pub async fn remove_role_capability(
-    pool: &PgPool,
+    pool: &Database,
     role_id: Uuid,
     cap_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     lock_role(&mut tx, role_id).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", role_id).await?;
     // Blocks this role links that grant `cap_id`. Unlink them from this role and
@@ -3773,23 +3709,20 @@ pub async fn remove_role_capability(
 // ─── Capabilities ─────────────────────────────────────────────────────────────
 
 pub async fn create_capability(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateCapability,
 ) -> Result<Capability, AppError> {
     create_capability_with_audit(pool, false, None, req).await
 }
 
 pub async fn create_capability_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateCapability,
 ) -> Result<Capability, AppError> {
     let id = Uuid::new_v4();
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(AppError::Database)?;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let capability = crate::db::query_as::<Capability>(
         r#"INSERT INTO actions (id, name, description)
            VALUES ($1, $2, $3)
@@ -3822,7 +3755,7 @@ pub async fn create_capability_with_audit(
     Ok(capability)
 }
 
-pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppError> {
+pub async fn get_capability(pool: &Database, id: Uuid) -> Result<Capability, AppError> {
     crate::db::query_as::<Capability>(
         "SELECT id, name, description, created_at, updated_at, managed_by FROM actions WHERE id = $1",
     )
@@ -3836,7 +3769,7 @@ pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppEr
 }
 
 pub async fn list_capabilities(
-    pool: &PgPool,
+    pool: &Database,
     params: ListCapabilities,
 ) -> Result<crate::models::capability::CapabilityList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -3887,7 +3820,7 @@ pub async fn list_capabilities(
 }
 
 pub async fn capability_applicability(
-    pool: &PgPool,
+    pool: &Database,
     capability_id: Uuid,
 ) -> Result<Vec<CapabilityApplicability>, AppError> {
     crate::db::query_as::<CapabilityApplicability>(
@@ -3903,7 +3836,7 @@ pub async fn capability_applicability(
 }
 
 pub async fn list_capability_applicability(
-    pool: &PgPool,
+    pool: &Database,
     action_name: Option<String>,
     object_kind: Option<String>,
     object_type: Option<String>,
@@ -3967,7 +3900,7 @@ pub async fn list_capability_applicability(
 }
 
 pub async fn get_action_assignment_rule(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<ActionAssignmentRule, AppError> {
     crate::db::query_as::<ActionAssignmentRule>(
@@ -3988,7 +3921,7 @@ pub async fn get_action_assignment_rule(
 }
 
 pub async fn list_action_assignment_rules(
-    pool: &PgPool,
+    pool: &Database,
     params: ListActionAssignmentRules,
 ) -> Result<ActionAssignmentRuleList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -4046,7 +3979,7 @@ pub async fn list_action_assignment_rules(
 }
 
 pub async fn create_action_assignment_rule(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateActionAssignmentRule,
 ) -> Result<ActionAssignmentRule, AppError> {
     create_action_assignment_rule_with_audit(pool, false, None, req, "internal").await
@@ -4055,7 +3988,7 @@ pub async fn create_action_assignment_rule(
 /// `transport` is supplied by the caller: the repo cannot know which surface
 /// invoked it, and the audit trail records it (see `grpc.rs` / `graphql`).
 pub async fn create_action_assignment_rule_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateActionAssignmentRule,
@@ -4088,10 +4021,7 @@ pub async fn create_action_assignment_rule_with_audit(
         return Err(AppError::conflict("action assignment rule already exists"));
     }
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let rule = crate::db::query_as::<ActionAssignmentRule>(
         r#"INSERT INTO action_assignment_rules
              (tenant_id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
@@ -4131,7 +4061,7 @@ pub async fn create_action_assignment_rule_with_audit(
 }
 
 pub(crate) async fn validate_and_normalize_action_assignment_rule(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateActionAssignmentRule,
 ) -> Result<CreateActionAssignmentRule, AppError> {
     let mut connection = pool.acquire().await.map_err(db_err)?;
@@ -4139,7 +4069,7 @@ pub(crate) async fn validate_and_normalize_action_assignment_rule(
 }
 
 pub(crate) async fn validate_and_normalize_action_assignment_rule_on_connection(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut impl DbExecutor,
     mut req: CreateActionAssignmentRule,
 ) -> Result<CreateActionAssignmentRule, AppError> {
     req.action_name = req.action_name.trim().to_string();
@@ -4181,7 +4111,7 @@ pub(crate) async fn validate_and_normalize_action_assignment_rule_on_connection(
 }
 
 pub async fn delete_action_assignment_rule(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<ActionAssignmentRule, AppError> {
     delete_action_assignment_rule_with_audit(pool, false, None, id, "internal").await
@@ -4189,16 +4119,13 @@ pub async fn delete_action_assignment_rule(
 
 /// See [`create_action_assignment_rule_with_audit`] for `transport`.
 pub async fn delete_action_assignment_rule_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     transport: &str,
 ) -> Result<ActionAssignmentRule, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
         crate::db::query_scalar("SELECT tenant_id FROM action_assignment_rules WHERE id = $1")
             .bind(id)
@@ -4289,7 +4216,7 @@ async fn ensure_not_config_managed_applicability_in_tx(
 }
 
 pub async fn add_capability_applicability(
-    pool: &PgPool,
+    pool: &Database,
     capability_id: Uuid,
     object_kind: String,
     object_type: Option<String>,
@@ -4306,17 +4233,14 @@ pub async fn add_capability_applicability(
 }
 
 pub async fn add_capability_applicability_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     capability_id: Uuid,
     object_kind: String,
     object_type: Option<String>,
 ) -> Result<CapabilityApplicabilityEntry, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(AppError::Database)?;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
     let exists =
         crate::db::query_scalar::<bool>("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
@@ -4384,7 +4308,7 @@ pub async fn add_capability_applicability_with_audit(
 }
 
 pub async fn remove_capability_applicability(
-    pool: &PgPool,
+    pool: &Database,
     capability_id: Uuid,
     object_kind: String,
     object_type: Option<String>,
@@ -4401,17 +4325,14 @@ pub async fn remove_capability_applicability(
 }
 
 pub async fn remove_capability_applicability_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     capability_id: Uuid,
     object_kind: String,
     object_type: Option<String>,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     ensure_not_config_managed_applicability_in_tx(
         &mut tx,
         capability_id,
@@ -4476,7 +4397,7 @@ fn validate_rule_object_type(
 }
 
 pub async fn update_capability(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
     req: crate::models::capability::UpdateCapability,
 ) -> Result<Capability, AppError> {
@@ -4484,16 +4405,13 @@ pub async fn update_capability(
 }
 
 pub async fn update_capability_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
     req: crate::models::capability::UpdateCapability,
 ) -> Result<Capability, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(AppError::Database)?;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "actions", id).await?;
     let updated = crate::db::query_as::<Capability>(
         r#"UPDATE actions
@@ -4582,20 +4500,17 @@ async fn replace_capability_applicability_in_tx(
     Ok(())
 }
 
-pub async fn delete_capability(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+pub async fn delete_capability(pool: &Database, id: Uuid) -> Result<(), AppError> {
     delete_capability_with_audit(pool, false, None, id).await
 }
 
 pub async fn delete_capability_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     // The action row is the FK serialization point for every
     // permission_block_actions insert. Lock it before checking ownership so a
     // concurrent bootstrap cannot add and stamp a declarative block link after
@@ -4791,7 +4706,7 @@ pub(crate) async fn prepare_direct_policy_in_tx(
 }
 
 pub async fn create_policy(
-    pool: &PgPool,
+    pool: &Database,
     req: CreatePolicyBinding,
 ) -> Result<PolicyBinding, AppError> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
@@ -4804,10 +4719,7 @@ pub async fn create_policy(
         && req.subject_kind == SubjectKind::Entity
         && req.effect == Effect::Allow;
     let conditions = normalize_conditions(req.conditions)?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     lock_live_subject(&mut tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     match req.grant_kind {
         GrantKind::Role => {
@@ -4915,7 +4827,7 @@ async fn sync_tenant_membership_for_policy(
     Ok(())
 }
 
-pub async fn get_policy(pool: &PgPool, id: Uuid) -> Result<PolicyBinding, AppError> {
+pub async fn get_policy(pool: &Database, id: Uuid) -> Result<PolicyBinding, AppError> {
     crate::db::query_as::<PolicyBinding>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions, created_at
            FROM effective_access_edges() WHERE id = $1"#,
@@ -4930,15 +4842,12 @@ pub async fn get_policy(pool: &PgPool, id: Uuid) -> Result<PolicyBinding, AppErr
 }
 
 pub async fn create_role_assignment_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let assignment = create_role_assignment_in_tx(&mut tx, events_enabled, actor_id, req).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -5005,7 +4914,7 @@ pub(crate) async fn create_role_assignment_in_tx(
 }
 
 pub async fn create_role_assignment(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateRoleAssignment,
 ) -> Result<RoleAssignment, AppError> {
     create_role_assignment_with_audit(pool, false, None, req).await
@@ -5052,7 +4961,7 @@ pub(crate) async fn lock_live_entity_subject_in_tx(
 }
 
 pub async fn list_role_assignments(
-    pool: &PgPool,
+    pool: &Database,
     params: ListRoleAssignments,
 ) -> Result<RoleAssignmentList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -5107,7 +5016,7 @@ pub async fn list_role_assignments(
 }
 
 pub async fn list_role_assignments_authorized(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     params: ListRoleAssignments,
 ) -> Result<RoleAssignmentList, AppError> {
@@ -5164,7 +5073,7 @@ pub async fn list_role_assignments_authorized(
     })
 }
 
-pub async fn get_role_assignment(pool: &PgPool, id: Uuid) -> Result<RoleAssignment, AppError> {
+pub async fn get_role_assignment(pool: &Database, id: Uuid) -> Result<RoleAssignment, AppError> {
     crate::db::query_as::<RoleAssignment>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
            FROM role_assignments
@@ -5179,20 +5088,17 @@ pub async fn get_role_assignment(pool: &PgPool, id: Uuid) -> Result<RoleAssignme
     })
 }
 
-pub async fn delete_role_assignment(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+pub async fn delete_role_assignment(pool: &Database, id: Uuid) -> Result<(), AppError> {
     delete_role_assignment_with_audit(pool, false, None, id).await
 }
 
 pub async fn delete_role_assignment_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id = delete_role_assignment_in_tx(&mut tx, events_enabled, actor_id, id).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -5257,15 +5163,12 @@ pub(crate) async fn delete_role_assignment_in_tx(
 }
 
 pub async fn create_direct_policy_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     req: CreateDirectPolicy,
 ) -> Result<DirectPolicy, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let policy = create_direct_policy_in_tx(&mut tx, events_enabled, actor_id, req).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -5293,7 +5196,7 @@ pub(crate) async fn create_direct_policy_in_tx(
 ) -> Result<DirectPolicy, AppError> {
     prepare_direct_policy_in_tx(tx, &req).await?;
     validate_direct_policy_in_tx(tx, &req).await?;
-    crate::guardrails::validate_direct_policy(tx.as_postgres_mut(), &req).await?;
+    crate::guardrails::validate_direct_policy(tx, &req).await?;
     let block_tenant_id: Option<Option<Uuid>> =
         crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
             .bind(req.permission_block_id)
@@ -5332,7 +5235,7 @@ pub(crate) async fn create_direct_policy_in_tx(
 }
 
 pub async fn create_direct_policy(
-    pool: &PgPool,
+    pool: &Database,
     req: CreateDirectPolicy,
 ) -> Result<DirectPolicy, AppError> {
     create_direct_policy_with_audit(pool, false, None, req).await
@@ -5470,7 +5373,7 @@ fn validate_direct_policy_object_filter(
 /// `tenant`, `object_kind`, `object_type`) are **not** returned — reading
 /// this as "everyone who can access X" will under-report.
 pub async fn list_direct_policies(
-    pool: &PgPool,
+    pool: &Database,
     params: ListDirectPolicies,
 ) -> Result<DirectPolicyList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -5541,7 +5444,7 @@ pub async fn list_direct_policies(
 }
 
 pub async fn list_direct_policies_authorized(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     params: ListDirectPolicies,
 ) -> Result<DirectPolicyList, AppError> {
@@ -5623,7 +5526,7 @@ pub async fn list_direct_policies_authorized(
     })
 }
 
-pub async fn get_direct_policy(pool: &PgPool, id: Uuid) -> Result<DirectPolicy, AppError> {
+pub async fn get_direct_policy(pool: &Database, id: Uuid) -> Result<DirectPolicy, AppError> {
     crate::db::query_as::<DirectPolicy>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
            FROM direct_policies
@@ -5639,15 +5542,12 @@ pub async fn get_direct_policy(pool: &PgPool, id: Uuid) -> Result<DirectPolicy, 
 }
 
 pub async fn delete_direct_policy_with_audit(
-    pool: &PgPool,
+    pool: &Database,
     events_enabled: bool,
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id = delete_direct_policy_in_tx(&mut tx, events_enabled, actor_id, id).await?;
     tx.commit().await.map_err(db_err)?;
     crate::audit::log_observe_allow(
@@ -5711,7 +5611,7 @@ pub(crate) async fn delete_direct_policy_in_tx(
     Ok(tenant_id)
 }
 
-pub async fn delete_direct_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
+pub async fn delete_direct_policy(pool: &Database, id: Uuid) -> Result<(), AppError> {
     delete_direct_policy_with_audit(pool, false, None, id).await
 }
 
@@ -5733,7 +5633,7 @@ pub(crate) async fn validate_role_assignment_in_tx(
     }
     validate_subject_boundary_in_tx(tx, req.tenant_id, &req.subject_kind, req.subject_id).await?;
     crate::guardrails::validate_role_assignment_on_connection(
-        tx.as_postgres_mut(),
+        tx,
         req.tenant_id,
         req.subject_kind.clone(),
         req.subject_id,
@@ -5824,7 +5724,7 @@ async fn validate_subject_boundary_in_tx(
 }
 
 pub async fn subject_role_assignments(
-    pool: &PgPool,
+    pool: &Database,
     params: SubjectRoleAssignmentsQuery,
 ) -> Result<SubjectRoleAssignmentList, AppError> {
     let limit = params.limit.clamp(1, 100);
@@ -5963,11 +5863,8 @@ pub async fn subject_role_assignments(
     Ok(SubjectRoleAssignmentList { items, total })
 }
 
-pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+pub async fn delete_policy(pool: &Database, id: Uuid) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let direct_tenant_id: Option<Option<Uuid>> =
         crate::db::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
             .bind(id)
@@ -6018,7 +5915,7 @@ pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
 /// no object with that UUID exists in the known Atom object tables; `Some(None)`
 /// means the object is platform/global.
 pub async fn object_tenant_id_by_id(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<Option<Option<Uuid>>, AppError> {
     Ok(crate::protected_objects::lookup(pool, id)
@@ -6057,7 +5954,7 @@ pub(crate) fn ceiling_cte(param: &str) -> String {
 /// forget to apply it — the same rule as `engine::evaluate`. A delegated
 /// listing about another subject is unaffected (the derivation yields `None`).
 pub async fn authorized_object_ids(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     params: AuthorizedObjectIdsQuery,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
@@ -6069,7 +5966,7 @@ pub async fn authorized_object_ids(
 /// production code must call [`authorized_object_ids`], which derives the
 /// ceiling from the authenticated context.
 pub async fn authorized_object_ids_with_ceiling(
-    pool: &PgPool,
+    pool: &Database,
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
@@ -6087,7 +5984,7 @@ pub async fn authorized_object_ids_with_ceiling(
 }
 
 async fn authorized_flat_object_ids(
-    pool: &PgPool,
+    pool: &Database,
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
@@ -6143,7 +6040,7 @@ async fn authorized_flat_object_ids(
 }
 
 async fn authorized_entity_ids(
-    pool: &PgPool,
+    pool: &Database,
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
@@ -6293,7 +6190,7 @@ enum AuthorizedResourceProjection {
 }
 
 async fn authorized_resource_ids(
-    pool: &PgPool,
+    pool: &Database,
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
@@ -6310,7 +6207,7 @@ async fn authorized_resource_ids(
 /// Ceiling-aware kind listing for request-path callers; the ceiling is derived
 /// from the caller's `AuthContext`, same as [`authorized_object_ids`].
 pub async fn authorized_resource_kinds(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     subject_id: Uuid,
     tenant_id: Option<Uuid>,
@@ -6322,7 +6219,7 @@ pub async fn authorized_resource_kinds(
 /// Low-level kind listing taking an explicit ceiling credential. For tests;
 /// production code must call [`authorized_resource_kinds`].
 pub async fn authorized_resource_kinds_with_ceiling(
-    pool: &PgPool,
+    pool: &Database,
     subject_id: Uuid,
     tenant_id: Option<Uuid>,
     ceiling_credential_id: Option<Uuid>,
@@ -6362,7 +6259,7 @@ pub async fn authorized_resource_kinds_with_ceiling(
 }
 
 async fn authorized_resource_rows(
-    pool: &PgPool,
+    pool: &Database,
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
     projection: AuthorizedResourceProjection,
@@ -6505,7 +6402,7 @@ async fn authorized_resource_rows(
 }
 
 async fn authorized_group_ids(
-    pool: &PgPool,
+    pool: &Database,
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
@@ -6656,7 +6553,7 @@ fn rows_to_authorized_object_ids(
 }
 
 pub async fn audit_logs(
-    pool: &PgPool,
+    pool: &Database,
     params: crate::models::access::AuditQuery,
     allowed_tenant_ids: Option<Vec<Uuid>>,
 ) -> Result<AuditLogResponse, AppError> {
@@ -6728,7 +6625,7 @@ pub async fn audit_logs(
 /// not grant access (deny overrides), and a conditional allow is not listable
 /// without request context. The grant's assignment tenant boundary is honoured.
 pub async fn tenant_ids_for_action_on_object_kind(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     action_name: &str,
     object_kind: &str,
@@ -6793,7 +6690,7 @@ pub async fn tenant_ids_for_action_on_object_kind(
 }
 
 pub async fn orphan_policies(
-    pool: &PgPool,
+    pool: &Database,
     params: AdminPageQuery,
 ) -> Result<OrphanPoliciesResponse, AppError> {
     let limit = params.limit.clamp(1, 200);
@@ -6901,7 +6798,7 @@ pub async fn orphan_policies(
 }
 
 pub async fn expiring_credentials(
-    pool: &PgPool,
+    pool: &Database,
     params: ExpiringCredentialsQuery,
 ) -> Result<ExpiringCredentialsResponse, AppError> {
     let limit = params.limit.clamp(1, 200);
@@ -7002,7 +6899,7 @@ pub(crate) struct AuthzObjectRecord {
 }
 
 pub(crate) async fn load_authz_subject(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
 ) -> Result<Option<AuthzSubjectRecord>, AppError> {
     crate::db::query_as::<AuthzSubjectRecord>(
@@ -7017,7 +6914,7 @@ pub(crate) async fn load_authz_subject(
 }
 
 pub(crate) async fn load_authz_tenant(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
 ) -> Result<Option<AuthzTenantRecord>, AppError> {
     crate::db::query_as::<AuthzTenantRecord>(
@@ -7032,7 +6929,7 @@ pub(crate) async fn load_authz_tenant(
 }
 
 pub(crate) async fn load_authz_resource(
-    pool: &PgPool,
+    pool: &Database,
     resource_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     crate::db::query_as::<AuthzObjectRecord>(
@@ -7050,7 +6947,7 @@ pub(crate) async fn load_authz_resource(
 }
 
 pub(crate) async fn load_authz_entity_object(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     crate::db::query_as::<AuthzObjectRecord>(
@@ -7068,7 +6965,7 @@ pub(crate) async fn load_authz_entity_object(
 }
 
 pub(crate) async fn load_authz_group_object(
-    pool: &PgPool,
+    pool: &Database,
     group_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     // The group hierarchy stays a tree (`PRIMARY KEY (child_id)`), so this is 0
@@ -7089,7 +6986,7 @@ pub(crate) async fn load_authz_group_object(
 }
 
 pub(crate) async fn load_authz_credential_object(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     crate::db::query_as::<AuthzObjectRecord>(
@@ -7109,7 +7006,7 @@ pub(crate) async fn load_authz_credential_object(
 /// in several groups in different subtrees, so the tree scopes must be evaluated
 /// against the union of their ancestors, not one branch's.
 pub(crate) async fn group_ancestor_ids(
-    pool: &PgPool,
+    pool: &Database,
     group_ids: &[Uuid],
 ) -> Result<Vec<Uuid>, AppError> {
     if group_ids.is_empty() {
@@ -7138,7 +7035,7 @@ pub(crate) async fn group_ancestor_ids(
 /// so a reader can decide access by matching tenant → block scope → action →
 /// conditions and applying the effect (deny overrides allow).
 pub async fn effective_grants_for_subject(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
 ) -> Result<Vec<EffectiveGrant>, AppError> {
     // Canonical grant expansion lives in the `subject_effective_grants` SQL
@@ -7317,7 +7214,7 @@ async fn lock_group_closures_after_tenant_rows(
 }
 
 pub(crate) async fn load_authz_role_object(
-    pool: &PgPool,
+    pool: &Database,
     role_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     crate::db::query_as::<AuthzObjectRecord>(
@@ -7337,7 +7234,7 @@ pub(crate) async fn load_authz_role_object(
 }
 
 pub(crate) async fn load_authz_policy_object(
-    pool: &PgPool,
+    pool: &Database,
     policy_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     crate::db::query_as::<AuthzObjectRecord>(
@@ -7356,6 +7253,19 @@ pub(crate) async fn load_authz_policy_object(
            ) policy ON TRUE
            WHERE registry.id = $1 AND registry.object_kind = 'policy'"#,
     )
+    .sqlite(
+        r#"SELECT registry.id, 'policy' AS kind, NULL AS name,
+                  policy.tenant_id, '{}' AS attributes, '[]' AS parent_group_ids
+           FROM protected_object_ids registry
+           JOIN (
+               SELECT 'direct_policies' AS source_table, id, tenant_id
+               FROM direct_policies WHERE id = $1
+               UNION ALL
+               SELECT 'role_assignments', id, tenant_id
+               FROM role_assignments WHERE id = $1
+           ) policy ON policy.source_table = registry.source_table AND policy.id = registry.id
+           WHERE registry.id = $1 AND registry.object_kind = 'policy'"#,
+    )
     .bind(policy_id)
     .fetch_optional(pool)
     .await
@@ -7363,7 +7273,7 @@ pub(crate) async fn load_authz_policy_object(
 }
 
 pub(crate) async fn load_authz_api_endpoint_object(
-    pool: &PgPool,
+    pool: &Database,
     endpoint_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
     crate::db::query_as::<AuthzObjectRecord>(
@@ -7528,7 +7438,7 @@ pub async fn lock_role_then_group_closure_and_collect_grants_keys(
 }
 
 pub async fn find_capability_ids_by_name(
-    pool: &PgPool,
+    pool: &Database,
     name: &str,
     object_kind: &str,
     object_type: &str,

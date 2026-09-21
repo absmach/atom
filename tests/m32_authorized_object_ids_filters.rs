@@ -8,16 +8,16 @@
 mod common;
 
 use async_graphql::Request;
+use atom::db::Database;
 use atom::{
     auth::AuthContext, authz::repo as authz_repo, config::Config, graphql::build_schema, keys,
     models::token::AccessTokenPermission, state::AppState,
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-async fn state(pool: PgPool) -> AppState {
+async fn state(pool: Database) -> AppState {
     let config = Config::for_tests();
     keys::bootstrap_if_needed(&pool, &config.signing_keys)
         .await
@@ -57,9 +57,9 @@ fn authed_scoped(
     })
 }
 
-async fn make_tenant(pool: &PgPool, name: &str) -> Uuid {
+async fn make_tenant(pool: &Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("{name}-{id}"))
         .execute(pool)
@@ -68,9 +68,9 @@ async fn make_tenant(pool: &PgPool, name: &str) -> Uuid {
     id
 }
 
-async fn make_entity(pool: &PgPool, tenant_id: Uuid, attributes: Value) -> Uuid {
+async fn make_entity(pool: &Database, tenant_id: Uuid, attributes: Value) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
            VALUES ($1, 'device', $2, $3, 'active', $4)"#,
     )
@@ -84,9 +84,9 @@ async fn make_entity(pool: &PgPool, tenant_id: Uuid, attributes: Value) -> Uuid 
     id
 }
 
-async fn make_object_group(pool: &PgPool, tenant_id: Uuid, name: &str) -> Uuid {
+async fn make_object_group(pool: &Database, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(format!("m32-{name}-{id}"))
         .bind(tenant_id)
@@ -97,8 +97,8 @@ async fn make_object_group(pool: &PgPool, tenant_id: Uuid, name: &str) -> Uuid {
 }
 
 /// Object-scoped `read` allow for `subject_id` on one entity.
-async fn grant_read(pool: &PgPool, tenant_id: Uuid, subject_id: Uuid, object_id: Uuid) {
-    let block_id: Uuid = sqlx::query_scalar(
+async fn grant_read(pool: &Database, tenant_id: Uuid, subject_id: Uuid, object_id: Uuid) {
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
     )
@@ -107,7 +107,7 @@ async fn grant_read(pool: &PgPool, tenant_id: Uuid, subject_id: Uuid, object_id:
     .fetch_one(pool)
     .await
     .expect("insert read block");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            SELECT $1, id FROM actions WHERE name = 'read'"#,
     )
@@ -115,7 +115,7 @@ async fn grant_read(pool: &PgPool, tenant_id: Uuid, subject_id: Uuid, object_id:
     .execute(pool)
     .await
     .expect("insert read action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -225,7 +225,7 @@ async fn include_descendants_walks_the_tree_only_when_set() {
     let subject_id = make_entity(&pool, tenant_id, json!({})).await;
     let parent = make_object_group(&pool, tenant_id, "parent").await;
     let child = make_object_group(&pool, tenant_id, "child").await;
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(parent)
@@ -440,7 +440,7 @@ async fn external_id_and_entity_status_also_narrow() {
     let subject_id = make_entity(&pool, tenant_id, json!({})).await;
     let serial = format!("SN-{}", Uuid::new_v4());
     let matching = make_entity(&pool, tenant_id, json!({})).await;
-    sqlx::query("UPDATE entities SET external_id = $1 WHERE id = $2")
+    atom::db::query("UPDATE entities SET external_id = $1 WHERE id = $2")
         .bind(&serial)
         .bind(matching)
         .execute(&pool)

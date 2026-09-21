@@ -14,6 +14,7 @@ use atom::certs::{
     pki_core::{issue_from_csr_at, IssueFromCsr, IssuedCertificate, PkiIssuer},
     profile::{self, CertificateProfile},
 };
+use atom::db::Database;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Timelike, Utc};
 use rcgen::{
@@ -21,7 +22,6 @@ use rcgen::{
     KeyPair, KeyUsagePurpose, SanType, SerialNumber,
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::{pem::parse_x509_pem, prelude::ParsedExtension};
@@ -54,13 +54,13 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     assert_eq!(server.extended_key_usages().len(), 1);
 
     let empty_key_usages =
-        sqlx::query("UPDATE certificate_profiles SET key_usages = '{}'::text[] WHERE id = $1")
+        atom::db::query("UPDATE certificate_profiles SET key_usages = '{}'::text[] WHERE id = $1")
             .bind(client.id())
             .execute(&pool)
             .await
             .map(|_| ());
     assert_check_violation(empty_key_usages);
-    let empty_extended_key_usages = sqlx::query(
+    let empty_extended_key_usages = atom::db::query(
         "UPDATE certificate_profiles SET extended_key_usages = '{}'::text[] WHERE id = $1",
     )
     .bind(client.id())
@@ -187,7 +187,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         &["client_auth"],
     )
     .await;
-    sqlx::query(
+    atom::db::query(
         r#"UPDATE certificate_profiles
            SET permitted_key_algorithms = '[{"algorithm":"ecdsa","sizes":[384]}]'::jsonb
            WHERE id = $1"#,
@@ -380,7 +380,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         .unwrap();
     assert_eq!(tenant_override.maximum_ttl_seconds(), 3600);
     let platform_ceiling = profile::profile_by_id(&pool, ceiling_id).await.unwrap();
-    let narrowed_platform = sqlx::query(
+    let narrowed_platform = atom::db::query(
         "UPDATE certificate_profiles SET default_ttl_seconds = 3000, maximum_ttl_seconds = 3500 WHERE id = $1",
     )
     .bind(ceiling_id)
@@ -630,9 +630,9 @@ fn assert_openssl_profile(certificate: &IssuedCertificate) {
     assert!(text.contains("CA:FALSE"));
 }
 
-async fn create_tenant(pool: &PgPool) -> Uuid {
+async fn create_tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("pki-profile-{id}"))
         .execute(pool)
@@ -641,9 +641,9 @@ async fn create_tenant(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn create_entity(pool: &PgPool, tenant_id: Option<Uuid>, prefix: &str) -> Uuid {
+async fn create_entity(pool: &Database, tenant_id: Option<Uuid>, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')",
     )
     .bind(id)
@@ -656,7 +656,7 @@ async fn create_entity(pool: &PgPool, tenant_id: Option<Uuid>, prefix: &str) -> 
 }
 
 async fn insert_platform_profile(
-    pool: &PgPool,
+    pool: &Database,
     name: &str,
     default_ttl: i64,
     maximum_ttl: i64,
@@ -665,7 +665,7 @@ async fn insert_platform_profile(
     extended_key_usages: &[&str],
 ) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"
         INSERT INTO certificate_profiles (
             id, name, permitted_key_algorithms, default_ttl_seconds,
@@ -694,14 +694,14 @@ async fn insert_platform_profile(
 }
 
 async fn insert_tenant_override(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     base_profile_id: Uuid,
     default_ttl: i64,
     maximum_ttl: i64,
     san_policy: Value,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    atom::db::query(
         r#"
         INSERT INTO certificate_profiles (
             id, tenant_id, base_profile_id, name, permitted_key_algorithms,
@@ -732,8 +732,5 @@ async fn insert_tenant_override(
 
 fn assert_check_violation(result: Result<(), sqlx::Error>) {
     let error = result.expect_err("profile widening must fail");
-    assert!(matches!(
-        error,
-        sqlx::Error::Database(ref database) if database.code().as_deref() == Some("23514")
-    ));
+    assert!(atom::error::is_check_violation(&error));
 }

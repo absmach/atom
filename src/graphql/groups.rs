@@ -1157,7 +1157,7 @@ fn group_status_event(status: &EntityStatus) -> &'static str {
 }
 
 async fn require_group_manage_app(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     group_id: uuid::Uuid,
     tenant_id: Option<uuid::Uuid>,

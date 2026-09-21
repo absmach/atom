@@ -1,5 +1,5 @@
+use crate::db::Database;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -78,7 +78,7 @@ const AUTHORITY_COLUMNS: &str = r#"
 "#;
 
 pub async fn authority_by_id(
-    pool: &PgPool,
+    pool: &Database,
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
     fetch_authority_by_id(pool, authority_id).await
@@ -105,7 +105,7 @@ where
 /// active platform leaf issuer. Callers derive this scope from the stored entity;
 /// public requests never choose an issuer.
 pub async fn active_leaf_issuer_for_scope(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Option<Uuid>,
 ) -> Result<AuthorityRecord, AppError> {
     fetch_active_leaf_issuer_for_scope(pool, tenant_id).await
@@ -202,7 +202,7 @@ pub async fn lock_authority_for_certificate_authentication(
 
 /// Backward-compatible tenant-only selector for current call sites.
 pub async fn active_tenant_leaf_issuer(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
     active_leaf_issuer_for_scope(pool, Some(tenant_id)).await
@@ -222,7 +222,7 @@ where
 /// can issue leaves now. Readiness ignores provisioning and historical rows,
 /// while an active-but-disabled or out-of-window issuer remains an error. The
 /// single non-secret snapshot avoids both a second query and a cross-query race.
-pub async fn leaf_issuer_readiness(pool: &PgPool) -> Result<LeafIssuerReadiness, AppError> {
+pub async fn leaf_issuer_readiness(pool: &Database) -> Result<LeafIssuerReadiness, AppError> {
     crate::db::query_as(
         r#"
         SELECT COUNT(*) FILTER (WHERE status = 'active') AS active_count,
@@ -246,7 +246,7 @@ pub async fn leaf_issuer_readiness(pool: &PgPool) -> Result<LeafIssuerReadiness,
 }
 
 pub async fn list_tenant_authorities(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
 ) -> Result<Vec<AuthorityRecord>, AppError> {
     let query = format!(
@@ -268,7 +268,7 @@ pub async fn list_tenant_authorities(
 /// before the process starts serving. Private-key columns are deliberately not
 /// selected, so startup validation cannot preload tenant keys.
 pub async fn encrypted_key_requirements(
-    pool: &PgPool,
+    pool: &Database,
 ) -> Result<Vec<EncryptedKeyRequirement>, AppError> {
     crate::db::query_as::<EncryptedKeyRequirement>(
         r#"SELECT DISTINCT key_encryption_key_id, encryption_algorithm
@@ -284,7 +284,7 @@ pub async fn encrypted_key_requirements(
 /// Return PKCS#11-backed authorities for fail-closed startup validation. The
 /// selected rows contain public certificate metadata and opaque references;
 /// they cannot contain encrypted or plaintext private-key bytes by constraint.
-pub async fn pkcs11_authorities(pool: &PgPool) -> Result<Vec<AuthorityRecord>, AppError> {
+pub async fn pkcs11_authorities(pool: &Database) -> Result<Vec<AuthorityRecord>, AppError> {
     let query = format!(
         "SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE key_backend = 'pkcs11' ORDER BY id"
     );
@@ -294,7 +294,7 @@ pub async fn pkcs11_authorities(pool: &PgPool) -> Result<Vec<AuthorityRecord>, A
         .map_err(db_err)
 }
 
-pub async fn kms_authority_count(pool: &PgPool) -> Result<i64, AppError> {
+pub async fn kms_authority_count(pool: &Database) -> Result<i64, AppError> {
     crate::db::query_scalar("SELECT count(*) FROM pki_authorities WHERE key_backend = 'kms'")
         .fetch_one(pool)
         .await
@@ -737,7 +737,7 @@ pub async fn transition_authority(
 }
 
 pub async fn list_authorities(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Option<Uuid>,
 ) -> Result<Vec<AuthorityRecord>, AppError> {
     let query = format!(
@@ -753,7 +753,7 @@ pub async fn list_authorities(
         .map_err(db_err)
 }
 
-pub async fn trust_bundle_authorities(pool: &PgPool) -> Result<Vec<AuthorityRecord>, AppError> {
+pub async fn trust_bundle_authorities(pool: &Database) -> Result<Vec<AuthorityRecord>, AppError> {
     let query = format!(
         r#"SELECT {AUTHORITY_COLUMNS}
            FROM pki_authorities

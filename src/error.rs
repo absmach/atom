@@ -121,7 +121,9 @@ impl IntoResponse for AppError {
                         )
                             .into_response();
                     }
-                    DatabaseErrorKind::NotFound | DatabaseErrorKind::Internal => {}
+                    DatabaseErrorKind::NotFound
+                    | DatabaseErrorKind::Busy
+                    | DatabaseErrorKind::Internal => {}
                 }
                 tracing::error!("db error: {}", e);
                 (
@@ -165,7 +167,9 @@ impl From<AppError> for tonic::Status {
                         tracing::warn!("check violation: {e}");
                         return tonic::Status::invalid_argument("invalid value");
                     }
-                    DatabaseErrorKind::NotFound | DatabaseErrorKind::Internal => {}
+                    DatabaseErrorKind::NotFound
+                    | DatabaseErrorKind::Busy
+                    | DatabaseErrorKind::Internal => {}
                 }
                 tracing::error!("db error: {e}");
                 tonic::Status::internal("database error")
@@ -181,6 +185,10 @@ impl From<AppError> for tonic::Status {
 pub fn db_err(e: sqlx::Error) -> AppError {
     match classify_database_error(&e) {
         DatabaseErrorKind::NotFound => AppError::NotFound("not found".to_string()),
+        DatabaseErrorKind::Busy => {
+            tracing::warn!("database busy: {e}");
+            AppError::ServiceUnavailable("database is busy; retry shortly".to_string())
+        }
         DatabaseErrorKind::Unique
         | DatabaseErrorKind::ForeignKey
         | DatabaseErrorKind::Check
@@ -199,16 +207,20 @@ pub enum DatabaseErrorKind {
     Unique,
     ForeignKey,
     Check,
+    /// SQLite could not take its write lock within the busy timeout; the
+    /// request fails closed as "service unavailable" instead of hanging.
+    Busy,
     Internal,
 }
 
-fn classify_database_error(e: &sqlx::Error) -> DatabaseErrorKind {
+pub fn classify_database_error(e: &sqlx::Error) -> DatabaseErrorKind {
     match e {
         sqlx::Error::RowNotFound => DatabaseErrorKind::NotFound,
         _ => match database_constraint_violation(e) {
             Some(DatabaseConstraintViolation::Unique) => DatabaseErrorKind::Unique,
             Some(DatabaseConstraintViolation::ForeignKey) => DatabaseErrorKind::ForeignKey,
             Some(DatabaseConstraintViolation::Check) => DatabaseErrorKind::Check,
+            None if is_busy(e) => DatabaseErrorKind::Busy,
             None => DatabaseErrorKind::Internal,
         },
     }
@@ -232,26 +244,78 @@ fn database_constraint_violation(e: &sqlx::Error) -> Option<DatabaseConstraintVi
     let sqlx::Error::Database(db) = e else {
         return None;
     };
+    // SQLite reports an `ON DELETE RESTRICT` foreign-key failure with the
+    // trigger code (1811) rather than 787; the message tells them apart.
+    if db.code().as_deref() == Some("1811") && db.message().starts_with("FOREIGN KEY constraint") {
+        return Some(DatabaseConstraintViolation::ForeignKey);
+    }
     database_constraint_violation_code(db.code().as_deref())
 }
 
 fn database_constraint_violation_code(code: Option<&str>) -> Option<DatabaseConstraintViolation> {
     match code {
+        // PostgreSQL SQLSTATEs.
         Some("23505") => Some(DatabaseConstraintViolation::Unique),
         Some("23503") => Some(DatabaseConstraintViolation::ForeignKey),
         Some("23514") => Some(DatabaseConstraintViolation::Check),
+        // SQLite extended result codes: UNIQUE (2067) and PRIMARY KEY (1555),
+        // FOREIGN KEY (787), CHECK (275) and trigger `RAISE(ABORT)` (1811), which
+        // is how the schema's invariant triggers report a violation.
+        Some("2067") | Some("1555") => Some(DatabaseConstraintViolation::Unique),
+        Some("787") => Some(DatabaseConstraintViolation::ForeignKey),
+        Some("275") | Some("1811") => Some(DatabaseConstraintViolation::Check),
         _ => None,
     }
 }
 
-fn is_unique_violation(e: &sqlx::Error) -> bool {
+/// SQLite `SQLITE_BUSY` / `SQLITE_LOCKED` (primary codes 5 and 6, and their
+/// extended variants).
+fn is_busy(e: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db) = e else {
+        return false;
+    };
+    db.code()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| matches!(code & 0xff, 5 | 6))
+}
+
+/// True for a uniqueness (or primary-key) violation on either backend.
+pub fn is_unique_violation(e: &sqlx::Error) -> bool {
     database_constraint_violation(e) == Some(DatabaseConstraintViolation::Unique)
 }
 
-/// The constraint a unique-violation (23505) names, if this error is one.
-fn unique_violation_constraint(e: &sqlx::Error) -> Option<&str> {
-    match e {
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => db.constraint(),
+/// True for a foreign-key violation on either backend.
+pub fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
+    database_constraint_violation(e) == Some(DatabaseConstraintViolation::ForeignKey)
+}
+
+/// True for a `CHECK` violation on either backend, including the schema's
+/// invariant triggers (PostgreSQL raises them as `check_violation`, SQLite as a
+/// trigger abort).
+pub fn is_check_violation(e: &sqlx::Error) -> bool {
+    database_constraint_violation(e) == Some(DatabaseConstraintViolation::Check)
+}
+
+/// The constraint a unique violation names, if this error is one. PostgreSQL
+/// reports the constraint or index; SQLite reports `index '<name>'` in the
+/// message for expression indexes, which is what the entity identifiers use.
+pub fn unique_violation_constraint(e: &sqlx::Error) -> Option<&str> {
+    let sqlx::Error::Database(db) = e else {
+        return None;
+    };
+    match db.code().as_deref() {
+        Some("23505") => db.constraint(),
+        Some("2067") | Some("1555") => {
+            let message = db.message();
+            if let Some(rest) = message.split("index '").nth(1) {
+                return rest.split('\'').next();
+            }
+            // Column-list violations name `table.column`; the registry's primary
+            // key is the one whose PostgreSQL constraint name callers match on.
+            message
+                .contains("protected_object_ids.id")
+                .then_some("protected_object_ids_pkey")
+        }
         _ => None,
     }
 }

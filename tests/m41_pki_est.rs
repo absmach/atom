@@ -75,10 +75,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
 
     let issuer = common::pki::provision_tenant_issuer(&pool, &config, &root, tenant).await;
     let other_issuer = {
-        let mut tx = atom::db::Database::from(pool.clone())
-            .begin()
-            .await
-            .unwrap();
+        let mut tx = pool.clone().begin().await.unwrap();
         let mut provisioned = provisioning::provision_tenant_automatically_in_tx(
             &mut tx,
             &config.pki_ca_keys,
@@ -93,7 +90,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         );
         tx.commit().await.unwrap();
         provisioned.commit_generated_key();
-        sqlx::query(
+        atom::db::query(
             r#"UPDATE pki_authorities
                SET ocsp_url = $2, ca_issuers_url = $3,
                    crl_distribution_point_url = $4
@@ -404,7 +401,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         413,
     )
     .await;
-    let reenrollment_events_before: i64 = sqlx::query_scalar(
+    let reenrollment_events_before: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -427,7 +424,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     .await
     .unwrap();
     assert_eq!(no_peer.status, 401, "{}", no_peer.body);
-    let reenrollment_events_after: i64 = sqlx::query_scalar(
+    let reenrollment_events_after: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -486,7 +483,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         fs::read_to_string(&generated_cert_a).unwrap(),
         fs::read_to_string(&generated_cert_b).unwrap()
     );
-    let stored_metadata: Vec<String> = sqlx::query_scalar(
+    let stored_metadata: Vec<String> = atom::db::query_scalar(
         "SELECT metadata::text FROM credentials WHERE entity_id = $1 AND kind = 'certificate'",
     )
     .bind(entity)
@@ -550,11 +547,13 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         ),
     )
     .unwrap();
-    sqlx::query("UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1")
-        .bind(renewed_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    atom::db::query(
+        "UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(renewed_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let expired_attempt = directory.join("expired-attempt.pem");
     assert_client_failure(
         "expired simplereenroll",
@@ -582,7 +581,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     // windows without changing the service configuration. Covering the next
     // fixed window keeps the pair of assertions deterministic when the clock
     // crosses a boundary between the two requests.
-    sqlx::query(
+    atom::db::query(
         r#"WITH windows AS (
                SELECT generate_series(0, 1) AS step,
                       to_timestamp(
@@ -629,7 +628,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         ("certificate.enroll", "serverkeygen", "error", 1_i64),
         ("certificate.reenroll", "reenroll", "deny", 2_i64),
     ] {
-        let observed: i64 = sqlx::query_scalar(
+        let observed: i64 = atom::db::query_scalar(
             r#"SELECT COUNT(*)
                FROM event_outbox
                WHERE event = $1
@@ -711,8 +710,8 @@ fn path_arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-async fn latest_certificate_id(pool: &sqlx::PgPool, entity_id: Uuid) -> Uuid {
-    sqlx::query_scalar(
+async fn latest_certificate_id(pool: &atom::db::Database, entity_id: Uuid) -> Uuid {
+    atom::db::query_scalar(
         r#"SELECT id
            FROM credentials
            WHERE entity_id = $1 AND kind = 'certificate'

@@ -13,12 +13,14 @@ mod arg;
 mod query;
 pub mod sqlite;
 mod sqlite_functions;
+#[doc(hidden)]
+pub mod testing;
 pub mod translate;
 
 pub use arg::{enum_text, Arg, ArgKind, DbArg, TextList, UuidList};
 pub use query::{
-    query, query_as, query_scalar, DbRow, DbScalar, ExecResult, IntoTarget, Query, QueryAs,
-    QueryBuilder, QueryScalar, Row, Target,
+    query, query_as, query_scalar, DbExecutor, DbRow, DbScalar, ExecResult, IntoTarget, Query,
+    QueryAs, QueryBuilder, QueryScalar, Row, Target,
 };
 pub use sqlite::SqliteDb;
 
@@ -206,14 +208,43 @@ impl Database {
         }
     }
 
-    /// Transitional accessor for storage code that has not yet moved onto
-    /// `Database`/`DbTransaction`. Panics on a non-PostgreSQL database, which
-    /// is why removing every remaining use is a hard requirement of adding a
-    /// second backend.
-    pub fn as_postgres(&self) -> &PgPool {
+    /// A second handle over the same database whose pool is capped at
+    /// `max_connections`. Tests use `1` to prove a code path never borrows a
+    /// second connection while it holds one.
+    pub async fn with_max_connections(
+        &self,
+        max_connections: u32,
+        cfg: &DbPoolConfig,
+    ) -> anyhow::Result<Database> {
         match self {
-            Database::Postgres(pool) => pool,
-            Database::Sqlite(_) => panic!("as_postgres() called on a SQLite database"),
+            Database::Postgres(pool) => {
+                let options = (*pool.connect_options()).clone();
+                let limited = pool_options(cfg)
+                    .max_connections(max_connections)
+                    .min_connections(0)
+                    .connect_with(options)
+                    .await?;
+                Ok(Database::Postgres(limited))
+            }
+            Database::Sqlite(db) => Ok(Database::Sqlite(
+                db.with_max_connections(max_connections, cfg).await?,
+            )),
+        }
+    }
+
+    /// Open connections in the pool (for health and metrics).
+    pub fn size(&self) -> u32 {
+        match self {
+            Database::Postgres(pool) => pool.size(),
+            Database::Sqlite(db) => db.pool.size(),
+        }
+    }
+
+    /// Idle connections in the pool (for health and metrics).
+    pub fn num_idle(&self) -> usize {
+        match self {
+            Database::Postgres(pool) => pool.num_idle(),
+            Database::Sqlite(db) => db.pool.num_idle(),
         }
     }
 }

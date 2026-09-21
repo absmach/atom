@@ -6,6 +6,7 @@
 mod common;
 
 use async_graphql::{Request, Variables};
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     certs::{enrollment::service as enrollment, lifecycle, service},
@@ -22,7 +23,6 @@ use atom::{
 use chrono::{DateTime, Duration, Utc};
 use rcgen::{CertificateParams, KeyPair};
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -82,7 +82,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
 
     // A tenant issuer at the exact 30-day lead boundary is surfaced early
     // enough to run the PR-003 rotation procedure.
-    sqlx::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
+    atom::db::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
         .bind(expiring_authority.id)
         .bind(now + Duration::days(30))
         .execute(&pool)
@@ -134,7 +134,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
 
     // A later profile snapshot/correction may move the timestamp but does not
     // create a second logical renewal-window notification for this certificate.
-    sqlx::query(
+    atom::db::query(
         "UPDATE credentials SET metadata = jsonb_set(metadata, '{renewal_due_at}', to_jsonb($2::timestamptz)) WHERE id = $1",
     )
     .bind(due.credential_id)
@@ -171,7 +171,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
         common::pki::create_tenant(&pool, "pki-life-overdue-authority").await;
     let overdue_authority =
         common::pki::provision_tenant_issuer(&pool, &config, &root, overdue_authority_tenant).await;
-    sqlx::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
+    atom::db::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
         .bind(overdue_authority.id)
         // Keep the synthetic expiry after the authority's not-before value.
         // The test root is only backdated by one minute, so using the same
@@ -279,7 +279,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     // Even a corrupt cross-tenant membership row is constrained by the SQL
     // selector scope and cannot turn a tenant-wide permission into platform
     // revocation authority.
-    sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
         .bind(group_id)
         .bind(entity_b)
         .execute(&pool)
@@ -374,12 +374,12 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     let mut ordered = [c_one.credential_id, c_two.credential_id];
     ordered.sort();
     let original_metadata: Value =
-        sqlx::query_scalar("SELECT metadata FROM credentials WHERE id = $1")
+        atom::db::query_scalar("SELECT metadata FROM credentials WHERE id = $1")
             .bind(ordered[1])
             .fetch_one(&pool)
             .await
             .unwrap();
-    sqlx::query("UPDATE credentials SET metadata = metadata - 'certificate_pem' WHERE id = $1")
+    atom::db::query("UPDATE credentials SET metadata = metadata - 'certificate_pem' WHERE id = $1")
         .bind(ordered[1])
         .execute(&pool)
         .await
@@ -398,7 +398,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(partial["items"][1]["errorCode"], "internal");
     assert_eq!(partial["nextCursor"], ordered[0].to_string());
     let partial_snapshot = partial["snapshotAt"].as_str().unwrap().to_string();
-    let failed_observation: (String, String) = sqlx::query_as(
+    let failed_observation: (String, String) = atom::db::query_as(
         r#"
         SELECT payload->>'outcome', payload->'details'->>'error_code'
         FROM event_outbox
@@ -413,7 +413,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     .unwrap();
     assert_eq!(failed_observation.0, "error");
     assert_eq!(failed_observation.1, "internal");
-    sqlx::query("UPDATE credentials SET metadata = $2 WHERE id = $1")
+    atom::db::query("UPDATE credentials SET metadata = $2 WHERE id = $1")
         .bind(ordered[1])
         .bind(original_metadata)
         .execute(&pool)
@@ -552,10 +552,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     // `_in_tx` success is provisional. Rolling the caller-owned transaction
     // back must not publish a successful issuance sample.
     let before_rollback = lifecycle_metric_value(&metrics::render(&pool), "issuance", "success");
-    let mut rollback_tx = atom::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .unwrap();
+    let mut rollback_tx = pool.clone().begin().await.unwrap();
     service::issue_certificate_from_csr_v2_in_tx(
         &mut rollback_tx,
         &config,
@@ -625,7 +622,7 @@ fn lifecycle_metric_value(rendered: &str, operation: &str, outcome: &str) -> f64
 }
 
 async fn issue(
-    pool: &PgPool,
+    pool: &Database,
     config: &atom::config::Config,
     tenant_id: Uuid,
     entity_id: Uuid,
@@ -658,11 +655,11 @@ fn csr() -> String {
 }
 
 async fn set_profile_fallback_expiry(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
     expires_at: DateTime<Utc>,
 ) {
-    sqlx::query(
+    atom::db::query(
         r#"
         UPDATE credentials
         SET expires_at = $2,
@@ -682,12 +679,12 @@ async fn set_profile_fallback_expiry(
 }
 
 async fn set_expiry_and_renewal(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
     expires_at: DateTime<Utc>,
     renewal_due_at: DateTime<Utc>,
 ) {
-    sqlx::query(
+    atom::db::query(
         r#"
         UPDATE credentials
         SET expires_at = $2,
@@ -707,43 +704,24 @@ async fn set_expiry_and_renewal(
     .unwrap();
 }
 
-async fn install_outbox_failure(pool: &PgPool) {
-    sqlx::query(
-        r#"
-        CREATE OR REPLACE FUNCTION m40_reject_expiry_event() RETURNS trigger AS $$
-        BEGIN
-            IF NEW.event = 'certificate.expiring' THEN
-                RAISE EXCEPTION 'forced PR-015 outbox failure';
-            END IF;
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql
-        "#,
+async fn install_outbox_failure(pool: &Database) {
+    atom::db::testing::install_rejecting_trigger(
+        pool,
+        "m40_reject_expiry_event",
+        "event_outbox",
+        "NEW.event = 'certificate.expiring'",
+        "forced PR-015 outbox failure",
     )
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TRIGGER m40_reject_expiry_event BEFORE INSERT ON event_outbox FOR EACH ROW EXECUTE FUNCTION m40_reject_expiry_event()",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+    .await;
 }
 
-async fn remove_outbox_failure(pool: &PgPool) {
-    sqlx::query("DROP TRIGGER m40_reject_expiry_event ON event_outbox")
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("DROP FUNCTION m40_reject_expiry_event()")
-        .execute(pool)
-        .await
-        .unwrap();
+async fn remove_outbox_failure(pool: &Database) {
+    atom::db::testing::drop_rejecting_trigger(pool, "m40_reject_expiry_event", "event_outbox")
+        .await;
 }
 
-async fn marker_count(pool: &PgPool, subject_id: Uuid, window: &str) -> i64 {
-    sqlx::query_scalar(
+async fn marker_count(pool: &Database, subject_id: Uuid, window: &str) -> i64 {
+    atom::db::query_scalar(
         "SELECT COUNT(*) FROM pki_lifecycle_notifications WHERE subject_id = $1 AND window_kind = $2",
     )
     .bind(subject_id)
@@ -753,16 +731,16 @@ async fn marker_count(pool: &PgPool, subject_id: Uuid, window: &str) -> i64 {
     .unwrap()
 }
 
-async fn outbox_count(pool: &PgPool, event: &str) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM event_outbox WHERE event = $1")
+async fn outbox_count(pool: &Database, event: &str) -> i64 {
+    atom::db::query_scalar("SELECT COUNT(*) FROM event_outbox WHERE event = $1")
         .bind(event)
         .fetch_one(pool)
         .await
         .unwrap()
 }
 
-async fn assert_certificate_event(pool: &PgPool, credential_id: Uuid, window: &str) {
-    let expected: (Option<Uuid>, Uuid, Option<Uuid>) = sqlx::query_as(
+async fn assert_certificate_event(pool: &Database, credential_id: Uuid, window: &str) {
+    let expected: (Option<Uuid>, Uuid, Option<Uuid>) = atom::db::query_as(
         r#"
         SELECT c.issuer_id, c.entity_id, e.tenant_id
         FROM credentials c
@@ -774,7 +752,7 @@ async fn assert_certificate_event(pool: &PgPool, credential_id: Uuid, window: &s
     .fetch_one(pool)
     .await
     .unwrap();
-    let details: Value = sqlx::query_scalar(
+    let details: Value = atom::db::query_scalar(
         "SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.expiring' AND payload->>'target_id' = $1",
     )
     .bind(credential_id.to_string())
@@ -794,8 +772,8 @@ async fn assert_certificate_event(pool: &PgPool, credential_id: Uuid, window: &s
     assert!(!encoded.contains("private_key"));
 }
 
-async fn assert_authority_event(pool: &PgPool, issuer_id: Uuid, tenant_id: Uuid) {
-    let details: Value = sqlx::query_scalar(
+async fn assert_authority_event(pool: &Database, issuer_id: Uuid, tenant_id: Uuid) {
+    let details: Value = atom::db::query_scalar(
         "SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.authority_expiring' AND payload->>'target_id' = $1",
     )
     .bind(issuer_id.to_string())
@@ -809,11 +787,12 @@ async fn assert_authority_event(pool: &PgPool, issuer_id: Uuid, tenant_id: Uuid)
     assert!(details["entity_id"].is_null());
 }
 
-async fn grant_tenant_manage(pool: &PgPool, tenant_id: Uuid, actor_id: Uuid) {
-    let manage: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .unwrap();
+async fn grant_tenant_manage(pool: &Database, tenant_id: Uuid, actor_id: Uuid) {
+    let manage: Uuid =
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .unwrap();
     let role = atom::authz::repo::create_role(
         pool,
         CreateRole {
@@ -856,7 +835,7 @@ async fn grant_tenant_manage(pool: &PgPool, tenant_id: Uuid, actor_id: Uuid) {
     .unwrap();
 }
 
-async fn create_principal_group(pool: &PgPool, tenant_id: Uuid, members: &[Uuid]) -> Uuid {
+async fn create_principal_group(pool: &Database, tenant_id: Uuid, members: &[Uuid]) -> Uuid {
     let group = identity::repo::create_group(
         pool,
         CreateGroup {
@@ -871,12 +850,14 @@ async fn create_principal_group(pool: &PgPool, tenant_id: Uuid, members: &[Uuid]
     .await
     .unwrap();
     for member in members {
-        sqlx::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
-            .bind(group.id)
-            .bind(member)
-            .execute(pool)
-            .await
-            .unwrap();
+        atom::db::query(
+            "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)",
+        )
+        .bind(group.id)
+        .bind(member)
+        .execute(pool)
+        .await
+        .unwrap();
     }
     group.id
 }
@@ -919,8 +900,8 @@ fn errors_contain(errors: &[async_graphql::ServerError], needle: &str) -> bool {
     errors.iter().any(|error| error.message.contains(needle))
 }
 
-async fn certificate_status(pool: &PgPool, credential_id: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+async fn certificate_status(pool: &Database, credential_id: Uuid) -> String {
+    atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
         .bind(credential_id)
         .fetch_one(pool)
         .await

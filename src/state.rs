@@ -113,11 +113,9 @@ impl AppState {
         self
     }
 
-    /// Transitional accessor — see [`Database::as_postgres`]. Existing
-    /// storage code keeps calling `state.pool()` exactly as it called
-    /// `state.pool` before this field became the backend-neutral façade.
-    pub fn pool(&self) -> &sqlx::PgPool {
-        self.db.as_postgres()
+    /// The database handle every repository and service takes as `&Database`.
+    pub fn pool(&self) -> &Database {
+        &self.db
     }
 
     /// Opens a new top-level transaction through the façade, replacing the

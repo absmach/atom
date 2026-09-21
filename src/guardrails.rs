@@ -1,14 +1,14 @@
 //! Assignment guardrails: the rules that decide whether a grant may be
 //! created at all, independently of who is asking.
 //!
-//! Every entry point takes `&mut PgConnection` rather than `&PgPool`. Callers
+//! Every entry point takes `&mut impl DbExecutor` rather than `&Database`. Callers
 //! run these validations under the row locks their mutation already holds, so
 //! the reads must go through *that* transaction: a second pooled connection
 //! neither sees the transaction's uncommitted state nor respects its locks,
 //! and acquiring one while holding a transaction risks exhausting the pool
 //! (every request holding one connection and waiting for a second).
 
-use sqlx::PgConnection;
+use crate::db::DbExecutor;
 use uuid::Uuid;
 
 use crate::{
@@ -102,7 +102,7 @@ impl Rule {
 }
 
 pub async fn validate_policy(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     req: &CreatePolicyBinding,
 ) -> Result<(), AppError> {
     let assignments = assignments_for_policy(&mut *conn, req).await?;
@@ -110,7 +110,7 @@ pub async fn validate_policy(
 }
 
 pub async fn validate_role_capability(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     role_id: Uuid,
     capability_id: Uuid,
 ) -> Result<(), AppError> {
@@ -161,7 +161,7 @@ pub async fn validate_role_capability(
 }
 
 pub async fn validate_role_assignment(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     tenant_id: Option<Uuid>,
     subject_kind: SubjectKind,
     subject_id: Uuid,
@@ -194,7 +194,7 @@ pub async fn validate_role_assignment(
 /// Transactional mutation paths must use this variant so validation cannot
 /// wait for a second pool connection while the transaction holds the first.
 pub async fn validate_role_assignment_on_connection(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut impl DbExecutor,
     tenant_id: Option<Uuid>,
     subject_kind: SubjectKind,
     subject_id: Uuid,
@@ -223,7 +223,7 @@ pub async fn validate_role_assignment_on_connection(
 }
 
 pub async fn validate_composite_role_assignment_plan(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     entity_ids: &[Uuid],
     child_role_ids: &[Uuid],
     tenant_id: Option<Uuid>,
@@ -267,7 +267,7 @@ pub async fn validate_composite_role_assignment_plan(
 }
 
 pub async fn validate_role_assignment_plan(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     entity_ids: &[Uuid],
     capability_ids: &[Uuid],
     tenant_id: Option<Uuid>,
@@ -326,7 +326,7 @@ pub async fn validate_role_assignment_plan(
 /// while holding one deadlocks a saturated pool (and hangs outright at
 /// `max_connections = 1`).
 pub async fn validate_group_member(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
@@ -383,7 +383,7 @@ pub async fn validate_group_member(
 }
 
 pub async fn validate_direct_policy(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     req: &CreateDirectPolicy,
 ) -> Result<(), AppError> {
     let entity_kinds =
@@ -408,7 +408,7 @@ pub async fn validate_direct_policy(
 
 /// Takes the caller's connection, not the pool — see [`validate_group_member`].
 pub async fn validate_role_permission_block_links(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<(), AppError> {
@@ -451,7 +451,7 @@ pub async fn validate_role_permission_block_links(
 }
 
 async fn assignments_for_policy(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     req: &CreatePolicyBinding,
 ) -> Result<Vec<Assignment>, AppError> {
     let entity_kinds =
@@ -482,7 +482,7 @@ async fn assignments_for_policy(
 }
 
 async fn validate_assignments(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     assignments: &[Assignment],
 ) -> Result<(), AppError> {
     if assignments.is_empty() {
@@ -492,7 +492,7 @@ async fn validate_assignments(
     decide(assignments, &rules).map_err(AppError::bad_request)
 }
 
-async fn load_rules(conn: &mut PgConnection) -> Result<Vec<Rule>, AppError> {
+async fn load_rules(conn: &mut impl DbExecutor) -> Result<Vec<Rule>, AppError> {
     crate::db::query(
         r#"SELECT tenant_id, entity_kind, action_name AS capability_name, object_kind, object_type, decision, is_absolute
            FROM action_assignment_rules"#,
@@ -516,7 +516,7 @@ async fn load_rules(conn: &mut PgConnection) -> Result<Vec<Rule>, AppError> {
 }
 
 async fn subject_entity_kinds(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     subject_kind: SubjectKind,
     subject_id: Uuid,
 ) -> Result<Vec<String>, AppError> {
@@ -546,7 +546,10 @@ async fn subject_entity_kinds(
     }
 }
 
-async fn capability_names(conn: &mut PgConnection, ids: &[Uuid]) -> Result<Vec<String>, AppError> {
+async fn capability_names(
+    conn: &mut impl DbExecutor,
+    ids: &[Uuid],
+) -> Result<Vec<String>, AppError> {
     crate::db::query_scalar("SELECT name FROM actions WHERE id = ANY($1::uuid[])")
         .bind(ids)
         .fetch_all(&mut *conn)
@@ -555,7 +558,7 @@ async fn capability_names(conn: &mut PgConnection, ids: &[Uuid]) -> Result<Vec<S
 }
 
 async fn role_capability_names(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     role_id: Uuid,
 ) -> Result<Vec<String>, AppError> {
     crate::db::query_scalar(
@@ -578,7 +581,7 @@ struct RoleCapabilityAssignment {
 }
 
 async fn role_permission_assignments(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     role_ids: &[Uuid],
 ) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
     if role_ids.is_empty() {
@@ -634,7 +637,7 @@ async fn role_permission_assignments(
 }
 
 async fn permission_block_assignments(
-    conn: &mut PgConnection,
+    conn: &mut impl DbExecutor,
     permission_block_ids: &[Uuid],
 ) -> Result<Vec<RoleCapabilityAssignment>, AppError> {
     if permission_block_ids.is_empty() {

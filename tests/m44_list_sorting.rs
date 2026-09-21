@@ -23,9 +23,9 @@ use atom::models::{
 use serde_json::json;
 use uuid::Uuid;
 
-async fn make_tenant(pool: &sqlx::PgPool, name: &str, alias: &str) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database, name: &str, alias: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, alias, status) VALUES ($1, $2, $3, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, alias, status) VALUES ($1, $2, $3, 'active')")
         .bind(id)
         .bind(name)
         .bind(alias)
@@ -35,9 +35,9 @@ async fn make_tenant(pool: &sqlx::PgPool, name: &str, alias: &str) -> Uuid {
     id
 }
 
-async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
+async fn make_entity(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
     )
     .bind(id)
@@ -50,12 +50,12 @@ async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
 }
 
 async fn grant_entity_read(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     subject_id: Uuid,
     object_id: Uuid,
 ) {
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
     )
@@ -64,7 +64,7 @@ async fn grant_entity_read(
     .fetch_one(pool)
     .await
     .expect("insert read block");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            SELECT $1, id FROM actions WHERE name = 'read'"#,
     )
@@ -72,7 +72,7 @@ async fn grant_entity_read(
     .execute(pool)
     .await
     .expect("insert read action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -85,13 +85,13 @@ async fn grant_entity_read(
 }
 
 async fn make_updated_entity(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     name: &str,
     days_ago: i64,
 ) -> Uuid {
     let id = make_entity(pool, tenant_id, name).await;
-    sqlx::query("UPDATE entities SET updated_at = now() - ($2::text::interval) WHERE id = $1")
+    atom::db::query("UPDATE entities SET updated_at = now() - ($2::text::interval) WHERE id = $1")
         .bind(id)
         .bind(format!("{days_ago} days"))
         .execute(pool)
@@ -100,15 +100,17 @@ async fn make_updated_entity(
     id
 }
 
-async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
+async fn make_resource(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
-        .bind(id)
-        .bind(name)
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
@@ -350,7 +352,7 @@ async fn descending_nullable_sorts_put_nulls_last() {
 
     make_resource(&pool, tenant_id, &format!("{prefix}-named")).await;
     let unnamed_resource_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, tenant_id) VALUES ($1, 'channel', $2)")
+    atom::db::query("INSERT INTO resources (id, kind, tenant_id) VALUES ($1, 'channel', $2)")
         .bind(unnamed_resource_id)
         .bind(tenant_id)
         .execute(&pool)

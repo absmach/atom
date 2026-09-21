@@ -16,7 +16,6 @@
 pub mod publisher;
 
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::{Database, DbTransaction};
@@ -156,11 +155,11 @@ struct OutboxRow {
 /// delivery deterministically instead of waiting on the poller's interval,
 /// and so a future admin "flush now" operation can reuse it directly.
 pub async fn deliver_outbox_batch(
-    pool: &PgPool,
+    pool: &Database,
     publisher: &dyn EventPublisher,
     cfg: &crate::config::EventsConfig,
 ) -> Result<usize, AppError> {
-    let mut tx = Database::from(pool.clone()).begin().await.map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(EVENT_OUTBOX_ADVISORY_LOCK_ID)
         .fetch_one(tx.exec())
@@ -327,7 +326,7 @@ pub async fn deliver_outbox_batch(
 /// Deletes delivered and exhausted/unparseable outbox rows older than the
 /// retention window (`retention_days`).
 pub async fn cleanup_expired_outbox(
-    pool: &PgPool,
+    pool: &Database,
     retention_days: i64,
     max_attempts: i32,
     batch_size: i64,

@@ -1,5 +1,6 @@
 use std::{collections::HashSet, ops::Deref};
 
+use crate::db::Database;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use p256::{
@@ -13,7 +14,6 @@ use rcgen::{
     PublicKeyData, SerialNumber, SignatureAlgorithm, SigningKey, PKCS_ECDSA_P256_SHA256,
 };
 use ring::digest;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use x509_parser::{extensions::ParsedExtension, pem::parse_x509_pem, prelude::X509Certificate};
@@ -737,7 +737,7 @@ pub async fn complete_retirement_mutation_in_tx(
     Ok(AuthorityMutationOutcome::changed(authority))
 }
 
-pub async fn trust_bundle(pool: &PgPool) -> Result<TrustBundle, AppError> {
+pub async fn trust_bundle(pool: &Database) -> Result<TrustBundle, AppError> {
     let authorities = repo::trust_bundle_authorities(pool).await?;
     let mut seen = HashSet::new();
     let mut certificates = Vec::new();

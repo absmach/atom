@@ -52,8 +52,15 @@ impl<'a, 'b: 'a> IntoTarget<'a> for &'a &'b Database {
     }
 }
 
-impl<'a, 'c> IntoTarget<'a> for &'a mut DbTransaction<'c> {
-    fn into_target(self) -> Target<'a> {
+/// A connection-like handle a query can run on: an open transaction or a pooled
+/// connection. Functions that must work inside either take
+/// `&mut impl DbExecutor`.
+pub trait DbExecutor {
+    fn executor(&mut self) -> Target<'_>;
+}
+
+impl DbExecutor for DbTransaction<'_> {
+    fn executor(&mut self) -> Target<'_> {
         match self {
             DbTransaction::Postgres(tx) => Target::PgConn(tx),
             DbTransaction::Sqlite(tx) => Target::SqliteConn(tx),
@@ -61,12 +68,24 @@ impl<'a, 'c> IntoTarget<'a> for &'a mut DbTransaction<'c> {
     }
 }
 
-impl<'a> IntoTarget<'a> for &'a mut DbConn {
-    fn into_target(self) -> Target<'a> {
+impl DbExecutor for DbConn {
+    fn executor(&mut self) -> Target<'_> {
         match self {
             DbConn::Postgres(conn) => Target::PgConn(conn),
             DbConn::Sqlite(conn) => Target::SqliteConn(conn),
         }
+    }
+}
+
+impl<T: DbExecutor + ?Sized> DbExecutor for &mut T {
+    fn executor(&mut self) -> Target<'_> {
+        (**self).executor()
+    }
+}
+
+impl<'a, E: DbExecutor + ?Sized> IntoTarget<'a> for &'a mut E {
+    fn into_target(self) -> Target<'a> {
+        self.executor()
     }
 }
 
@@ -86,14 +105,33 @@ impl<'a> IntoTarget<'a> for &'a mut PgConnection {
 /// The body is type-checked separately for each backend, which is what lets one
 /// generic expression serve both drivers.
 macro_rules! on_target {
-    ($target:expr, pg($pe:ident) => $pg:expr, sqlite($se:ident) => $sq:expr $(,)?) => {
+    ($target:expr, locks = $locks:expr, pg($pe:ident) => $pg:expr, sqlite($se:ident) => $sq:expr $(,)?) => {
         match $target {
             Target::PgPool($pe) => $pg,
             Target::PgConn($pe) => {
                 let $pe = &mut *$pe;
                 $pg
             }
-            Target::SqlitePool($se) => $sq,
+            Target::SqlitePool(pool) => {
+                if $locks {
+                    // A PostgreSQL row lock (`FOR UPDATE`/`FOR SHARE`) makes the
+                    // statement wait for concurrent writers. SQLite's equivalent
+                    // is the single write lock, so run the statement inside
+                    // `BEGIN IMMEDIATE`; an early `return` in the body leaves
+                    // only this block, and the transaction always commits.
+                    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                    let out: Result<_, sqlx::Error> = {
+                        let $se = &mut *tx;
+                        async { $sq }.await
+                    };
+                    tx.commit().await?;
+                    out
+                } else {
+                    let mut pooled = pool.acquire().await?;
+                    let $se = &mut *pooled;
+                    $sq
+                }
+            }
             Target::SqliteConn($se) => {
                 let $se = &mut *$se;
                 $sq
@@ -121,6 +159,16 @@ pub enum Row {
 }
 
 impl Row {
+    /// Panicking variant of [`Row::try_get`], for tests and assertions.
+    pub fn get<'r, T, I>(&'r self, index: I) -> T
+    where
+        I: ColumnIndex<PgRow> + ColumnIndex<SqliteRow> + std::fmt::Display + Copy,
+        T: Decode<'r, Postgres> + Type<Postgres> + Decode<'r, Sqlite> + Type<Sqlite>,
+    {
+        self.try_get(index)
+            .unwrap_or_else(|e| panic!("column {index}: {e}"))
+    }
+
     pub fn try_get<'r, T, I>(&'r self, index: I) -> Result<T, sqlx::Error>
     where
         I: ColumnIndex<PgRow> + ColumnIndex<SqliteRow>,
@@ -164,14 +212,28 @@ impl<T> DbScalar for T where
 {
 }
 
+/// Logs the statement SQLite rejected (the translation, not the source text) so
+/// a parity gap can be located from a bare "near X: syntax error".
+fn trace<T>(sql: &str, result: Result<T, sqlx::Error>) -> Result<T, sqlx::Error> {
+    if let Err(e) = &result {
+        tracing::debug!(target: "atom::db::sqlite", error = %e, sql = %sql, "SQLite statement failed");
+    }
+    result
+}
+
 #[derive(Default)]
 struct Body {
     sql: String,
     args: Vec<Arg>,
-    sqlite_sql: Option<String>,
+    sqlite_sql: Vec<String>,
 }
 
 impl Body {
+    /// True when the PostgreSQL text takes row locks.
+    fn locks_rows(&self) -> bool {
+        super::translate::takes_row_locks(&self.sql)
+    }
+
     fn pg_arguments(&self) -> Result<PgArguments, sqlx::Error> {
         let mut out = PgArguments::default();
         for arg in &self.args {
@@ -180,75 +242,98 @@ impl Body {
         Ok(out)
     }
 
-    fn sqlite_prepared(&self) -> Result<(String, SqliteArguments<'static>), sqlx::Error> {
-        let sql = match &self.sqlite_sql {
-            Some(sql) => sql.clone(),
-            None => {
-                let kinds: Vec<_> = self.args.iter().map(Arg::kind).collect();
-                super::translate::to_sqlite(&self.sql, &kinds)
-            }
+    /// The SQLite statements to run, each with its own copy of the arguments:
+    /// the explicit override(s) when given, else the translation of `sql`.
+    fn sqlite_prepared(&self) -> Result<Vec<(String, SqliteArguments<'static>)>, sqlx::Error> {
+        let statements = if self.sqlite_sql.is_empty() {
+            let kinds: Vec<_> = self.args.iter().map(Arg::kind).collect();
+            vec![super::translate::to_sqlite(&self.sql, &kinds)]
+        } else {
+            self.sqlite_sql.clone()
         };
-        let mut out = SqliteArguments::default();
-        for arg in &self.args {
-            arg.add_sqlite(&mut out).map_err(sqlx::Error::Encode)?;
-        }
-        Ok((sql, out))
+        statements
+            .into_iter()
+            .map(|sql| {
+                let mut out = SqliteArguments::default();
+                for arg in &self.args {
+                    arg.add_sqlite(&mut out).map_err(sqlx::Error::Encode)?;
+                }
+                Ok((sql, out))
+            })
+            .collect()
     }
 
     async fn execute(&self, target: Target<'_>) -> Result<ExecResult, sqlx::Error> {
         on_target!(target,
+            locks = self.locks_rows(),
             pg(e) => {
                 let args = self.pg_arguments()?;
                 let res = sqlx::query_with(&self.sql, args).execute(e).await?;
                 Ok(ExecResult { rows_affected: res.rows_affected() })
             },
             sqlite(e) => {
-                let (sql, args) = self.sqlite_prepared()?;
-                let res = sqlx::query_with(&sql, args).execute(e).await?;
-                Ok(ExecResult { rows_affected: res.rows_affected() })
+                let mut rows_affected = 0;
+                for (sql, args) in self.sqlite_prepared()? {
+                    let res = trace(&sql, sqlx::query_with(&sql, args).execute(&mut *e).await)?;
+                    rows_affected += res.rows_affected();
+                }
+                Ok(ExecResult { rows_affected })
             },
         )
     }
 
     async fn fetch_all(&self, target: Target<'_>) -> Result<Vec<Row>, sqlx::Error> {
         on_target!(target,
+            locks = self.locks_rows(),
             pg(e) => {
                 let args = self.pg_arguments()?;
                 let rows = sqlx::query_with(&self.sql, args).fetch_all(e).await?;
                 Ok(rows.into_iter().map(Row::Pg).collect())
             },
             sqlite(e) => {
-                let (sql, args) = self.sqlite_prepared()?;
-                let rows = sqlx::query_with(&sql, args).fetch_all(e).await?;
-                Ok(rows.into_iter().map(Row::Sqlite).collect())
+                let mut out = Vec::new();
+                for (sql, args) in self.sqlite_prepared()? {
+                    let rows = trace(&sql, sqlx::query_with(&sql, args).fetch_all(&mut *e).await)?;
+                    out.extend(rows.into_iter().map(Row::Sqlite));
+                }
+                Ok(out)
             },
         )
     }
 
     async fn fetch_optional(&self, target: Target<'_>) -> Result<Option<Row>, sqlx::Error> {
         on_target!(target,
+            locks = self.locks_rows(),
             pg(e) => {
                 let args = self.pg_arguments()?;
                 let row = sqlx::query_with(&self.sql, args).fetch_optional(e).await?;
                 Ok(row.map(Row::Pg))
             },
             sqlite(e) => {
-                let (sql, args) = self.sqlite_prepared()?;
-                let row = sqlx::query_with(&sql, args).fetch_optional(e).await?;
-                Ok(row.map(Row::Sqlite))
+                for (sql, args) in self.sqlite_prepared()? {
+                    let row = trace(&sql, sqlx::query_with(&sql, args).fetch_optional(&mut *e).await)?;
+                    if let Some(row) = row {
+                        return Ok(Some(Row::Sqlite(row)));
+                    }
+                }
+                Ok(None)
             },
         )
     }
 
     async fn fetch_all_as<O: DbRow>(&self, target: Target<'_>) -> Result<Vec<O>, sqlx::Error> {
         on_target!(target,
+            locks = self.locks_rows(),
             pg(e) => {
                 let args = self.pg_arguments()?;
                 sqlx::query_as_with::<Postgres, O, _>(&self.sql, args).fetch_all(e).await
             },
             sqlite(e) => {
-                let (sql, args) = self.sqlite_prepared()?;
-                sqlx::query_as_with::<Sqlite, O, _>(&sql, args).fetch_all(e).await
+                let mut out = Vec::new();
+                for (sql, args) in self.sqlite_prepared()? {
+                    out.extend(trace(&sql, sqlx::query_as_with::<Sqlite, O, _>(&sql, args).fetch_all(&mut *e).await)?);
+                }
+                Ok(out)
             },
         )
     }
@@ -258,13 +343,18 @@ impl Body {
         target: Target<'_>,
     ) -> Result<Option<O>, sqlx::Error> {
         on_target!(target,
+            locks = self.locks_rows(),
             pg(e) => {
                 let args = self.pg_arguments()?;
                 sqlx::query_as_with::<Postgres, O, _>(&self.sql, args).fetch_optional(e).await
             },
             sqlite(e) => {
-                let (sql, args) = self.sqlite_prepared()?;
-                sqlx::query_as_with::<Sqlite, O, _>(&sql, args).fetch_optional(e).await
+                for (sql, args) in self.sqlite_prepared()? {
+                    if let Some(row) = trace(&sql, sqlx::query_as_with::<Sqlite, O, _>(&sql, args).fetch_optional(&mut *e).await)? {
+                        return Ok(Some(row));
+                    }
+                }
+                Ok(None)
             },
         )
     }
@@ -274,13 +364,17 @@ impl Body {
         target: Target<'_>,
     ) -> Result<Vec<O>, sqlx::Error> {
         on_target!(target,
+            locks = self.locks_rows(),
             pg(e) => {
                 let args = self.pg_arguments()?;
                 sqlx::query_scalar_with::<Postgres, O, _>(&self.sql, args).fetch_all(e).await
             },
             sqlite(e) => {
-                let (sql, args) = self.sqlite_prepared()?;
-                sqlx::query_scalar_with::<Sqlite, O, _>(&sql, args).fetch_all(e).await
+                let mut out = Vec::new();
+                for (sql, args) in self.sqlite_prepared()? {
+                    out.extend(trace(&sql, sqlx::query_scalar_with::<Sqlite, O, _>(&sql, args).fetch_all(&mut *e).await)?);
+                }
+                Ok(out)
             },
         )
     }
@@ -290,13 +384,18 @@ impl Body {
         target: Target<'_>,
     ) -> Result<Option<O>, sqlx::Error> {
         on_target!(target,
+            locks = self.locks_rows(),
             pg(e) => {
                 let args = self.pg_arguments()?;
                 sqlx::query_scalar_with::<Postgres, O, _>(&self.sql, args).fetch_optional(e).await
             },
             sqlite(e) => {
-                let (sql, args) = self.sqlite_prepared()?;
-                sqlx::query_scalar_with::<Sqlite, O, _>(&sql, args).fetch_optional(e).await
+                for (sql, args) in self.sqlite_prepared()? {
+                    if let Some(row) = trace(&sql, sqlx::query_scalar_with::<Sqlite, O, _>(&sql, args).fetch_optional(&mut *e).await)? {
+                        return Ok(Some(row));
+                    }
+                }
+                Ok(None)
             },
         )
     }
@@ -313,7 +412,17 @@ macro_rules! builder_methods {
         /// PostgreSQL→SQLite translation cannot express. Placeholders keep their
         /// `$N` numbering and bind the same arguments.
         pub fn sqlite(mut self, sql: &str) -> Self {
-            self.body.sqlite_sql = Some(sql.to_owned());
+            self.body.sqlite_sql = vec![sql.to_owned()];
+            self
+        }
+
+        /// SQLite has no data-modifying CTEs (`WITH x AS (UPDATE …)`). A
+        /// statement built from independent branches is instead run as these
+        /// statements in order, all bound to the same arguments: `fetch_all`
+        /// concatenates their rows, `fetch_optional` takes the first row any of
+        /// them returns, and `execute` sums the rows affected.
+        pub fn sqlite_all(mut self, statements: &[&str]) -> Self {
+            self.body.sqlite_sql = statements.iter().map(|s| (*s).to_owned()).collect();
             self
         }
     };

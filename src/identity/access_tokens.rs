@@ -3,10 +3,10 @@
 //! (`auth_from_api_key`); ceiling evaluation lives in the PDP and the
 //! ceiling-aware listing readers.
 
+use crate::db::Database;
 use argon2::password_hash::rand_core::OsRng;
 use chrono::Utc;
 use rand::RngCore;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -33,16 +33,13 @@ use super::service::hash_secret;
 pub const MAX_ACCESS_TOKEN_PERMISSIONS: usize = 100;
 
 pub async fn create_access_token(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     req: CreateAccessToken,
     scoped: bool,
 ) -> Result<AccessTokenResponse, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let response = create_access_token_in_tx(&mut tx, signing_keys, entity_id, req, scoped).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(response)
@@ -154,15 +151,12 @@ pub async fn create_access_token_in_tx(
 /// caller — owner self-service or a delegated admin via the
 /// credential-management gate — before resolving the owner id passed here.
 pub async fn replace_access_token_permissions(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     cred_id: Uuid,
     permissions: Vec<AccessTokenPermission>,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     replace_access_token_permissions_in_tx(&mut tx, entity_id, cred_id, permissions).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -319,7 +313,7 @@ async fn write_ceiling_limit(
     .execute(tx.exec())
     .await
     .map_err(|e| match e {
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23514") => {
+        e if crate::error::is_check_violation(&e) => {
             AppError::bad_request("invalid permission scope for access token")
         }
         other => AppError::Database(other),
@@ -351,7 +345,7 @@ pub struct ListAccessTokens {
 }
 
 pub async fn list_access_tokens(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     params: ListAccessTokens,
 ) -> Result<(Vec<AccessTokenSummary>, i64), AppError> {
@@ -432,7 +426,7 @@ pub async fn list_access_tokens(
 /// The owner (entity id) of an access-token credential; `NotFound` when the id
 /// does not exist or is not an access token. Used by the GraphQL layer to route
 /// owner vs delegated (admin) lifecycle operations.
-pub async fn access_token_owner(pool: &PgPool, cred_id: Uuid) -> Result<Uuid, AppError> {
+pub async fn access_token_owner(pool: &Database, cred_id: Uuid) -> Result<Uuid, AppError> {
     crate::db::query_scalar(r#"SELECT entity_id FROM credentials WHERE id = $1 AND kind = $2"#)
         .bind(cred_id)
         .bind(CredentialKind::AccessToken)
@@ -445,7 +439,7 @@ pub async fn access_token_owner(pool: &PgPool, cred_id: Uuid) -> Result<Uuid, Ap
 /// Render token ceilings for display: one entry per limit row with its action
 /// names, grouped per credential in one query for the whole listing.
 async fn load_access_token_permissions(
-    pool: &PgPool,
+    pool: &Database,
     credential_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<AccessTokenPermissionSummary>>, AppError> {
     let rows = crate::db::query(
@@ -496,14 +490,11 @@ async fn load_access_token_permissions(
 }
 
 pub async fn revoke_access_token(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     revoke_access_token_in_tx(&mut tx, entity_id, cred_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())

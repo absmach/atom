@@ -97,7 +97,7 @@ fn parse_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>> {
 }
 
 async fn commit_with_lifecycle_audit(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     tx: DbTransaction<'_>,
     events_enabled: bool,
     event: &audit::AuditEvent<'_>,

@@ -1,3 +1,4 @@
+use crate::db::Database;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -10,7 +11,6 @@ use openidconnect::{
 };
 use rand::RngCore;
 use serde_json::Value;
-use sqlx::PgPool;
 use url::Url;
 use uuid::Uuid;
 
@@ -114,7 +114,7 @@ pub fn validate_password_strength(password: &str) -> Result<(), AppError> {
 }
 
 pub async fn login_password(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     primary_key: &LoadedKey,
     identifier: &str,
@@ -124,7 +124,7 @@ pub async fn login_password(
 }
 
 pub async fn login_password_with_tenant(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     primary_key: &LoadedKey,
     identifier: &str,
@@ -148,7 +148,7 @@ pub async fn login_password_with_tenant(
 }
 
 pub async fn login_credential_with_tenant(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     primary_key: &LoadedKey,
     request: CredentialLoginRequest<'_>,
@@ -198,7 +198,7 @@ pub async fn login_credential_with_tenant(
 }
 
 async fn do_login_credential(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     primary_key: &LoadedKey,
     request: CredentialLoginRequest<'_>,
@@ -226,7 +226,7 @@ async fn do_login_credential(
 }
 
 pub async fn resolve_credential_auth_tenant(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Option<Uuid>,
     tenant_alias: Option<&str>,
 ) -> Result<Option<Uuid>, AppError> {
@@ -234,7 +234,7 @@ pub async fn resolve_credential_auth_tenant(
 }
 
 pub async fn authenticate_password_credential_in_tenant(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     identifier: &str,
     secret: &str,
@@ -252,7 +252,7 @@ pub async fn authenticate_password_credential_in_tenant(
 }
 
 pub async fn authenticate_credential_in_tenant(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     identifier: &str,
     secret: &str,
@@ -318,7 +318,7 @@ fn login_attempt_identifier(identifier: &str) -> String {
     normalize_email_lossy(identifier)
 }
 
-async fn ensure_login_target_active(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
+async fn ensure_login_target_active(pool: &Database, entity_id: Uuid) -> Result<(), AppError> {
     let ok: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT e.id
            FROM entities e
@@ -339,7 +339,7 @@ async fn ensure_login_target_active(pool: &PgPool, entity_id: Uuid) -> Result<()
 }
 
 async fn ensure_login_not_throttled(
-    pool: &PgPool,
+    pool: &Database,
     identifier: &str,
     tenant_id: Option<Uuid>,
     failure_limit: i64,
@@ -371,7 +371,7 @@ async fn ensure_login_not_throttled(
 }
 
 async fn record_login_attempt(
-    pool: &PgPool,
+    pool: &Database,
     identifier: &str,
     tenant_id: Option<Uuid>,
     success: bool,
@@ -391,7 +391,7 @@ async fn record_login_attempt(
 }
 
 pub async fn signup_human(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     req: SignupRequest,
 ) -> Result<SignupResponse, AppError> {
@@ -405,10 +405,7 @@ pub async fn signup_human(
         Err(err) => return Err(record_signup_rejection(pool, cfg, &name, &email, err).await),
     };
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     if let Err(err) = write_signup_human(&mut tx, &prepared).await {
         drop(tx);
         return Err(record_signup_rejection(pool, cfg, &name, &email, err).await);
@@ -450,7 +447,7 @@ pub async fn signup_human(
 /// they always have been. Both the pre-transaction and write phases classify
 /// through here, so a `BadRequest` raised by either is audited identically.
 async fn record_signup_rejection(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     name: &str,
     email: &str,
@@ -585,16 +582,13 @@ async fn write_signup_human(
 }
 
 fn signup_conflict(err: sqlx::Error, message: &str) -> AppError {
-    if matches!(
-        err,
-        sqlx::Error::Database(ref db) if db.code().as_deref() == Some("23505")
-    ) {
+    if crate::error::is_unique_violation(&err) {
         return AppError::conflict(message);
     }
     db_err(err)
 }
 
-pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
+pub async fn verify_email(pool: &Database, token: &str) -> Result<(), AppError> {
     let (token_id, token_secret) = parse_secret_token(token, "atomv")
         .ok_or_else(|| AppError::bad_request("invalid verification token"))?;
 
@@ -623,10 +617,7 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
 
     let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
         .is_none()
@@ -654,7 +645,11 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-pub async fn resend_verification(pool: &PgPool, cfg: &Config, email: &str) -> Result<(), AppError> {
+pub async fn resend_verification(
+    pool: &Database,
+    cfg: &Config,
+    email: &str,
+) -> Result<(), AppError> {
     let email = normalize_email(email)?;
     let row = crate::db::query(
         r#"SELECT ee.id AS email_id, ee.entity_id
@@ -707,7 +702,7 @@ pub async fn resend_verification(pool: &PgPool, cfg: &Config, email: &str) -> Re
 }
 
 pub async fn request_password_reset(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     req: PasswordResetRequest,
 ) -> Result<(), AppError> {
@@ -769,7 +764,7 @@ pub async fn request_password_reset(
 }
 
 pub async fn reset_password(
-    pool: &PgPool,
+    pool: &Database,
     cache: Option<&crate::cache::CacheClient>,
     req: PasswordResetConfirmRequest,
 ) -> Result<(), AppError> {
@@ -816,10 +811,7 @@ pub async fn reset_password(
         .map_err(db_err)?;
     let password_hash = hash_secret(req.password.as_bytes())?;
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
         .is_none()
@@ -924,7 +916,7 @@ async fn finish_password_reset_in_tx(
 }
 
 pub async fn oauth_start(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     provider_name: &str,
     return_to: Option<String>,
@@ -971,7 +963,7 @@ pub async fn oauth_start(
 }
 
 pub async fn oauth_callback(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     primary_key: &LoadedKey,
     provider_name: &str,
@@ -986,7 +978,7 @@ pub async fn oauth_callback(
 }
 
 async fn oauth_callback_inner(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     _primary_key: &LoadedKey,
     provider_name: &str,
@@ -1048,7 +1040,7 @@ async fn oauth_callback_inner(
 }
 
 pub async fn oauth_exchange(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     primary_key: &LoadedKey,
     code: &str,
@@ -1093,16 +1085,13 @@ pub async fn oauth_exchange(
 }
 
 pub async fn refresh_session(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     signer: &crate::auth::JwtSigner,
     entity_id: Uuid,
     session_id: Uuid,
 ) -> Result<LoginResponse, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let Some((_, tenant_id)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
         return Err(AppError::unauthorized("entity is not active"));
     };
@@ -1132,16 +1121,13 @@ pub async fn refresh_session(
 }
 
 async fn create_login_response(
-    pool: &PgPool,
+    pool: &Database,
     cfg: &Config,
     primary_key: &LoadedKey,
     entity_id: Uuid,
     email_verified: Option<bool>,
 ) -> Result<LoginResponse, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let Some((_, tenant_id)) = super::repo::lock_active_entity(&mut tx, entity_id).await? else {
         return Err(AppError::unauthorized("entity is not active"));
     };
@@ -1183,7 +1169,7 @@ struct PasswordCredential {
 }
 
 async fn resolve_login_identity(
-    pool: &PgPool,
+    pool: &Database,
     identifier: &str,
     tenant_id: Option<Uuid>,
 ) -> Result<LoginIdentity, AppError> {
@@ -1204,7 +1190,7 @@ async fn resolve_login_identity(
     })
 }
 
-async fn entity_email_verified(pool: &PgPool, entity_id: Uuid) -> Result<Option<bool>, AppError> {
+async fn entity_email_verified(pool: &Database, entity_id: Uuid) -> Result<Option<bool>, AppError> {
     let row = crate::db::query(
         r#"SELECT COUNT(*) AS email_count,
                   COALESCE(bool_or(verified_at IS NOT NULL), false) AS any_verified
@@ -1224,7 +1210,7 @@ async fn entity_email_verified(pool: &PgPool, entity_id: Uuid) -> Result<Option<
 }
 
 async fn login_identity_by_email(
-    pool: &PgPool,
+    pool: &Database,
     email: &str,
     tenant_id: Option<Uuid>,
 ) -> Result<Option<LoginIdentity>, AppError> {
@@ -1291,7 +1277,7 @@ async fn login_identity_by_email(
 }
 
 async fn credential_for_login(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     secret: &str,
@@ -1319,7 +1305,7 @@ async fn credential_for_login(
 }
 
 async fn password_credential_for_login(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     identifier: Option<&str>,
 ) -> Result<Option<PasswordCredential>, AppError> {
@@ -1363,7 +1349,7 @@ async fn password_credential_for_login(
 }
 
 async fn shared_key_credential_for_login(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     secret: &str,
@@ -1407,7 +1393,7 @@ fn embedded_shared_key_credential_id(secret: &str) -> Option<Uuid> {
 }
 
 async fn active_shared_key_by_id(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<PasswordCredential>, AppError> {
@@ -1434,7 +1420,7 @@ async fn active_shared_key_by_id(
 }
 
 async fn active_shared_keys_by_lookup_hash(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     lookup_hash: &[u8],
 ) -> Result<Vec<PasswordCredential>, AppError> {
@@ -1464,7 +1450,7 @@ async fn active_shared_keys_by_lookup_hash(
 }
 
 async fn active_shared_keys_without_lookup_hash(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
 ) -> Result<Vec<PasswordCredential>, AppError> {
     let rows = crate::db::query(
@@ -1504,7 +1490,7 @@ fn shared_key_credential_from_row(row: crate::db::Row) -> Result<PasswordCredent
 }
 
 async fn login_entity_row(
-    pool: &PgPool,
+    pool: &Database,
     identifier: &str,
     tenant_id: Option<Uuid>,
 ) -> Result<crate::db::Row, AppError> {
@@ -1590,7 +1576,7 @@ async fn login_entity_row(
 }
 
 async fn resolve_login_tenant(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Option<Uuid>,
     tenant_alias: Option<&str>,
 ) -> Result<Option<Uuid>, AppError> {
@@ -1693,7 +1679,7 @@ struct OAuthStateRow {
 }
 
 async fn consume_oauth_state(
-    pool: &PgPool,
+    pool: &Database,
     provider: &str,
     state: &str,
 ) -> Result<OAuthStateRow, AppError> {
@@ -1742,16 +1728,13 @@ async fn consume_oauth_state(
 }
 
 async fn upsert_oauth_identity(
-    pool: &PgPool,
+    pool: &Database,
     provider: &str,
     subject: &str,
     email: &str,
     profile: Value,
 ) -> Result<Uuid, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     if let Some(row) = crate::db::query(
         "SELECT entity_id FROM oauth_identities WHERE provider = $1 AND subject = $2",
     )
@@ -1860,16 +1843,13 @@ async fn upsert_oauth_identity(
 }
 
 async fn create_exchange_code(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     expiry_secs: u64,
 ) -> Result<String, AppError> {
     let (code_id, code_secret, code) = new_secret_token("atomx");
     let code_hash = hash_secret(code_secret.as_bytes())?;
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
         .is_none()
@@ -2087,14 +2067,11 @@ fn normalize_return_to(return_to: Option<String>) -> Result<Option<String>, AppE
 }
 
 pub async fn create_password(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     password: &str,
 ) -> Result<Uuid, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let id = create_password_in_tx(&mut tx, entity_id, password).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(id)
@@ -2232,15 +2209,12 @@ fn validate_machine_secret(secret: &str) -> Result<(), AppError> {
 }
 
 pub async fn create_shared_key(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     req: CreateSharedKey,
 ) -> Result<SharedKeyResponse, AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let response = create_shared_key_in_tx(&mut tx, signing_keys, entity_id, req).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(response)
@@ -2353,7 +2327,7 @@ async fn ensure_no_active_config_managed_credential_in_tx(
 }
 
 pub async fn reveal_shared_key(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     entity_id: Uuid,
     credential_id: Uuid,
@@ -2494,7 +2468,7 @@ fn make_shared_key(cred_id: Uuid) -> String {
 /// administrative fields, must satisfy the normal ceiling-aware source gate.
 /// Moving the entity additionally requires authority in the destination tenant.
 pub async fn update_entity_authorized(
-    pool: &PgPool,
+    pool: &Database,
     cache: Option<&crate::cache::CacheClient>,
     events_enabled: bool,
     auth: &AuthContext,
@@ -2588,7 +2562,7 @@ pub async fn update_entity_authorized(
 /// [`super::repo::lock_entity_and_collect_revocation_ids_in_tx`] for why the
 /// ids are enumerated inside the same locked transaction.
 pub async fn delete_entity(
-    pool: &PgPool,
+    pool: &Database,
     cache: Option<&crate::cache::CacheClient>,
     events_enabled: bool,
     id: Uuid,
@@ -2601,7 +2575,7 @@ pub async fn delete_entity(
 /// carries no implicit authority: the caller must hold the normal object or
 /// tenant manage grant.
 pub async fn delete_entity_authorized(
-    pool: &PgPool,
+    pool: &Database,
     cache: Option<&crate::cache::CacheClient>,
     events_enabled: bool,
     auth: &AuthContext,
@@ -2629,7 +2603,7 @@ pub async fn delete_entity_authorized(
 }
 
 async fn delete_entity_with_expected_tenant(
-    pool: &PgPool,
+    pool: &Database,
     cache: Option<&crate::cache::CacheClient>,
     events_enabled: bool,
     id: Uuid,
@@ -2663,10 +2637,7 @@ async fn delete_entity_with_expected_tenant(
         };
     };
 
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     // Lock and enumerate *before* establishing the barrier: the entity is
     // still fully active at this point, so a concurrent cache read has
     // nothing dirty to react to yet. Only once the barrier below is up does
@@ -2742,14 +2713,11 @@ async fn delete_entity_with_expected_tenant(
 }
 
 pub async fn revoke_credential(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let mut tx = crate::db::Database::from(pool.clone())
-        .begin()
-        .await
-        .map_err(db_err)?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
     revoke_credential_in_tx(&mut tx, entity_id, cred_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -2816,7 +2784,7 @@ pub async fn revoke_credential_in_tx(
 }
 
 pub async fn list_credentials(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
 ) -> Result<Vec<CredentialSummary>, AppError> {
     // Config-managed credentials are surfaced with `managed_by='config'` so
@@ -2871,17 +2839,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn oidc_auto_link_requires_a_previously_verified_email() {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB-gated tests");
-        let pool = PgPool::connect(&database_url)
-            .await
-            .expect("connect to test database");
-        sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
-            .await
-            .expect("load migrations")
-            .run(&pool)
-            .await
-            .expect("apply migrations");
+        let pool = crate::db::testing::database().await;
 
         let entity_id = Uuid::new_v4();
         let email = format!("oidc-unverified-{entity_id}@example.test");

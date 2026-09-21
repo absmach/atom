@@ -34,6 +34,7 @@ pub enum Arg<'a> {
 pub enum Ret {
     Null,
     Int(i64),
+    Real(f64),
     Text(String),
     Blob(Vec<u8>),
 }
@@ -79,10 +80,64 @@ const FUNCTIONS: &[Spec] = &[
         func: f_text,
     },
     Spec {
+        name: "atom_ts_diff",
+        args: 2,
+        deterministic: true,
+        func: f_ts_diff,
+    },
+    Spec {
+        name: "atom_ts_epoch",
+        args: 1,
+        deterministic: true,
+        func: f_ts_epoch,
+    },
+    Spec {
+        name: "atom_ts_floor",
+        args: 2,
+        deterministic: true,
+        func: f_ts_floor,
+    },
+    Spec {
+        name: "atom_interval_secs",
+        args: 1,
+        deterministic: true,
+        func: f_interval_secs,
+    },
+    Spec {
+        name: "repeat",
+        args: 2,
+        deterministic: true,
+        func: f_repeat,
+    },
+    Spec {
+        name: "atom_uuid",
+        args: 1,
+        deterministic: true,
+        func: f_uuid,
+    },
+    Spec {
         name: "atom_timestamp",
         args: 1,
         deterministic: true,
         func: f_timestamp,
+    },
+    Spec {
+        name: "atom_ts_add",
+        args: 2,
+        deterministic: true,
+        func: f_ts_add,
+    },
+    Spec {
+        name: "atom_json_merge",
+        args: 2,
+        deterministic: true,
+        func: f_json_merge,
+    },
+    Spec {
+        name: "atom_json_remove",
+        args: 2,
+        deterministic: true,
+        func: f_json_remove,
     },
     Spec {
         name: "atom_json_eq",
@@ -231,6 +286,7 @@ unsafe fn set_result(ctx: *mut ffi::sqlite3_context, ret: Ret) {
     match ret {
         Ret::Null => ffi::sqlite3_result_null(ctx),
         Ret::Int(i) => ffi::sqlite3_result_int64(ctx, i),
+        Ret::Real(r) => ffi::sqlite3_result_double(ctx, r),
         Ret::Text(s) => ffi::sqlite3_result_text(
             ctx,
             s.as_ptr().cast(),
@@ -309,18 +365,154 @@ fn f_text(args: &[Arg<'_>]) -> Result<Ret, String> {
     Ok(text_of(&args[0]).map_or(Ret::Null, Ret::Text))
 }
 
+/// `text::uuid`: hyphenated or simple text becomes the 16-byte form; a value
+/// that already is one passes through.
+fn f_uuid(args: &[Arg<'_>]) -> Result<Ret, String> {
+    Ok(match &args[0] {
+        Arg::Blob(b) if b.len() == 16 => Ret::Blob(b.to_vec()),
+        Arg::Text(s) => {
+            Uuid::parse_str(s.trim()).map_or(Ret::Null, |u| Ret::Blob(u.as_bytes().to_vec()))
+        }
+        _ => Ret::Null,
+    })
+}
+
 fn f_timestamp(args: &[Arg<'_>]) -> Result<Ret, String> {
     let Arg::Text(s) = args[0] else {
         return Ok(Ret::Null);
     };
-    let parsed = DateTime::parse_from_rfc3339(s)
+    Ok(parse_timestamp(s).map_or(Ret::Null, |t| Ret::Text(format_timestamp(t))))
+}
+
+fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z"))
         .map(|t| t.with_timezone(&Utc))
-        .or_else(|_| {
-            DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z").map(|t| t.with_timezone(&Utc))
-        });
-    Ok(parsed
-        .map(|t| Ret::Text(format_timestamp(t)))
-        .unwrap_or(Ret::Null))
+        .ok()
+}
+
+/// `EXTRACT(epoch FROM (a - b))`: the seconds between two timestamps.
+fn f_ts_diff(args: &[Arg<'_>]) -> Result<Ret, String> {
+    let (Arg::Text(a), Arg::Text(b)) = (args[0], args[1]) else {
+        return Ok(Ret::Null);
+    };
+    Ok(match (parse_timestamp(a), parse_timestamp(b)) {
+        (Some(a), Some(b)) => Ret::Real(
+            (a - b)
+                .num_microseconds()
+                .map_or(f64::NAN, |us| us as f64 / 1e6),
+        ),
+        _ => Ret::Null,
+    })
+}
+
+/// `EXTRACT(epoch FROM ts)`.
+fn f_ts_epoch(args: &[Arg<'_>]) -> Result<Ret, String> {
+    let Arg::Text(ts) = args[0] else {
+        return Ok(Ret::Null);
+    };
+    Ok(parse_timestamp(ts).map_or(Ret::Null, |t| Ret::Real(t.timestamp_micros() as f64 / 1e6)))
+}
+
+/// The start of the `seconds`-wide window containing `ts` (epoch-aligned).
+fn f_ts_floor(args: &[Arg<'_>]) -> Result<Ret, String> {
+    let (Arg::Text(ts), Some(width)) = (
+        args[0],
+        match args[1] {
+            Arg::Int(i) => Some(i as f64),
+            Arg::Real(r) => Some(r),
+            _ => None,
+        },
+    ) else {
+        return Ok(Ret::Null);
+    };
+    let Some(t) = parse_timestamp(ts) else {
+        return Ok(Ret::Null);
+    };
+    if width <= 0.0 {
+        return Ok(Ret::Null);
+    }
+    let epoch = t.timestamp() as f64;
+    let floored = (epoch / width).floor() * width;
+    Ok(DateTime::<Utc>::from_timestamp(floored as i64, 0)
+        .map_or(Ret::Null, |t| Ret::Text(format_timestamp(t))))
+}
+
+/// Seconds in a PostgreSQL interval literal such as `'3 days'` or
+/// `'1 hour 30 minutes'`.
+fn f_interval_secs(args: &[Arg<'_>]) -> Result<Ret, String> {
+    let Arg::Text(text) = args[0] else {
+        return Ok(Ret::Null);
+    };
+    let mut total = 0.0;
+    let mut words = text.split_whitespace();
+    while let Some(amount) = words.next() {
+        let amount: f64 = amount
+            .parse()
+            .map_err(|_| format!("invalid interval: {text}"))?;
+        let unit = words
+            .next()
+            .ok_or_else(|| format!("invalid interval: {text}"))?
+            .to_ascii_lowercase();
+        let per = match unit.trim_end_matches('s') {
+            "second" | "sec" => 1.0,
+            "minute" | "min" => 60.0,
+            "hour" => 3600.0,
+            "day" => 86_400.0,
+            "week" => 604_800.0,
+            _ => return Err(format!("unsupported interval unit: {unit}")),
+        };
+        total += amount * per;
+    }
+    Ok(Ret::Real(total))
+}
+
+/// `repeat(text, n)`.
+fn f_repeat(args: &[Arg<'_>]) -> Result<Ret, String> {
+    match (args[0], args[1]) {
+        (Arg::Text(s), Arg::Int(n)) if n >= 0 => Ok(Ret::Text(s.repeat(n as usize))),
+        _ => Ok(Ret::Null),
+    }
+}
+
+/// `timestamp ± interval`, with the interval given as seconds.
+fn f_ts_add(args: &[Arg<'_>]) -> Result<Ret, String> {
+    let Arg::Text(ts) = args[0] else {
+        return Ok(Ret::Null);
+    };
+    let seconds = match args[1] {
+        Arg::Int(i) => i as f64,
+        Arg::Real(r) => r,
+        Arg::Text(t) => t.parse::<f64>().map_err(|e| e.to_string())?,
+        _ => return Ok(Ret::Null),
+    };
+    let Some(base) = parse_timestamp(ts) else {
+        return Ok(Ret::Null);
+    };
+    let delta = chrono::Duration::microseconds((seconds * 1_000_000.0).round() as i64);
+    Ok(base
+        .checked_add_signed(delta)
+        .map_or(Ret::Null, |t| Ret::Text(format_timestamp(t))))
+}
+
+/// jsonb `a || b`: the top-level keys of `b` replace those of `a` (nulls kept).
+fn f_json_merge(args: &[Arg<'_>]) -> Result<Ret, String> {
+    Ok(match (json_of(&args[0]), json_of(&args[1])) {
+        (Some(Value::Object(mut a)), Some(Value::Object(b))) => {
+            a.extend(b);
+            Ret::Text(Value::Object(a).to_string())
+        }
+        _ => Ret::Null,
+    })
+}
+
+/// jsonb `a - 'key'`.
+fn f_json_remove(args: &[Arg<'_>]) -> Result<Ret, String> {
+    let (Some(Value::Object(mut a)), Arg::Text(key)) = (json_of(&args[0]), args[1]) else {
+        return Ok(Ret::Null);
+    };
+    a.remove(key);
+    Ok(Ret::Text(Value::Object(a).to_string()))
 }
 
 fn f_json_eq(args: &[Arg<'_>]) -> Result<Ret, String> {
@@ -440,10 +632,15 @@ fn f_sha256_hex(args: &[Arg<'_>]) -> Result<Ret, String> {
 }
 
 fn f_md5(args: &[Arg<'_>]) -> Result<Ret, String> {
+    let owned;
     let bytes: &[u8] = match &args[0] {
         Arg::Blob(b) => b,
         Arg::Text(s) => s.as_bytes(),
-        _ => return Ok(Ret::Null),
+        Arg::Null => return Ok(Ret::Null),
+        other => {
+            owned = text_of(other).unwrap_or_default();
+            owned.as_bytes()
+        }
     };
     Ok(Ret::Text(hex::encode(Md5::digest(bytes))))
 }
@@ -591,6 +788,24 @@ mod tests {
     }
 
     #[test]
+    fn json_merge_and_remove_follow_jsonb_operators() {
+        let merged = f_json_merge(&[
+            Arg::Text(r#"{"a":1,"b":2}"#),
+            Arg::Text(r#"{"b":null,"c":3}"#),
+        ])
+        .unwrap();
+        let Ret::Text(text) = merged else {
+            panic!("expected text")
+        };
+        assert_eq!(text, r#"{"a":1,"b":null,"c":3}"#);
+        let removed = f_json_remove(&[Arg::Text(r#"{"a":1,"b":2}"#), Arg::Text("a")]).unwrap();
+        let Ret::Text(text) = removed else {
+            panic!("expected text")
+        };
+        assert_eq!(text, r#"{"b":2}"#);
+    }
+
+    #[test]
     fn san_rule_subset() {
         let deny = json!({"mode": "deny", "values": []});
         let allow = json!({"mode": "allowlist", "values": ["a", "b"]});
@@ -618,6 +833,12 @@ mod tests {
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
         assert_eq!(
+            scalar("SELECT atom_ts_add('2026-01-02T03:04:05.000000Z', -3600)")
+                .await
+                .as_deref(),
+            Some("2026-01-02T02:04:05.000000Z")
+        );
+        assert_eq!(
             scalar("SELECT atom_timestamp('2026-01-02T03:04:05+00:00')")
                 .await
                 .as_deref(),
@@ -629,7 +850,12 @@ mod tests {
                 .as_deref(),
             Some("blob16")
         );
-        assert_eq!(scalar("SELECT CAST(length(now()) AS TEXT)").await.as_deref(), Some("27"));
+        assert_eq!(
+            scalar("SELECT CAST(length(now()) AS TEXT)")
+                .await
+                .as_deref(),
+            Some("27")
+        );
     }
 
     #[tokio::test]

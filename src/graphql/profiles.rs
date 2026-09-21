@@ -1,6 +1,6 @@
+use crate::db::Database;
 use async_graphql::{Context, Object, Result, ID};
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -362,7 +362,7 @@ impl ProfileMutation {
 /// before returning a row or a not-found error, so an unauthorized caller
 /// cannot distinguish a missing id from a profile in another tenant.
 async fn profile_tenant_target(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> std::result::Result<Option<Option<Uuid>>, AppError> {
     crate::db::query_scalar("SELECT tenant_id FROM profiles WHERE id = $1")
@@ -373,7 +373,7 @@ async fn profile_tenant_target(
 }
 
 async fn profile_version_tenant_target(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> std::result::Result<Option<(Uuid, Option<Uuid>)>, AppError> {
     crate::db::query_as(
@@ -389,7 +389,7 @@ async fn profile_version_tenant_target(
 }
 
 async fn require_profile_target_access(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     target: Option<Option<Uuid>>,
     id: Uuid,
