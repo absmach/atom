@@ -421,7 +421,7 @@ async fn grpc_check(state: &AppState) -> ComponentCheck {
 
 fn db_pool_status(state: &AppState) -> DbPoolStatus {
     DbPoolStatus {
-        max_connections: state.config.db_pool.max_connections,
+        max_connections: state.pool().max_connections(),
         min_connections: state.config.db_pool.min_connections,
         acquire_timeout_secs: state.config.db_pool.acquire_timeout_secs,
         connect_timeout_secs: state.config.db_pool.connect_timeout_secs,

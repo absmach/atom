@@ -52,6 +52,10 @@ pub enum Arg {
 }
 
 impl Arg {
+    pub fn is_null(&self) -> bool {
+        matches!(self, Arg::Null(_))
+    }
+
     pub fn kind(&self) -> ArgKind {
         match self {
             Arg::Null(kind) => *kind,

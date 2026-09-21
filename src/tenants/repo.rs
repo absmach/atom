@@ -2675,10 +2675,9 @@ mod tests {
         .execute(&pool)
         .await;
         let err = res.expect_err("FK should reject unknown tenant_id");
-        let msg = format!("{err}");
         assert!(
-            msg.contains("foreign key") || msg.contains("entities_tenant_id_fkey"),
-            "unexpected error: {msg}"
+            crate::error::is_foreign_key_violation(&err),
+            "unexpected error: {err}"
         );
     }
 }

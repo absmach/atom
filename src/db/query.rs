@@ -247,7 +247,8 @@ impl Body {
     fn sqlite_prepared(&self) -> Result<Vec<(String, SqliteArguments<'static>)>, sqlx::Error> {
         let statements = if self.sqlite_sql.is_empty() {
             let kinds: Vec<_> = self.args.iter().map(Arg::kind).collect();
-            vec![super::translate::to_sqlite(&self.sql, &kinds)]
+            let nulls: Vec<_> = self.args.iter().map(Arg::is_null).collect();
+            vec![super::translate::to_sqlite(&self.sql, &kinds, &nulls)]
         } else {
             self.sqlite_sql.clone()
         };

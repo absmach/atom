@@ -19,7 +19,7 @@ use regex::{Captures, Regex};
 
 use super::arg::ArgKind;
 
-type Cache = RwLock<HashMap<(String, Vec<ArgKind>), String>>;
+type Cache = RwLock<HashMap<(String, Vec<ArgKind>, Vec<bool>), String>>;
 static CACHE: LazyLock<Cache> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// True when `sql` asks PostgreSQL for row locks (`FOR UPDATE`, `FOR SHARE`, …).
@@ -27,14 +27,18 @@ pub fn takes_row_locks(sql: &str) -> bool {
     ROW_LOCK.is_match(sql)
 }
 
-pub fn to_sqlite(sql: &str, kinds: &[ArgKind]) -> String {
-    let key = (sql.to_owned(), kinds.to_vec());
+/// Translates `sql` for SQLite. `nulls[i]` says whether bound argument `$i+1` is
+/// NULL: the optional-filter idiom `($n IS NULL OR cond)` is resolved with it,
+/// which lets SQLite plan the filter that is actually present (an `OR` over a
+/// parameter otherwise defeats index use).
+pub fn to_sqlite(sql: &str, kinds: &[ArgKind], nulls: &[bool]) -> String {
+    let key = (sql.to_owned(), kinds.to_vec(), nulls.to_vec());
     if let Ok(cache) = CACHE.read() {
         if let Some(hit) = cache.get(&key) {
             return hit.clone();
         }
     }
-    let translated = translate(sql, kinds);
+    let translated = translate_with_nulls(sql, kinds, nulls);
     if let Ok(mut cache) = CACHE.write() {
         cache.insert(key, translated.clone());
     }
@@ -213,6 +217,8 @@ static JSON_MERGE_HEAD: LazyLock<Regex> =
     LazyLock::new(|| re(r"([A-Za-z_][\w.]*)((?:\s*-\s*'[^']*')*)\s*\|\|\s*json_object\s*\("));
 static JSON_MERGE_PARAM: LazyLock<Regex> =
     LazyLock::new(|| re(r"([A-Za-z_][\w.]*)\s*\|\|\s*(\$(\d+))"));
+static JSON_KEY_REMOVE: LazyLock<Regex> =
+    LazyLock::new(|| re(r"([A-Za-z_][\w.]*)((?:\s*-\s*'[^']*')+)"));
 static JSON_KEY_LITERAL: LazyLock<Regex> = LazyLock::new(|| re(r"-\s*('[^']*')"));
 static GREATEST_LEAST: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(greatest|least)\s*\("));
 static DIGITS_ONLY: LazyLock<Regex> = LazyLock::new(|| {
@@ -700,7 +706,62 @@ fn rewrite_lateral(sql: &str) -> String {
 }
 
 pub fn translate(sql: &str, kinds: &[ArgKind]) -> String {
+    translate_with_nulls(sql, kinds, &[])
+}
+
+static OPTIONAL_FILTER: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?i)\(\s*\$(\d+)(?:\s*::\s*\w+)?\s+IS\s+(NOT\s+)?NULL\s+(OR|AND)\s+"));
+
+/// `($n IS NULL OR cond)` → `(1)` when `$n` is NULL, else `(cond)`; and
+/// `($n IS NOT NULL AND cond)` → `(0)` / `(cond)`.
+fn specialize_optional_filters(sql: &str, nulls: &[bool]) -> String {
+    let mut out = sql.to_owned();
+    let mut from = 0;
+    loop {
+        let found = OPTIONAL_FILTER.captures_at(&out, from).map(|c| {
+            let whole = c.get(0).expect("group 0");
+            (
+                whole.start(),
+                whole.end(),
+                c[1].parse::<usize>().unwrap_or(0),
+                c.get(2).is_some(),
+                c[3].eq_ignore_ascii_case("OR"),
+            )
+        });
+        let Some((start, prefix_end, n, negated, is_or)) = found else {
+            break;
+        };
+        let Some(&is_null) = n.checked_sub(1).and_then(|i| nulls.get(i)) else {
+            from = prefix_end;
+            continue;
+        };
+        // Only the two idioms whose value is fixed by the argument's nullness.
+        if negated == is_or {
+            from = prefix_end;
+            continue;
+        }
+        let Some(end) = matching_paren(&out, start, b'(', b')') else {
+            from = prefix_end;
+            continue;
+        };
+        let replacement = if is_null {
+            if is_or {
+                "(1)".to_owned()
+            } else {
+                "(0)".to_owned()
+            }
+        } else {
+            format!("({})", &out[prefix_end..end - 1])
+        };
+        out.replace_range(start..end, &replacement);
+        from = start + 1;
+    }
+    out
+}
+
+pub fn translate_with_nulls(sql: &str, kinds: &[ArgKind], nulls: &[bool]) -> String {
     let mut out = NULL_CAST.replace_all(sql, "NULL").into_owned();
+    out = specialize_optional_filters(&out, nulls);
 
     if let Some(c) = TRUNCATE.captures(&out) {
         return format!("DELETE FROM {}", &c[1]);
@@ -905,6 +966,16 @@ pub fn translate(sql: &str, kinds: &[ArgKind]) -> String {
         })
         .into_owned();
     out = rewrite_json_merges(&out);
+    // Remaining `jsonb - 'key'` (not followed by a merge).
+    out = JSON_KEY_REMOVE
+        .replace_all(&out, |c: &Captures<'_>| {
+            let mut lhs = c[1].to_owned();
+            for key in JSON_KEY_LITERAL.captures_iter(&c[2]) {
+                lhs = format!("atom_json_remove({lhs}, {})", &key[1]);
+            }
+            lhs
+        })
+        .into_owned();
     out = JSON_MERGE_PARAM
         .replace_all(&out, |c: &Captures<'_>| {
             let n: usize = c[3].parse().unwrap_or(0);
@@ -1245,6 +1316,35 @@ mod tests {
         assert_eq!(
             t("GREATEST(MIN(x), 0)::float8 AS seconds", &[]),
             "CAST(max(MIN(x), 0) AS REAL) AS seconds"
+        );
+    }
+
+    #[test]
+    fn optional_filters_are_resolved_by_argument_nullness() {
+        let sql = "WHERE ($1::uuid IS NULL OR e.tenant_id = $1) AND ($2::text IS NULL OR e.external_id = $2)";
+        assert_eq!(
+            translate_with_nulls(sql, &[ArgKind::Uuid, ArgKind::Text], &[true, false]),
+            "WHERE (1) AND (e.external_id = $2)"
+        );
+        assert_eq!(
+            translate_with_nulls(sql, &[ArgKind::Uuid, ArgKind::Text], &[false, true]),
+            "WHERE (e.tenant_id = $1) AND (1)"
+        );
+        assert_eq!(
+            translate_with_nulls(
+                "($2 IS NOT NULL AND invitee_user_id = $2)",
+                &[ArgKind::Uuid, ArgKind::Uuid],
+                &[false, true]
+            ),
+            "(0)"
+        );
+    }
+
+    #[test]
+    fn json_key_removal_outside_a_merge() {
+        assert_eq!(
+            t("jsonb_set(metadata - 'a' - 'b', '{k}', '1')", &[]),
+            "json_set(atom_json_remove(atom_json_remove(metadata, 'a'), 'b'), '$.k', json('1'))"
         );
     }
 

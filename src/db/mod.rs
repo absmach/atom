@@ -232,6 +232,15 @@ impl Database {
         }
     }
 
+    /// The pool's connection ceiling as actually applied (SQLite sizes its own
+    /// pool, so this can differ from the configured value).
+    pub fn max_connections(&self) -> u32 {
+        match self {
+            Database::Postgres(pool) => pool.options().get_max_connections(),
+            Database::Sqlite(db) => db.pool.options().get_max_connections(),
+        }
+    }
+
     /// Open connections in the pool (for health and metrics).
     pub fn size(&self) -> u32 {
         match self {
