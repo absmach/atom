@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use rand::{rngs::OsRng, RngCore};
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -136,14 +136,14 @@ pub async fn lock_active_tenant(
     tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
 ) -> Result<(), AppError> {
-    let locked: Option<Uuid> = sqlx::query_scalar(
+    let locked: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT id
            FROM tenants
            WHERE id = $1 AND status = 'active' AND deleted_at IS NULL
            FOR UPDATE"#,
     )
     .bind(tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
@@ -182,9 +182,9 @@ pub(crate) async fn lock_tenant_rows_in_order(
 
     for tenant_id in tenant_ids {
         let locked: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+            crate::db::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
                 .bind(tenant_id)
-                .fetch_optional(tx.as_postgres_mut())
+                .fetch_optional(tx.exec())
                 .await
                 .map_err(db_err)?;
         if locked.is_none() {
@@ -244,7 +244,7 @@ async fn create_tenant_in_tx(
     } else {
         req.attributes
     };
-    sqlx::query_as::<_, Tenant>(&format!(
+    crate::db::query_as::<Tenant>(&format!(
         r#"INSERT INTO tenants (id, name, alias, tags, attributes, created_by, updated_by)
            VALUES ($1, $2, $3, $4, $5, $6, $6)
            RETURNING {TENANT_COLS}"#,
@@ -255,7 +255,7 @@ async fn create_tenant_in_tx(
     .bind(&req.tags)
     .bind(attrs)
     .bind(created_by)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -264,16 +264,14 @@ async fn bootstrap_tenant_admin(
     tx: &mut DbTransaction<'_>,
     plan: TenantAdminBootstrap,
 ) -> Result<(), AppError> {
-    use sqlx::Row;
-
     let role_id = Uuid::new_v4();
-    let configured_capabilities: Vec<String> = sqlx::query_scalar(
+    let configured_capabilities: Vec<String> = crate::db::query_scalar(
         r#"SELECT a.name
            FROM tenant_admin_default_actions defaults
            JOIN actions a ON a.id = defaults.action_id
            ORDER BY a.name"#,
     )
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     let mut capabilities = plan.capabilities;
@@ -281,29 +279,29 @@ async fn bootstrap_tenant_admin(
     capabilities.sort();
     capabilities.dedup();
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO roles (id, name, tenant_id, description, managed_by)
            VALUES ($1, $2, $3, 'Default tenant administration role', 'system:tenant-admin')"#,
     )
     .bind(role_id)
     .bind(plan.role_name)
     .bind(plan.tenant_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
-    let permission_block_id: Uuid = sqlx::query_scalar(
+    let permission_block_id: Uuid = crate::db::query_scalar(
         r#"INSERT INTO permission_blocks
               (tenant_id, scope_mode, effect, conditions, managed_by)
            VALUES ($1, 'tenant', 'allow', '{}'::jsonb, 'system:tenant-admin')
            RETURNING id"#,
     )
     .bind(plan.tenant_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            SELECT $1, c.id
            FROM actions c
@@ -312,17 +310,17 @@ async fn bootstrap_tenant_admin(
     )
     .bind(permission_block_id)
     .bind(&capabilities)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
            VALUES ($1, $2)"#,
     )
     .bind(role_id)
     .bind(permission_block_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -335,7 +333,7 @@ async fn bootstrap_tenant_admin(
     )
     .await?;
 
-    let missing_names: Vec<String> = sqlx::query_scalar(
+    let missing_names: Vec<String> = crate::db::query_scalar(
         r#"SELECT required.name
            FROM unnest($1::text[]) AS required(name)
            WHERE NOT EXISTS (
@@ -347,7 +345,7 @@ async fn bootstrap_tenant_admin(
     )
     .bind(&capabilities)
     .bind(permission_block_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     if !missing_names.is_empty() {
@@ -357,7 +355,7 @@ async fn bootstrap_tenant_admin(
         )));
     }
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, 'entity', $2, $3)"#,
@@ -365,13 +363,13 @@ async fn bootstrap_tenant_admin(
     .bind(plan.tenant_id)
     .bind(plan.creator_id)
     .bind(role_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
-    let creator = sqlx::query("SELECT kind FROM entities WHERE id = $1")
+    let creator = crate::db::query("SELECT kind FROM entities WHERE id = $1")
         .bind(plan.creator_id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)?;
 
@@ -380,14 +378,14 @@ async fn bootstrap_tenant_admin(
         .as_deref()
         == Some("human")
     {
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
                VALUES ($1, $2, 'active')
                ON CONFLICT (tenant_id, entity_id) DO NOTHING"#,
         )
         .bind(plan.tenant_id)
         .bind(plan.creator_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -396,7 +394,7 @@ async fn bootstrap_tenant_admin(
 }
 
 pub async fn get_tenant(pool: &PgPool, id: Uuid) -> Result<Tenant, AppError> {
-    sqlx::query_as::<_, Tenant>(&format!(
+    crate::db::query_as::<Tenant>(&format!(
         "SELECT {TENANT_COLS} FROM tenants WHERE id = $1 AND deleted_at IS NULL"
     ))
     .bind(id)
@@ -421,7 +419,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     let q = search_pattern(params.q);
     let order_by = tenant_order_by(params.order, params.dir);
 
-    let items = sqlx::query_as::<_, Tenant>(&format!(
+    let items = crate::db::query_as::<Tenant>(&format!(
         r#"SELECT {TENANT_COLS} FROM tenants
            WHERE ($2::text IS NULL OR name ILIKE $2)
              AND ($3::text IS NULL OR alias ILIKE $3)
@@ -450,7 +448,7 @@ pub async fn list_tenants(pool: &PgPool, params: ListTenants) -> Result<TenantLi
     .await
     .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*) FROM tenants
            WHERE ($2::text IS NULL OR name ILIKE $2)
              AND ($3::text IS NULL OR alias ILIKE $3)
@@ -587,7 +585,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
              AND ($12::uuid IS NULL OR t.id = $12)
              AND ($13::text IS NULL OR t.id::text ILIKE $13)"#;
 
-    let items = sqlx::query_as::<_, Tenant>(&format!(
+    let items = crate::db::query_as::<Tenant>(&format!(
         "{ctes} SELECT {TENANT_COLS} FROM tenants t \
          WHERE {base_filter} {auth_filter} ORDER BY {order_by} LIMIT $7 OFFSET $8"
     ))
@@ -608,7 +606,7 @@ pub async fn list_tenants_for_entity_with_ceiling(
     .await
     .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(&format!(
+    let total: i64 = crate::db::query_scalar(&format!(
         "{ctes} SELECT COUNT(*) FROM tenants t WHERE {base_filter} {auth_filter}"
     ))
     .bind(entity_id)
@@ -647,7 +645,7 @@ pub async fn update_tenant_with_audit(
         .await
         .map_err(db_err)?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "tenants", id).await?;
-    let tenant = sqlx::query_as::<_, Tenant>(&format!(
+    let tenant = crate::db::query_as::<Tenant>(&format!(
         r#"UPDATE tenants
            SET name       = COALESCE($2, name),
                alias      = CASE WHEN $3 THEN $4 ELSE alias END,
@@ -665,7 +663,7 @@ pub async fn update_tenant_with_audit(
     .bind(req.tags)
     .bind(req.attributes)
     .bind(updated_by)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
@@ -721,22 +719,22 @@ pub async fn lock_tenant_and_collect_session_ids_in_tx(
 ) -> Result<Vec<Uuid>, AppError> {
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "tenants", id).await?;
     let locked =
-        sqlx::query("SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE")
+        crate::db::query("SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     if locked.is_none() {
         return Err(AppError::not_found(format!("tenant {id} not found")));
     }
 
-    let session_ids: Vec<Uuid> = sqlx::query_scalar(
+    let session_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT id FROM sessions
            WHERE revoked_at IS NULL
              AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)"#,
     )
     .bind(id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -756,7 +754,7 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     deleted_by: Option<Uuid>,
     id: Uuid,
 ) -> Result<Tenant, AppError> {
-    let tenant = sqlx::query_as::<_, Tenant>(&format!(
+    let tenant = crate::db::query_as::<Tenant>(&format!(
         r#"UPDATE tenants
            SET status = 'deleted', deleted_at = now(), deleted_by = $2,
                updated_by = $2, updated_at = now()
@@ -765,7 +763,7 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     ))
     .bind(id)
     .bind(deleted_by)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
@@ -776,7 +774,7 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     // certificates) so restore_tenant can reverse exactly the revocations this
     // delete caused, without disturbing credentials revoked earlier for other
     // reasons.
-    let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+    let revoked_certificates: Vec<(Uuid, Option<Uuid>)> = crate::db::query_as(
         r#"WITH revoked AS (
                UPDATE credentials c
                SET status = 'revoked',
@@ -795,17 +793,17 @@ pub async fn deactivate_and_finish_tenant_soft_delete_in_tx(
     )
     .bind(id)
     .bind(actor_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
-    sqlx::query(
+    crate::db::query(
         "UPDATE sessions SET revoked_at = now()
          WHERE revoked_at IS NULL
            AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
     )
     .bind(id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -928,7 +926,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
     restored_by: Option<Uuid>,
 ) -> Result<(Tenant, Vec<Uuid>), AppError> {
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "tenants", id).await?;
-    let tenant = sqlx::query_as::<_, Tenant>(&format!(
+    let tenant = crate::db::query_as::<Tenant>(&format!(
         r#"UPDATE tenants
            SET status = 'active', deleted_at = NULL, deleted_by = NULL,
                updated_by = $2, updated_at = now()
@@ -937,7 +935,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
     ))
     .bind(id)
     .bind(restored_by)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
@@ -946,7 +944,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
         other => restore_conflict(other),
     })?;
 
-    let credential_ids: Vec<Uuid> = sqlx::query_scalar(
+    let credential_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT c.id
            FROM credentials c
            JOIN entities e ON c.entity_id = e.id
@@ -957,7 +955,7 @@ pub async fn reactivate_tenant_and_collect_credential_ids_in_tx(
              AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
     )
     .bind(id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -975,7 +973,7 @@ pub async fn finish_tenant_restore_in_tx(
     actor_id: Option<Uuid>,
     id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE credentials c
            SET status = 'active',
                metadata = c.metadata - 'revoked_at' - 'revocation_reason'
@@ -988,7 +986,7 @@ pub async fn finish_tenant_restore_in_tx(
              AND c.metadata->>'revocation_reason' = 'tenant_deleted'"#,
     )
     .bind(id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -1059,7 +1057,7 @@ pub(crate) async fn tenant_purge_object_ids(
     if tenant_ids.is_empty() {
         return Ok(Vec::new());
     }
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"SELECT id FROM unnest($1::uuid[]) AS t(id)
            UNION ALL SELECT id FROM entities WHERE tenant_id = ANY($1)
            UNION ALL SELECT c.id FROM credentials c
@@ -1071,7 +1069,7 @@ pub(crate) async fn tenant_purge_object_ids(
            UNION ALL SELECT id FROM resources WHERE tenant_id = ANY($1)"#,
     )
     .bind(tenant_ids)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -1087,7 +1085,7 @@ pub(crate) async fn purge_tenant_pki_in_tx(
     // Rate-limit rows are deliberately independent of subject FKs. Remove
     // both tenant and child-entity scopes while those entities are still
     // available to identify, before the tenant cascade runs.
-    sqlx::query(
+    crate::db::query(
         r#"DELETE FROM pki_enrollment_rate_windows
            WHERE (scope_kind = 'tenant' AND scope_id = ANY($1))
               OR (scope_kind = 'entity' AND scope_id IN (
@@ -1095,26 +1093,26 @@ pub(crate) async fn purge_tenant_pki_in_tx(
                  ))"#,
     )
     .bind(tenant_ids)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
     // Credentials restrict authority deletion, and authorities belong to the
     // tenant being purged. Remove them in dependency order before the tenant.
-    sqlx::query(
+    crate::db::query(
         r#"DELETE FROM credentials
            WHERE issuer_id IN (
                SELECT id FROM pki_authorities WHERE tenant_id = ANY($1)
            )"#,
     )
     .bind(tenant_ids)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
-    sqlx::query("DELETE FROM pki_authorities WHERE tenant_id = ANY($1)")
+    crate::db::query("DELETE FROM pki_authorities WHERE tenant_id = ANY($1)")
         .bind(tenant_ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
@@ -1137,13 +1135,13 @@ pub async fn purge_tenant_with_audit(
     let doomed = tenant_purge_object_ids(&mut tx, &[id]).await?;
     purge_tenant_pki_in_tx(&mut tx, &[id]).await?;
 
-    let purged = sqlx::query_as::<_, (Uuid, String)>(
+    let purged = crate::db::query_as::<(Uuid, String)>(
         "DELETE FROM tenants
          WHERE id = $1 AND deleted_at IS NOT NULL
          RETURNING id, name",
     )
     .bind(id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let Some((id, name)) = purged else {
@@ -1228,7 +1226,7 @@ pub(crate) async fn change_tenant_status_in_tx(
         ));
     }
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "tenants", id).await?;
-    let tenant = sqlx::query_as::<_, Tenant>(&format!(
+    let tenant = crate::db::query_as::<Tenant>(&format!(
         r#"UPDATE tenants
            SET status = $2, updated_by = $3, updated_at = now()
            WHERE id = $1 AND deleted_at IS NULL
@@ -1237,7 +1235,7 @@ pub(crate) async fn change_tenant_status_in_tx(
     .bind(id)
     .bind(&status)
     .bind(actor_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("tenant {id} not found")),
@@ -1245,13 +1243,13 @@ pub(crate) async fn change_tenant_status_in_tx(
     })?;
 
     if status != TenantStatus::Active {
-        sqlx::query(
+        crate::db::query(
             "UPDATE sessions SET revoked_at = now()
              WHERE revoked_at IS NULL
                AND entity_id IN (SELECT id FROM entities WHERE tenant_id = $1)",
         )
         .bind(id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -1326,7 +1324,7 @@ pub async fn create_invitation(
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = checked_invitation_expiration(expiry_secs)?;
 
-    let invitation = sqlx::query_as::<_, TenantInvitation>(&format!(
+    let invitation = crate::db::query_as::<TenantInvitation>(&format!(
         r#"WITH updated AS (
                UPDATE tenant_invitations
                SET invitee_user_id = COALESCE($2, invitee_user_id),
@@ -1407,7 +1405,7 @@ pub async fn list_tenant_invitations(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let state = invitation_state_str(params.state);
-    let items = sqlx::query_as::<_, TenantInvitation>(
+    let items = crate::db::query_as::<TenantInvitation>(
         r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
                   ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
                   ti.revoked_at, ti.created_at, ti.updated_at
@@ -1433,7 +1431,7 @@ pub async fn list_tenant_invitations(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*) FROM tenant_invitations ti
            WHERE ti.tenant_id = $1
              AND (
@@ -1461,7 +1459,7 @@ pub async fn list_user_invitations(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     let state = invitation_state_str(params.state);
-    let items = sqlx::query_as::<_, TenantInvitation>(
+    let items = crate::db::query_as::<TenantInvitation>(
         r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, e.name AS invitee_name, ti.invitee_email, ti.invited_by,
                   ti.role_id, r.name AS role_name, ti.accepted_at, ti.rejected_at,
                   ti.revoked_at, ti.created_at, ti.updated_at
@@ -1494,7 +1492,7 @@ pub async fn list_user_invitations(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*) FROM tenant_invitations ti
            WHERE (
                ti.invitee_user_id = $1
@@ -1535,7 +1533,7 @@ pub async fn list_tenant_members(
     let q = search_pattern(q);
     let id = search_pattern(id);
 
-    let items = sqlx::query_as::<_, Entity>(
+    let items = crate::db::query_as::<Entity>(
         r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
                   e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
                   e.created_at, e.updated_at
@@ -1561,7 +1559,7 @@ pub async fn list_tenant_members(
     .await
     .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM tenant_memberships tm
            JOIN entities e ON e.id = tm.entity_id
@@ -1595,7 +1593,7 @@ pub async fn list_tenant_assignable_entities(
     let offset = offset.max(0);
     let q = search_pattern(Some(q));
 
-    let items = sqlx::query_as::<_, Entity>(
+    let items = crate::db::query_as::<Entity>(
         r#"SELECT e.id, e.kind, e.name, e.alias, e.external_id, e.tenant_id, e.profile_id,
                   e.profile_version_id, e.status, e.attributes, e.deleted_at, e.deleted_by,
                   e.created_at, e.updated_at
@@ -1622,7 +1620,7 @@ pub async fn list_tenant_assignable_entities(
     .await
     .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM entities e
            WHERE e.kind = 'human'
@@ -1672,7 +1670,7 @@ pub async fn remove_tenant_member_with_audit(
     // affected owner; otherwise a config stamp could land after a pooled
     // precheck and its link would then be deleted out of band.
     lock_tenant_rows_in_order(&mut tx, &[Some(tenant_id)]).await?;
-    let affected_group_ids: Vec<Uuid> = sqlx::query_scalar(
+    let affected_group_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT gm.group_id
            FROM principal_group_members gm
            JOIN principal_groups g ON g.id = gm.group_id
@@ -1681,14 +1679,14 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     for group_id in affected_group_ids {
         crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "principal_groups", group_id)
             .await?;
     }
-    let affected_assignment_ids: Vec<Uuid> = sqlx::query_scalar(
+    let affected_assignment_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT id FROM role_assignments
            WHERE tenant_id = $1
              AND subject_kind = 'entity'
@@ -1697,7 +1695,7 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     for assignment_id in affected_assignment_ids {
@@ -1709,7 +1707,7 @@ pub async fn remove_tenant_member_with_audit(
         .await?;
     }
 
-    sqlx::query(
+    crate::db::query(
         r#"DELETE FROM principal_group_members gm
            USING principal_groups g
            WHERE gm.group_id = g.id
@@ -1718,11 +1716,11 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
-    sqlx::query(
+    crate::db::query(
         r#"DELETE FROM role_assignments
            WHERE tenant_id = $1
              AND subject_kind = 'entity'
@@ -1730,18 +1728,18 @@ pub async fn remove_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"DELETE FROM tenant_memberships
            WHERE tenant_id = $1
              AND entity_id = $2"#,
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -1788,7 +1786,7 @@ pub async fn add_tenant_member_with_audit(
     // The `WHERE` on the conflict branch keeps `rows_affected` honest: without
     // it a `DO UPDATE` reports one row even when it rewrote 'active' as
     // 'active', and re-adding an existing member would look like a change.
-    let membership_changed = sqlx::query(
+    let membership_changed = crate::db::query(
         r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
            VALUES ($1, $2, 'active')
            ON CONFLICT (tenant_id, entity_id)
@@ -1797,7 +1795,7 @@ pub async fn add_tenant_member_with_audit(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?
     .rows_affected()
@@ -1841,7 +1839,7 @@ pub async fn list_tenant_role_assignments(
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<Vec<TenantRoleAssignmentSummary>, AppError> {
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"WITH RECURSIVE subject_groups(group_id, path) AS (
              SELECT gm.group_id, g.name
              FROM group_members gm
@@ -1896,8 +1894,14 @@ pub async fn list_tenant_role_assignments(
             Ok(TenantRoleAssignmentSummary {
                 role_id: row.try_get("role_id").map_err(db_err)?,
                 role_name: row.try_get("role_name").map_err(db_err)?,
-                actions: row.try_get("actions").map_err(db_err)?,
-                assignment_paths: row.try_get("assignment_paths").map_err(db_err)?,
+                actions: row
+                    .try_get::<crate::db::TextList, _>("actions")
+                    .map_err(db_err)?
+                    .0,
+                assignment_paths: row
+                    .try_get::<crate::db::TextList, _>("assignment_paths")
+                    .map_err(db_err)?
+                    .0,
             })
         })
         .collect()
@@ -1930,7 +1934,7 @@ pub async fn accept_invitation_token(
         .begin()
         .await
         .map_err(db_err)?;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT id, tenant_id, invitee_user_id, invitee_email, role_id,
                   secret_hash, expires_at, accepted_at, rejected_at, revoked_at
            FROM tenant_invitations
@@ -1938,7 +1942,7 @@ pub async fn accept_invitation_token(
            FOR UPDATE"#,
     )
     .bind(token_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found("invitation not found"),
@@ -1975,7 +1979,7 @@ pub async fn accept_invitation_token(
     }
 
     let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
-    let role_id: Option<Uuid> = sqlx::query_scalar(
+    let role_id: Option<Uuid> = crate::db::query_scalar(
         r#"UPDATE tenant_invitations
            SET invitee_user_id = $2,
                accepted_by = $2,
@@ -1988,7 +1992,7 @@ pub async fn accept_invitation_token(
     )
     .bind(invitation_id)
     .bind(actor_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -2008,7 +2012,7 @@ async fn accept_invitation_row(
     ensure_invitation_pending(&row)?;
     let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
 
-    sqlx::query_scalar::<_, Option<Uuid>>(
+    crate::db::query_scalar::<Option<Uuid>>(
         r#"UPDATE tenant_invitations
            SET invitee_user_id = $2,
                accepted_by = $2,
@@ -2021,7 +2025,7 @@ async fn accept_invitation_row(
     )
     .bind(invitation_id)
     .bind(invitee_user_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -2035,7 +2039,7 @@ async fn grant_invitation_role(
     lock_active_tenant(tx, tenant_id).await?;
     crate::authz::repo::lock_live_entity_subject_in_tx(tx, Some(tenant_id), invitee_user_id)
         .await?;
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
            VALUES ($1, $2, 'active')
            ON CONFLICT (tenant_id, entity_id)
@@ -2043,7 +2047,7 @@ async fn grant_invitation_role(
     )
     .bind(tenant_id)
     .bind(invitee_user_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -2079,13 +2083,13 @@ pub async fn reject_invitation(
     ensure_invitation_pending(&row)?;
     let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
 
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE tenant_invitations
            SET rejected_at = now(), updated_at = now()
            WHERE id = $1"#,
     )
     .bind(invitation_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2107,13 +2111,13 @@ pub async fn revoke_invitation(
     ensure_invitation_pending(&row)?;
     let invitation_id: Uuid = row.try_get("id").map_err(db_err)?;
 
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE tenant_invitations
            SET revoked_at = now(), updated_at = now()
            WHERE id = $1"#,
     )
     .bind(invitation_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2134,14 +2138,14 @@ pub async fn revoke_invitation_by_id(
         .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
     ensure_invitation_pending(&row)?;
 
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE tenant_invitations
            SET revoked_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND id = $2"#,
     )
     .bind(tenant_id)
     .bind(invitation_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2152,8 +2156,8 @@ async fn invitation_row_for_invitee(
     tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
     invitee_user_id: Uuid,
-) -> Result<Option<PgRow>, AppError> {
-    sqlx::query(
+) -> Result<Option<crate::db::Row>, AppError> {
+    crate::db::query(
         r#"SELECT ti.id, ti.tenant_id, ti.invitee_user_id, ti.invitee_email,
                   ti.role_id, ti.secret_hash, ti.expires_at, ti.accepted_at,
                   ti.rejected_at, ti.revoked_at
@@ -2171,7 +2175,7 @@ async fn invitation_row_for_invitee(
     )
     .bind(tenant_id)
     .bind(invitee_user_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -2180,8 +2184,8 @@ async fn invitation_row_by_id(
     tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
     invitation_id: Uuid,
-) -> Result<Option<PgRow>, AppError> {
-    sqlx::query(
+) -> Result<Option<crate::db::Row>, AppError> {
+    crate::db::query(
         r#"SELECT id, tenant_id, invitee_user_id, invitee_email, role_id,
                   secret_hash, expires_at, accepted_at, rejected_at, revoked_at
            FROM tenant_invitations
@@ -2190,12 +2194,12 @@ async fn invitation_row_by_id(
     )
     .bind(tenant_id)
     .bind(invitation_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)
 }
 
-fn ensure_invitation_pending(row: &PgRow) -> Result<(), AppError> {
+fn ensure_invitation_pending(row: &crate::db::Row) -> Result<(), AppError> {
     let accepted_at: Option<DateTime<Utc>> = row.try_get("accepted_at").map_err(db_err)?;
     if accepted_at.is_some() {
         return Err(AppError::bad_request("invitation already accepted"));
@@ -2224,7 +2228,7 @@ fn invitation_wrong_user() -> AppError {
 }
 
 async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"SELECT entity_id
            FROM entity_emails
            WHERE lower(email) = lower($1)
@@ -2238,7 +2242,7 @@ async fn entity_id_by_email(pool: &PgPool, email: &str) -> Result<Option<Uuid>, 
 }
 
 async fn email_by_entity_id(pool: &PgPool, entity_id: Uuid) -> Result<Option<String>, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         "SELECT email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL",
     )
     .bind(entity_id)
@@ -2252,7 +2256,7 @@ async fn verify_entity_email_from_invitation(
     entity_id: Uuid,
     email: &str,
 ) -> Result<bool, AppError> {
-    Ok(sqlx::query(
+    Ok(crate::db::query(
         r#"UPDATE entity_emails
            SET verified_at = COALESCE(verified_at, now()), updated_at = now()
            WHERE entity_id = $1 AND lower(email) = lower($2)
@@ -2260,7 +2264,7 @@ async fn verify_entity_email_from_invitation(
     )
     .bind(entity_id)
     .bind(email)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?
     .rows_affected()
@@ -2327,7 +2331,7 @@ mod tests {
 
     async fn cleanup(pool: &PgPool, ids: &[Uuid]) {
         for id in ids {
-            let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            let _ = crate::db::query("DELETE FROM tenants WHERE id = $1")
                 .bind(id)
                 .execute(pool)
                 .await;
@@ -2618,7 +2622,7 @@ mod tests {
     async fn entity_with_unknown_tenant_id_is_rejected_by_fk() {
         let pool = pool().await;
         let bogus = Uuid::new_v4();
-        let res = sqlx::query(
+        let res = crate::db::query(
             "INSERT INTO entities (id, kind, name, tenant_id)
              VALUES (gen_random_uuid(), 'service', 'fk-test', $1)",
         )

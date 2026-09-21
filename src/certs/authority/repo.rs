@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -35,6 +35,7 @@ pub struct EncryptedKeyRequirement {
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct LeafIssuerReadiness {
     pub active_count: i64,
+    #[sqlx(try_from = "crate::db::TextList")]
     pub active_backends: Vec<AuthorityKeyBackend>,
 }
 
@@ -88,10 +89,10 @@ pub async fn fetch_authority_by_id<'e, E>(
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
     let query = format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1");
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(authority_id)
         .fetch_one(executor)
         .await
@@ -115,7 +116,7 @@ pub async fn fetch_active_leaf_issuer_for_scope<'e, E>(
     tenant_id: Option<Uuid>,
 ) -> Result<AuthorityRecord, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
     let query = format!(
         r#"
@@ -133,7 +134,7 @@ where
           AND not_after > now()
         "#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(tenant_id)
         .fetch_one(executor)
         .await
@@ -165,9 +166,9 @@ pub async fn lock_active_leaf_issuer_for_scope(
         FOR SHARE
         "#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(tenant_id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(|error| match error {
             sqlx::Error::RowNotFound => {
@@ -192,9 +193,9 @@ pub async fn lock_authority_for_certificate_authentication(
         FOR SHARE
         "#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(authority_id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(db_err)
 }
@@ -212,7 +213,7 @@ pub async fn fetch_active_tenant_leaf_issuer<'e, E>(
     tenant_id: Uuid,
 ) -> Result<AuthorityRecord, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
     fetch_active_leaf_issuer_for_scope(executor, Some(tenant_id)).await
 }
@@ -222,7 +223,7 @@ where
 /// while an active-but-disabled or out-of-window issuer remains an error. The
 /// single non-secret snapshot avoids both a second query and a cross-query race.
 pub async fn leaf_issuer_readiness(pool: &PgPool) -> Result<LeafIssuerReadiness, AppError> {
-    sqlx::query_as(
+    crate::db::query_as(
         r#"
         SELECT COUNT(*) FILTER (WHERE status = 'active') AS active_count,
                COALESCE(
@@ -256,7 +257,7 @@ pub async fn list_tenant_authorities(
         ORDER BY version DESC, created_at DESC
         "#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(tenant_id)
         .fetch_all(pool)
         .await
@@ -269,7 +270,7 @@ pub async fn list_tenant_authorities(
 pub async fn encrypted_key_requirements(
     pool: &PgPool,
 ) -> Result<Vec<EncryptedKeyRequirement>, AppError> {
-    sqlx::query_as::<_, EncryptedKeyRequirement>(
+    crate::db::query_as::<EncryptedKeyRequirement>(
         r#"SELECT DISTINCT key_encryption_key_id, encryption_algorithm
            FROM pki_authorities
            WHERE key_backend = 'encrypted_database'
@@ -287,14 +288,14 @@ pub async fn pkcs11_authorities(pool: &PgPool) -> Result<Vec<AuthorityRecord>, A
     let query = format!(
         "SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE key_backend = 'pkcs11' ORDER BY id"
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .fetch_all(pool)
         .await
         .map_err(db_err)
 }
 
 pub async fn kms_authority_count(pool: &PgPool) -> Result<i64, AppError> {
-    sqlx::query_scalar("SELECT count(*) FROM pki_authorities WHERE key_backend = 'kms'")
+    crate::db::query_scalar("SELECT count(*) FROM pki_authorities WHERE key_backend = 'kms'")
         .fetch_one(pool)
         .await
         .map_err(db_err)
@@ -325,9 +326,9 @@ pub struct CompletedAuthority {
 }
 
 pub async fn lock_provisioning(tx: &mut DbTransaction<'_>) -> Result<(), AppError> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    crate::db::query("SELECT pg_advisory_xact_lock($1)")
         .bind(PROVISIONING_ADVISORY_LOCK_ID)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     Ok(())
@@ -337,11 +338,11 @@ pub async fn lock_active_tenant(
     tx: &mut DbTransaction<'_>,
     tenant_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query_scalar::<_, Uuid>(
+    crate::db::query_scalar::<Uuid>(
         "SELECT id FROM tenants WHERE id = $1 AND status = 'active' AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(tenant_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -352,9 +353,9 @@ pub async fn authority_by_id_for_update(
     authority_id: Uuid,
 ) -> Result<AuthorityRecord, AppError> {
     let query = format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE id = $1 FOR UPDATE");
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(authority_id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(db_err)
 }
@@ -365,9 +366,9 @@ pub async fn authority_by_fingerprint(
 ) -> Result<Option<AuthorityRecord>, AppError> {
     let query =
         format!("SELECT {AUTHORITY_COLUMNS} FROM pki_authorities WHERE fingerprint_sha256 = $1");
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(fingerprint_sha256)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)
 }
@@ -377,14 +378,14 @@ pub async fn next_authority_version(
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
 ) -> Result<i32, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"SELECT COALESCE(MAX(version), 0) + 1
            FROM pki_authorities
            WHERE kind = $1 AND tenant_id IS NOT DISTINCT FROM $2"#,
     )
     .bind(kind)
     .bind(tenant_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -404,10 +405,10 @@ pub async fn pending_authority_for_scope(
            LIMIT 1
            FOR UPDATE"#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(kind)
         .bind(tenant_id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)
 }
@@ -429,10 +430,10 @@ pub async fn active_authority_for_scope(
            LIMIT 1
            FOR UPDATE"#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(kind)
         .bind(tenant_id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)
 }
@@ -457,7 +458,7 @@ pub async fn insert_root_authority(
     version: i32,
     completed: &CompletedAuthority,
 ) -> Result<AuthorityRecord, AppError> {
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO pki_authorities (
                id, kind, version, status, issuance_enabled, subject,
                serial_number, fingerprint_sha256, subject_key_id,
@@ -480,7 +481,7 @@ pub async fn insert_root_authority(
     .bind(&completed.chain_pem)
     .bind(completed.not_before)
     .bind(completed.not_after)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, id).await
@@ -518,7 +519,7 @@ pub async fn insert_active_authority(
             )
         })
         .unwrap_or((None, None, None));
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO pki_authorities (
                id, tenant_id, parent_id, kind, version, status,
                issuance_enabled, subject, serial_number, fingerprint_sha256,
@@ -570,7 +571,7 @@ pub async fn insert_active_authority(
     .bind(ocsp_url)
     .bind(ca_issuers_url)
     .bind(crl_distribution_point_url)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, input.id).await
@@ -581,7 +582,7 @@ pub async fn insert_pending_authority(
     input: &PendingAuthorityInsert<'_>,
 ) -> Result<AuthorityRecord, AppError> {
     let key = input.key.columns();
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO pki_authorities (
                id, tenant_id, parent_id, kind, version, status,
                issuance_enabled, subject, key_backend, key_reference,
@@ -610,7 +611,7 @@ pub async fn insert_pending_authority(
     .bind(key.encryption_algorithm)
     .bind(input.provisioning_mode)
     .bind(input.csr_pem)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, input.id).await
@@ -632,7 +633,7 @@ pub async fn activate_authority(
             )
         })
         .unwrap_or((None, None, None));
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE pki_authorities
            SET status = 'active', issuance_enabled = $2, subject = $3,
                serial_number = $4, fingerprint_sha256 = $5,
@@ -659,7 +660,7 @@ pub async fn activate_authority(
     .bind(ocsp_url)
     .bind(ca_issuers_url)
     .bind(crl_distribution_point_url)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, authority_id).await
@@ -670,7 +671,7 @@ pub async fn mark_authority_failed(
     authority_id: Uuid,
     reason: &str,
 ) -> Result<AuthorityRecord, AppError> {
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE pki_authorities
            SET status = 'failed', issuance_enabled = false,
                failure_reason = $2, updated_at = now()
@@ -678,7 +679,7 @@ pub async fn mark_authority_failed(
     )
     .bind(authority_id)
     .bind(reason)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     authority_by_id_for_update(tx, authority_id).await
@@ -690,7 +691,7 @@ pub async fn retire_other_active_authorities(
     kind: AuthorityKind,
     tenant_id: Option<Uuid>,
 ) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"UPDATE pki_authorities
            SET status = 'retiring', issuance_enabled = false,
                retiring_at = now(), updated_at = now()
@@ -703,7 +704,7 @@ pub async fn retire_other_active_authorities(
     .bind(authority_id)
     .bind(kind)
     .bind(tenant_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -714,7 +715,7 @@ pub async fn transition_authority(
     from: AuthorityStatus,
     to: AuthorityStatus,
 ) -> Result<AuthorityRecord, AppError> {
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"UPDATE pki_authorities
            SET status = $3,
                issuance_enabled = false,
@@ -726,7 +727,7 @@ pub async fn transition_authority(
     .bind(authority_id)
     .bind(from)
     .bind(to)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     if result.rows_affected() != 1 {
@@ -745,7 +746,7 @@ pub async fn list_authorities(
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
            ORDER BY tenant_id NULLS FIRST, kind, version DESC"#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .bind(tenant_id)
         .fetch_all(pool)
         .await
@@ -762,7 +763,7 @@ pub async fn trust_bundle_authorities(pool: &PgPool) -> Result<Vec<AuthorityReco
            ORDER BY CASE kind WHEN 'root' THEN 0 ELSE 1 END,
                     tenant_id NULLS FIRST, kind, version DESC"#
     );
-    sqlx::query_as::<_, AuthorityRecord>(&query)
+    crate::db::query_as::<AuthorityRecord>(&query)
         .fetch_all(pool)
         .await
         .map_err(db_err)

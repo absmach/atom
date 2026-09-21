@@ -88,7 +88,7 @@ async fn require_ownership_management(
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 pub async fn health(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    sqlx::query("SELECT 1")
+    crate::db::query("SELECT 1")
         .execute(state.pool())
         .await
         .map_err(AppError::Database)?;
@@ -615,7 +615,7 @@ async fn credential_tenant_id(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar::<_, Option<Uuid>>(
+    crate::db::query_scalar::<Option<Uuid>>(
         "SELECT e.tenant_id FROM credentials c JOIN entities e ON e.id = c.entity_id WHERE c.id = $1 AND c.entity_id = $2",
     )
     .bind(credential_id)

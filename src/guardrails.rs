@@ -115,7 +115,7 @@ pub async fn validate_role_capability(
     capability_id: Uuid,
 ) -> Result<(), AppError> {
     let capability_names = capability_names(&mut *conn, &[capability_id]).await?;
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"WITH RECURSIVE assigned_groups(edge_id, group_id) AS (
                SELECT pb.id, pb.subject_id
                FROM effective_access_edges() pb
@@ -143,7 +143,6 @@ pub async fn validate_role_capability(
 
     let mut assignments = Vec::new();
     for row in rows {
-        use sqlx::Row;
         let entity_kind: String = row.try_get("entity_kind").map_err(db_err)?;
         let tenant_id: Option<Uuid> = row.try_get("tenant_id").map_err(db_err)?;
         let scope_kind: ScopeKind = row.try_get("scope_kind").map_err(db_err)?;
@@ -241,7 +240,7 @@ pub async fn validate_composite_role_assignment_plan(
     unique_child_role_ids.dedup();
 
     let entity_kinds =
-        sqlx::query_scalar::<_, String>("SELECT kind FROM entities WHERE id = ANY($1::uuid[])")
+        crate::db::query_scalar::<String>("SELECT kind FROM entities WHERE id = ANY($1::uuid[])")
             .bind(&unique_entity_ids)
             .fetch_all(&mut *conn)
             .await
@@ -287,7 +286,7 @@ pub async fn validate_role_assignment_plan(
     unique_capability_ids.dedup();
 
     let entity_kinds =
-        sqlx::query_scalar::<_, String>("SELECT kind FROM entities WHERE id = ANY($1::uuid[])")
+        crate::db::query_scalar::<String>("SELECT kind FROM entities WHERE id = ANY($1::uuid[])")
             .bind(&unique_entity_ids)
             .fetch_all(&mut *conn)
             .await
@@ -331,15 +330,13 @@ pub async fn validate_group_member(
     group_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    use sqlx::Row;
-
-    let entity_kind: String = sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
+    let entity_kind: String = crate::db::query_scalar("SELECT kind FROM entities WHERE id = $1")
         .bind(entity_id)
         .fetch_one(&mut *conn)
         .await
         .map_err(db_err)?;
 
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"WITH RECURSIVE policy_groups(group_id) AS (
                SELECT $1::uuid
                UNION ALL
@@ -419,8 +416,7 @@ pub async fn validate_role_permission_block_links(
         return Ok(());
     }
 
-    use sqlx::Row;
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT ra.tenant_id, e.kind AS entity_kind
            FROM role_assignments ra
            JOIN entities e ON ra.subject_kind = 'entity' AND e.id = ra.subject_id
@@ -497,8 +493,7 @@ async fn validate_assignments(
 }
 
 async fn load_rules(conn: &mut PgConnection) -> Result<Vec<Rule>, AppError> {
-    use sqlx::Row;
-    sqlx::query(
+    crate::db::query(
         r#"SELECT tenant_id, entity_kind, action_name AS capability_name, object_kind, object_type, decision, is_absolute
            FROM action_assignment_rules"#,
     )
@@ -526,12 +521,12 @@ async fn subject_entity_kinds(
     subject_id: Uuid,
 ) -> Result<Vec<String>, AppError> {
     match subject_kind {
-        SubjectKind::Entity => sqlx::query_scalar("SELECT kind FROM entities WHERE id = $1")
+        SubjectKind::Entity => crate::db::query_scalar("SELECT kind FROM entities WHERE id = $1")
             .bind(subject_id)
             .fetch_all(&mut *conn)
             .await
             .map_err(db_err),
-        SubjectKind::Group => sqlx::query_scalar(
+        SubjectKind::Group => crate::db::query_scalar(
             r#"WITH RECURSIVE subject_groups(group_id) AS (
                    SELECT $1::uuid
                    UNION ALL
@@ -552,7 +547,7 @@ async fn subject_entity_kinds(
 }
 
 async fn capability_names(conn: &mut PgConnection, ids: &[Uuid]) -> Result<Vec<String>, AppError> {
-    sqlx::query_scalar("SELECT name FROM actions WHERE id = ANY($1::uuid[])")
+    crate::db::query_scalar("SELECT name FROM actions WHERE id = ANY($1::uuid[])")
         .bind(ids)
         .fetch_all(&mut *conn)
         .await
@@ -563,7 +558,7 @@ async fn role_capability_names(
     conn: &mut PgConnection,
     role_id: Uuid,
 ) -> Result<Vec<String>, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"SELECT DISTINCT c.name
            FROM (SELECT $1::uuid AS role_id) roles
            JOIN effective_role_actions() rc ON rc.role_id = roles.role_id
@@ -590,8 +585,7 @@ async fn role_permission_assignments(
         return Ok(Vec::new());
     }
 
-    use sqlx::Row;
-    sqlx::query(
+    crate::db::query(
         r#"SELECT a.name AS capability_name,
                   CASE
                     WHEN pb.scope_mode = 'platform' THEN 'platform'
@@ -647,8 +641,7 @@ async fn permission_block_assignments(
         return Ok(Vec::new());
     }
 
-    use sqlx::Row;
-    sqlx::query(
+    crate::db::query(
         r#"SELECT a.name AS capability_name,
                   CASE
                     WHEN pb.scope_mode = 'platform' THEN 'platform'

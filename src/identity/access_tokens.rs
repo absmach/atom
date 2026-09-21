@@ -118,7 +118,7 @@ pub async fn create_access_token_in_tx(
     }
     // A scoped token's authority is capped by its ceiling; an unscoped token
     // (`scoped = false`) authenticates with the owner's full live grants.
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, secret_lookup_hash, scoped, expires_at, metadata)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
     )
@@ -131,7 +131,7 @@ pub async fn create_access_token_in_tx(
     .bind(scoped)
     .bind(req.expires_at)
     .bind(metadata)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -188,7 +188,7 @@ pub async fn replace_access_token_permissions_in_tx(
     }
     // Look the token up once and reject config-managed rows with a 409
     // conflict — the same shape as the entity/capability guards.
-    let row: Option<(bool, Option<String>)> = sqlx::query_as(
+    let row: Option<(bool, Option<String>)> = crate::db::query_as(
         r#"SELECT scoped, managed_by FROM credentials
            WHERE id = $1 AND entity_id = $2 AND kind = $3 AND status = 'active'
            FOR UPDATE"#,
@@ -196,7 +196,7 @@ pub async fn replace_access_token_permissions_in_tx(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     match row {
@@ -214,9 +214,9 @@ pub async fn replace_access_token_permissions_in_tx(
         Some((true, _)) => {}
     }
 
-    sqlx::query("DELETE FROM credential_permission_limits WHERE credential_id = $1")
+    crate::db::query("DELETE FROM credential_permission_limits WHERE credential_id = $1")
         .bind(cred_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     let action_ids = resolve_ceiling_action_ids(tx, &permissions).await?;
@@ -233,16 +233,15 @@ async fn resolve_ceiling_action_ids(
     tx: &mut DbTransaction<'_>,
     permissions: &[AccessTokenPermission],
 ) -> Result<std::collections::HashMap<String, Uuid>, AppError> {
-    use sqlx::Row;
     let names: Vec<String> = permissions
         .iter()
         .flat_map(|permission| permission.actions.iter().cloned())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let rows = sqlx::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
+    let rows = crate::db::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
         .bind(&names)
-        .fetch_all(tx.as_postgres_mut())
+        .fetch_all(tx.exec())
         .await
         .map_err(db_err)?;
     let action_ids = rows
@@ -304,7 +303,7 @@ async fn write_ceiling_limit(
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
     let limit_id = Uuid::new_v4();
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO credential_permission_limits
              (id, credential_id, scope_mode, tenant_id, object_kind, object_type, object_id, conditions)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
@@ -317,7 +316,7 @@ async fn write_ceiling_limit(
     .bind(&permission.object_type)
     .bind(permission.object_id)
     .bind(conditions)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::Database(db) if db.code().as_deref() == Some("23514") => {
@@ -330,13 +329,13 @@ async fn write_ceiling_limit(
         let action_id = action_ids
             .get(action)
             .ok_or_else(|| AppError::bad_request(format!("unknown action: {action}")))?;
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO credential_permission_limit_actions (limit_id, action_id)
                VALUES ($1, $2) ON CONFLICT DO NOTHING"#,
         )
         .bind(limit_id)
         .bind(action_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -356,14 +355,12 @@ pub async fn list_access_tokens(
     entity_id: Uuid,
     params: ListAccessTokens,
 ) -> Result<(Vec<AccessTokenSummary>, i64), AppError> {
-    use sqlx::Row;
-
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
     // Config-managed tokens are surfaced with `managed_by='config'` so the
     // UI can flag them read-only; the mutation endpoints refuse to touch
     // them with 409 conflict.
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM credentials
            WHERE entity_id = $1
@@ -377,7 +374,7 @@ pub async fn list_access_tokens(
     .await
     .map_err(db_err)?;
 
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT id,
                   COALESCE(NULLIF(metadata->>'name', ''), identifier, 'Access token') AS name,
                   NULLIF(metadata->>'description', '') AS description,
@@ -436,7 +433,7 @@ pub async fn list_access_tokens(
 /// does not exist or is not an access token. Used by the GraphQL layer to route
 /// owner vs delegated (admin) lifecycle operations.
 pub async fn access_token_owner(pool: &PgPool, cred_id: Uuid) -> Result<Uuid, AppError> {
-    sqlx::query_scalar(r#"SELECT entity_id FROM credentials WHERE id = $1 AND kind = $2"#)
+    crate::db::query_scalar(r#"SELECT entity_id FROM credentials WHERE id = $1 AND kind = $2"#)
         .bind(cred_id)
         .bind(CredentialKind::AccessToken)
         .fetch_optional(pool)
@@ -451,8 +448,7 @@ async fn load_access_token_permissions(
     pool: &PgPool,
     credential_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<AccessTokenPermissionSummary>>, AppError> {
-    use sqlx::Row;
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT l.credential_id,
                   l.scope_mode,
                   l.tenant_id,
@@ -484,7 +480,10 @@ async fn load_access_token_permissions(
             .entry(credential_id)
             .or_default()
             .push(AccessTokenPermissionSummary {
-                actions: row.try_get("actions").map_err(db_err)?,
+                actions: row
+                    .try_get::<crate::db::TextList, _>("actions")
+                    .map_err(db_err)?
+                    .0,
                 scope_mode: row.try_get("scope_mode").map_err(db_err)?,
                 tenant_id: row.try_get("tenant_id").map_err(db_err)?,
                 object_kind: row.try_get("object_kind").map_err(db_err)?,
@@ -521,7 +520,7 @@ pub async fn revoke_access_token_in_tx(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let managed_by: Option<Option<String>> = sqlx::query_scalar(
+    let managed_by: Option<Option<String>> = crate::db::query_scalar(
         r#"SELECT managed_by FROM credentials
            WHERE id = $1 AND entity_id = $2 AND kind = $3
            FOR UPDATE"#,
@@ -529,7 +528,7 @@ pub async fn revoke_access_token_in_tx(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     match managed_by {
@@ -541,7 +540,7 @@ pub async fn revoke_access_token_in_tx(
         }
         _ => {}
     }
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"UPDATE credentials
            SET status = 'revoked',
                metadata = metadata - 'revoked_at' - 'revocation_reason'
@@ -556,7 +555,7 @@ pub async fn revoke_access_token_in_tx(
     .bind(cred_id)
     .bind(entity_id)
     .bind(CredentialKind::AccessToken)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {

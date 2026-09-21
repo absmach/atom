@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres};
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::{
@@ -193,7 +193,9 @@ struct ProfileRow {
     default_ttl_seconds: i64,
     maximum_ttl_seconds: i64,
     renewal_threshold_seconds: i64,
+    #[sqlx(try_from = "crate::db::TextList")]
     key_usages: Vec<String>,
+    #[sqlx(try_from = "crate::db::TextList")]
     extended_key_usages: Vec<String>,
     san_policy: Value,
     identity_uri_template: String,
@@ -202,9 +204,9 @@ struct ProfileRow {
 
 pub async fn load_subject<'e, E>(executor: E, entity_id: Uuid) -> Result<StoredSubject, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, StoredSubject>(
+    crate::db::query_as::<StoredSubject>(
         r#"
         SELECT e.id AS entity_id, e.tenant_id
         FROM entities e
@@ -239,7 +241,7 @@ pub async fn resolve_for_subject(
         LIMIT 1
         "#
     );
-    let row = sqlx::query_as::<_, ProfileRow>(&query)
+    let row = crate::db::query_as::<ProfileRow>(&query)
         .bind(name)
         .bind(subject.tenant_id)
         .fetch_one(pool)
@@ -272,10 +274,10 @@ pub async fn resolve_for_subject_in_tx(
         LIMIT 1
         "#
     );
-    let row = sqlx::query_as::<_, ProfileRow>(&query)
+    let row = crate::db::query_as::<ProfileRow>(&query)
         .bind(name)
         .bind(subject.tenant_id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(db_err)?;
     let profile = CertificateProfile::try_from(row)?;
@@ -291,10 +293,10 @@ pub async fn profile_by_id<'e, E>(
     profile_id: Uuid,
 ) -> Result<CertificateProfile, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
     let query = format!("SELECT {PROFILE_COLUMNS} FROM certificate_profiles WHERE id = $1");
-    let row = sqlx::query_as::<_, ProfileRow>(&query)
+    let row = crate::db::query_as::<ProfileRow>(&query)
         .bind(profile_id)
         .fetch_one(executor)
         .await

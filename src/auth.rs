@@ -252,8 +252,7 @@ async fn load_session_entity_tenant(
     session_id: Uuid,
     entity_id: Uuid,
 ) -> Result<SessionEntityTenantSnapshot, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT s.revoked_at,
                   s.expires_at,
                   e.tenant_id,
@@ -545,10 +544,9 @@ fn credential_cache_entry(snapshot: &CredentialSnapshot) -> CredentialCacheEntry
 /// was introduced. This remains the single cache-miss loader for all three
 /// cached entities it touches — it is never split into per-field queries.
 async fn load_credential_row(pool: &PgPool, cred_id: Uuid) -> Result<CredentialSnapshot, AppError> {
-    use sqlx::Row;
     // Only access-token credentials enter this cache. Password credentials
     // remain uncached and are verified through the normal password path.
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT c.entity_id,
                   c.secret_hash,
                   c.secret_lookup_hash,
@@ -674,7 +672,7 @@ async fn finish_api_key_auth(
                 CacheCategory::Credential,
                 std::slice::from_ref(&credential_key),
                 || async {
-                    sqlx::query(
+                    crate::db::query(
                         "UPDATE credentials SET secret_lookup_hash = $1, secret_hash = NULL WHERE id = $2",
                     )
                     .bind(digest)
@@ -699,7 +697,7 @@ async fn finish_api_key_auth(
     // one write per credential per five minutes so the auth hot path stays
     // read-mostly. Best-effort: a failed stamp never fails authentication.
     // Not cached data, so no invalidation is needed.
-    if let Err(err) = sqlx::query(
+    if let Err(err) = crate::db::query(
         r#"UPDATE credentials
            SET last_used_at = now()
            WHERE id = $1
@@ -1223,7 +1221,7 @@ fn is_unconditional(conditions: &serde_json::Value) -> bool {
 }
 
 async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppError> {
-    let active: Option<bool> = sqlx::query_scalar(
+    let active: Option<bool> = crate::db::query_scalar(
         r#"SELECT (actor.status = 'active'
                    AND actor.deleted_at IS NULL
                    AND (actor.tenant_id IS NULL OR (actor_tenant.status = 'active' AND actor_tenant.deleted_at IS NULL)))
@@ -1239,7 +1237,7 @@ async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppErro
 }
 
 async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppError> {
-    let active: Option<bool> = sqlx::query_scalar(
+    let active: Option<bool> = crate::db::query_scalar(
         "SELECT status = 'active' AND deleted_at IS NULL FROM tenants WHERE id = $1",
     )
     .bind(tenant_id)
@@ -1250,7 +1248,7 @@ async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppErr
 }
 
 async fn action_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+    crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
         .bind(name)
         .fetch_optional(pool)
         .await
@@ -1337,9 +1335,8 @@ async fn action_ids_by_name(
     pool: &PgPool,
     names: &[&str],
 ) -> Result<std::collections::HashMap<String, Uuid>, AppError> {
-    use sqlx::Row;
     let owned: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-    let rows = sqlx::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
+    let rows = crate::db::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
         .bind(&owned)
         .fetch_all(pool)
         .await

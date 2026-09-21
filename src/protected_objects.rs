@@ -58,7 +58,7 @@ WHERE registry.id = $1
 "#;
 
 pub async fn lookup(pool: &PgPool, id: Uuid) -> Result<Option<ProtectedObjectIdentity>, AppError> {
-    sqlx::query_as::<_, ProtectedObjectIdentity>(LOOKUP_SQL)
+    crate::db::query_as::<ProtectedObjectIdentity>(LOOKUP_SQL)
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -69,7 +69,7 @@ pub async fn lookup_on_connection(
     connection: &mut PgConnection,
     id: Uuid,
 ) -> Result<Option<ProtectedObjectIdentity>, AppError> {
-    sqlx::query_as::<_, ProtectedObjectIdentity>(LOOKUP_SQL)
+    crate::db::query_as::<ProtectedObjectIdentity>(LOOKUP_SQL)
         .bind(id)
         .fetch_optional(connection)
         .await

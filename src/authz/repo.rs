@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -138,7 +138,7 @@ async fn authorize_flat_candidate_query(
            LEFT JOIN LATERAL (SELECT id FROM page) page ON TRUE"#,
         ceiling = ceiling_cte("$4")
     );
-    let rows = sqlx::query(&sql)
+    let rows = crate::db::query(&sql)
         .bind(subject_id)
         .bind(action_names)
         .bind(object_kind)
@@ -196,7 +196,7 @@ pub async fn list_api_endpoints_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as::<_, ApiEndpoint>(
+        crate::db::query_as::<ApiEndpoint>(
             r#"SELECT id, tenant_id, key, name, description, method, path,
                       operation_kind, graphql, auth_mode, service_entity_id,
                       variables_mapping, request_schema, response_mapping, status,
@@ -299,7 +299,7 @@ pub async fn create_resource_with_audit(
         .await
         .map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
-    let resource = sqlx::query_as::<_, Resource>(
+    let resource = crate::db::query_as::<Resource>(
         r#"INSERT INTO resources (id, kind, name, alias, tenant_id, owner_id, attributes)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
@@ -312,7 +312,7 @@ pub async fn create_resource_with_audit(
     .bind(req.tenant_id)
     .bind(req.owner_id)
     .bind(attrs)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     let meta = crate::audit::AuditMeta {
@@ -344,9 +344,9 @@ pub async fn get_resource(pool: &PgPool, id: Uuid) -> Result<Resource, AppError>
 /// from inside its own transaction instead of re-reading it after the commit.
 async fn fetch_resource<'e, E>(executor: E, id: Uuid) -> Result<Resource, AppError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, Resource>(
+    crate::db::query_as::<Resource>(
         "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by FROM resources WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -363,7 +363,7 @@ pub async fn list_resources_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Re
         return Ok(Vec::new());
     }
 
-    sqlx::query_as::<_, Resource>(
+    crate::db::query_as::<Resource>(
         r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at
            FROM resources
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
@@ -417,7 +417,7 @@ pub async fn list_resources(
            ORDER BY {order_by}
            LIMIT $6 OFFSET $7"#,
     );
-    let items = sqlx::query_as::<_, Resource>(&items_sql)
+    let items = crate::db::query_as::<Resource>(&items_sql)
         .bind(kind.clone())
         .bind(tenant_id)
         .bind(q.clone())
@@ -431,7 +431,7 @@ pub async fn list_resources(
         .await
         .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"WITH RECURSIVE target_groups(id) AS (
                SELECT $4::uuid WHERE $4::uuid IS NOT NULL
                UNION ALL
@@ -486,17 +486,18 @@ pub async fn update_resource_with_audit(
         .begin()
         .await
         .map_err(db_err)?;
-    let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
-            .await
-            .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
+        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(tx.exec())
+    .await
+    .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("resource {id} not found")));
     };
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
+    let locked: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT id FROM resources
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
@@ -505,14 +506,14 @@ pub async fn update_resource_with_audit(
     )
     .bind(id)
     .bind(tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
         return Err(AppError::not_found(format!("resource {id} not found")));
     }
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
-    let resource = sqlx::query_as::<_, Resource>(
+    let resource = crate::db::query_as::<Resource>(
         r#"UPDATE resources
            SET name       = COALESCE($2, name),
                attributes = COALESCE($3, attributes),
@@ -527,7 +528,7 @@ pub async fn update_resource_with_audit(
     .bind(req.attributes)
     .bind(alias_is_set)
     .bind(alias)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
@@ -565,34 +566,35 @@ pub async fn delete_resource_with_audit(
         .begin()
         .await
         .map_err(db_err)?;
-    let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
-            .await
-            .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
+        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(tx.exec())
+    .await
+    .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("resource {id} not found")));
     };
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
-    let live: bool = sqlx::query_scalar(
+    let live: bool = crate::db::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM resources WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     if !live {
         return Err(AppError::not_found(format!("resource {id} not found")));
     }
-    let result = sqlx::query(
+    let result = crate::db::query(
         "UPDATE resources SET deleted_at = now(), deleted_by = $2
          WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(deleted_by)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -632,11 +634,11 @@ pub async fn restore_resource_with_audit(
         .await
         .map_err(db_err)?;
 
-    let expected_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
+    let expected_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
         "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let Some(expected_tenant_id) = expected_tenant_id else {
@@ -647,7 +649,7 @@ pub async fn restore_resource_with_audit(
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
 
-    let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
+    let tenant_info: Option<(Option<Uuid>, bool)> = crate::db::query_as(
         "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
          FROM resources r
          LEFT JOIN tenants t ON t.id = r.tenant_id
@@ -657,7 +659,7 @@ pub async fn restore_resource_with_audit(
     )
     .bind(id)
     .bind(expected_tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let (tenant_id, _is_tenant_deleted) = match tenant_info {
@@ -674,12 +676,12 @@ pub async fn restore_resource_with_audit(
         Some((t_id, false)) => (t_id, false),
     };
 
-    sqlx::query(
+    crate::db::query(
         "UPDATE resources SET deleted_at = NULL, deleted_by = NULL
          WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(restore_conflict)?;
 
@@ -732,19 +734,19 @@ pub(crate) async fn purge_authz_references_for_ids(
     if ids.is_empty() {
         return Ok(());
     }
-    sqlx::query("DELETE FROM permission_blocks WHERE object_id = ANY($1)")
+    crate::db::query("DELETE FROM permission_blocks WHERE object_id = ANY($1)")
         .bind(ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
-    sqlx::query("DELETE FROM direct_policies WHERE subject_id = ANY($1)")
+    crate::db::query("DELETE FROM direct_policies WHERE subject_id = ANY($1)")
         .bind(ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
-    sqlx::query("DELETE FROM role_assignments WHERE subject_id = ANY($1)")
+    crate::db::query("DELETE FROM role_assignments WHERE subject_id = ANY($1)")
         .bind(ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     Ok(())
@@ -770,9 +772,9 @@ pub async fn purge_resource_with_audit(
         .map_err(db_err)?;
 
     let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(expected_tenant_id) = tenant_id else {
@@ -783,11 +785,11 @@ pub async fn purge_resource_with_audit(
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
 
-    let purged_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
+    let purged_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
         "DELETE FROM resources WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
     )
     .bind(id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let tenant_id = purged_tenant_id
@@ -840,7 +842,7 @@ pub async fn resolve_alias(
         .filter(|alias| !alias.is_empty());
     let tenant_id = match (tenant_id, tenant_alias, global) {
         (Some(id), None, false) => {
-            let id = sqlx::query_scalar::<_, Uuid>(
+            let id = crate::db::query_scalar::<Uuid>(
                 r#"SELECT id FROM tenants
                    WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
             )
@@ -852,7 +854,7 @@ pub async fn resolve_alias(
             Some(id)
         }
         (None, Some(alias), false) => {
-            let id = sqlx::query_scalar::<_, Uuid>(
+            let id = crate::db::query_scalar::<Uuid>(
                 r#"SELECT id FROM tenants
                    WHERE lower(alias) = lower($1)
                      AND status = 'active'
@@ -893,7 +895,7 @@ pub async fn resolve_alias(
         }
     };
 
-    let object_id = sqlx::query_scalar::<_, Uuid>(sql)
+    let object_id = crate::db::query_scalar::<Uuid>(sql)
         .bind(tenant_id)
         .bind(&object_alias)
         .fetch_optional(pool)
@@ -916,7 +918,7 @@ pub async fn get_resource_object_groups(
     pool: &PgPool,
     resource_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"SELECT grp.group_id
            FROM group_resource_parents grp
            JOIN object_groups g ON g.id = grp.group_id AND g.deleted_at IS NULL
@@ -1069,20 +1071,20 @@ async fn add_resource_to_object_group_in_tx_impl(
     group_id: Uuid,
     enforce_api_ownership: bool,
 ) -> Result<bool, AppError> {
-    use sqlx::Row;
-    let resource_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
-            .bind(resource_id)
-            .fetch_optional(tx.as_postgres_mut())
-            .await
-            .map_err(db_err)?;
+    let resource_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
+        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(resource_id)
+    .fetch_optional(tx.exec())
+    .await
+    .map_err(db_err)?;
     let Some(resource_tenant_id) = resource_tenant_id else {
         return Err(AppError::bad_request(
             "resource parent group reference is invalid",
         ));
     };
     crate::tenants::repo::lock_optional_active_tenant(tx, resource_tenant_id).await?;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT r.tenant_id AS resource_tenant_id, g.tenant_id AS group_tenant_id
            FROM resources r
            CROSS JOIN object_groups g
@@ -1095,7 +1097,7 @@ async fn add_resource_to_object_group_in_tx_impl(
     .bind(resource_id)
     .bind(group_id)
     .bind(resource_tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?
     .ok_or_else(|| AppError::bad_request("resource parent group reference is invalid"))?;
@@ -1116,7 +1118,7 @@ async fn add_resource_to_object_group_in_tx_impl(
     }
     // Additive: membership is a set, so re-adding an existing membership is an
     // idempotent no-op rather than a silent move between groups.
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
            VALUES ($1, $2, $3)
            ON CONFLICT (group_id, resource_id) DO NOTHING"#,
@@ -1124,7 +1126,7 @@ async fn add_resource_to_object_group_in_tx_impl(
     .bind(group_id)
     .bind(resource_id)
     .bind(tenant_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(result.rows_affected() > 0)
@@ -1138,19 +1140,20 @@ async fn delete_resource_object_groups_in_tx(
     resource_id: Uuid,
     group_id: Option<Uuid>,
 ) -> Result<u64, AppError> {
-    let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
-            .bind(resource_id)
-            .fetch_optional(tx.as_postgres_mut())
-            .await
-            .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
+        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(resource_id)
+    .fetch_optional(tx.exec())
+    .await
+    .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!(
             "resource {resource_id} not found"
         )));
     };
     crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
+    let locked: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT id FROM resources
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
@@ -1159,7 +1162,7 @@ async fn delete_resource_object_groups_in_tx(
     )
     .bind(resource_id)
     .bind(tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
@@ -1167,14 +1170,14 @@ async fn delete_resource_object_groups_in_tx(
             "resource {resource_id} not found"
         )));
     }
-    let mut affected_group_ids: Vec<Uuid> = sqlx::query_scalar(
+    let mut affected_group_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT group_id FROM object_group_resources
            WHERE resource_id = $1 AND ($2::uuid IS NULL OR group_id = $2)
            ORDER BY group_id"#,
     )
     .bind(resource_id)
     .bind(group_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     affected_group_ids.dedup();
@@ -1185,13 +1188,13 @@ async fn delete_resource_object_groups_in_tx(
         crate::managed_by::ensure_not_config_managed_in_tx(tx, "object_groups", affected_group_id)
             .await?;
     }
-    let deleted = sqlx::query(
+    let deleted = crate::db::query(
         r#"DELETE FROM object_group_resources
            WHERE resource_id = $1 AND ($2::uuid IS NULL OR group_id = $2)"#,
     )
     .bind(resource_id)
     .bind(group_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?
     .rows_affected();
@@ -1270,8 +1273,7 @@ pub async fn load_credential_ceiling(
     pool: &PgPool,
     credential_id: Uuid,
 ) -> Result<CredentialCeiling, AppError> {
-    use sqlx::Row;
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT l.id        AS limit_id,
                   s.scope_kind AS scope_kind,
                   s.scope_ref  AS scope_ref,
@@ -1328,7 +1330,7 @@ pub async fn create_role_with_audit(
         .await
         .map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
-    let role = sqlx::query_as::<_, Role>(
+    let role = crate::db::query_as::<Role>(
         r#"INSERT INTO roles (id, name, tenant_id, description)
            VALUES ($1, $2, $3, $4)
            RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
@@ -1337,7 +1339,7 @@ pub async fn create_role_with_audit(
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -1427,7 +1429,7 @@ pub async fn create_role_with_assignments(
     for member_id in locked_member_ids {
         lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
     }
-    let role = sqlx::query_as::<_, Role>(
+    let role = crate::db::query_as::<Role>(
         r#"INSERT INTO roles (id, name, tenant_id, description)
            VALUES ($1, $2, $3, $4)
            RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
@@ -1436,7 +1438,7 @@ pub async fn create_role_with_assignments(
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -1463,7 +1465,7 @@ pub async fn create_role_with_assignments(
     }
 
     for member_id in member_entity_ids {
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO role_assignments
                  (tenant_id, subject_kind, subject_id, role_id)
                VALUES ($1, 'entity', $2, $3)"#,
@@ -1471,12 +1473,12 @@ pub async fn create_role_with_assignments(
         .bind(req.tenant_id)
         .bind(member_id)
         .bind(role.id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
         if let Some(tenant_id) = req.tenant_id {
-            sqlx::query(
+            crate::db::query(
                 r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
                    SELECT $1, $2, 'active'
                    WHERE EXISTS (
@@ -1491,7 +1493,7 @@ pub async fn create_role_with_assignments(
             )
             .bind(tenant_id)
             .bind(member_id)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
         }
@@ -1525,7 +1527,7 @@ pub async fn create_role_with_permission_blocks(
     for member_id in locked_member_ids {
         lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
     }
-    let role = sqlx::query_as::<_, Role>(
+    let role = crate::db::query_as::<Role>(
         r#"INSERT INTO roles (id, name, tenant_id, description)
            VALUES ($1, $2, $3, $4)
            RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
@@ -1534,7 +1536,7 @@ pub async fn create_role_with_permission_blocks(
     .bind(req.name)
     .bind(req.tenant_id)
     .bind(req.description)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -1543,7 +1545,7 @@ pub async fn create_role_with_permission_blocks(
     }
 
     for member_id in member_entity_ids {
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO role_assignments
                  (tenant_id, subject_kind, subject_id, role_id)
                VALUES ($1, 'entity', $2, $3)"#,
@@ -1551,12 +1553,12 @@ pub async fn create_role_with_permission_blocks(
         .bind(req.tenant_id)
         .bind(member_id)
         .bind(role.id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
         if let Some(tenant_id) = req.tenant_id {
-            sqlx::query(
+            crate::db::query(
                 r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
                    SELECT $1, $2, 'active'
                    WHERE EXISTS (
@@ -1571,7 +1573,7 @@ pub async fn create_role_with_permission_blocks(
             )
             .bind(tenant_id)
             .bind(member_id)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
         }
@@ -1597,9 +1599,9 @@ async fn read_live_role_tenant_id(
     tx: &mut DbTransaction<'_>,
     role_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+    crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
         .bind(role_id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)?
         .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))
@@ -1610,7 +1612,7 @@ async fn lock_live_role_row(
     role_id: Uuid,
     expected_tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let locked: Option<Uuid> = sqlx::query_scalar(
+    let locked: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT id FROM roles
            WHERE id = $1
              AND tenant_id IS NOT DISTINCT FROM $2
@@ -1619,7 +1621,7 @@ async fn lock_live_role_row(
     )
     .bind(role_id)
     .bind(expected_tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
@@ -1694,9 +1696,9 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
     permission_block_ids: &[Uuid],
 ) -> Result<Option<Uuid>, AppError> {
     let role_tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(role_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?
             .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))?;
@@ -1706,7 +1708,7 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
     unique_block_ids.dedup();
 
     if !unique_block_ids.is_empty() {
-        let count: i64 = sqlx::query_scalar(
+        let count: i64 = crate::db::query_scalar(
             r#"SELECT COUNT(*)
                FROM permission_blocks
                WHERE id = ANY($1::uuid[])
@@ -1714,7 +1716,7 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
         )
         .bind(&unique_block_ids)
         .bind(role_tenant_id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(db_err)?;
         if count != unique_block_ids.len() as i64 {
@@ -1736,21 +1738,21 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
         &unique_block_ids,
     )
     .await?;
-    sqlx::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
+    crate::db::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
         .bind(role_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
     for permission_block_id in &unique_block_ids {
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
                VALUES ($1, $2)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(role_id)
         .bind(permission_block_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -1778,7 +1780,7 @@ async fn insert_role_permission_block(
 ) -> Result<Uuid, AppError> {
     let (scope_mode, tenant_id, object_kind, object_type, object_id, group_id) =
         permission_block_scope_columns(block);
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = crate::db::query_scalar(
         r#"INSERT INTO permission_blocks
              (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect, conditions)
            VALUES ($1, $2, $3, $4, $5, $6, 'allow', '{}'::jsonb)
@@ -1790,31 +1792,31 @@ async fn insert_role_permission_block(
     .bind(object_type)
     .bind(object_id)
     .bind(group_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
     for capability_id in &block.capability_ids {
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                VALUES ($1, $2)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(block_id)
         .bind(capability_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
            VALUES ($1, $2)
            ON CONFLICT DO NOTHING"#,
     )
     .bind(role_id)
     .bind(block_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -1833,7 +1835,7 @@ async fn delete_orphaned_blocks(
     if block_ids.is_empty() {
         return Ok(());
     }
-    sqlx::query(
+    crate::db::query(
         r#"DELETE FROM permission_blocks pb
            WHERE pb.id = ANY($1)
              AND pb.managed_by IS DISTINCT FROM 'config'
@@ -1845,7 +1847,7 @@ async fn delete_orphaned_blocks(
              )"#,
     )
     .bind(block_ids)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -1863,12 +1865,12 @@ async fn unlink_role_blocks_and_gc(
     if block_ids.is_empty() {
         return Ok(());
     }
-    sqlx::query(
+    crate::db::query(
         "DELETE FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = ANY($2)",
     )
     .bind(role_id)
     .bind(block_ids)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     delete_orphaned_blocks(tx, block_ids).await
@@ -1876,11 +1878,13 @@ async fn unlink_role_blocks_and_gc(
 
 /// Block ids currently linked to `role_id`.
 async fn role_block_ids(tx: &mut DbTransaction<'_>, role_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1")
-        .bind(role_id)
-        .fetch_all(tx.as_postgres_mut())
-        .await
-        .map_err(db_err)
+    crate::db::query_scalar(
+        "SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1",
+    )
+    .bind(role_id)
+    .fetch_all(tx.exec())
+    .await
+    .map_err(db_err)
 }
 
 type PermissionBlockScopeColumns<'a> = (
@@ -1967,7 +1971,7 @@ async fn insert_role_capability_as_permission_block(
     capability_id: Uuid,
 ) -> Result<Uuid, AppError> {
     let block = permission_block_from_legacy_scope(tenant_id, scope_kind, scope_ref)?;
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = crate::db::query_scalar(
         r#"INSERT INTO permission_blocks
              (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect, conditions)
            VALUES ($1, $2, $3, $4, $5, $6, 'allow', '{}'::jsonb)
@@ -1979,25 +1983,25 @@ async fn insert_role_capability_as_permission_block(
     .bind(block.object_type)
     .bind(block.object_id)
     .bind(block.group_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(capability_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
            VALUES ($1, $2)"#,
     )
     .bind(role_id)
     .bind(block_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(block_id)
@@ -2008,9 +2012,7 @@ async fn copy_role_permission_blocks(
     target_role_id: Uuid,
     source_role_id: Uuid,
 ) -> Result<(), AppError> {
-    use sqlx::Row;
-
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT pb.id, pb.tenant_id, pb.scope_mode, pb.object_kind, pb.object_type,
                   pb.object_id, pb.group_id, pb.effect, pb.conditions
            FROM role_permission_blocks rpb
@@ -2019,13 +2021,13 @@ async fn copy_role_permission_blocks(
            WHERE rpb.role_id = $1"#,
     )
     .bind(source_role_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
     for row in rows {
         let source_block_id: Uuid = row.try_get("id").map_err(db_err)?;
-        let copied_block_id: Uuid = sqlx::query_scalar(
+        let copied_block_id: Uuid = crate::db::query_scalar(
             r#"INSERT INTO permission_blocks
                  (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -2039,10 +2041,10 @@ async fn copy_role_permission_blocks(
         .bind(row.try_get::<Option<Uuid>, _>("group_id").map_err(db_err)?)
         .bind(row.try_get::<String, _>("effect").map_err(db_err)?)
         .bind(row.try_get::<Value, _>("conditions").map_err(db_err)?)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(db_err)?;
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                SELECT $1, action_id
                FROM permission_block_actions
@@ -2050,16 +2052,16 @@ async fn copy_role_permission_blocks(
         )
         .bind(copied_block_id)
         .bind(source_block_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
                VALUES ($1, $2)"#,
         )
         .bind(target_role_id)
         .bind(copied_block_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -2281,7 +2283,7 @@ pub async fn list_role_permission_blocks(
     pool: &PgPool,
     role_id: Uuid,
 ) -> Result<Vec<RolePermissionBlock>, AppError> {
-    sqlx::query_as::<_, RolePermissionBlock>(
+    crate::db::query_as::<RolePermissionBlock>(
         r#"SELECT pb.id,
                   rpb.role_id,
                   CASE
@@ -2313,7 +2315,7 @@ pub async fn list_permission_blocks_for_role(
     pool: &PgPool,
     role_id: Uuid,
 ) -> Result<Vec<PermissionBlock>, AppError> {
-    sqlx::query_as::<_, PermissionBlock>(
+    crate::db::query_as::<PermissionBlock>(
         r#"SELECT pb.id,
                   pb.tenant_id,
                   pb.scope_mode,
@@ -2340,7 +2342,7 @@ pub async fn role_permission_block_capabilities(
     pool: &PgPool,
     block_id: Uuid,
 ) -> Result<Vec<Capability>, AppError> {
-    sqlx::query_as::<_, Capability>(
+    crate::db::query_as::<Capability>(
         r#"SELECT c.id, c.name, c.description, c.created_at, c.updated_at
            FROM actions c
            JOIN permission_block_actions pba ON pba.action_id = c.id
@@ -2368,9 +2370,9 @@ pub async fn get_permission_block(pool: &PgPool, id: Uuid) -> Result<PermissionB
 /// just wrote from inside its own transaction instead of after the commit.
 async fn fetch_permission_block<'e, E>(executor: E, id: Uuid) -> Result<PermissionBlock, AppError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, PermissionBlock>(
+    crate::db::query_as::<PermissionBlock>(
         r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
                   effect, conditions, created_at, updated_at
            FROM permission_blocks
@@ -2391,7 +2393,7 @@ pub async fn list_permission_blocks(
 ) -> Result<PermissionBlockList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let items = sqlx::query_as::<_, PermissionBlock>(
+    let items = crate::db::query_as::<PermissionBlock>(
         r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
                   effect, conditions, created_at, updated_at, managed_by
            FROM permission_blocks
@@ -2408,7 +2410,7 @@ pub async fn list_permission_blocks(
     .await
     .map_err(db_err)?;
 
-    let total = sqlx::query_scalar(
+    let total = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM permission_blocks
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
@@ -2456,7 +2458,7 @@ pub async fn create_permission_block_with_audit(
         .await
         .map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = crate::db::query_scalar(
         r#"INSERT INTO permission_blocks
              (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -2470,19 +2472,19 @@ pub async fn create_permission_block_with_audit(
     .bind(req.group_id)
     .bind(req.effect)
     .bind(conditions)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
     for action_id in req.action_ids {
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                VALUES ($1, $2)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(id)
         .bind(action_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -2528,9 +2530,9 @@ pub async fn delete_permission_block_with_audit(
         .await
         .map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -2540,12 +2542,12 @@ pub async fn delete_permission_block_with_audit(
     };
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "permission_blocks", id).await?;
-    let referenced: bool = sqlx::query_scalar(
+    let referenced: bool = crate::db::query_scalar(
         r#"SELECT EXISTS (SELECT 1 FROM role_permission_blocks WHERE permission_block_id = $1)
               OR EXISTS (SELECT 1 FROM direct_policies WHERE permission_block_id = $1)"#,
     )
     .bind(id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     if referenced {
@@ -2553,9 +2555,9 @@ pub async fn delete_permission_block_with_audit(
             "permission block is still linked to a role or direct policy; unlink it first",
         ));
     }
-    sqlx::query("DELETE FROM permission_blocks WHERE id = $1")
+    crate::db::query("DELETE FROM permission_blocks WHERE id = $1")
         .bind(id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     crate::audit::commit_with_observation(
@@ -2685,7 +2687,7 @@ async fn validate_object_group_boundary(
 ) -> Result<(), AppError> {
     let group_id =
         group_id.ok_or_else(|| AppError::bad_request("object group scope requires groupId"))?;
-    let group_tenant_id: Option<Uuid> = sqlx::query_scalar(
+    let group_tenant_id: Option<Uuid> = crate::db::query_scalar(
         "SELECT tenant_id FROM object_groups WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(group_id)
@@ -2702,7 +2704,7 @@ async fn validate_object_group_boundary(
 }
 
 pub async fn get_role(pool: &PgPool, id: Uuid) -> Result<Role, AppError> {
-    sqlx::query_as::<_, Role>(
+    crate::db::query_as::<Role>(
         r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
            FROM roles WHERE id = $1 AND deleted_at IS NULL"#,
     )
@@ -2738,7 +2740,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
         }
     }
 
-    let items = sqlx::query_as::<_, Role>(
+    let items = crate::db::query_as::<Role>(
         r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at, managed_by
            FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
@@ -2768,7 +2770,7 @@ pub async fn list_roles(pool: &PgPool, params: ListRoles) -> Result<RoleList, Ap
     .await
     .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*) FROM roles
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
@@ -2857,7 +2859,7 @@ pub async fn list_roles_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as::<_, Role>(
+        crate::db::query_as::<Role>(
             r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by,
                       created_at, updated_at, managed_by
                FROM roles
@@ -2876,8 +2878,7 @@ pub async fn list_roles_authorized(
 }
 
 pub async fn role_derived_kind(pool: &PgPool, role_id: Uuid) -> Result<RoleDerivedKind, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT
               EXISTS (SELECT 1 FROM role_permission_blocks WHERE role_id = $1) AS has_permission_blocks,
               FALSE AS has_children"#,
@@ -2908,11 +2909,12 @@ async fn ensure_entities_exist(pool: &PgPool, entity_ids: &[Uuid]) -> Result<(),
     let mut unique_entity_ids = entity_ids.to_vec();
     unique_entity_ids.sort_unstable();
     unique_entity_ids.dedup();
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1::uuid[])")
-        .bind(&unique_entity_ids)
-        .fetch_one(pool)
-        .await
-        .map_err(db_err)?;
+    let count: i64 =
+        crate::db::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1::uuid[])")
+            .bind(&unique_entity_ids)
+            .fetch_one(pool)
+            .await
+            .map_err(db_err)?;
     if count != unique_entity_ids.len() as i64 {
         return Err(AppError::bad_request("invalid member reference"));
     }
@@ -2935,8 +2937,7 @@ async fn validate_composite_children(
         return Err(AppError::bad_request("role cannot include itself"));
     }
 
-    use sqlx::Row;
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT r.id, r.tenant_id,
                   EXISTS (SELECT 1 FROM effective_role_actions() rc WHERE rc.role_id = r.id) AS has_capabilities,
                   FALSE AS has_children
@@ -3059,7 +3060,7 @@ async fn validate_role_scope(
                 | ScopeKind::Object => {}
             }
             let group_tenant_id: Option<Uuid> =
-                sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = $1")
+                crate::db::query_scalar("SELECT tenant_id FROM groups WHERE id = $1")
                     .bind(group_id)
                     .fetch_optional(pool)
                     .await
@@ -3190,8 +3191,7 @@ async fn validate_capabilities_against_target_on_connection(
     unique_capability_ids.sort_unstable();
     unique_capability_ids.dedup();
 
-    use sqlx::Row;
-    let rows = sqlx::query("SELECT id, name FROM actions WHERE id = ANY($1::uuid[])")
+    let rows = crate::db::query("SELECT id, name FROM actions WHERE id = ANY($1::uuid[])")
         .bind(&unique_capability_ids)
         .fetch_all(&mut *connection)
         .await
@@ -3220,7 +3220,7 @@ async fn validate_capabilities_against_target_on_connection(
         return Ok(());
     };
 
-    let invalid_rows = sqlx::query(
+    let invalid_rows = crate::db::query(
         r#"SELECT c.name
            FROM actions c
            WHERE c.id = ANY($1::uuid[])
@@ -3322,9 +3322,9 @@ pub(crate) async fn update_role_in_tx(
     req: UpdateRole,
 ) -> Result<Role, AppError> {
     let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -3332,7 +3332,7 @@ pub(crate) async fn update_role_in_tx(
     };
     crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
-    let role = sqlx::query_as::<_, Role>(
+    let role = crate::db::query_as::<Role>(
         r#"UPDATE roles
            SET name        = COALESCE($2, name),
                description = COALESCE($3, description),
@@ -3344,7 +3344,7 @@ pub(crate) async fn update_role_in_tx(
     .bind(id)
     .bind(req.name)
     .bind(req.description)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("role {id} not found")),
@@ -3410,9 +3410,9 @@ pub(crate) async fn delete_role_in_tx(
     deleted_by: Option<Uuid>,
 ) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -3420,23 +3420,23 @@ pub(crate) async fn delete_role_in_tx(
     };
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
-    let live: bool = sqlx::query_scalar(
+    let live: bool = crate::db::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM roles WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     if !live {
         return Err(AppError::not_found(format!("role {id} not found")));
     }
-    let result = sqlx::query(
+    let result = crate::db::query(
         "UPDATE roles SET deleted_at = now(), deleted_by = $2
          WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .bind(deleted_by)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -3508,12 +3508,13 @@ pub(crate) async fn restore_role_in_tx(
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     let _ = restored_by;
-    let expected_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NOT NULL")
-            .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
-            .await
-            .map_err(db_err)?;
+    let expected_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
+        "SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(tx.exec())
+    .await
+    .map_err(db_err)?;
     let Some(expected_tenant_id) = expected_tenant_id else {
         return Err(AppError::not_found(format!(
             "no soft-deleted role {id} to restore"
@@ -3521,7 +3522,7 @@ pub(crate) async fn restore_role_in_tx(
     };
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &[expected_tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
-    let tenant_info: Option<(Option<Uuid>, bool)> = sqlx::query_as(
+    let tenant_info: Option<(Option<Uuid>, bool)> = crate::db::query_as(
         "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
          FROM roles r
          LEFT JOIN tenants t ON t.id = r.tenant_id
@@ -3531,7 +3532,7 @@ pub(crate) async fn restore_role_in_tx(
     )
     .bind(id)
     .bind(expected_tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let (tenant_id, _is_tenant_deleted) = match tenant_info {
@@ -3548,12 +3549,12 @@ pub(crate) async fn restore_role_in_tx(
         Some((t_id, false)) => (t_id, false),
     };
 
-    sqlx::query(
+    crate::db::query(
         "UPDATE roles SET deleted_at = NULL, deleted_by = NULL
          WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(restore_conflict)?;
 
@@ -3588,9 +3589,9 @@ pub async fn purge_role_with_audit(
         .map_err(db_err)?;
 
     let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(expected_tenant_id) = tenant_id else {
@@ -3601,26 +3602,26 @@ pub async fn purge_role_with_audit(
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", id).await?;
 
-    let candidate_block_ids: Vec<Uuid> = sqlx::query_scalar(
+    let candidate_block_ids: Vec<Uuid> = crate::db::query_scalar(
         "SELECT DISTINCT permission_block_id FROM role_permission_blocks WHERE role_id = $1",
     )
     .bind(id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
-    let purged_tenant_id: Option<Option<Uuid>> = sqlx::query_scalar(
+    let purged_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
         "DELETE FROM roles WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
     )
     .bind(id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let tenant_id = purged_tenant_id
         .ok_or_else(|| AppError::not_found(format!("no soft-deleted role {id} to purge")))?;
 
     if !candidate_block_ids.is_empty() {
-        sqlx::query(
+        crate::db::query(
             r#"DELETE FROM permission_blocks pb
                WHERE pb.id = ANY($1)
                  AND pb.managed_by IS DISTINCT FROM 'config'
@@ -3632,7 +3633,7 @@ pub async fn purge_role_with_audit(
                  )"#,
         )
         .bind(&candidate_block_ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -3753,7 +3754,7 @@ pub async fn remove_role_capability(
     // Blocks this role links that grant `cap_id`. Unlink them from this role and
     // GC any now-orphaned; blocks the same `cap_id` reaches through other roles
     // are untouched.
-    let block_ids: Vec<Uuid> = sqlx::query_scalar(
+    let block_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT rpb.permission_block_id
            FROM role_permission_blocks rpb
            JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
@@ -3761,7 +3762,7 @@ pub async fn remove_role_capability(
     )
     .bind(role_id)
     .bind(cap_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     unlink_role_blocks_and_gc(&mut tx, role_id, &block_ids).await?;
@@ -3789,7 +3790,7 @@ pub async fn create_capability_with_audit(
         .begin()
         .await
         .map_err(AppError::Database)?;
-    let capability = sqlx::query_as::<_, Capability>(
+    let capability = crate::db::query_as::<Capability>(
         r#"INSERT INTO actions (id, name, description)
            VALUES ($1, $2, $3)
            RETURNING id, name, description, created_at, updated_at"#,
@@ -3797,7 +3798,7 @@ pub async fn create_capability_with_audit(
     .bind(id)
     .bind(req.name)
     .bind(req.description)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -3822,7 +3823,7 @@ pub async fn create_capability_with_audit(
 }
 
 pub async fn get_capability(pool: &PgPool, id: Uuid) -> Result<Capability, AppError> {
-    sqlx::query_as::<_, Capability>(
+    crate::db::query_as::<Capability>(
         "SELECT id, name, description, created_at, updated_at, managed_by FROM actions WHERE id = $1",
     )
     .bind(id)
@@ -3841,7 +3842,7 @@ pub async fn list_capabilities(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
 
-    let items = sqlx::query_as::<_, Capability>(
+    let items = crate::db::query_as::<Capability>(
         r#"SELECT id, name, description, created_at, updated_at, managed_by FROM actions c
            WHERE (
                $1::text IS NULL
@@ -3863,7 +3864,7 @@ pub async fn list_capabilities(
     .await
     .map_err(db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*) FROM actions c
            WHERE (
                $1::text IS NULL
@@ -3889,7 +3890,7 @@ pub async fn capability_applicability(
     pool: &PgPool,
     capability_id: Uuid,
 ) -> Result<Vec<CapabilityApplicability>, AppError> {
-    sqlx::query_as::<_, CapabilityApplicability>(
+    crate::db::query_as::<CapabilityApplicability>(
         r#"SELECT object_kind, object_type, managed_by
            FROM action_applicability
            WHERE action_id = $1
@@ -3922,7 +3923,7 @@ pub async fn list_capability_applicability(
         .filter(|value| !value.is_empty());
     let action_pattern = action_name.as_ref().map(|value| format!("%{value}%"));
 
-    let items = sqlx::query_as::<_, CapabilityApplicabilityEntry>(
+    let items = crate::db::query_as::<CapabilityApplicabilityEntry>(
         r#"SELECT c.id AS capability_id,
                   c.name AS capability_name,
                   c.description,
@@ -3947,7 +3948,7 @@ pub async fn list_capability_applicability(
     .await
     .map_err(db_err)?;
 
-    let total = sqlx::query_scalar(
+    let total = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM action_applicability ca
            JOIN actions c ON c.id = ca.action_id
@@ -3969,7 +3970,7 @@ pub async fn get_action_assignment_rule(
     pool: &PgPool,
     id: Uuid,
 ) -> Result<ActionAssignmentRule, AppError> {
-    sqlx::query_as::<_, ActionAssignmentRule>(
+    crate::db::query_as::<ActionAssignmentRule>(
         r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
                   decision, is_absolute, created_at, managed_by
            FROM action_assignment_rules
@@ -3996,7 +3997,7 @@ pub async fn list_action_assignment_rules(
     let action_pattern = action_name.as_ref().map(|value| format!("%{value}%"));
     let object_type = normalize_optional_text(params.object_type);
 
-    let items = sqlx::query_as::<_, ActionAssignmentRule>(
+    let items = crate::db::query_as::<ActionAssignmentRule>(
         r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
                   decision, is_absolute, created_at, managed_by
            FROM action_assignment_rules
@@ -4021,7 +4022,7 @@ pub async fn list_action_assignment_rules(
     .await
     .map_err(db_err)?;
 
-    let total = sqlx::query_scalar(
+    let total = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM action_assignment_rules
            WHERE tenant_id IS NOT DISTINCT FROM $1
@@ -4064,7 +4065,7 @@ pub async fn create_action_assignment_rule_with_audit(
     let action_name = req.action_name.clone();
     let object_type = req.object_type.clone();
 
-    let duplicate: bool = sqlx::query_scalar(
+    let duplicate: bool = crate::db::query_scalar(
         r#"SELECT EXISTS (
              SELECT 1
              FROM action_assignment_rules
@@ -4091,7 +4092,7 @@ pub async fn create_action_assignment_rule_with_audit(
         .begin()
         .await
         .map_err(db_err)?;
-    let rule = sqlx::query_as::<_, ActionAssignmentRule>(
+    let rule = crate::db::query_as::<ActionAssignmentRule>(
         r#"INSERT INTO action_assignment_rules
              (tenant_id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -4105,7 +4106,7 @@ pub async fn create_action_assignment_rule_with_audit(
     .bind(object_type)
     .bind(req.decision)
     .bind(req.is_absolute)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     let event = crate::audit::AuditEvent {
@@ -4165,7 +4166,7 @@ pub(crate) async fn validate_and_normalize_action_assignment_rule_on_connection(
     validate_rule_object_type(req.object_kind, req.object_type.as_deref())?;
 
     let action_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE name = $1)")
+        crate::db::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE name = $1)")
             .bind(&req.action_name)
             .fetch_one(connection)
             .await
@@ -4199,9 +4200,9 @@ pub async fn delete_action_assignment_rule_with_audit(
         .await
         .map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM action_assignment_rules WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM action_assignment_rules WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -4212,14 +4213,14 @@ pub async fn delete_action_assignment_rule_with_audit(
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "action_assignment_rules", id)
         .await?;
-    let rule = sqlx::query_as::<_, ActionAssignmentRule>(
+    let rule = crate::db::query_as::<ActionAssignmentRule>(
         r#"DELETE FROM action_assignment_rules
            WHERE id = $1
            RETURNING id, tenant_id, entity_kind, action_name, object_kind, object_type,
                      decision, is_absolute, created_at"#,
     )
     .bind(id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
@@ -4255,9 +4256,9 @@ async fn ensure_not_config_managed_applicability_in_tx(
     object_type: Option<&str>,
 ) -> Result<(), AppError> {
     let action_locked: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM actions WHERE id = $1 FOR UPDATE")
+        crate::db::query_scalar("SELECT id FROM actions WHERE id = $1 FOR UPDATE")
             .bind(capability_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     if action_locked.is_none() {
@@ -4265,7 +4266,7 @@ async fn ensure_not_config_managed_applicability_in_tx(
             "capability {capability_id} not found"
         )));
     }
-    let managed_by: Option<Option<String>> = sqlx::query_scalar(
+    let managed_by: Option<Option<String>> = crate::db::query_scalar(
         r#"SELECT managed_by FROM action_applicability
            WHERE action_id = $1
              AND object_kind = $2
@@ -4275,7 +4276,7 @@ async fn ensure_not_config_managed_applicability_in_tx(
     .bind(capability_id)
     .bind(object_kind)
     .bind(object_type)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     match managed_by {
@@ -4318,9 +4319,9 @@ pub async fn add_capability_applicability_with_audit(
         .map_err(AppError::Database)?;
 
     let exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
+        crate::db::query_scalar::<bool>("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
             .bind(capability_id)
-            .fetch_one(tx.as_postgres_mut())
+            .fetch_one(tx.exec())
             .await
             .map_err(db_err)?;
     if !exists {
@@ -4329,7 +4330,7 @@ pub async fn add_capability_applicability_with_audit(
         )));
     }
 
-    let insert = sqlx::query(
+    let insert = crate::db::query(
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            VALUES ($1, $2, $3)
            ON CONFLICT DO NOTHING"#,
@@ -4337,11 +4338,11 @@ pub async fn add_capability_applicability_with_audit(
     .bind(capability_id)
     .bind(&object_kind)
     .bind(&object_type)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
-    let entry = sqlx::query_as::<_, CapabilityApplicabilityEntry>(
+    let entry = crate::db::query_as::<CapabilityApplicabilityEntry>(
         r#"SELECT c.id AS capability_id,
                   c.name AS capability_name,
                   c.description,
@@ -4358,7 +4359,7 @@ pub async fn add_capability_applicability_with_audit(
     .bind(capability_id)
     .bind(&object_kind)
     .bind(&object_type)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -4418,7 +4419,7 @@ pub async fn remove_capability_applicability_with_audit(
         object_type.as_deref(),
     )
     .await?;
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"DELETE FROM action_applicability
            WHERE action_id = $1
              AND object_kind = $2
@@ -4427,7 +4428,7 @@ pub async fn remove_capability_applicability_with_audit(
     .bind(capability_id)
     .bind(&object_kind)
     .bind(&object_type)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -4494,7 +4495,7 @@ pub async fn update_capability_with_audit(
         .await
         .map_err(AppError::Database)?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "actions", id).await?;
-    let updated = sqlx::query_as::<_, Capability>(
+    let updated = crate::db::query_as::<Capability>(
         r#"UPDATE actions
            SET name          = COALESCE($2, name),
                description   = COALESCE($3, description),
@@ -4505,7 +4506,7 @@ pub async fn update_capability_with_audit(
     .bind(id)
     .bind(req.name)
     .bind(req.description)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("capability {id} not found")),
@@ -4539,12 +4540,12 @@ async fn replace_capability_applicability_in_tx(
 ) -> Result<(), AppError> {
     // Refuse to blow away applicability rows that were declared in the
     // bootstrap config, even when the parent capability itself is API-managed.
-    let has_managed: bool = sqlx::query_scalar(
+    let has_managed: bool = crate::db::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM action_applicability
                         WHERE action_id = $1 AND managed_by = 'config')",
     )
     .bind(capability_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     if has_managed {
@@ -4554,9 +4555,9 @@ async fn replace_capability_applicability_in_tx(
         ));
     }
 
-    sqlx::query("DELETE FROM action_applicability WHERE action_id = $1")
+    crate::db::query("DELETE FROM action_applicability WHERE action_id = $1")
         .bind(capability_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
@@ -4565,7 +4566,7 @@ async fn replace_capability_applicability_in_tx(
         if !seen.insert((item.object_kind.as_str(), item.object_type.as_deref())) {
             continue;
         }
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
                VALUES ($1, $2, $3)
                ON CONFLICT DO NOTHING"#,
@@ -4573,7 +4574,7 @@ async fn replace_capability_applicability_in_tx(
         .bind(capability_id)
         .bind(&item.object_kind)
         .bind(&item.object_type)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -4600,7 +4601,7 @@ pub async fn delete_capability_with_audit(
     // concurrent bootstrap cannot add and stamp a declarative block link after
     // our check but before the cascading delete.
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "actions", id).await?;
-    let config_owned_link: bool = sqlx::query_scalar(
+    let config_owned_link: bool = crate::db::query_scalar(
         r#"SELECT EXISTS (
                SELECT 1
                FROM permission_block_actions pba
@@ -4609,7 +4610,7 @@ pub async fn delete_capability_with_audit(
            )"#,
     )
     .bind(id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     if config_owned_link {
@@ -4617,9 +4618,9 @@ pub async fn delete_capability_with_audit(
             "capability is linked to a permission block managed by the bootstrap config file and cannot be deleted via the API",
         ));
     }
-    let result = sqlx::query("DELETE FROM actions WHERE id = $1")
+    let result = crate::db::query("DELETE FROM actions WHERE id = $1")
         .bind(id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -4659,20 +4660,20 @@ async fn read_live_subject_tenant_id(
     subject_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
     let subject_tenant_id: Option<Option<Uuid>> = match subject_kind {
-        SubjectKind::Entity => sqlx::query_scalar(
+        SubjectKind::Entity => crate::db::query_scalar(
             r#"SELECT tenant_id FROM entities
                    WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
         )
         .bind(subject_id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)?,
-        SubjectKind::Group => sqlx::query_scalar(
+        SubjectKind::Group => crate::db::query_scalar(
             r#"SELECT tenant_id FROM principal_groups
                    WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
         )
         .bind(subject_id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)?,
     };
@@ -4715,10 +4716,10 @@ async fn lock_live_subject_row(
              AND deleted_at IS NULL
            FOR UPDATE"#
     );
-    let locked: Option<Uuid> = sqlx::query_scalar(&sql)
+    let locked: Option<Uuid> = crate::db::query_scalar(&sql)
         .bind(subject_id)
         .bind(expected_tenant_id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)?;
     if locked.is_none() {
@@ -4816,7 +4817,7 @@ pub async fn create_policy(
                     "role assignment supports only allow effect without conditions; use direct policy for deny or conditional grants",
                 ));
             }
-            sqlx::query(
+            crate::db::query(
                 r#"INSERT INTO role_assignments
                      (id, tenant_id, subject_kind, subject_id, role_id)
                    VALUES ($1, $2, $3, $4, $5)"#,
@@ -4826,7 +4827,7 @@ pub async fn create_policy(
             .bind(req.subject_kind)
             .bind(req.subject_id)
             .bind(req.grant_id)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
         }
@@ -4836,7 +4837,7 @@ pub async fn create_policy(
                 &req.scope_kind,
                 req.scope_ref.as_deref(),
             )?;
-            let permission_block_id: Uuid = sqlx::query_scalar(
+            let permission_block_id: Uuid = crate::db::query_scalar(
                 r#"INSERT INTO permission_blocks
                      (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -4850,19 +4851,19 @@ pub async fn create_policy(
             .bind(block.group_id)
             .bind(req.effect)
             .bind(conditions)
-            .fetch_one(tx.as_postgres_mut())
+            .fetch_one(tx.exec())
             .await
             .map_err(db_err)?;
-            sqlx::query(
+            crate::db::query(
                 r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                    VALUES ($1, $2)"#,
             )
             .bind(permission_block_id)
             .bind(req.grant_id)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
-            sqlx::query(
+            crate::db::query(
                 r#"INSERT INTO direct_policies
                      (id, tenant_id, subject_kind, subject_id, permission_block_id)
                    VALUES ($1, $2, $3, $4, $5)"#,
@@ -4872,7 +4873,7 @@ pub async fn create_policy(
             .bind(req.subject_kind)
             .bind(req.subject_id)
             .bind(permission_block_id)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
         }
@@ -4892,7 +4893,7 @@ async fn sync_tenant_membership_for_policy(
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
            SELECT $1, $2, 'active'
            WHERE EXISTS (
@@ -4907,7 +4908,7 @@ async fn sync_tenant_membership_for_policy(
     )
     .bind(tenant_id)
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -4915,7 +4916,7 @@ async fn sync_tenant_membership_for_policy(
 }
 
 pub async fn get_policy(pool: &PgPool, id: Uuid) -> Result<PolicyBinding, AppError> {
-    sqlx::query_as::<_, PolicyBinding>(
+    crate::db::query_as::<PolicyBinding>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions, created_at
            FROM effective_access_edges() WHERE id = $1"#,
     )
@@ -4977,7 +4978,7 @@ pub(crate) async fn create_role_assignment_in_tx(
     // Validation must run on `tx` for that to hold at all — the pool variant
     // would neither see the locked state nor respect the locks.
     validate_role_assignment_in_tx(tx, &req).await?;
-    let assignment = sqlx::query_as::<_, RoleAssignment>(
+    let assignment = crate::db::query_as::<RoleAssignment>(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, $2, $3, $4)
@@ -4987,7 +4988,7 @@ pub(crate) async fn create_role_assignment_in_tx(
     .bind(req.subject_kind)
     .bind(req.subject_id)
     .bind(req.role_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -5019,7 +5020,7 @@ pub(crate) async fn create_role_assignment_if_missing_in_tx(
 ) -> Result<bool, AppError> {
     prepare_role_assignment_in_tx(tx, req).await?;
     validate_role_assignment_in_tx(tx, req).await?;
-    let inserted = sqlx::query(
+    let inserted = crate::db::query(
         r#"INSERT INTO role_assignments
              (tenant_id, subject_kind, subject_id, role_id)
            SELECT $1, $2, $3, $4
@@ -5035,7 +5036,7 @@ pub(crate) async fn create_role_assignment_if_missing_in_tx(
     .bind(req.subject_kind.clone())
     .bind(req.subject_id)
     .bind(req.role_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?
     .rows_affected();
@@ -5056,7 +5057,7 @@ pub async fn list_role_assignments(
 ) -> Result<RoleAssignmentList, AppError> {
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
-    let items = sqlx::query_as::<_, RoleAssignment>(
+    let items = crate::db::query_as::<RoleAssignment>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at, managed_by
            FROM role_assignments
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
@@ -5081,7 +5082,7 @@ pub async fn list_role_assignments(
     .await
     .map_err(db_err)?;
 
-    let total = sqlx::query_scalar(
+    let total = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM role_assignments
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
@@ -5146,7 +5147,7 @@ pub async fn list_role_assignments_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as::<_, RoleAssignment>(
+        crate::db::query_as::<RoleAssignment>(
             r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at, managed_by
                FROM role_assignments
                WHERE id = ANY($1::uuid[])
@@ -5164,7 +5165,7 @@ pub async fn list_role_assignments_authorized(
 }
 
 pub async fn get_role_assignment(pool: &PgPool, id: Uuid) -> Result<RoleAssignment, AppError> {
-    sqlx::query_as::<_, RoleAssignment>(
+    crate::db::query_as::<RoleAssignment>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
            FROM role_assignments
            WHERE id = $1"#,
@@ -5219,9 +5220,9 @@ pub(crate) async fn delete_role_assignment_in_tx(
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -5233,9 +5234,9 @@ pub(crate) async fn delete_role_assignment_in_tx(
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "role_assignments", id).await?;
     // A role assignment is a 'policy' protected object; the policy-object cleanup trigger
     // sweeps the permission blocks targeting it when this row is deleted.
-    let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
+    let result = crate::db::query("DELETE FROM role_assignments WHERE id = $1")
         .bind(id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -5294,9 +5295,9 @@ pub(crate) async fn create_direct_policy_in_tx(
     validate_direct_policy_in_tx(tx, &req).await?;
     crate::guardrails::validate_direct_policy(tx.as_postgres_mut(), &req).await?;
     let block_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
+        crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
             .bind(req.permission_block_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     if block_tenant_id != Some(req.tenant_id) {
@@ -5304,7 +5305,7 @@ pub(crate) async fn create_direct_policy_in_tx(
             "direct policy references a missing or cross-tenant permission block",
         ));
     }
-    let policy = sqlx::query_as::<_, DirectPolicy>(
+    let policy = crate::db::query_as::<DirectPolicy>(
         r#"INSERT INTO direct_policies
              (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, $2, $3, $4)
@@ -5314,7 +5315,7 @@ pub(crate) async fn create_direct_policy_in_tx(
     .bind(req.subject_kind)
     .bind(req.subject_id)
     .bind(req.permission_block_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -5496,7 +5497,7 @@ pub async fn list_direct_policies(
            ORDER BY created_at DESC
            LIMIT $8 OFFSET $9"#
     );
-    let items = sqlx::query_as::<_, DirectPolicy>(&items_sql)
+    let items = crate::db::query_as::<DirectPolicy>(&items_sql)
         .bind(params.tenant_id)
         .bind(params.subject_kind.clone())
         .bind(params.subject_id)
@@ -5524,7 +5525,7 @@ pub async fn list_direct_policies(
              )
              AND {DIRECT_POLICY_OBJECT_PREDICATE}"#
     );
-    let total = sqlx::query_scalar(&total_sql)
+    let total = crate::db::query_scalar(&total_sql)
         .bind(params.tenant_id)
         .bind(params.subject_kind)
         .bind(params.subject_id)
@@ -5604,7 +5605,7 @@ pub async fn list_direct_policies_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as::<_, DirectPolicy>(
+        crate::db::query_as::<DirectPolicy>(
             r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id,
                       created_at, managed_by
                FROM direct_policies
@@ -5623,7 +5624,7 @@ pub async fn list_direct_policies_authorized(
 }
 
 pub async fn get_direct_policy(pool: &PgPool, id: Uuid) -> Result<DirectPolicy, AppError> {
-    sqlx::query_as::<_, DirectPolicy>(
+    crate::db::query_as::<DirectPolicy>(
         r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
            FROM direct_policies
            WHERE id = $1"#,
@@ -5673,9 +5674,9 @@ pub(crate) async fn delete_direct_policy_in_tx(
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
     let policy_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = policy_tenant_id else {
@@ -5683,11 +5684,11 @@ pub(crate) async fn delete_direct_policy_in_tx(
     };
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "direct_policies", id).await?;
-    let block_id: Option<Uuid> = sqlx::query_scalar(
+    let block_id: Option<Uuid> = crate::db::query_scalar(
         "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
     )
     .bind(id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let Some(block_id) = block_id else {
@@ -5719,9 +5720,9 @@ pub(crate) async fn validate_role_assignment_in_tx(
     req: &CreateRoleAssignment,
 ) -> Result<(), AppError> {
     let role_tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
+        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
             .bind(req.role_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?
             .ok_or_else(|| AppError::bad_request("role assignment references unknown role"))?;
@@ -5746,9 +5747,9 @@ pub(crate) async fn validate_direct_policy_in_tx(
     req: &CreateDirectPolicy,
 ) -> Result<(), AppError> {
     let block_tenant_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
             .bind(req.permission_block_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?
             .ok_or_else(|| {
@@ -5770,16 +5771,16 @@ async fn validate_subject_boundary_in_tx(
 ) -> Result<(), AppError> {
     match subject_kind {
         SubjectKind::Entity => {
-            let entity_tenant_id: Option<Uuid> = sqlx::query_scalar(
+            let entity_tenant_id: Option<Uuid> = crate::db::query_scalar(
                 "SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL",
             )
             .bind(subject_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?
             .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
             if let Some(tenant_id) = tenant_id {
-                let member: bool = sqlx::query_scalar(
+                let member: bool = crate::db::query_scalar(
                     r#"SELECT EXISTS (
                          SELECT 1 FROM tenant_memberships
                          WHERE tenant_id = $1 AND entity_id = $2 AND status = 'active'
@@ -5787,7 +5788,7 @@ async fn validate_subject_boundary_in_tx(
                 )
                 .bind(tenant_id)
                 .bind(subject_id)
-                .fetch_one(tx.as_postgres_mut())
+                .fetch_one(tx.exec())
                 .await
                 .map_err(db_err)?;
                 if entity_tenant_id != Some(tenant_id) && !member {
@@ -5802,11 +5803,11 @@ async fn validate_subject_boundary_in_tx(
             }
         }
         SubjectKind::Group => {
-            let group_tenant_id: Option<Uuid> = sqlx::query_scalar(
+            let group_tenant_id: Option<Uuid> = crate::db::query_scalar(
                 "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
             )
             .bind(subject_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?
             .ok_or_else(|| {
@@ -5847,8 +5848,7 @@ pub async fn subject_role_assignments(
         }
     }
 
-    use sqlx::Row;
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT
              pb.id AS policy_id,
              pb.tenant_id AS policy_tenant_id,
@@ -5932,7 +5932,7 @@ pub async fn subject_role_assignments(
         })
         .collect::<Result<Vec<_>, AppError>>()?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM effective_access_edges() pb
            JOIN roles r ON pb.grant_kind = 'role' AND pb.grant_id = r.id
@@ -5969,19 +5969,19 @@ pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
         .await
         .map_err(db_err)?;
     let direct_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     if let Some(tenant_id) = direct_tenant_id {
         crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
         crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "direct_policies", id).await?;
-        let block_id: Uuid = sqlx::query_scalar(
+        let block_id: Uuid = crate::db::query_scalar(
             "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
         )
         .bind(id)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(db_err)?;
         // The block is shared: GC it only if removing this policy left it
@@ -5994,9 +5994,9 @@ pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     }
 
     let assignment_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
             .bind(id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = assignment_tenant_id else {
@@ -6004,9 +6004,9 @@ pub async fn delete_policy(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     };
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "role_assignments", id).await?;
-    let result = sqlx::query("DELETE FROM role_assignments WHERE id = $1")
+    let result = crate::db::query("DELETE FROM role_assignments WHERE id = $1")
         .bind(id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     debug_assert_eq!(result.rows_affected(), 1);
@@ -6259,7 +6259,7 @@ async fn authorized_entity_ids(
         .replace("__ORDER_BY__", order_by)
         .replace("__CEILING_CTE__", &ceiling_cte("$12"));
 
-    let rows = sqlx::query(&sql)
+    let rows = crate::db::query(&sql)
         .bind(params.subject_id)
         .bind(params.action)
         .bind(params.tenant_id)
@@ -6327,8 +6327,6 @@ pub async fn authorized_resource_kinds_with_ceiling(
     tenant_id: Option<Uuid>,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<Vec<String>, AppError> {
-    use sqlx::Row;
-
     let rows = authorized_resource_rows(
         pool,
         AuthorizedObjectIdsQuery {
@@ -6368,7 +6366,7 @@ async fn authorized_resource_rows(
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
     projection: AuthorizedResourceProjection,
-) -> Result<Vec<sqlx::postgres::PgRow>, AppError> {
+) -> Result<Vec<crate::db::Row>, AppError> {
     let limit = match projection {
         AuthorizedResourceProjection::Ids => params.limit.clamp(1, 500),
         AuthorizedResourceProjection::Kinds => 500,
@@ -6489,7 +6487,7 @@ async fn authorized_resource_rows(
         .replace("__SELECT__", &select_clause)
         .replace("__CEILING_CTE__", &ceiling_cte("$11"));
 
-    sqlx::query(&sql)
+    crate::db::query(&sql)
         .bind(params.subject_id)
         .bind(params.action)
         .bind(params.tenant_id)
@@ -6625,7 +6623,7 @@ async fn authorized_group_ids(
         .replace("__ORDER_BY__", order_by)
         .replace("__CEILING_CTE__", &ceiling_cte("$11"));
 
-    let rows = sqlx::query(&sql)
+    let rows = crate::db::query(&sql)
         .bind(params.subject_id)
         .bind(params.action)
         .bind(params.tenant_id)
@@ -6646,10 +6644,8 @@ async fn authorized_group_ids(
 }
 
 fn rows_to_authorized_object_ids(
-    rows: Vec<sqlx::postgres::PgRow>,
+    rows: Vec<crate::db::Row>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
-    use sqlx::Row;
-
     let mut total = 0;
     let mut ids = Vec::with_capacity(rows.len());
     for row in rows {
@@ -6666,7 +6662,7 @@ pub async fn audit_logs(
 ) -> Result<AuditLogResponse, AppError> {
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
-    let items = sqlx::query_as::<_, AuditLogItem>(
+    let items = crate::db::query_as::<AuditLogItem>(
         r#"SELECT id, actor_entity_id, tenant_id, target_kind, target_id, event, outcome, details, created_at
            FROM audit_logs
            WHERE ($1::uuid IS NULL OR actor_entity_id = $1)
@@ -6695,7 +6691,7 @@ pub async fn audit_logs(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM audit_logs
            WHERE ($1::uuid IS NULL OR actor_entity_id = $1)
@@ -6738,7 +6734,7 @@ pub async fn tenant_ids_for_action_on_object_kind(
     object_kind: &str,
 ) -> Result<Vec<Uuid>, AppError> {
     let Some(action_id): Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+        crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
             .bind(action_name)
             .fetch_optional(pool)
             .await
@@ -6800,10 +6796,9 @@ pub async fn orphan_policies(
     pool: &PgPool,
     params: AdminPageQuery,
 ) -> Result<OrphanPoliciesResponse, AppError> {
-    use sqlx::Row;
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"WITH orphaned AS (
              SELECT ra.id,
                     ra.tenant_id,
@@ -6855,7 +6850,7 @@ pub async fn orphan_policies(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"WITH orphaned AS (
              SELECT CASE
                       WHEN (ra.subject_kind = 'entity' AND e.id IS NULL)
@@ -6909,11 +6904,10 @@ pub async fn expiring_credentials(
     pool: &PgPool,
     params: ExpiringCredentialsQuery,
 ) -> Result<ExpiringCredentialsResponse, AppError> {
-    use sqlx::Row;
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
     let days = params.days.max(0);
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT c.id, c.entity_id, e.name AS entity_name, e.kind AS entity_kind,
                   c.kind, c.status, c.expires_at, c.created_at
            FROM credentials c
@@ -6934,7 +6928,7 @@ pub async fn expiring_credentials(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM credentials c
            WHERE c.status = 'active'
@@ -7003,6 +6997,7 @@ pub(crate) struct AuthzObjectRecord {
     /// a join projecting the group would multiply rows and `fetch_optional`
     /// would then keep one arbitrary group, silently dropping the grants held
     /// through the rest.
+    #[sqlx(try_from = "crate::db::UuidList")]
     pub(crate) parent_group_ids: Vec<Uuid>,
 }
 
@@ -7010,7 +7005,7 @@ pub(crate) async fn load_authz_subject(
     pool: &PgPool,
     entity_id: Uuid,
 ) -> Result<Option<AuthzSubjectRecord>, AppError> {
-    sqlx::query_as::<_, AuthzSubjectRecord>(
+    crate::db::query_as::<AuthzSubjectRecord>(
         r#"SELECT id, name, kind, tenant_id, status, attributes
            FROM entities
            WHERE id = $1 AND deleted_at IS NULL"#,
@@ -7025,7 +7020,7 @@ pub(crate) async fn load_authz_tenant(
     pool: &PgPool,
     tenant_id: Uuid,
 ) -> Result<Option<AuthzTenantRecord>, AppError> {
-    sqlx::query_as::<_, AuthzTenantRecord>(
+    crate::db::query_as::<AuthzTenantRecord>(
         r#"SELECT id, name, status, deleted_at, attributes
            FROM tenants
            WHERE id = $1"#,
@@ -7040,7 +7035,7 @@ pub(crate) async fn load_authz_resource(
     pool: &PgPool,
     resource_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    sqlx::query_as::<_, AuthzObjectRecord>(
+    crate::db::query_as::<AuthzObjectRecord>(
         r#"SELECT r.id, r.kind, r.name, r.tenant_id, r.attributes,
                   COALESCE((SELECT array_agg(grp.group_id)
                             FROM group_resource_parents grp
@@ -7058,7 +7053,7 @@ pub(crate) async fn load_authz_entity_object(
     pool: &PgPool,
     entity_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    sqlx::query_as::<_, AuthzObjectRecord>(
+    crate::db::query_as::<AuthzObjectRecord>(
         r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.attributes,
                   COALESCE((SELECT array_agg(gep.group_id)
                             FROM group_entity_parents gep
@@ -7079,7 +7074,7 @@ pub(crate) async fn load_authz_group_object(
     // The group hierarchy stays a tree (`PRIMARY KEY (child_id)`), so this is 0
     // or 1 parent — carried as an array only so every protected object presents
     // the same shape to the scope predicate.
-    sqlx::query_as::<_, AuthzObjectRecord>(
+    crate::db::query_as::<AuthzObjectRecord>(
         r#"SELECT g.id, 'group'::text AS kind, g.name, g.tenant_id, g.attributes,
                   CASE WHEN gh.parent_id IS NULL THEN '{}'::uuid[] ELSE ARRAY[gh.parent_id] END
                       AS parent_group_ids
@@ -7097,7 +7092,7 @@ pub(crate) async fn load_authz_credential_object(
     pool: &PgPool,
     credential_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    sqlx::query_as::<_, AuthzObjectRecord>(
+    crate::db::query_as::<AuthzObjectRecord>(
         r#"SELECT c.id, c.kind, c.identifier AS name, e.tenant_id,
                   c.metadata AS attributes, '{}'::uuid[] AS parent_group_ids
            FROM credentials c
@@ -7120,7 +7115,7 @@ pub(crate) async fn group_ancestor_ids(
     if group_ids.is_empty() {
         return Ok(Vec::new());
     }
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"WITH RECURSIVE ancestors(id) AS (
                SELECT parent_id FROM group_hierarchy WHERE child_id = ANY($1::uuid[])
                UNION
@@ -7146,11 +7141,10 @@ pub async fn effective_grants_for_subject(
     pool: &PgPool,
     entity_id: Uuid,
 ) -> Result<Vec<EffectiveGrant>, AppError> {
-    use sqlx::Row;
     // Canonical grant expansion lives in the `subject_effective_grants` SQL
     // function, shared by this PDP path and every authorized
     // listing reader so scope/effect/conditions semantics cannot drift.
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT assignment_id, block_id, role_id, role_name, via, tenant_boundary,
                   scope_kind, scope_ref, capability_id, effect, conditions
            FROM subject_effective_grants($1)"#,
@@ -7263,9 +7257,9 @@ async fn lock_group_tenant_rows(
     group_ids: &[Uuid],
 ) -> Result<(), AppError> {
     let tenant_ids: Vec<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM groups WHERE id = ANY($1::uuid[])")
+        crate::db::query_scalar("SELECT tenant_id FROM groups WHERE id = ANY($1::uuid[])")
             .bind(group_ids)
-            .fetch_all(tx.as_postgres_mut())
+            .fetch_all(tx.exec())
             .await
             .map_err(db_err)?;
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids).await
@@ -7281,7 +7275,7 @@ async fn lock_group_closures_after_tenant_rows(
     // and the locks below.
     lock_group_hierarchy(tx).await?;
 
-    let mut closure: Vec<Uuid> = sqlx::query_scalar(
+    let mut closure: Vec<Uuid> = crate::db::query_scalar(
         r#"WITH RECURSIVE target_groups(id) AS (
                SELECT id FROM UNNEST($1::uuid[]) AS root(id)
                UNION
@@ -7292,7 +7286,7 @@ async fn lock_group_closures_after_tenant_rows(
            SELECT id FROM target_groups"#,
     )
     .bind(root_group_ids)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     closure.sort_unstable();
@@ -7303,21 +7297,21 @@ async fn lock_group_closures_after_tenant_rows(
     // mutation already holding an object row. Object-only roots still need
     // this lock so their hierarchy cannot be changed while the prepared
     // closure is in use.
-    sqlx::query("SELECT id FROM object_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+    crate::db::query("SELECT id FROM object_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
         .bind(&closure)
-        .fetch_all(tx.as_postgres_mut())
+        .fetch_all(tx.exec())
         .await
         .map_err(db_err)?;
 
-    sqlx::query("SELECT id FROM principal_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+    crate::db::query("SELECT id FROM principal_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
         .bind(&closure)
-        .fetch_all(tx.as_postgres_mut())
+        .fetch_all(tx.exec())
         .await
         .map_err(db_err)?;
 
-    sqlx::query_scalar("SELECT DISTINCT entity_id FROM group_members WHERE group_id = ANY($1)")
+    crate::db::query_scalar("SELECT DISTINCT entity_id FROM group_members WHERE group_id = ANY($1)")
         .bind(&closure)
-        .fetch_all(tx.as_postgres_mut())
+        .fetch_all(tx.exec())
         .await
         .map_err(db_err)
 }
@@ -7326,7 +7320,7 @@ pub(crate) async fn load_authz_role_object(
     pool: &PgPool,
     role_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    sqlx::query_as::<_, AuthzObjectRecord>(
+    crate::db::query_as::<AuthzObjectRecord>(
         r#"SELECT r.id, 'role'::text AS kind, r.name, r.tenant_id,
                   '{}'::jsonb AS attributes, '{}'::uuid[] AS parent_group_ids
            FROM roles r
@@ -7346,7 +7340,7 @@ pub(crate) async fn load_authz_policy_object(
     pool: &PgPool,
     policy_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    sqlx::query_as::<_, AuthzObjectRecord>(
+    crate::db::query_as::<AuthzObjectRecord>(
         r#"SELECT registry.id, 'policy'::text AS kind, NULL::text AS name,
                   policy.tenant_id, '{}'::jsonb AS attributes,
                   '{}'::uuid[] AS parent_group_ids
@@ -7372,7 +7366,7 @@ pub(crate) async fn load_authz_api_endpoint_object(
     pool: &PgPool,
     endpoint_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    sqlx::query_as::<_, AuthzObjectRecord>(
+    crate::db::query_as::<AuthzObjectRecord>(
         r#"SELECT endpoint.id, 'api_endpoint'::text AS kind, endpoint.name,
                   endpoint.tenant_id, '{}'::jsonb AS attributes,
                   '{}'::uuid[] AS parent_group_ids
@@ -7394,8 +7388,8 @@ pub(crate) async fn load_authz_api_endpoint_object(
 /// create or delete the hierarchy row, leaving no row lock for a reader to
 /// wait on.
 pub async fn lock_group_hierarchy(tx: &mut DbTransaction<'_>) -> Result<(), AppError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))")
-        .execute(tx.as_postgres_mut())
+    crate::db::query("SELECT pg_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))")
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     Ok(())
@@ -7441,9 +7435,9 @@ pub async fn lock_role_and_collect_grants_keys(
     role_id: Uuid,
 ) -> Result<Vec<String>, AppError> {
     let role_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
             .bind(role_id)
-            .fetch_optional(tx.as_postgres_mut())
+            .fetch_optional(tx.exec())
             .await
             .map_err(db_err)?;
     let Some(role_tenant_id) = role_tenant_id else {
@@ -7455,9 +7449,9 @@ pub async fn lock_role_and_collect_grants_keys(
         // whether its tenant state permits restoration. This row lock is only
         // for the canonical tenant -> role order.
         let tenant_locked: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+            crate::db::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
                 .bind(tenant_id)
-                .fetch_optional(tx.as_postgres_mut())
+                .fetch_optional(tx.exec())
                 .await
                 .map_err(db_err)?;
         if tenant_locked.is_none() {
@@ -7466,32 +7460,32 @@ pub async fn lock_role_and_collect_grants_keys(
             )));
         }
     }
-    let locked: Option<Uuid> = sqlx::query_scalar(
+    let locked: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT id FROM roles
            WHERE id = $1 AND tenant_id IS NOT DISTINCT FROM $2
            FOR UPDATE"#,
     )
     .bind(role_id)
     .bind(role_tenant_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     if locked.is_none() {
         return Err(AppError::not_found(format!("role {role_id} not found")));
     }
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", role_id).await?;
-    let entity_subject_ids: Vec<Uuid> = sqlx::query_scalar(
+    let entity_subject_ids: Vec<Uuid> = crate::db::query_scalar(
         "SELECT subject_id FROM role_assignments WHERE role_id = $1 AND subject_kind = 'entity'",
     )
     .bind(role_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
-    let group_subject_ids: Vec<Uuid> = sqlx::query_scalar(
+    let group_subject_ids: Vec<Uuid> = crate::db::query_scalar(
         "SELECT subject_id FROM role_assignments WHERE role_id = $1 AND subject_kind = 'group'",
     )
     .bind(role_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
     let mut member_ids = lock_group_closures_and_collect_member_ids(tx, &group_subject_ids).await?;
@@ -7539,7 +7533,7 @@ pub async fn find_capability_ids_by_name(
     object_kind: &str,
     object_type: &str,
 ) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"SELECT c.id
            FROM actions c
            JOIN action_applicability ca ON ca.action_id = c.id

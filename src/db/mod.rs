@@ -2,30 +2,44 @@ use std::time::Duration;
 
 use sqlx::{
     migrate::MigrateError,
+    pool::PoolConnection,
     postgres::{PgConnectOptions, PgPoolOptions},
-    Acquire, PgConnection, PgPool, Postgres, Transaction,
+    Acquire, PgConnection, PgPool, Postgres, Sqlite, Transaction,
 };
 
 use crate::config::DbPoolConfig;
+
+mod arg;
+mod query;
+pub mod sqlite;
+pub mod translate;
+
+pub use arg::{enum_text, Arg, ArgKind, DbArg, TextList, UuidList};
+pub use query::{
+    query, query_as, query_scalar, DbRow, DbScalar, ExecResult, IntoTarget, Query, QueryAs,
+    QueryBuilder, QueryScalar, Row, Target,
+};
+pub use sqlite::SqliteDb;
 
 /// Identifies which storage backend a [`Database`] is backed by. `DATABASE_URL`'s
 /// scheme selects this at startup (see [`classify_url`]); every backend-specific
 /// pool/transaction type stays behind the [`Database`]/[`DbTransaction`] façade so
 /// domain and transport code never names a concrete SQLx backend type directly.
 ///
-/// Only `Postgres` is connectable today — adding SQLite (tracked in
-/// `product-docs/development/database-backends/`) is additive: a new variant here,
-/// a new `Database`/`DbTransaction` arm, and a `storage/sqlite` adapter, with no
-/// change to this type's callers.
+/// Both backends are first-class: PostgreSQL for multi-replica and high-write
+/// deployments, SQLite for a single local process (see
+/// `product-docs/development/database-backends/`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseKind {
     Postgres,
+    Sqlite,
 }
 
 impl DatabaseKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             DatabaseKind::Postgres => "postgres",
+            DatabaseKind::Sqlite => "sqlite",
         }
     }
 }
@@ -42,13 +56,13 @@ impl std::fmt::Display for DatabaseKind {
 pub fn classify_url(url: &str) -> anyhow::Result<DatabaseKind> {
     if url.starts_with("postgres://") || url.starts_with("postgresql://") {
         Ok(DatabaseKind::Postgres)
-    } else if url.starts_with("sqlite://") || url.starts_with("sqlite:") {
-        anyhow::bail!(
-            "DATABASE_URL scheme 'sqlite' is not supported by this build yet; \
-             use postgres:// or postgresql://"
-        )
+    } else if url.starts_with("sqlite://") || url == "sqlite::memory:" {
+        Ok(DatabaseKind::Sqlite)
     } else {
-        anyhow::bail!("unsupported DATABASE_URL scheme; expected postgres:// or postgresql://")
+        anyhow::bail!(
+            "unsupported DATABASE_URL scheme; expected postgres://, postgresql://, \
+             sqlite://<path>, or sqlite::memory:"
+        )
     }
 }
 
@@ -85,6 +99,9 @@ pub struct DatabaseLocation {
 
 impl std::fmt::Display for DatabaseLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.kind == DatabaseKind::Sqlite {
+            return write!(f, "sqlite:{}", self.host);
+        }
         match self.port {
             Some(port) => write!(
                 f,
@@ -110,6 +127,19 @@ pub fn location(url: &str) -> anyhow::Result<DatabaseLocation> {
                 database: opts.get_database().unwrap_or_default().to_string(),
             })
         }
+        DatabaseKind::Sqlite => {
+            // Category only: a file path is not an operator-safe log field.
+            let category = match sqlite::parse_location(url)? {
+                sqlite::SqliteLocation::File(_) => "file",
+                sqlite::SqliteLocation::Memory => "memory",
+            };
+            Ok(DatabaseLocation {
+                kind: DatabaseKind::Sqlite,
+                host: category.to_string(),
+                port: None,
+                database: String::new(),
+            })
+        }
     }
 }
 
@@ -123,6 +153,7 @@ pub fn location(url: &str) -> anyhow::Result<DatabaseLocation> {
 #[derive(Clone)]
 pub enum Database {
     Postgres(PgPool),
+    Sqlite(SqliteDb),
 }
 
 impl Database {
@@ -132,12 +163,14 @@ impl Database {
     pub async fn connect(url: &str, cfg: &DbPoolConfig) -> anyhow::Result<Self> {
         match classify_url(url)? {
             DatabaseKind::Postgres => Ok(Database::Postgres(create_pool(url, cfg).await?)),
+            DatabaseKind::Sqlite => Ok(Database::Sqlite(sqlite::connect(url, cfg).await?)),
         }
     }
 
     pub fn kind(&self) -> DatabaseKind {
         match self {
             Database::Postgres(_) => DatabaseKind::Postgres,
+            Database::Sqlite(_) => DatabaseKind::Sqlite,
         }
     }
 
@@ -145,27 +178,49 @@ impl Database {
     pub async fn run_migrations(&self) -> Result<(), MigrateError> {
         match self {
             Database::Postgres(pool) => sqlx::migrate!("./migrations").run(pool).await,
+            Database::Sqlite(db) => sqlx::migrate!("./migrations/sqlite").run(&db.pool).await,
         }
     }
 
-    /// Opens a new top-level transaction. Nested (savepoint) transactions are
-    /// opened from an existing [`DbTransaction`] via [`DbTransaction::begin`].
+    /// Opens a new top-level transaction. SQLite transactions begin
+    /// `IMMEDIATE`, taking the single write reservation up front so a
+    /// read-then-write transaction can never deadlock against another writer.
+    /// Nested (savepoint) transactions are opened from an existing
+    /// [`DbTransaction`] via [`DbTransaction::begin`].
     pub async fn begin(&self) -> Result<DbTransaction<'static>, sqlx::Error> {
         match self {
             Database::Postgres(pool) => Ok(DbTransaction::Postgres(pool.begin().await?)),
+            Database::Sqlite(db) => Ok(DbTransaction::Sqlite(
+                db.pool.begin_with("BEGIN IMMEDIATE").await?,
+            )),
+        }
+    }
+
+    /// A pooled connection outside any transaction, for read-only validation
+    /// that must not open a write transaction.
+    pub async fn acquire(&self) -> Result<DbConn, sqlx::Error> {
+        match self {
+            Database::Postgres(pool) => Ok(DbConn::Postgres(pool.acquire().await?)),
+            Database::Sqlite(db) => Ok(DbConn::Sqlite(db.pool.acquire().await?)),
         }
     }
 
     /// Transitional accessor for storage code that has not yet moved onto
-    /// `Database`/`DbTransaction` (identity/authz/certs/tenants repositories
-    /// and their callers). Removing every remaining use of this is
-    /// Milestone A's exit criterion (see `ROADMAP.md`); until then it is the
-    /// only place a [`PgPool`] may be recovered from the façade.
+    /// `Database`/`DbTransaction`. Panics on a non-PostgreSQL database, which
+    /// is why removing every remaining use is a hard requirement of adding a
+    /// second backend.
     pub fn as_postgres(&self) -> &PgPool {
         match self {
             Database::Postgres(pool) => pool,
+            Database::Sqlite(_) => panic!("as_postgres() called on a SQLite database"),
         }
     }
+}
+
+/// A pooled connection acquired outside a transaction.
+pub enum DbConn {
+    Postgres(PoolConnection<Postgres>),
+    Sqlite(PoolConnection<Sqlite>),
 }
 
 impl From<PgPool> for Database {
@@ -182,9 +237,17 @@ impl From<PgPool> for Database {
 /// borrowed from the parent for a nested savepoint opened via [`Self::begin`].
 pub enum DbTransaction<'c> {
     Postgres(Transaction<'c, Postgres>),
+    Sqlite(Transaction<'c, Sqlite>),
 }
 
 impl<'c> DbTransaction<'c> {
+    pub fn kind(&self) -> DatabaseKind {
+        match self {
+            DbTransaction::Postgres(_) => DatabaseKind::Postgres,
+            DbTransaction::Sqlite(_) => DatabaseKind::Sqlite,
+        }
+    }
+
     /// Opens a nested savepoint transaction borrowing this one. PKI
     /// issuance's serial-collision retry uses this so a unique violation
     /// aborts only the inner savepoint, never the caller's outer transaction
@@ -192,27 +255,37 @@ impl<'c> DbTransaction<'c> {
     pub async fn begin(&mut self) -> Result<DbTransaction<'_>, sqlx::Error> {
         match self {
             DbTransaction::Postgres(tx) => Ok(DbTransaction::Postgres(tx.begin().await?)),
+            DbTransaction::Sqlite(tx) => Ok(DbTransaction::Sqlite(tx.begin().await?)),
         }
     }
 
     pub async fn commit(self) -> Result<(), sqlx::Error> {
         match self {
             DbTransaction::Postgres(tx) => tx.commit().await,
+            DbTransaction::Sqlite(tx) => tx.commit().await,
         }
     }
 
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         match self {
             DbTransaction::Postgres(tx) => tx.rollback().await,
+            DbTransaction::Sqlite(tx) => tx.rollback().await,
         }
     }
 
+    /// The handle to pass to a query's `execute`/`fetch_*`, whether this
+    /// transaction is held by value or by `&mut` reference.
+    pub fn exec(&mut self) -> &mut Self {
+        self
+    }
+
     /// Transitional accessor: the concrete Postgres connection this
-    /// transaction runs on, for storage code that has not yet moved onto a
-    /// dispatching adapter. See [`Database::as_postgres`].
+    /// transaction runs on, for storage code that has not yet moved onto the
+    /// query layer. Panics on SQLite; see [`Database::as_postgres`].
     pub fn as_postgres_mut(&mut self) -> &mut PgConnection {
         match self {
             DbTransaction::Postgres(tx) => tx,
+            DbTransaction::Sqlite(_) => panic!("as_postgres_mut() called on a SQLite transaction"),
         }
     }
 }
@@ -253,9 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn classify_url_rejects_sqlite_and_unknown_schemes() {
-        assert!(classify_url("sqlite://local.db").is_err());
-        assert!(classify_url("sqlite::memory:").is_err());
+    fn classify_url_accepts_sqlite_and_rejects_unknown_schemes() {
+        assert_eq!(
+            classify_url("sqlite://local.db").unwrap(),
+            DatabaseKind::Sqlite
+        );
+        assert_eq!(
+            classify_url("sqlite::memory:").unwrap(),
+            DatabaseKind::Sqlite
+        );
         assert!(classify_url("mysql://u:p@host/db").is_err());
         assert!(classify_url("not a url").is_err());
     }

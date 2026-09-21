@@ -11,6 +11,7 @@ pub struct Tenant {
     pub name: String,
     pub alias: Option<String>,
     pub status: TenantStatus,
+    #[sqlx(try_from = "crate::db::TextList")]
     pub tags: Vec<String>,
     pub attributes: Value,
     pub created_by: Option<Uuid>,

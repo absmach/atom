@@ -66,7 +66,7 @@ pub(crate) async fn enqueue<'e, E>(
     details: &serde_json::Value,
 ) -> Result<(), AppError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
     if !enabled {
         return Ok(());
@@ -87,7 +87,7 @@ where
         request_id: None,
     };
 
-    sqlx::query(
+    crate::db::query(
         "INSERT INTO event_outbox (id, event, actor_entity_id, tenant_id, payload)
          VALUES ($1, $2, $3, $4, $5)",
     )
@@ -161,9 +161,9 @@ pub async fn deliver_outbox_batch(
     cfg: &crate::config::EventsConfig,
 ) -> Result<usize, AppError> {
     let mut tx = Database::from(pool.clone()).begin().await.map_err(db_err)?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(EVENT_OUTBOX_ADVISORY_LOCK_ID)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(db_err)?;
     if !acquired {
@@ -182,7 +182,7 @@ pub async fn deliver_outbox_batch(
     // the outage lasts or how high its `attempts` climbs — capping those
     // too would silently and permanently drop otherwise-valid events the
     // moment an outage outlasts `outbox_max_attempts` polls.
-    let rows: Vec<OutboxRow> = sqlx::query_as(
+    let rows: Vec<OutboxRow> = crate::db::query_as(
         "SELECT id, payload FROM event_outbox
          WHERE delivered_at IS NULL AND (NOT unparseable OR attempts < $2)
          ORDER BY created_at ASC
@@ -190,7 +190,7 @@ pub async fn deliver_outbox_batch(
     )
     .bind(cfg.outbox_batch_size)
     .bind(cfg.outbox_max_attempts)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -275,7 +275,7 @@ pub async fn deliver_outbox_batch(
                     }
                     Err(err) => {
                         failed_count += 1;
-                        sqlx::query(
+                        crate::db::query(
                             "UPDATE event_outbox
                              SET attempts = attempts + 1,
                                  last_error = $2
@@ -283,7 +283,7 @@ pub async fn deliver_outbox_batch(
                         )
                         .bind(id)
                         .bind(&err.0)
-                        .execute(tx.as_postgres_mut())
+                        .execute(tx.exec())
                         .await
                         .map_err(db_err)?;
                     }
@@ -291,9 +291,9 @@ pub async fn deliver_outbox_batch(
             }
 
             if !delivered_ids.is_empty() {
-                sqlx::query("UPDATE event_outbox SET delivered_at = now() WHERE id = ANY($1)")
+                crate::db::query("UPDATE event_outbox SET delivered_at = now() WHERE id = ANY($1)")
                     .bind(&delivered_ids)
-                    .execute(tx.as_postgres_mut())
+                    .execute(tx.exec())
                     .await
                     .map_err(db_err)?;
             }
@@ -307,7 +307,7 @@ pub async fn deliver_outbox_batch(
         }
         Err(err) => {
             crate::metrics::record_outbox_publish_failure(ids.len() as u64);
-            sqlx::query(
+            crate::db::query(
                 "UPDATE event_outbox
                  SET attempts = attempts + 1,
                      last_error = $2
@@ -315,7 +315,7 @@ pub async fn deliver_outbox_batch(
             )
             .bind(&ids)
             .bind(&err.0)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
             tx.commit().await.map_err(db_err)?;
@@ -336,7 +336,7 @@ pub async fn cleanup_expired_outbox(
     let mut deleted_rows = 0_i64;
 
     loop {
-        let result = sqlx::query(
+        let result = crate::db::query(
             r#"WITH doomed AS (
                    SELECT id
                    FROM event_outbox
@@ -378,7 +378,7 @@ async fn record_unparseable_failure(
     error: &str,
     max_attempts: i32,
 ) -> Result<(), AppError> {
-    let updated: Vec<(Uuid, i32)> = sqlx::query_as(
+    let updated: Vec<(Uuid, i32)> = crate::db::query_as(
         "UPDATE event_outbox
          SET attempts = attempts + 1, last_error = $2, unparseable = true
          WHERE id = ANY($1)
@@ -386,7 +386,7 @@ async fn record_unparseable_failure(
     )
     .bind(ids)
     .bind(error)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 

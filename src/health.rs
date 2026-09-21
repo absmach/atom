@@ -169,7 +169,7 @@ fn readiness_ok(
 }
 
 async fn database_check(state: &AppState) -> ComponentCheck {
-    match sqlx::query_scalar::<_, i32>("SELECT 1")
+    match crate::db::query_scalar::<i32>("SELECT 1")
         .fetch_one(state.pool())
         .await
     {
@@ -185,9 +185,11 @@ async fn database_check(state: &AppState) -> ComponentCheck {
 }
 
 async fn migrations_check(state: &AppState) -> ComponentCheck {
-    match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE")
-        .fetch_one(state.pool())
-        .await
+    match crate::db::query_scalar::<i64>(
+        "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE",
+    )
+    .fetch_one(state.pool())
+    .await
     {
         Ok(count) if count > 0 => ComponentCheck {
             status: ComponentStatus::Ok,
@@ -432,7 +434,7 @@ fn db_pool_status(state: &AppState) -> DbPoolStatus {
 
 async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
     let cfg = state.config.audit_retention;
-    let last_cleanup = sqlx::query_scalar::<_, serde_json::Value>(
+    let last_cleanup = crate::db::query_scalar::<serde_json::Value>(
         r#"SELECT details
            FROM audit_logs
            WHERE event = 'audit.retention_cleanup'

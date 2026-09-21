@@ -373,7 +373,7 @@ async fn execution_auth_context(
             let service_entity_id = endpoint.service_entity_id.ok_or_else(|| {
                 AppError::bad_request("service_context endpoint has no service entity")
             })?;
-            let row = sqlx::query(
+            let row = crate::db::query(
                 r#"SELECT e.tenant_id, e.status AS entity_status, t.status AS tenant_status
                    FROM entities e
                    LEFT JOIN tenants t ON t.id = e.tenant_id
@@ -383,7 +383,6 @@ async fn execution_auth_context(
             .fetch_one(state.pool())
             .await
             .map_err(crate::error::db_err)?;
-            use sqlx::Row;
             let entity_status: crate::models::enums::EntityStatus =
                 row.try_get("entity_status").map_err(crate::error::db_err)?;
             if entity_status != crate::models::enums::EntityStatus::Active {

@@ -88,9 +88,9 @@ pub fn spawn_purge_cleanup(state: AppState) {
 pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSummary, AppError> {
     let cutoff = Utc::now() - Duration::days(cfg.retention_days);
     let mut tx = Database::from(pool.clone()).begin().await?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(PURGE_ADVISORY_LOCK_ID)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await?;
 
     if !acquired {
@@ -115,17 +115,17 @@ pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSumma
     // Entities: capture cascaded credential ids before the delete removes them.
     let entity_ids = select_doomed(&mut tx, "entities", cutoff, cfg.batch_size).await?;
     if !entity_ids.is_empty() {
-        sqlx::query(
+        crate::db::query(
             "DELETE FROM pki_enrollment_rate_windows
              WHERE scope_kind = 'entity' AND scope_id = ANY($1)",
         )
         .bind(&entity_ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await?;
         let credential_ids: Vec<Uuid> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE entity_id = ANY($1)")
+            crate::db::query_scalar("SELECT id FROM credentials WHERE entity_id = ANY($1)")
                 .bind(&entity_ids)
-                .fetch_all(tx.as_postgres_mut())
+                .fetch_all(tx.exec())
                 .await?;
         deleted_rows += delete_by_ids(&mut tx, "entities", &entity_ids).await?;
         doomed_ids.extend(entity_ids);
@@ -170,10 +170,10 @@ async fn select_doomed(
            LIMIT $2
            FOR UPDATE SKIP LOCKED"#
     );
-    Ok(sqlx::query_scalar(&sql)
+    Ok(crate::db::query_scalar(&sql)
         .bind(cutoff)
         .bind(batch_size)
-        .fetch_all(tx.as_postgres_mut())
+        .fetch_all(tx.exec())
         .await?)
 }
 
@@ -186,10 +186,7 @@ async fn delete_by_ids(
         return Ok(0);
     }
     let sql = format!("DELETE FROM {table} WHERE id = ANY($1)");
-    let result = sqlx::query(&sql)
-        .bind(ids)
-        .execute(tx.as_postgres_mut())
-        .await?;
+    let result = crate::db::query(&sql).bind(ids).execute(tx.exec()).await?;
     Ok(i64::try_from(result.rows_affected()).unwrap_or(i64::MAX))
 }
 
@@ -206,22 +203,22 @@ async fn purge_roles(
         return Ok(role_ids);
     }
 
-    let candidate_block_ids: Vec<Uuid> = sqlx::query_scalar(
+    let candidate_block_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT DISTINCT permission_block_id
            FROM role_permission_blocks
            WHERE role_id = ANY($1)"#,
     )
     .bind(&role_ids)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await?;
 
-    sqlx::query("DELETE FROM roles WHERE id = ANY($1)")
+    crate::db::query("DELETE FROM roles WHERE id = ANY($1)")
         .bind(&role_ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await?;
 
     if !candidate_block_ids.is_empty() {
-        sqlx::query(
+        crate::db::query(
             r#"DELETE FROM permission_blocks pb
                WHERE pb.id = ANY($1)
                  AND NOT EXISTS (
@@ -234,7 +231,7 @@ async fn purge_roles(
                  )"#,
         )
         .bind(&candidate_block_ids)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await?;
     }
 

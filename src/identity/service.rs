@@ -10,7 +10,7 @@ use openidconnect::{
 };
 use rand::RngCore;
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use url::Url;
 use uuid::Uuid;
 
@@ -157,7 +157,7 @@ pub async fn login_credential_with_tenant(
 
     let (entity_id_opt, tenant_id_opt, outcome, kind) = match &result {
         Ok((r, kind)) => {
-            let tenant_id = sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+            let tenant_id = crate::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
                 .bind(r.entity_id)
                 .fetch_optional(pool)
                 .await
@@ -319,7 +319,7 @@ fn login_attempt_identifier(identifier: &str) -> String {
 }
 
 async fn ensure_login_target_active(pool: &PgPool, entity_id: Uuid) -> Result<(), AppError> {
-    let ok: Option<Uuid> = sqlx::query_scalar(
+    let ok: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT e.id
            FROM entities e
            LEFT JOIN tenants t ON t.id = e.tenant_id
@@ -345,7 +345,7 @@ async fn ensure_login_not_throttled(
     failure_limit: i64,
     failure_window_secs: i64,
 ) -> Result<(), AppError> {
-    let failures: i64 = sqlx::query_scalar(
+    let failures: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*)
            FROM auth_login_attempts
            WHERE identifier = $1
@@ -376,7 +376,7 @@ async fn record_login_attempt(
     tenant_id: Option<Uuid>,
     success: bool,
 ) {
-    if let Err(err) = sqlx::query(
+    if let Err(err) = crate::db::query(
         r#"INSERT INTO auth_login_attempts (identifier, tenant_id, success)
            VALUES ($1, $2, $3)"#,
     )
@@ -535,7 +535,7 @@ async fn write_signup_human(
     tx: &mut DbTransaction<'_>,
     prepared: &PreparedSignup,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO entities (id, kind, name, tenant_id, attributes)
            VALUES ($1, $2, $3, NULL, $4)"#,
     )
@@ -543,24 +543,24 @@ async fn write_signup_human(
     .bind(EntityKind::Human)
     .bind(&prepared.name)
     .bind(&prepared.attributes)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(|err| signup_conflict(err, "Username already taken"))?;
 
     super::repo::add_authenticated_user_membership_in_tx(tx, prepared.entity_id).await?;
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO entity_emails (id, entity_id, email)
            VALUES ($1, $2, $3)"#,
     )
     .bind(prepared.email_id)
     .bind(prepared.entity_id)
     .bind(&prepared.email)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(|err| signup_conflict(err, "Email address already taken"))?;
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
            VALUES ($1, $2, $3, $4, $5)"#,
     )
@@ -569,7 +569,7 @@ async fn write_signup_human(
     .bind(CredentialKind::Password)
     .bind(&prepared.email)
     .bind(&prepared.password_hash)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -598,8 +598,7 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
     let (token_id, token_secret) = parse_secret_token(token, "atomv")
         .ok_or_else(|| AppError::bad_request("invalid verification token"))?;
 
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT entity_id, email_id, secret_hash, expires_at, consumed_at
            FROM email_verification_tokens
            WHERE id = $1"#,
@@ -634,29 +633,30 @@ pub async fn verify_email(pool: &PgPool, token: &str) -> Result<(), AppError> {
     {
         return Err(AppError::bad_request("invalid verification token"));
     }
-    let updated = sqlx::query(
+    let updated = crate::db::query(
         "UPDATE email_verification_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(token_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     if updated.rows_affected() == 0 {
         return Err(AppError::bad_request("verification token expired"));
     }
-    sqlx::query("UPDATE entity_emails SET verified_at = now(), updated_at = now() WHERE id = $1")
-        .bind(email_id)
-        .execute(tx.as_postgres_mut())
-        .await
-        .map_err(db_err)?;
+    crate::db::query(
+        "UPDATE entity_emails SET verified_at = now(), updated_at = now() WHERE id = $1",
+    )
+    .bind(email_id)
+    .execute(tx.exec())
+    .await
+    .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
 }
 
 pub async fn resend_verification(pool: &PgPool, cfg: &Config, email: &str) -> Result<(), AppError> {
     let email = normalize_email(email)?;
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT ee.id AS email_id, ee.entity_id
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
@@ -686,7 +686,7 @@ pub async fn resend_verification(pool: &PgPool, cfg: &Config, email: &str) -> Re
         cfg.email_verification_expiry_secs,
     )?;
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO email_verification_tokens
              (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, $5)"#,
@@ -712,8 +712,7 @@ pub async fn request_password_reset(
     req: PasswordResetRequest,
 ) -> Result<(), AppError> {
     let email = normalize_email(&req.email)?;
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT ee.id AS email_id, ee.entity_id
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
@@ -747,7 +746,7 @@ pub async fn request_password_reset(
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = Utc::now() + Duration::minutes(30);
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO password_reset_tokens
              (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, $5)"#,
@@ -785,8 +784,7 @@ pub async fn reset_password(
     let (token_id, token_secret) = parse_secret_token(&req.token, "atomr")
         .ok_or_else(|| AppError::bad_request("invalid password reset token"))?;
 
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT entity_id, email_id, secret_hash, expires_at, consumed_at
            FROM password_reset_tokens
            WHERE id = $1"#,
@@ -811,7 +809,7 @@ pub async fn reset_password(
 
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
     let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
-    let email: String = sqlx::query_scalar("SELECT email FROM entity_emails WHERE id = $1")
+    let email: String = crate::db::query_scalar("SELECT email FROM entity_emails WHERE id = $1")
         .bind(email_id)
         .fetch_one(pool)
         .await
@@ -838,11 +836,11 @@ pub async fn reset_password(
     // finish. A pre-transaction pool query could miss one, leaving its cache
     // entry uninvalidated indefinitely. See `src/cache/mod.rs`'s consistency
     // model.
-    let session_keys: Vec<String> = sqlx::query_scalar::<_, Uuid>(
+    let session_keys: Vec<String> = crate::db::query_scalar::<Uuid>(
         "SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(entity_id)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?
     .into_iter()
@@ -884,26 +882,26 @@ async fn finish_password_reset_in_tx(
     email: &str,
     password_hash: String,
 ) -> Result<(), AppError> {
-    let updated = sqlx::query(
+    let updated = crate::db::query(
         "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(token_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     if updated.rows_affected() == 0 {
         return Err(AppError::bad_request("password reset token expired"));
     }
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE credentials
            SET status = 'revoked'
            WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#,
     )
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
            VALUES ($1, $2, $3, $4, $5)"#,
     )
@@ -912,14 +910,14 @@ async fn finish_password_reset_in_tx(
     .bind(CredentialKind::Password)
     .bind(email)
     .bind(password_hash)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
-    sqlx::query(
+    crate::db::query(
         "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
     )
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -939,7 +937,7 @@ pub async fn oauth_start(
     let state_hash = hash_secret(state_secret.as_bytes())?;
     let nonce = Nonce::new_random();
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO oauth_login_states
              (id, provider, state_hash, pkce_verifier, nonce, return_to, expires_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
@@ -1057,8 +1055,7 @@ pub async fn oauth_exchange(
 ) -> Result<LoginResponse, AppError> {
     let (code_id, code_secret) = parse_secret_token(code, "atomx")
         .ok_or_else(|| AppError::bad_request("invalid exchange code"))?;
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT entity_id, secret_hash, expires_at, consumed_at
            FROM auth_exchange_codes
            WHERE id = $1"#,
@@ -1081,7 +1078,7 @@ pub async fn oauth_exchange(
         return Err(AppError::bad_request("invalid exchange code"));
     }
 
-    let updated = sqlx::query(
+    let updated = crate::db::query(
         "UPDATE auth_exchange_codes SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(code_id)
@@ -1197,7 +1194,6 @@ async fn resolve_login_identity(
     }
 
     let row = login_entity_row(pool, identifier, tenant_id).await?;
-    use sqlx::Row;
     let entity_id = row.try_get("id").map_err(db_err)?;
     Ok(LoginIdentity {
         entity_id,
@@ -1209,8 +1205,7 @@ async fn resolve_login_identity(
 }
 
 async fn entity_email_verified(pool: &PgPool, entity_id: Uuid) -> Result<Option<bool>, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT COUNT(*) AS email_count,
                   COALESCE(bool_or(verified_at IS NOT NULL), false) AS any_verified
            FROM entity_emails
@@ -1233,8 +1228,7 @@ async fn login_identity_by_email(
     email: &str,
     tenant_id: Option<Uuid>,
 ) -> Result<Option<LoginIdentity>, AppError> {
-    use sqlx::Row;
-    let canonical = sqlx::query(
+    let canonical = crate::db::query(
         r#"SELECT e.id, e.tenant_id, e.status, ee.verified_at
            FROM entity_emails ee
            JOIN entities e ON e.id = ee.entity_id
@@ -1260,7 +1254,7 @@ async fn login_identity_by_email(
         }));
     }
 
-    let mut rows = sqlx::query(
+    let mut rows = crate::db::query(
         r#"SELECT e.id, e.tenant_id, e.status
            FROM entities e
            WHERE lower(btrim(e.attributes->>'email')) = $1
@@ -1329,8 +1323,7 @@ async fn password_credential_for_login(
     entity_id: Uuid,
     identifier: Option<&str>,
 ) -> Result<Option<PasswordCredential>, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT id, secret_hash
            FROM credentials
            WHERE entity_id = $1
@@ -1418,7 +1411,7 @@ async fn active_shared_key_by_id(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<PasswordCredential>, AppError> {
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT c.id, c.secret_hash
            FROM credentials c
            JOIN entities e ON e.id = c.entity_id
@@ -1445,7 +1438,7 @@ async fn active_shared_keys_by_lookup_hash(
     entity_id: Uuid,
     lookup_hash: &[u8],
 ) -> Result<Vec<PasswordCredential>, AppError> {
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT c.id, c.secret_hash
            FROM credentials c
            JOIN entities e ON e.id = c.entity_id
@@ -1474,7 +1467,7 @@ async fn active_shared_keys_without_lookup_hash(
     pool: &PgPool,
     entity_id: Uuid,
 ) -> Result<Vec<PasswordCredential>, AppError> {
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT c.id, c.secret_hash
            FROM credentials c
            JOIN entities e ON e.id = c.entity_id
@@ -1498,10 +1491,7 @@ async fn active_shared_keys_without_lookup_hash(
         .collect()
 }
 
-fn shared_key_credential_from_row(
-    row: sqlx::postgres::PgRow,
-) -> Result<PasswordCredential, AppError> {
-    use sqlx::Row;
+fn shared_key_credential_from_row(row: crate::db::Row) -> Result<PasswordCredential, AppError> {
     let secret_hash = row
         .try_get::<Option<String>, _>("secret_hash")
         .unwrap_or(None)
@@ -1517,11 +1507,11 @@ async fn login_entity_row(
     pool: &PgPool,
     identifier: &str,
     tenant_id: Option<Uuid>,
-) -> Result<sqlx::postgres::PgRow, AppError> {
+) -> Result<crate::db::Row, AppError> {
     if let Ok(entity_id) = Uuid::parse_str(identifier) {
         let row = match tenant_id {
             Some(tenant_id) => {
-                sqlx::query(
+                crate::db::query(
                     "SELECT id, tenant_id, status
                      FROM entities
                      WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
@@ -1532,7 +1522,7 @@ async fn login_entity_row(
                 .await
             }
             None => {
-                sqlx::query(
+                crate::db::query(
                     "SELECT id, tenant_id, status
                          FROM entities
                          WHERE id = $1 AND deleted_at IS NULL",
@@ -1549,7 +1539,7 @@ async fn login_entity_row(
 
     let mut rows = match tenant_id {
         Some(tenant_id) => {
-            sqlx::query(
+            crate::db::query(
                 "SELECT id, tenant_id, status
                  FROM entities
                  WHERE name = $1 AND tenant_id = $2 AND deleted_at IS NULL",
@@ -1560,7 +1550,7 @@ async fn login_entity_row(
             .await
         }
         None => {
-            sqlx::query(
+            crate::db::query(
                 "SELECT id, tenant_id, status
                  FROM entities
                  WHERE name = $1 AND deleted_at IS NULL
@@ -1575,7 +1565,7 @@ async fn login_entity_row(
 
     if rows.is_empty() {
         if let (Some(tenant_id), Some(alias)) = (tenant_id, normalize_alias(Some(identifier))) {
-            rows = sqlx::query(
+            rows = crate::db::query(
                 "SELECT id, tenant_id, status
                  FROM entities
                  WHERE lower(alias) = $1 AND tenant_id = $2 AND deleted_at IS NULL",
@@ -1607,16 +1597,15 @@ async fn resolve_login_tenant(
     let tenant_alias = normalize_alias(tenant_alias);
     validate_tenant_selector(tenant_id, tenant_alias.as_deref())?;
 
-    use sqlx::Row;
     let Some(row) = (match (tenant_id, tenant_alias) {
         (Some(tenant_id), None) => {
-            sqlx::query("SELECT id, status FROM tenants WHERE id = $1 AND deleted_at IS NULL")
+            crate::db::query("SELECT id, status FROM tenants WHERE id = $1 AND deleted_at IS NULL")
                 .bind(tenant_id)
                 .fetch_optional(pool)
                 .await
         }
         (None, Some(tenant_alias)) => {
-            sqlx::query(
+            crate::db::query(
                 "SELECT id, status
                  FROM tenants
                  WHERE lower(alias) = $1 AND deleted_at IS NULL",
@@ -1652,7 +1641,7 @@ async fn insert_email_token_in_tx(
     token_hash: String,
     expires_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO email_verification_tokens
              (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, $5)"#,
@@ -1662,7 +1651,7 @@ async fn insert_email_token_in_tx(
     .bind(email_id)
     .bind(token_hash)
     .bind(expires_at)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(())
@@ -1710,8 +1699,7 @@ async fn consume_oauth_state(
 ) -> Result<OAuthStateRow, AppError> {
     let (state_id, state_secret) = parse_secret_token(state, "atoms")
         .ok_or_else(|| AppError::bad_request("invalid oauth state"))?;
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT state_hash, pkce_verifier, nonce, return_to, expires_at, consumed_at
            FROM oauth_login_states
            WHERE id = $1 AND provider = $2"#,
@@ -1735,7 +1723,7 @@ async fn consume_oauth_state(
         return Err(AppError::bad_request("invalid oauth state"));
     }
 
-    let updated = sqlx::query(
+    let updated = crate::db::query(
         "UPDATE oauth_login_states SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
     )
     .bind(state_id)
@@ -1764,14 +1752,14 @@ async fn upsert_oauth_identity(
         .begin()
         .await
         .map_err(db_err)?;
-    use sqlx::Row;
-    if let Some(row) =
-        sqlx::query("SELECT entity_id FROM oauth_identities WHERE provider = $1 AND subject = $2")
-            .bind(provider)
-            .bind(subject)
-            .fetch_optional(tx.as_postgres_mut())
-            .await
-            .map_err(db_err)?
+    if let Some(row) = crate::db::query(
+        "SELECT entity_id FROM oauth_identities WHERE provider = $1 AND subject = $2",
+    )
+    .bind(provider)
+    .bind(subject)
+    .fetch_optional(tx.exec())
+    .await
+    .map_err(db_err)?
     {
         let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
         if super::repo::lock_active_entity(&mut tx, entity_id)
@@ -1780,7 +1768,7 @@ async fn upsert_oauth_identity(
         {
             return Err(AppError::unauthorized("entity is not active"));
         }
-        sqlx::query(
+        crate::db::query(
             r#"UPDATE oauth_identities
                SET email = $3, email_verified = true, profile = $4, updated_at = now()
                WHERE provider = $1 AND subject = $2"#,
@@ -1789,14 +1777,14 @@ async fn upsert_oauth_identity(
         .bind(subject)
         .bind(email)
         .bind(profile)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
         return Ok(entity_id);
     }
 
-    let entity_id = match sqlx::query(
+    let entity_id = match crate::db::query(
         "SELECT ee.entity_id, ee.verified_at
          FROM entity_emails ee
          JOIN entities e ON e.id = ee.entity_id
@@ -1804,7 +1792,7 @@ async fn upsert_oauth_identity(
          FOR UPDATE OF e",
     )
     .bind(email)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?
     {
@@ -1828,32 +1816,32 @@ async fn upsert_oauth_identity(
         None => {
             let entity_id = Uuid::new_v4();
             let name = email.split('@').next().unwrap_or("human");
-            sqlx::query(
+            crate::db::query(
                 r#"INSERT INTO entities (id, kind, name, tenant_id, attributes)
                    VALUES ($1, $2, $3, NULL, '{}')"#,
             )
             .bind(entity_id)
             .bind(EntityKind::Human)
             .bind(name)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
             super::repo::add_authenticated_user_membership_in_tx(&mut tx, entity_id).await?;
-            sqlx::query(
+            crate::db::query(
                 r#"INSERT INTO entity_emails (id, entity_id, email, verified_at)
                    VALUES ($1, $2, $3, now())"#,
             )
             .bind(Uuid::new_v4())
             .bind(entity_id)
             .bind(email)
-            .execute(tx.as_postgres_mut())
+            .execute(tx.exec())
             .await
             .map_err(db_err)?;
             entity_id
         }
     };
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO oauth_identities
              (id, entity_id, provider, subject, email, email_verified, profile)
            VALUES ($1, $2, $3, $4, $5, true, $6)"#,
@@ -1864,7 +1852,7 @@ async fn upsert_oauth_identity(
     .bind(subject)
     .bind(email)
     .bind(profile)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -1888,7 +1876,7 @@ async fn create_exchange_code(
     {
         return Err(AppError::unauthorized("entity is not active"));
     }
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO auth_exchange_codes (id, entity_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4)"#,
     )
@@ -1899,7 +1887,7 @@ async fn create_exchange_code(
         "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
         expiry_secs,
     )?)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2131,14 +2119,14 @@ pub async fn create_password_in_tx(
     let hash = hash_secret(password.as_bytes())?;
     let id = Uuid::new_v4();
 
-    sqlx::query(
+    crate::db::query(
         "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, $3, $4)",
     )
     .bind(id)
     .bind(entity_id)
     .bind(CredentialKind::Password)
     .bind(hash)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     Ok(id)
@@ -2159,7 +2147,7 @@ pub async fn change_own_password_in_tx(
         .await?;
     validate_password_for_kind(&kind, new_password)?;
 
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT secret_hash
            FROM credentials
            WHERE entity_id = $1
@@ -2169,7 +2157,7 @@ pub async fn change_own_password_in_tx(
     .bind(entity_id)
     .bind(CredentialKind::Password)
     .bind(CredentialStatus::Active)
-    .fetch_all(tx.as_postgres_mut())
+    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -2182,7 +2170,7 @@ pub async fn change_own_password_in_tx(
         return Err(AppError::unauthorized("current password is incorrect"));
     }
 
-    let identifier: Option<String> = sqlx::query_scalar(
+    let identifier: Option<String> = crate::db::query_scalar(
         r#"SELECT email
            FROM entity_emails
            WHERE entity_id = $1 AND deleted_at IS NULL
@@ -2190,11 +2178,11 @@ pub async fn change_own_password_in_tx(
            LIMIT 1"#,
     )
     .bind(entity_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
 
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE credentials
            SET status = $3
            WHERE entity_id = $1
@@ -2206,13 +2194,13 @@ pub async fn change_own_password_in_tx(
     .bind(CredentialKind::Password)
     .bind(CredentialStatus::Revoked)
     .bind(CredentialStatus::Active)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
     let hash = hash_secret(new_password.as_bytes())?;
     let id = Uuid::new_v4();
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
            VALUES ($1, $2, $3, $4, $5)"#,
     )
@@ -2221,7 +2209,7 @@ pub async fn change_own_password_in_tx(
     .bind(CredentialKind::Password)
     .bind(identifier)
     .bind(hash)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -2293,7 +2281,7 @@ pub async fn create_shared_key_in_tx(
     let lookup_hash = shared_key_lookup_hash(signing_keys, key.as_bytes())?;
     let metadata = serde_json::json!({ "description": req.description });
 
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO credentials
              (id, entity_id, kind, secret_hash,
               secret_ciphertext, secret_nonce, secret_key_id, secret_enc_alg,
@@ -2311,7 +2299,7 @@ pub async fn create_shared_key_in_tx(
     .bind(lookup_hash)
     .bind(req.expires_at)
     .bind(metadata)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -2340,7 +2328,7 @@ async fn ensure_no_active_config_managed_credential_in_tx(
             )))
         }
     };
-    let managed_id: Option<Uuid> = sqlx::query_scalar(
+    let managed_id: Option<Uuid> = crate::db::query_scalar(
         r#"SELECT id
            FROM credentials
            WHERE entity_id = $1
@@ -2353,7 +2341,7 @@ async fn ensure_no_active_config_managed_credential_in_tx(
     )
     .bind(entity_id)
     .bind(kind)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     if managed_id.is_some() {
@@ -2370,8 +2358,6 @@ pub async fn reveal_shared_key(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<SharedKeyResponse, AppError> {
-    use sqlx::Row;
-
     // Reveal exposes the plaintext key. Config-managed rows must never leak
     // that material, so ownership is checked in the same locking statement
     // that reads the ciphertext. `FOR SHARE OF c` waits for a concurrent
@@ -2379,7 +2365,7 @@ pub async fn reveal_shared_key(
     // the winning row version; a separate precheck would have an MVCC race.
     // Return not_found so this path does not acknowledge that a protected
     // credential exists.
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT c.expires_at,
                   c.status,
                   c.secret_hash,
@@ -2780,14 +2766,14 @@ pub async fn revoke_credential_in_tx(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
+    let row: Option<(String, Option<String>)> = crate::db::query_as(
         "SELECT kind, managed_by FROM credentials
          WHERE id = $1 AND entity_id = $2
          FOR UPDATE",
     )
     .bind(cred_id)
     .bind(entity_id)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     let (kind, managed_by) = match row {
@@ -2808,7 +2794,7 @@ pub async fn revoke_credential_in_tx(
     // from a tenant soft delete) with this explicit revocation, so a later tenant
     // restore — which only reactivates credentials still marked `tenant_deleted` —
     // cannot resurrect a credential an admin has deliberately revoked.
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"UPDATE credentials
            SET status = 'revoked',
                metadata = metadata - 'revoked_at' - 'revocation_reason'
@@ -2820,7 +2806,7 @@ pub async fn revoke_credential_in_tx(
     )
     .bind(cred_id)
     .bind(entity_id)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     if result.rows_affected() == 0 {
@@ -2833,14 +2819,12 @@ pub async fn list_credentials(
     pool: &PgPool,
     entity_id: Uuid,
 ) -> Result<Vec<CredentialSummary>, AppError> {
-    use sqlx::Row;
-
     // Config-managed credentials are surfaced with `managed_by='config'` so
     // the UI can flag them read-only. The metadata below carries no secret
     // material. Mutation endpoints (revoke/reveal/replace) still refuse to
     // touch them, and `reveal_shared_key` in particular refuses to read the
     // plaintext key out of a config-managed row.
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         "SELECT id, kind, identifier, status, expires_at, created_at, managed_by
          FROM credentials
          WHERE entity_id = $1
@@ -2901,7 +2885,7 @@ mod tests {
 
         let entity_id = Uuid::new_v4();
         let email = format!("oidc-unverified-{entity_id}@example.test");
-        sqlx::query(
+        crate::db::query(
             "INSERT INTO entities (id, kind, name, status, attributes)
              VALUES ($1, 'human', $2, 'active', '{}')",
         )
@@ -2910,7 +2894,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert entity");
-        sqlx::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
+        crate::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
             .bind(Uuid::new_v4())
             .bind(entity_id)
             .bind(&email)
@@ -2932,14 +2916,14 @@ mod tests {
                 if message.contains("pending verification")
         ));
         let links: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1")
+            crate::db::query_scalar("SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1")
                 .bind(entity_id)
                 .fetch_one(&pool)
                 .await
                 .expect("count rejected links");
         assert_eq!(links, 0);
 
-        sqlx::query("UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1")
+        crate::db::query("UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1")
             .bind(entity_id)
             .execute(&pool)
             .await

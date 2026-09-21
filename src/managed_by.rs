@@ -50,7 +50,7 @@ pub async fn ensure_not_config_managed(
             )))
         }
     };
-    let managed_by: Option<Option<String>> = sqlx::query_scalar(sql)
+    let managed_by: Option<Option<String>> = crate::db::query_scalar(sql)
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -105,9 +105,9 @@ pub(crate) async fn ensure_not_config_managed_in_tx(
             )))
         }
     };
-    let managed_by: Option<Option<String>> = sqlx::query_scalar(sql)
+    let managed_by: Option<Option<String>> = crate::db::query_scalar(sql)
         .bind(id)
-        .fetch_optional(tx.as_postgres_mut())
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)?;
     reject_config_managed(table, id, managed_by)

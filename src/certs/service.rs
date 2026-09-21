@@ -1044,9 +1044,9 @@ pub async fn issuer_crl(
         .await
         .map_err(AppError::Database)?;
     let lock_id = issuer_crl_lock_id(issuer_id);
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    crate::db::query("SELECT pg_advisory_xact_lock($1)")
         .bind(lock_id)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await
         .map_err(AppError::Database)?;
 

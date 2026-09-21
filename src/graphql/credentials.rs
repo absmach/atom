@@ -540,7 +540,7 @@ async fn credential_tenant_id(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<Uuid>> {
-    let tenant_id = sqlx::query_scalar::<_, Option<Uuid>>(
+    let tenant_id = crate::db::query_scalar::<Option<Uuid>>(
         "SELECT e.tenant_id FROM credentials c JOIN entities e ON e.id = c.entity_id WHERE c.id = $1 AND c.entity_id = $2",
     )
     .bind(credential_id)

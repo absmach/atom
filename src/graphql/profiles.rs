@@ -365,7 +365,7 @@ async fn profile_tenant_target(
     pool: &PgPool,
     id: Uuid,
 ) -> std::result::Result<Option<Option<Uuid>>, AppError> {
-    sqlx::query_scalar("SELECT tenant_id FROM profiles WHERE id = $1")
+    crate::db::query_scalar("SELECT tenant_id FROM profiles WHERE id = $1")
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -376,7 +376,7 @@ async fn profile_version_tenant_target(
     pool: &PgPool,
     id: Uuid,
 ) -> std::result::Result<Option<(Uuid, Option<Uuid>)>, AppError> {
-    sqlx::query_as(
+    crate::db::query_as(
         r#"SELECT version.profile_id, profile.tenant_id
            FROM profile_versions version
            JOIN profiles profile ON profile.id = version.profile_id

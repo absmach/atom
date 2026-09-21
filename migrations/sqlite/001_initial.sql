@@ -1,0 +1,1 @@
+-- SQLite baseline schema (see product-docs/development/database-backends/RFC.md).

@@ -35,7 +35,7 @@ pub async fn consume_rate_limit(
     let window_secs = i64::try_from(policy.window_secs)
         .map_err(|_| AppError::Internal(anyhow::anyhow!("rate-limit window is too large")))?;
     let max_requests = i64::from(policy.max_requests);
-    let count: Option<i64> = sqlx::query_scalar(
+    let count: Option<i64> = crate::db::query_scalar(
         r#"
         INSERT INTO pki_enrollment_rate_windows (
             scope_kind, scope_id, window_start, request_count, updated_at
@@ -58,13 +58,13 @@ pub async fn consume_rate_limit(
     .bind(scope_id)
     .bind(window_secs)
     .bind(max_requests)
-    .fetch_optional(tx.as_postgres_mut())
+    .fetch_optional(tx.exec())
     .await
     .map_err(AppError::Database)?;
 
     // Bound storage per subject without a global cleanup scan on this public
     // hot path. At most the current and immediately preceding window survive.
-    sqlx::query(
+    crate::db::query(
         r#"
         DELETE FROM pki_enrollment_rate_windows
         WHERE scope_kind = $1
@@ -75,7 +75,7 @@ pub async fn consume_rate_limit(
     .bind(scope.as_str())
     .bind(scope_id)
     .bind(window_secs)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(AppError::Database)?;
 

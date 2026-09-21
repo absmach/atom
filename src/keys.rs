@@ -275,11 +275,9 @@ async fn fetch_active_keys<'e, E>(
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    use sqlx::Row;
-
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT kid,
                   public_key,
                   private_key,
@@ -332,7 +330,7 @@ pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Resul
     encrypt_legacy_plaintext_keys(pool, cfg).await?;
 
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM signing_keys WHERE status = 'primary'")
+        crate::db::query_scalar("SELECT COUNT(*) FROM signing_keys WHERE status = 'primary'")
             .fetch_one(pool)
             .await
             .map_err(db_err)?;
@@ -340,7 +338,7 @@ pub async fn bootstrap_if_needed(pool: &PgPool, cfg: &SigningKeyConfig) -> Resul
     if count == 0 {
         let (kid, public_pem, private_pem) = generate_key_pair()?;
         let storage = storage_values_for_private_key(cfg, &kid, private_pem)?;
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO signing_keys (
                    kid,
                    public_key,
@@ -389,19 +387,19 @@ pub async fn rotate_in_tx(
     tx: &mut DbTransaction<'_>,
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError> {
-    sqlx::query("UPDATE signing_keys SET status = 'retired' WHERE status = 'standby'")
-        .execute(tx.as_postgres_mut())
+    crate::db::query("UPDATE signing_keys SET status = 'retired' WHERE status = 'standby'")
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
-    sqlx::query("UPDATE signing_keys SET status = 'standby' WHERE status = 'primary'")
-        .execute(tx.as_postgres_mut())
+    crate::db::query("UPDATE signing_keys SET status = 'standby' WHERE status = 'primary'")
+        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
     let (kid, public_pem, private_pem) = generate_key_pair()?;
     let storage = storage_values_for_private_key(cfg, &kid, private_pem)?;
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO signing_keys (
                kid,
                public_key,
@@ -420,7 +418,7 @@ pub async fn rotate_in_tx(
     .bind(storage.nonce)
     .bind(storage.key_id)
     .bind(storage.encryption_alg)
-    .execute(tx.as_postgres_mut())
+    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -488,13 +486,11 @@ pub async fn encrypt_legacy_plaintext_keys(
     pool: &PgPool,
     cfg: &SigningKeyConfig,
 ) -> Result<u64, AppError> {
-    use sqlx::Row;
-
     if cfg.key_encryption_key.is_none() {
         return Ok(0);
     }
 
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT kid, private_key
            FROM signing_keys
            WHERE private_key IS NOT NULL
@@ -509,7 +505,7 @@ pub async fn encrypt_legacy_plaintext_keys(
         let kid: String = row.try_get("kid").map_err(db_err)?;
         let private_pem: String = row.try_get("private_key").map_err(db_err)?;
         let material = encrypt_private_key(cfg, &kid, &private_pem)?;
-        sqlx::query(
+        crate::db::query(
             r#"UPDATE signing_keys
                SET private_key = NULL,
                    private_key_ciphertext = $2,
@@ -536,9 +532,7 @@ pub async fn encrypt_legacy_plaintext_keys(
 }
 
 pub async fn list_metadata(pool: &PgPool) -> Result<Vec<SigningKeyMetadata>, AppError> {
-    use sqlx::Row;
-
-    let rows = sqlx::query(
+    let rows = crate::db::query(
         r#"SELECT kid,
                   algorithm,
                   status,
@@ -579,9 +573,7 @@ pub async fn list_metadata(pool: &PgPool) -> Result<Vec<SigningKeyMetadata>, App
 }
 
 pub async fn storage_summary(pool: &PgPool) -> Result<SigningKeyStorageSummary, AppError> {
-    use sqlx::Row;
-
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT COUNT(*)::bigint AS total,
                   COUNT(*) FILTER (WHERE private_key_ciphertext IS NOT NULL)::bigint AS encrypted,
                   COUNT(*) FILTER (WHERE private_key IS NOT NULL)::bigint AS plaintext

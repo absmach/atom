@@ -121,9 +121,9 @@ pub async fn sweep_once(
         .begin()
         .await
         .map_err(AppError::Database)?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(LIFECYCLE_SWEEP_ADVISORY_LOCK_ID)
-        .fetch_one(tx.as_postgres_mut())
+        .fetch_one(tx.exec())
         .await
         .map_err(AppError::Database)?;
     if !acquired {

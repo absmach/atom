@@ -44,7 +44,7 @@ pub async fn create_api_endpoint_with_audit(
         .begin()
         .await
         .map_err(db_err)?;
-    let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
+    let endpoint = crate::db::query_as::<ApiEndpoint>(&format!(
         r#"INSERT INTO api_endpoints
            (id, tenant_id, key, name, description, method, path, operation_kind,
             graphql, auth_mode, service_entity_id, variables_mapping, request_schema,
@@ -69,7 +69,7 @@ pub async fn create_api_endpoint_with_audit(
     .bind(json_object_or_default(req.response_mapping))
     .bind(status)
     .bind(actor_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(endpoint_db_err)?;
     crate::audit::commit_with_observation(
@@ -89,7 +89,7 @@ pub async fn create_api_endpoint_with_audit(
 }
 
 pub async fn get_api_endpoint(pool: &PgPool, id: Uuid) -> Result<ApiEndpoint, AppError> {
-    sqlx::query_as::<_, ApiEndpoint>(&format!(
+    crate::db::query_as::<ApiEndpoint>(&format!(
         "SELECT {API_ENDPOINT_COLS} FROM api_endpoints WHERE id = $1",
     ))
     .bind(id)
@@ -113,7 +113,7 @@ pub async fn list_api_endpoints(
         validate_status(status)?;
     }
 
-    let items = sqlx::query_as::<_, ApiEndpoint>(&format!(
+    let items = crate::db::query_as::<ApiEndpoint>(&format!(
         r#"SELECT {API_ENDPOINT_COLS} FROM api_endpoints
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR status = $2)
@@ -128,7 +128,7 @@ pub async fn list_api_endpoints(
     .await
     .map_err(endpoint_db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*) FROM api_endpoints
            WHERE ($1::uuid IS NULL OR tenant_id = $1)
              AND ($2::text IS NULL OR status = $2)"#,
@@ -195,7 +195,7 @@ pub async fn update_api_endpoint_with_audit(
         .begin()
         .await
         .map_err(db_err)?;
-    let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
+    let endpoint = crate::db::query_as::<ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET key               = COALESCE($2, key),
                name              = COALESCE($3, name),
@@ -230,7 +230,7 @@ pub async fn update_api_endpoint_with_audit(
     .bind(req.response_mapping.map(json_object_or_default))
     .bind(req.status)
     .bind(actor_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("api endpoint {id} not found")),
@@ -310,7 +310,7 @@ pub async fn find_api_endpoint(
     path: &str,
 ) -> Result<ApiEndpoint, AppError> {
     let method = normalize_method(method)?;
-    sqlx::query_as::<_, ApiEndpoint>(&format!(
+    crate::db::query_as::<ApiEndpoint>(&format!(
         r#"SELECT {API_ENDPOINT_COLS} FROM api_endpoints
            WHERE method = $1 AND path = $2 AND status = 'active'"#,
     ))
@@ -336,7 +336,7 @@ pub async fn record_api_endpoint_execution(
     error: Option<String>,
 ) -> Result<ApiEndpointExecution, AppError> {
     validate_execution_status(status)?;
-    sqlx::query_as::<_, ApiEndpointExecution>(&format!(
+    crate::db::query_as::<ApiEndpointExecution>(&format!(
         r#"INSERT INTO api_endpoint_executions
            (id, endpoint_id, caller_entity_id, status, request_summary, response_summary, error)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -361,7 +361,7 @@ pub async fn list_api_endpoint_executions(
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
 
-    let items = sqlx::query_as::<_, ApiEndpointExecution>(&format!(
+    let items = crate::db::query_as::<ApiEndpointExecution>(&format!(
         r#"SELECT {API_ENDPOINT_EXECUTION_COLS} FROM api_endpoint_executions
            WHERE endpoint_id = $1
            ORDER BY created_at DESC
@@ -374,7 +374,7 @@ pub async fn list_api_endpoint_executions(
     .await
     .map_err(endpoint_db_err)?;
 
-    let total: i64 = sqlx::query_scalar(
+    let total: i64 = crate::db::query_scalar(
         r#"SELECT COUNT(*) FROM api_endpoint_executions
            WHERE endpoint_id = $1"#,
     )
@@ -399,7 +399,7 @@ async fn set_api_endpoint_status_with_audit(
         .begin()
         .await
         .map_err(db_err)?;
-    let endpoint = sqlx::query_as::<_, ApiEndpoint>(&format!(
+    let endpoint = crate::db::query_as::<ApiEndpoint>(&format!(
         r#"UPDATE api_endpoints
            SET status = $2, updated_by = $3, updated_at = now()
            WHERE id = $1
@@ -408,7 +408,7 @@ async fn set_api_endpoint_status_with_audit(
     .bind(id)
     .bind(status)
     .bind(actor_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => AppError::not_found(format!("api endpoint {id} not found")),

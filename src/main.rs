@@ -405,22 +405,22 @@ async fn bootstrap_password_credentials(
     {
         anyhow::bail!("active {label} entity {entity_id} not found");
     }
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = crate::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
     .bind(entity_id)
-    .fetch_one(tx.as_postgres_mut())
+    .fetch_one(tx.exec())
     .await?;
 
     let mut created = false;
     if count == 0 {
-        sqlx::query(
+        crate::db::query(
             "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
         )
         .bind(Uuid::new_v4())
         .bind(entity_id)
         .bind(hash)
-        .execute(tx.as_postgres_mut())
+        .execute(tx.exec())
         .await?;
         created = true;
     }

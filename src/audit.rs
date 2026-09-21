@@ -385,9 +385,9 @@ async fn insert_audit_log<'e, E>(
     event: &AuditEvent<'_>,
 ) -> Result<(), crate::error::AppError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query(
+    crate::db::query(
         "INSERT INTO audit_logs (id, actor_entity_id, tenant_id, target_kind, target_id, event, outcome, details)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
@@ -503,7 +503,7 @@ pub async fn cleanup_expired(
     let mut deleted_rows = 0_i64;
 
     loop {
-        let result = sqlx::query(
+        let result = crate::db::query(
             r#"WITH doomed AS (
                    SELECT id
                    FROM audit_logs
