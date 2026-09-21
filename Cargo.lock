@@ -443,6 +443,8 @@ dependencies = [
  "jsonwebtoken",
  "lapin",
  "lettre",
+ "libsqlite3-sys",
+ "md-5",
  "metrics",
  "metrics-exporter-prometheus",
  "minijinja",

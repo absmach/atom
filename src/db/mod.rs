@@ -12,6 +12,7 @@ use crate::config::DbPoolConfig;
 mod arg;
 mod query;
 pub mod sqlite;
+mod sqlite_functions;
 pub mod translate;
 
 pub use arg::{enum_text, Arg, ArgKind, DbArg, TextList, UuidList};

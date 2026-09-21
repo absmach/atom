@@ -130,7 +130,8 @@ pub async fn connect(url: &str, cfg: &DbPoolConfig) -> anyhow::Result<SqliteDb> 
 
     let mut pool_options = SqlitePoolOptions::new()
         .max_connections(max_connections)
-        .acquire_timeout(Duration::from_secs(cfg.acquire_timeout_secs));
+        .acquire_timeout(Duration::from_secs(cfg.acquire_timeout_secs))
+        .after_connect(|conn, _meta| Box::pin(super::sqlite_functions::register(conn)));
     if location == SqliteLocation::Memory {
         // An in-memory database lives and dies with its only connection.
         pool_options = pool_options
@@ -187,6 +188,26 @@ mod tests {
         assert!(parse_location("sqlite://").is_err());
         assert!(parse_location("sqlite://atom.db?mode=ro").is_err());
         assert!(parse_location("sqlite:atom.db").is_err());
+    }
+
+    #[tokio::test]
+    async fn baseline_migration_applies_and_seeds_the_platform_rows() {
+        let cfg = DbPoolConfig::default();
+        let db = crate::db::Database::connect("sqlite::memory:", &cfg)
+            .await
+            .unwrap();
+        db.run_migrations().await.unwrap();
+        let admins: i64 =
+            crate::db::query_scalar("SELECT count(*) FROM entities WHERE name = 'admin'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(admins, 1);
+        let registered: i64 = crate::db::query_scalar("SELECT count(*) FROM protected_object_ids")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(registered >= 3);
     }
 
     #[test]

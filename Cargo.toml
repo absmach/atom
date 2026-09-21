@@ -18,6 +18,8 @@ async-graphql-value = "=7.2.1"
 async-graphql-axum = "=7.0.13"
 async-trait = "0.1"
 regex = "1"
+libsqlite3-sys = { version = "0.30", default-features = false }
+md-5 = "0.10"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite", "uuid", "chrono", "json", "migrate", "macros", "derive"] }
 serde = { version = "1", features = ["derive"] }
