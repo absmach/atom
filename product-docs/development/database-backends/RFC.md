@@ -1,5 +1,12 @@
 # RFC: Internal Database Backend Boundary and SQLite Semantics
 
+> **Superseded in part.** The per-domain repository/adapter design in this RFC
+> was replaced during implementation by a single query layer (SQL written once
+> in the PostgreSQL dialect, mechanically translated for SQLite). See
+> `IMPLEMENTATION-NOTES.md` for the design as built. The runtime policy,
+> consistency rules and acceptance criteria below still apply.
+
+
 | Field | Value |
 |---|---|
 | Status | Draft |

@@ -9,6 +9,10 @@ The phase decomposition below (`ROADMAP.md`, `issues/`) is the implementation
 and review plan, not a publication plan — every phase lands as its own
 commit(s) inside one branch and one PR.
 
+> **Implementation status:** delivered. Read `IMPLEMENTATION-NOTES.md` first: it
+> records where the built design departs from the RFC (one query layer instead
+> of per-domain adapters, BLOB UUIDs, built-in-only SQLite constraints).
+
 Read in this order:
 
 1. `PRD.md`
