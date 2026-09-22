@@ -824,17 +824,24 @@ pub fn translate_with_nulls(sql: &str, kinds: &[ArgKind], nulls: &[bool]) -> Str
             format!("{} {} AS {} {}", &c[1], &c[2], &c[3], &c[4])
         })
         .into_owned();
+    // Deliberately not a `json_each` correlated subquery: `json_each` exposes
+    // fixed columns named key/value/type/atom/id/parent/fullkey/path, and
+    // every real call site here compares against a bare `id` — which a WHERE
+    // clause inside json_each's own scope resolves to json_each's *own* `id`
+    // column, silently shadowing the correlated outer row and matching
+    // nothing. `instr` finds the substring within the parameter's JSON array
+    // text directly, in the outer scope, so there is no name to shadow. Every
+    // element is a fixed-width token (32-hex UUID, or any other JSON scalar
+    // wrapped in its own quotes), so an element's substring position is
+    // strictly increasing in element order — safe to sort by.
     out = ARRAY_POSITION
         .replace_all(&out, |c: &Captures<'_>| {
             let n: usize = c[1][1..].parse().unwrap_or(0);
-            let element = match n.checked_sub(1).and_then(|i| kinds.get(i)) {
-                Some(ArgKind::UuidArray) => "unhex(value)",
-                _ => "value",
+            let needle = match n.checked_sub(1).and_then(|i| kinds.get(i)) {
+                Some(ArgKind::UuidArray) => format!("lower(hex({}))", &c[2]),
+                _ => format!("'\"' || {} || '\"'", &c[2]),
             };
-            format!(
-                "(SELECT key FROM json_each({}) WHERE {element} = {})",
-                &c[1], &c[2]
-            )
+            format!("NULLIF(instr({}, {needle}), 0)", &c[1])
         })
         .into_owned();
     out = BOOL_AGG
@@ -1198,13 +1205,38 @@ mod tests {
                 "ORDER BY array_position($1::uuid[], id)",
                 &[ArgKind::UuidArray]
             ),
-            "ORDER BY (SELECT key FROM json_each($1) WHERE unhex(value) = id)"
+            "ORDER BY NULLIF(instr($1, lower(hex(id))), 0)"
         );
         assert_eq!(
             t("COALESCE(bool_or(verified_at IS NOT NULL), false)", &[]),
             "COALESCE(max(verified_at IS NOT NULL), false)"
         );
         assert_eq!(t("lower(btrim(x))", &[]), "lower(trim(x))");
+    }
+
+    /// `array_position`'s old translation used a `json_each` correlated
+    /// subquery that compared against a bare `id` — `json_each` itself
+    /// exposes a fixed `id` column, which silently shadowed the outer row and
+    /// matched nothing, reversing (rather than applying) the requested order.
+    /// `instr` deliberately avoids introducing any new scope, so there is no
+    /// name left to shadow.
+    #[test]
+    fn array_position_does_not_shadow_a_same_named_outer_column() {
+        assert_eq!(
+            t("array_position($1::uuid[], id)", &[ArgKind::UuidArray]),
+            "NULLIF(instr($1, lower(hex(id))), 0)"
+        );
+        assert_eq!(
+            t(
+                "array_position($2::uuid[], g.id)",
+                &[ArgKind::Uuid, ArgKind::UuidArray]
+            ),
+            "NULLIF(instr($2, lower(hex(g.id))), 0)"
+        );
+        assert_eq!(
+            t("array_position($1::text[], name)", &[ArgKind::TextArray]),
+            "NULLIF(instr($1, '\"' || name || '\"'), 0)"
+        );
     }
 
     #[test]
