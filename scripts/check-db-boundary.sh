@@ -43,14 +43,23 @@ if ! python3 - <<'PY'
 import re
 import sys
 
-PG = "migrations/001_initial.sql"
-LITE = "migrations/sqlite/001_initial.sql"
+import glob
+import os
+
+PG_DIR = "migrations"
+LITE_DIR = "migrations/sqlite"
 ALLOW = "scripts/db-parity-allow.txt"
 
 
-def objects(path):
-    """Tables, views and indexes that exist after the file's CREATE/DROP statements."""
-    text = re.sub(r"--[^\n]*", "", open(path).read())
+def migrations(directory):
+    return sorted(glob.glob(os.path.join(directory, "*.sql")))
+
+
+def objects(directory):
+    """Tables, views and indexes that exist after every migration's CREATE/DROP statements."""
+    text = ""
+    for path in migrations(directory):
+        text += re.sub(r"--[^\n]*", "", open(path).read()) + "\n"
     found = {"TABLE": set(), "VIEW": set(), "INDEX": set()}
     pattern = re.compile(
         r"\b(CREATE(?:\s+OR\s+REPLACE)?(?:\s+UNIQUE)?|DROP)\s+(TABLE|VIEW|INDEX)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:public\.)?([A-Za-z0-9_]+)",
@@ -72,8 +81,18 @@ for line in open(ALLOW):
         kind, name = line.split()[:2]
         allowed.add((kind.upper(), name))
 
+PG, LITE = PG_DIR, LITE_DIR
 pg, lite = objects(PG), objects(LITE)
 bad = False
+# Every PostgreSQL migration has a same-named SQLite counterpart and vice versa.
+pg_names = {os.path.basename(p) for p in migrations(PG)}
+lite_names = {os.path.basename(p) for p in migrations(LITE)}
+for name in sorted(pg_names - lite_names):
+    print(f"migration {name} has no counterpart in {LITE}", file=sys.stderr)
+    bad = True
+for name in sorted(lite_names - pg_names):
+    print(f"migration {name} has no counterpart in {PG}", file=sys.stderr)
+    bad = True
 for kind in ("TABLE", "VIEW", "INDEX"):
     for name in sorted(pg[kind] - lite[kind]):
         if (kind, name) not in allowed:
