@@ -581,12 +581,20 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     // windows without changing the service configuration. Covering the next
     // fixed window keeps the pair of assertions deterministic when the clock
     // crosses a boundary between the two requests.
+    //
+    // The trailing `WHERE true` is required by SQLite, not PostgreSQL: SQLite's
+    // grammar cannot disambiguate `INSERT ... SELECT ... FROM <source>` (no
+    // WHERE) immediately followed by an upsert clause from other constructs, and
+    // rejects it with "near DO: syntax error" even though the statement is
+    // otherwise valid SQL. Adding any WHERE clause resolves the ambiguity; `true`
+    // keeps this one a no-op filter on both backends.
     atom::db::query(
         r#"WITH windows AS (
-               SELECT generate_series(0, 1) AS step,
+               SELECT step,
                       to_timestamp(
                           floor(extract(epoch FROM now()) / $3) * $3
                       ) AS current_start
+                 FROM generate_series(0, 1) AS step
            )
            INSERT INTO pki_enrollment_rate_windows (
                scope_kind, scope_id, window_start, request_count, updated_at
@@ -595,6 +603,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
                   current_start + (step * $3 * interval '1 second'),
                   $2, now()
              FROM windows
+            WHERE true
            ON CONFLICT (scope_kind, scope_id, window_start) DO UPDATE
            SET request_count = EXCLUDED.request_count,
                updated_at = EXCLUDED.updated_at"#,

@@ -1380,6 +1380,52 @@ mod tests {
         );
     }
 
+    /// `generate_series` used as a scalar expression in a SELECT list — a
+    /// PostgreSQL set-returning-function extension, distinct from the
+    /// `FROM generate_series(...)` table-source form `rewrite_generate_series`
+    /// otherwise handles — is not something this translator rewrites; give
+    /// that statement the `FROM generate_series(...) AS alias` form instead
+    /// (see `tests/m41_pki_est.rs`, which does exactly this).
+    ///
+    /// Once rewritten that way, this pins a second, unrelated SQLite
+    /// requirement the same statement runs into: SQLite's grammar cannot
+    /// disambiguate `INSERT ... SELECT ... FROM <source>` (no WHERE)
+    /// immediately followed by an upsert clause, and rejects it with
+    /// `near "DO": syntax error` even though the statement is otherwise valid
+    /// SQL (confirmed directly against SQLite, not just through this
+    /// translator). The translator does not paper over this — the statement's
+    /// own trailing `WHERE true` is what fixes it — so this test only pins
+    /// that the *rest* of the statement (the CTE's generate_series and the
+    /// epoch/interval arithmetic) still translates to something that loads
+    /// and executes, once the statement carries that WHERE itself.
+    #[test]
+    fn generate_series_in_a_cte_feeding_an_upsert_translates_to_valid_sqlite() {
+        let sql = r#"WITH windows AS (
+               SELECT step,
+                      to_timestamp(
+                          floor(extract(epoch FROM now()) / $3) * $3
+                      ) AS current_start
+                 FROM generate_series(0, 1) AS step
+           )
+           INSERT INTO pki_enrollment_rate_windows (
+               scope_kind, scope_id, window_start, request_count, updated_at
+           )
+           SELECT 'entity', $1,
+                  current_start + (step * $3 * interval '1 second'),
+                  $2, now()
+             FROM windows
+            WHERE true
+           ON CONFLICT (scope_kind, scope_id, window_start) DO UPDATE
+           SET request_count = EXCLUDED.request_count,
+               updated_at = EXCLUDED.updated_at"#;
+        let kinds = [ArgKind::Uuid, ArgKind::I64, ArgKind::I64];
+        let out = t(sql, &kinds);
+        assert!(!out.contains("generate_series"), "{out}");
+        assert!(out.contains("WITH RECURSIVE series"), "{out}");
+        assert!(out.contains("atom_ts_floor(now(), $3)"), "{out}");
+        assert!(out.contains("WHERE true"), "{out}");
+    }
+
     #[test]
     fn digest_encoding_uses_the_sha256_function() {
         assert_eq!(
