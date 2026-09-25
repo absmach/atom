@@ -61,7 +61,7 @@ async fn make_entity(
 }
 
 async fn make_resource(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
-    atom::authz::repo::create_resource(
+    atom::authz::resources::create_resource(
         pool,
         CreateResource {
             id: None,
@@ -954,7 +954,7 @@ async fn parent_group_id_attribute_is_rejected_on_create_and_update() {
         "createEntity must reject the parent_group_id attribute"
     );
 
-    let resource_err = atom::authz::repo::create_resource(
+    let resource_err = atom::authz::resources::create_resource(
         &pool,
         CreateResource {
             id: None,

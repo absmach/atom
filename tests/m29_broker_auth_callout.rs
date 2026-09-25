@@ -11,6 +11,7 @@ mod common;
 use atom::db::Database;
 use atom::{
     authz::repo as authz_repo,
+    authz::resources as resource_repo,
     broker_auth::service::proto::{
         auth_service_client::AuthServiceClient, Action, AuthnReq, AuthzReq,
     },
@@ -210,7 +211,7 @@ async fn make_channel(pool: &Database, tenant_id: Option<Uuid>) -> (Uuid, String
     .expect("seed publish/subscribe applicability on resource:channel");
 
     let alias = slug("chan");
-    let resource = authz_repo::create_resource(
+    let resource = resource_repo::create_resource(
         pool,
         CreateResource {
             id: None,

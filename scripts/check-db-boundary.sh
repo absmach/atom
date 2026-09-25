@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
 # Guards the database-backend boundary (see product-docs/development/database-backends/).
 #
-# 1. Application code never names a database driver: every statement goes
-#    through crate::db (src/db/), so it can run on PostgreSQL or SQLite.
+# 1. Application code never names a database driver, with two exceptions:
+#    - crate::db (src/db/) — the general-purpose query layer and translator
+#      most domains still route through.
+#    - a domain's own backend adapters, named `postgres.rs`/`sqlite.rs`
+#      (REPOSITORY-PATTERN.md) — each owns native SQL for its one backend and
+#      is never imported from outside its parent module.
+#    Everywhere else, a statement goes through one of those so it can run on
+#    PostgreSQL or SQLite.
 # 2. The SQLite baseline declares the same tables, indexes and views as the
 #    PostgreSQL baseline, so the two schemas cannot drift apart unnoticed.
 set -euo pipefail
 
 status=0
 
-# --- 1. no driver types or raw sqlx queries outside src/db/ ------------------
+# --- 1. no driver types or raw sqlx queries outside src/db/ or an adapter ----
 violations="$(
   grep -rnE 'sqlx::(query|query_as|query_scalar|postgres|sqlite|Postgres|Sqlite|PgPool|PgConnection|SqlitePool|SqliteConnection|Pool|Transaction)\b|\bPgPool\b|\bPgConnection\b|\bSqlitePool\b|::migrate!' \
     src --include='*.rs' \
   | grep -v '^src/db/' \
+  | grep -vE '^[^:]+/(postgres|sqlite)\.rs:' \
   | grep -vE '^[^:]+:[0-9]+:\s*//' \
   || true
 )"
@@ -33,8 +40,25 @@ violations="$(printf '%s\n' "${violations}" | awk -F: '
 done)"
 
 if [[ -n "${violations}" ]]; then
-  echo "database driver types must stay inside src/db/; found:" >&2
+  echo "database driver types must stay inside src/db/ or a domain's postgres.rs/sqlite.rs adapter; found:" >&2
   printf '%s\n' "${violations}" >&2
+  status=1
+fi
+
+# --- 1b. every postgres.rs/sqlite.rs adapter is private to its own domain ---
+# Rust's own privacy check is the enforcement (mod, not pub mod, so a caller
+# outside the domain fails to compile) — this just catches the exemption
+# above being handed to a module that forgot to keep them private, since that
+# would silently widen it to "anywhere in src/".
+publicized_adapters="$(
+  for adapter in $(find src -type f \( -name postgres.rs -o -name sqlite.rs \) -not -path 'src/db/*'); do
+    backend="$(basename "${adapter}" .rs)"
+    grep -lE "^pub mod ${backend};" "$(dirname "${adapter}")"/mod.rs 2>/dev/null || true
+  done
+)"
+if [[ -n "${publicized_adapters}" ]]; then
+  echo "a postgres.rs/sqlite.rs adapter is declared pub mod, widening the exemption above beyond its own domain; found:" >&2
+  printf '%s\n' "${publicized_adapters}" >&2
   status=1
 fi
 

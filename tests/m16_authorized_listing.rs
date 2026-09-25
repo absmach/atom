@@ -428,7 +428,7 @@ async fn list_resources_attributes_contains_filters_items_and_total() {
     )
     .await;
 
-    let page = atom::authz::repo::list_resources(
+    let page = atom::authz::resources::list_resources(
         &pool,
         ListResources {
             q: None,

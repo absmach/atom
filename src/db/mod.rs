@@ -10,6 +10,7 @@ use sqlx::{
 use crate::config::DbPoolConfig;
 
 mod arg;
+pub mod native;
 mod query;
 pub mod sqlite;
 mod sqlite_functions;

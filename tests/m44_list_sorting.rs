@@ -167,7 +167,7 @@ async fn direct_lists_apply_order_before_pagination() {
     make_resource(&pool, tenant_id, &format!("{prefix}-a-resource")).await;
     make_resource(&pool, tenant_id, &format!("{prefix}-b-resource")).await;
 
-    let resources = atom::authz::repo::list_resources(
+    let resources = atom::authz::resources::list_resources(
         &pool,
         ListResources {
             q: Some(prefix.clone()),
@@ -359,7 +359,7 @@ async fn descending_nullable_sorts_put_nulls_last() {
         .await
         .expect("insert unnamed resource");
 
-    let resources = atom::authz::repo::list_resources(
+    let resources = atom::authz::resources::list_resources(
         &pool,
         ListResources {
             q: None,

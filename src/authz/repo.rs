@@ -39,7 +39,7 @@ use crate::{
             ListRoleAssignments, PermissionBlock, PermissionBlockList, PolicyBinding,
             RoleAssignment, RoleAssignmentList,
         },
-        resource::{CreateResource, ListResources, Resource, ResourceList, UpdateResource},
+        resource::{Resource, UpdateResource},
         role::{
             CreateRole, CreateRolePermissionBlock, ListRoles, Role, RoleDerivedKind, RoleList,
             RolePermissionBlock, UpdateRole,
@@ -219,19 +219,6 @@ pub async fn list_api_endpoints_authorized(
 
 // ─── Resources ────────────────────────────────────────────────────────────────
 
-fn resource_order_by(order: ResourceOrderField, dir: SortDir) -> &'static str {
-    match (order, dir) {
-        (ResourceOrderField::CreatedAt, SortDir::Asc) => "r.created_at ASC, r.id ASC",
-        (ResourceOrderField::CreatedAt, SortDir::Desc) => "r.created_at DESC, r.id ASC",
-        (ResourceOrderField::UpdatedAt, SortDir::Asc) => "r.updated_at ASC, r.id ASC",
-        (ResourceOrderField::UpdatedAt, SortDir::Desc) => "r.updated_at DESC NULLS LAST, r.id ASC",
-        (ResourceOrderField::Name, SortDir::Asc) => "lower(r.name) ASC, r.id ASC",
-        (ResourceOrderField::Name, SortDir::Desc) => "lower(r.name) DESC NULLS LAST, r.id ASC",
-        (ResourceOrderField::Kind, SortDir::Asc) => "r.kind ASC, r.id ASC",
-        (ResourceOrderField::Kind, SortDir::Desc) => "r.kind DESC, r.id ASC",
-    }
-}
-
 fn authorized_entity_order_by(order: EntityOrderField, dir: SortDir) -> &'static str {
     match (order, dir) {
         (EntityOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
@@ -281,65 +268,15 @@ fn authorized_group_order_by(order: GroupOrderField, dir: SortDir) -> &'static s
     }
 }
 
-pub async fn create_resource_with_audit(
-    pool: &Database,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    req: CreateResource,
-) -> Result<Resource, AppError> {
-    let id = req.id.unwrap_or_else(Uuid::new_v4);
-    let attrs = if req.attributes.is_null() {
-        serde_json::json!({})
-    } else {
-        req.attributes
-    };
-    reject_parent_group_attribute(&attrs)?;
-    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
-    let resource = crate::db::query_as::<Resource>(
-        r#"INSERT INTO resources (id, kind, name, alias, tenant_id, owner_id, attributes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
-                     deleted_at, deleted_by, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.kind)
-    .bind(req.name)
-    .bind(alias)
-    .bind(req.tenant_id)
-    .bind(req.owner_id)
-    .bind(attrs)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
-    let meta = crate::audit::AuditMeta {
-        actor_entity_id: actor_id,
-        tenant_id: resource.tenant_id,
-        target_kind: "resource",
-        target_id: Some(resource.id),
-        event: "resource.create",
-    };
-    let details = serde_json::json!({
-        "kind": resource.kind,
-        "name": resource.name,
-        "alias": resource.alias,
-        "attributes": resource.attributes,
-    });
-    crate::audit::commit_with_observation(tx, events_enabled, &meta, &details).await?;
-    Ok(resource)
-}
+// create_resource_with_audit / create_resource / get_resource /
+// list_resources_by_ids / list_resources moved to `authz::resources` (the
+// repository-per-domain pilot; see that module's doc comment). `fetch_resource`
+// stays here — the object-group mutations below still read a resource from
+// inside their own transaction through it.
 
-pub async fn create_resource(pool: &Database, req: CreateResource) -> Result<Resource, AppError> {
-    create_resource_with_audit(pool, false, None, req).await
-}
-
-pub async fn get_resource(pool: &Database, id: Uuid) -> Result<Resource, AppError> {
-    fetch_resource(pool, id).await
-}
-
-/// Executor-generic `get_resource`, so a mutation can read the row it just wrote
-/// from inside its own transaction instead of re-reading it after the commit.
+/// Executor-generic resource fetch, so a mutation can read the row it just
+/// wrote from inside its own transaction instead of re-reading it after the
+/// commit.
 async fn fetch_resource<'e, E>(executor: E, id: Uuid) -> Result<Resource, AppError>
 where
     E: crate::db::IntoTarget<'e>,
@@ -354,119 +291,6 @@ where
         sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
         other => AppError::Database(other),
     })
-}
-
-pub async fn list_resources_by_ids(
-    pool: &Database,
-    ids: &[Uuid],
-) -> Result<Vec<Resource>, AppError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    crate::db::query_as::<Resource>(
-        r#"SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at
-           FROM resources
-           WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
-           ORDER BY array_position($1::uuid[], id)"#,
-    )
-    .bind(ids)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
-}
-
-pub async fn list_resources(
-    pool: &Database,
-    params: ListResources,
-) -> Result<ResourceList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-
-    let kind = params.kind;
-    let tenant_id = params.tenant_id;
-    let parent_group_id = params.parent_group_id;
-    let include_descendants = params.include_descendants;
-    let deleted = params.deleted.as_str();
-    let q = search_pattern(params.q);
-    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
-    let order_by = resource_order_by(params.order, params.dir);
-
-    let items_sql = format!(
-        r#"WITH RECURSIVE target_groups(id) AS (
-               SELECT $4::uuid WHERE $4::uuid IS NOT NULL
-               UNION ALL
-               SELECT gh.child_id
-               FROM group_hierarchy gh
-               JOIN target_groups tg ON tg.id = gh.parent_id
-               WHERE $5::boolean
-           )
-           SELECT r.id, r.kind, r.name, r.alias, r.tenant_id, r.owner_id, r.attributes,
-                  r.deleted_at, r.deleted_by, r.created_at, r.updated_at, r.managed_by
-           FROM resources r
-           WHERE ($1::text IS NULL OR r.kind = $1)
-             AND ($2::uuid IS NULL OR r.tenant_id = $2)
-             AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
-             AND ($4::uuid IS NULL OR EXISTS (
-                     SELECT 1 FROM group_resource_parents grp
-                     WHERE grp.resource_id = r.id
-                       AND grp.group_id IN (SELECT id FROM target_groups)))
-             AND ($9::jsonb IS NULL OR r.attributes @> $9::jsonb)
-             AND ($8::text = 'all'
-                  OR ($8::text = 'live' AND r.deleted_at IS NULL)
-                  OR ($8::text = 'deleted' AND r.deleted_at IS NOT NULL))
-           ORDER BY {order_by}
-           LIMIT $6 OFFSET $7"#,
-    );
-    let items = crate::db::query_as::<Resource>(&items_sql)
-        .bind(kind.clone())
-        .bind(tenant_id)
-        .bind(q.clone())
-        .bind(parent_group_id)
-        .bind(include_descendants)
-        .bind(limit)
-        .bind(offset)
-        .bind(deleted)
-        .bind(attributes_contains.clone())
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
-
-    let total: i64 = crate::db::query_scalar(
-        r#"WITH RECURSIVE target_groups(id) AS (
-               SELECT $4::uuid WHERE $4::uuid IS NOT NULL
-               UNION ALL
-               SELECT gh.child_id
-               FROM group_hierarchy gh
-               JOIN target_groups tg ON tg.id = gh.parent_id
-               WHERE $5::boolean
-           )
-           SELECT COUNT(*)
-           FROM resources r
-           WHERE ($1::text IS NULL OR r.kind = $1)
-             AND ($2::uuid IS NULL OR r.tenant_id = $2)
-             AND ($3::text IS NULL OR r.name ILIKE $3 OR r.alias ILIKE $3 OR r.attributes::text ILIKE $3)
-             AND ($4::uuid IS NULL OR EXISTS (
-                     SELECT 1 FROM group_resource_parents grp
-                     WHERE grp.resource_id = r.id
-                       AND grp.group_id IN (SELECT id FROM target_groups)))
-             AND ($7::jsonb IS NULL OR r.attributes @> $7::jsonb)
-             AND ($6::text = 'all'
-                  OR ($6::text = 'live' AND r.deleted_at IS NULL)
-                  OR ($6::text = 'deleted' AND r.deleted_at IS NOT NULL))"#,
-    )
-    .bind(kind)
-    .bind(tenant_id)
-    .bind(q)
-    .bind(parent_group_id)
-    .bind(include_descendants)
-    .bind(deleted)
-    .bind(attributes_contains)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(ResourceList { items, total })
 }
 
 pub async fn update_resource_with_audit(

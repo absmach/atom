@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::{
     audit,
     auth::Scope,
-    authz::{engine, repo as authz_repo},
+    authz::{engine, repo as authz_repo, resources as resource_repo},
     error::AppError,
     models::{
         access::AuthorizedObjectIdsQuery,
@@ -71,7 +71,7 @@ impl ResourceQuery {
 
         if deleted != DeletedFilter::Live {
             require_any_capability(state.pool(), &auth, &[("manage", Scope::Platform)]).await?;
-            let list = authz_repo::list_resources(
+            let list = resource_repo::list_resources(
                 state.pool(),
                 ListResources {
                     q,
@@ -130,7 +130,7 @@ impl ResourceQuery {
         )
         .await
         .map_err(gql_error)?;
-        let items = authz_repo::list_resources_by_ids(state.pool(), &authorized.ids)
+        let items = resource_repo::list_resources_by_ids(state.pool(), &authorized.ids)
             .await
             .map_err(gql_error)?;
 
@@ -144,7 +144,7 @@ impl ResourceQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let resource = authz_repo::get_resource(state.pool(), id)
+        let resource = resource_repo::get_resource(state.pool(), id)
             .await
             .map_err(gql_error)?;
         // Object read decision via the PDP. `manage` implies `read`, so the caller
@@ -216,7 +216,7 @@ impl ResourceMutation {
             )
             .await?;
 
-            authz_repo::create_resource_with_audit(
+            resource_repo::create_resource_with_audit(
                 state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
@@ -268,7 +268,7 @@ impl ResourceMutation {
         let details = serde_json::json!({ "updated_fields": updated_fields });
 
         let result = async {
-            let existing = authz_repo::get_resource(state.pool(), id).await?;
+            let existing = resource_repo::get_resource(state.pool(), id).await?;
             crate::auth::require_any_capability(
                 state.pool(),
                 &auth,
@@ -323,7 +323,7 @@ impl ResourceMutation {
         let details = serde_json::json!({});
 
         let result = async {
-            let existing = authz_repo::get_resource(state.pool(), id).await?;
+            let existing = resource_repo::get_resource(state.pool(), id).await?;
             crate::auth::require_any_capability(
                 state.pool(),
                 &auth,
@@ -466,7 +466,7 @@ impl ResourceMutation {
         let resource_id = parse_id(resource_id, "resourceId")?;
         let group_id = parse_id(object_group_id, "objectGroupId")?;
         let result = async {
-            let resource = authz_repo::get_resource(state.pool(), resource_id).await?;
+            let resource = resource_repo::get_resource(state.pool(), resource_id).await?;
             crate::auth::require_any_capability(
                 state.pool(),
                 &auth,
@@ -607,7 +607,7 @@ async fn require_resource_group_manage(
     auth: &crate::auth::AuthContext,
     resource_id: uuid::Uuid,
 ) -> std::result::Result<(), crate::error::AppError> {
-    let resource = authz_repo::get_resource(state.pool(), resource_id).await?;
+    let resource = resource_repo::get_resource(state.pool(), resource_id).await?;
     crate::auth::require_any_capability(
         state.pool(),
         auth,

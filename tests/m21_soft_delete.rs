@@ -491,7 +491,7 @@ async fn soft_deleted_role_and_resource_are_hidden() {
     atom::authz::repo::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
-    assert!(atom::authz::repo::get_resource(&pool, resource_id)
+    assert!(atom::authz::resources::get_resource(&pool, resource_id)
         .await
         .is_err());
 }
@@ -786,7 +786,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
     atom::authz::repo::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
-    let live_resources = atom::authz::repo::list_resources(
+    let live_resources = atom::authz::resources::list_resources(
         &pool,
         ListResources {
             q: Some(resource_name.clone()),
@@ -808,7 +808,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         .items
         .iter()
         .all(|resource| resource.id != resource_id));
-    let deleted_resources = atom::authz::repo::list_resources(
+    let deleted_resources = atom::authz::resources::list_resources(
         &pool,
         ListResources {
             q: Some(resource_name),

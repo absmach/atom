@@ -209,7 +209,7 @@ async fn restore_resource_makes_it_readable_again() {
     atom::authz::repo::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
-    assert!(atom::authz::repo::get_resource(&pool, resource_id)
+    assert!(atom::authz::resources::get_resource(&pool, resource_id)
         .await
         .is_err());
 
@@ -217,7 +217,7 @@ async fn restore_resource_makes_it_readable_again() {
         .await
         .expect("restore resource");
     assert!(
-        atom::authz::repo::get_resource(&pool, resource_id)
+        atom::authz::resources::get_resource(&pool, resource_id)
             .await
             .is_ok(),
         "resource must be readable after restore"
