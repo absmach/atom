@@ -56,6 +56,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # The committed .cargo/config.toml links with mold on GNU hosts; test
+      # binaries link in this job, so the linker must exist here.
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y clang mold
+
       - name: Provision disposable SoftHSM PKCS#11 token
         run: |
           set -euo pipefail

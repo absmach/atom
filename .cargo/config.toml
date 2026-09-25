@@ -1,0 +1,8 @@
+# Host (GNU/Linux x86_64) builds link with mold — much faster than the default
+# ld, and linking dominates rebuild time on this crate. Requires clang + mold
+# on the host (`apt install clang mold`; CI installs both). Builds for other
+# targets (Alpine/musl Docker images, macOS) are unaffected — this only applies
+# to the x86_64-unknown-linux-gnu triple.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
