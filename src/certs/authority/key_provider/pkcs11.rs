@@ -956,6 +956,10 @@ mod tests {
     #[test]
     fn executor_retries_transient_failures_and_opens_circuit() {
         let mut retry_config = executor_config("retry");
+        // This checks retry behavior, not timeout enforcement. Give each worker
+        // enough time to be scheduled on a busy CI runner; the timeout tests
+        // below and in executor_bounds_time_and_in_flight_work keep short limits.
+        retry_config.operation_timeout_ms = 5_000;
         retry_config.max_in_flight = 2;
         retry_config.max_retries = 1;
         let retry_provider = Pkcs11KeyProvider::new(retry_config);
