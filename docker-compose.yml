@@ -38,6 +38,8 @@ services:
       retries: 5
 
   atom:
+    # Must exceed ATOM_HTTP_SHUTDOWN_DRAIN_TIMEOUT_SECS (default 30s).
+    stop_grace_period: ${ATOM_STOP_GRACE_PERIOD:-35s}
     image: ${ATOM_IMAGE:-ghcr.io/absmach/atom:latest}
     build:
       context: .
@@ -201,6 +203,7 @@ services:
       - default
 
   atom-dev:
+    stop_grace_period: ${ATOM_STOP_GRACE_PERIOD:-35s}
     image: ${ATOM_DEV_IMAGE:-ghcr.io/absmach/atom:dev}
     build:
       context: .

@@ -450,15 +450,31 @@ async fn write_and_enqueue(
 }
 
 pub fn spawn_retention_cleanup(state: AppState) {
+    drop(spawn_retention_cleanup_with_shutdown(
+        state,
+        tokio_util::sync::CancellationToken::new(),
+    ));
+}
+
+/// Starts a tracked worker. An active pass finishes before observing shutdown.
+pub fn spawn_retention_cleanup_with_shutdown(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
     let cfg = state.config.audit_retention;
 
-    tokio::spawn(async move {
+    let tasks = state.background_tasks.clone();
+    Some(tasks.spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(cfg.cleanup_interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {}
+            }
             if let Err(err) = crate::events::cleanup_expired_outbox(
                 &state.pool,
                 cfg.days,
@@ -498,7 +514,7 @@ pub fn spawn_retention_cleanup(state: AppState) {
                 }
             }
         }
-    });
+    }))
 }
 
 pub async fn cleanup_expired(

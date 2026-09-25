@@ -2,10 +2,9 @@
 
 /// Resolves when the process receives SIGINT (Ctrl-C) or, on Unix, SIGTERM.
 ///
-/// Both the HTTP and gRPC servers await this so in-flight requests drain on
-/// shutdown instead of being dropped. Each server installs its own listener;
-/// tokio delivers a single OS signal to every registered handler, so one
-/// SIGTERM wakes both. On non-Unix platforms only Ctrl-C is awaited.
+/// The standalone entry point listens once and cancels the shared runtime token
+/// so HTTP, gRPC, enrollment and background jobs drain together. On non-Unix
+/// platforms only Ctrl-C is awaited.
 pub async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(err) = tokio::signal::ctrl_c().await {
