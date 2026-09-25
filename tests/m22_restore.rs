@@ -206,14 +206,14 @@ async fn restore_resource_makes_it_readable_again() {
         .await
         .expect("insert resource");
 
-    atom::authz::repo::delete_resource(&pool, resource_id, None)
+    atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
     assert!(atom::authz::resources::get_resource(&pool, resource_id)
         .await
         .is_err());
 
-    atom::authz::repo::restore_resource(&pool, resource_id, None)
+    atom::authz::resources::restore_resource(&pool, resource_id, None)
         .await
         .expect("restore resource");
     assert!(
@@ -629,10 +629,10 @@ async fn purge_resource_clears_object_scoped_blocks() {
         .expect("insert resource");
     let block = make_object_block(&pool, resource_id).await;
 
-    atom::authz::repo::delete_resource(&pool, resource_id, None)
+    atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("soft delete resource");
-    atom::authz::repo::purge_resource(&pool, resource_id)
+    atom::authz::resources::purge_resource(&pool, resource_id)
         .await
         .expect("purge resource");
 

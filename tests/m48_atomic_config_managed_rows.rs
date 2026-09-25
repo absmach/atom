@@ -17,7 +17,7 @@ use std::{fmt::Debug, future::Future};
 use atom::db::Database;
 use atom::db::DbTransaction;
 use atom::{
-    authz::repo as authz_repo,
+    authz::{repo as authz_repo, resources as resource_repo},
     config::Config,
     error::AppError,
     identity::{repo as identity_repo, service as identity_service},
@@ -304,7 +304,7 @@ async fn row_updates_recheck_config_ownership_inside_the_write_transaction() {
     let stamp = stage_config_stamp(&p, "resources", resource_id, Some(owner_tenant)).await;
     let p2 = p.clone();
     assert_waits_then_conflicts(stamp, async move {
-        authz_repo::update_resource(
+        resource_repo::update_resource(
             &p2,
             resource_id,
             UpdateResource {

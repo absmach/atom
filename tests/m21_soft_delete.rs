@@ -488,7 +488,7 @@ async fn soft_deleted_role_and_resource_are_hidden() {
         .execute(&pool)
         .await
         .expect("insert resource");
-    atom::authz::repo::delete_resource(&pool, resource_id, None)
+    atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
     assert!(atom::authz::resources::get_resource(&pool, resource_id)
@@ -564,11 +564,11 @@ async fn soft_deleted_objects_are_read_only() {
         .execute(&pool)
         .await
         .expect("insert resource");
-    atom::authz::repo::delete_resource(&pool, resource_id, None)
+    atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
     assert!(
-        atom::authz::repo::update_resource(
+        atom::authz::resources::update_resource(
             &pool,
             resource_id,
             UpdateResource {
@@ -783,7 +783,7 @@ async fn deleted_filter_lists_soft_deleted_objects() {
         .execute(&pool)
         .await
         .expect("insert resource");
-    atom::authz::repo::delete_resource(&pool, resource_id, None)
+    atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
     let live_resources = atom::authz::resources::list_resources(
@@ -1363,7 +1363,7 @@ async fn add_resource_to_object_group_rejects_deleted_resource_or_group() {
     .execute(&pool)
     .await
     .expect("groups");
-    atom::authz::repo::delete_resource(&pool, deleted_resource, None)
+    atom::authz::resources::delete_resource(&pool, deleted_resource, None)
         .await
         .expect("delete resource");
     atom::identity::repo::delete_group(&pool, deleted_group, None)

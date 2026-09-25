@@ -155,7 +155,7 @@ async fn resolve_alias_ignores_deleted_object_after_alias_reuse() {
     let old = resource_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
         .await
         .expect("create old resource");
-    authz_repo::delete_resource(&p, old.id, None)
+    resource_repo::delete_resource(&p, old.id, None)
         .await
         .expect("delete old resource");
     let replacement = resource_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
@@ -283,7 +283,7 @@ async fn alias_updates_can_clear_existing_values() {
     )
     .await
     .expect("clear entity alias");
-    let resource = authz_repo::update_resource(
+    let resource = resource_repo::update_resource(
         &p,
         resource.id,
         UpdateResource {

@@ -279,7 +279,7 @@ impl ResourceMutation {
             )
             .await?;
 
-            authz_repo::update_resource_with_audit(
+            resource_repo::update_resource_with_audit(
                 state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
@@ -334,7 +334,7 @@ impl ResourceMutation {
             )
             .await?;
 
-            authz_repo::delete_resource_with_audit(
+            resource_repo::delete_resource_with_audit(
                 state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
@@ -381,7 +381,7 @@ impl ResourceMutation {
                 &[("manage", Scope::Platform)],
             )
             .await?;
-            authz_repo::restore_resource_with_audit(
+            resource_repo::restore_resource_with_audit(
                 state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
@@ -428,7 +428,7 @@ impl ResourceMutation {
                 &[("manage", Scope::Platform)],
             )
             .await?;
-            authz_repo::purge_resource_with_audit(
+            resource_repo::purge_resource_with_audit(
                 state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),

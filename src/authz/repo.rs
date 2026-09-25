@@ -39,7 +39,7 @@ use crate::{
             ListRoleAssignments, PermissionBlock, PermissionBlockList, PolicyBinding,
             RoleAssignment, RoleAssignmentList,
         },
-        resource::{Resource, UpdateResource},
+        resource::Resource,
         role::{
             CreateRole, CreateRolePermissionBlock, ListRoles, Role, RoleDerivedKind, RoleList,
             RolePermissionBlock, UpdateRole,
@@ -268,11 +268,11 @@ fn authorized_group_order_by(order: GroupOrderField, dir: SortDir) -> &'static s
     }
 }
 
-// create_resource_with_audit / create_resource / get_resource /
-// list_resources_by_ids / list_resources moved to `authz::resources` (the
-// repository-per-domain pilot; see that module's doc comment). `fetch_resource`
-// stays here — the object-group mutations below still read a resource from
-// inside their own transaction through it.
+// The resource repository — create/get/list/list_by_ids and the
+// update/delete/restore/purge mutations — moved to `authz::resources` (the
+// repository-per-domain pilot; see that module's doc comment).
+// `fetch_resource` stays here — the object-group mutations below still read
+// a resource from inside their own transaction through it.
 
 /// Executor-generic resource fetch, so a mutation can read the row it just
 /// wrote from inside its own transaction instead of re-reading it after the
@@ -291,235 +291,6 @@ where
         sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
         other => AppError::Database(other),
     })
-}
-
-pub async fn update_resource_with_audit(
-    pool: &Database,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-    req: UpdateResource,
-    updated_fields: Vec<&'static str>,
-) -> Result<Resource, AppError> {
-    if let Some(attrs) = req.attributes.as_ref() {
-        reject_parent_group_attribute(attrs)?;
-    }
-    let alias = crate::models::alias::validate_alias_update(req.alias)?;
-    let alias_is_set = alias.is_some();
-    let alias = alias.flatten();
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
-    let Some(tenant_id) = tenant_id else {
-        return Err(AppError::not_found(format!("resource {id} not found")));
-    };
-    crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant_id).await?;
-    let locked: Option<Uuid> = crate::db::query_scalar(
-        r#"SELECT id FROM resources
-           WHERE id = $1
-             AND tenant_id IS NOT DISTINCT FROM $2
-             AND deleted_at IS NULL
-           FOR UPDATE"#,
-    )
-    .bind(id)
-    .bind(tenant_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if locked.is_none() {
-        return Err(AppError::not_found(format!("resource {id} not found")));
-    }
-    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
-    let resource = crate::db::query_as::<Resource>(
-        r#"UPDATE resources
-           SET name       = COALESCE($2, name),
-               attributes = COALESCE($3, attributes),
-               alias      = CASE WHEN $4 THEN $5 ELSE alias END,
-               updated_at = now()
-           WHERE id = $1 AND deleted_at IS NULL
-           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
-                     deleted_at, deleted_by, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.attributes)
-    .bind(alias_is_set)
-    .bind(alias)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
-        other => AppError::Database(other),
-    })?;
-    let event = crate::audit::AuditEvent {
-        actor_entity_id: actor_id,
-        tenant_id: resource.tenant_id,
-        target_kind: Some("resource"),
-        target_id: Some(id),
-        event: "resource.update",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({ "updated_fields": updated_fields }),
-    };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
-    Ok(resource)
-}
-
-pub async fn update_resource(
-    pool: &Database,
-    id: Uuid,
-    req: UpdateResource,
-) -> Result<Resource, AppError> {
-    update_resource_with_audit(pool, false, None, id, req, Vec::new()).await
-}
-
-pub async fn delete_resource_with_audit(
-    pool: &Database,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-    deleted_by: Option<Uuid>,
-) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-    let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
-    let Some(tenant_id) = tenant_id else {
-        return Err(AppError::not_found(format!("resource {id} not found")));
-    };
-    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
-    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
-    let live: bool = crate::db::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM resources WHERE id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(id)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if !live {
-        return Err(AppError::not_found(format!("resource {id} not found")));
-    }
-    let result = crate::db::query(
-        "UPDATE resources SET deleted_at = now(), deleted_by = $2
-         WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .bind(deleted_by)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::not_found(format!("resource {id} not found")));
-    }
-    let event = crate::audit::AuditEvent {
-        actor_entity_id: actor_id,
-        tenant_id,
-        target_kind: Some("resource"),
-        target_id: Some(id),
-        event: "resource.delete",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
-    };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
-    Ok(())
-}
-
-pub async fn delete_resource(
-    pool: &Database,
-    id: Uuid,
-    deleted_by: Option<Uuid>,
-) -> Result<(), AppError> {
-    delete_resource_with_audit(pool, false, None, id, deleted_by).await
-}
-
-pub async fn restore_resource_with_audit(
-    pool: &Database,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-    restored_by: Option<Uuid>,
-) -> Result<(), AppError> {
-    let _ = restored_by;
-    let mut tx = pool.begin().await.map_err(db_err)?;
-
-    let expected_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NOT NULL",
-    )
-    .bind(id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
-    let Some(expected_tenant_id) = expected_tenant_id else {
-        return Err(AppError::not_found(format!(
-            "no soft-deleted resource {id} to restore"
-        )));
-    };
-    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
-    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
-
-    let tenant_info: Option<(Option<Uuid>, bool)> = crate::db::query_as(
-        "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
-         FROM resources r
-         LEFT JOIN tenants t ON t.id = r.tenant_id
-         WHERE r.id = $1
-           AND r.tenant_id IS NOT DISTINCT FROM $2
-           AND r.deleted_at IS NOT NULL",
-    )
-    .bind(id)
-    .bind(expected_tenant_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
-    let (tenant_id, _is_tenant_deleted) = match tenant_info {
-        None => {
-            return Err(AppError::not_found(format!(
-                "no soft-deleted resource {id} to restore"
-            )))
-        }
-        Some((_, true)) => {
-            return Err(AppError::conflict(
-                "the resource's tenant is soft-deleted; restore the tenant first",
-            ))
-        }
-        Some((t_id, false)) => (t_id, false),
-    };
-
-    crate::db::query(
-        "UPDATE resources SET deleted_at = NULL, deleted_by = NULL
-         WHERE id = $1 AND deleted_at IS NOT NULL",
-    )
-    .bind(id)
-    .execute(tx.exec())
-    .await
-    .map_err(restore_conflict)?;
-
-    let event = crate::audit::AuditEvent {
-        actor_entity_id: actor_id,
-        tenant_id,
-        target_kind: Some("resource"),
-        target_id: Some(id),
-        event: "resource.restore",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
-    };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
-    Ok(())
-}
-
-pub async fn restore_resource(
-    pool: &Database,
-    id: Uuid,
-    restored_by: Option<Uuid>,
-) -> Result<(), AppError> {
-    restore_resource_with_audit(pool, false, None, id, restored_by).await
 }
 
 /// Canonical cleanup of the authorization rows that reference a set of
@@ -566,65 +337,6 @@ pub(crate) async fn purge_authz_references_for_ids(
         .await
         .map_err(db_err)?;
     Ok(())
-}
-
-/// Physically remove an already-soft-deleted resource, bypassing the purge
-/// retention window. Irreversible: FK cascades drop its group links. A soft
-/// delete is required first.
-///
-/// Object-scoped permission blocks granting access *on* the resource reference
-/// it by `object_id`, which has no foreign key, so they are removed explicitly
-/// (deleting a block cascades to its actions, role links, and direct policies).
-/// Resources are never a subject, so there is no subject-side cleanup.
-pub async fn purge_resource_with_audit(
-    pool: &Database,
-    events_enabled: bool,
-    actor_id: Option<Uuid>,
-    id: Uuid,
-) -> Result<Option<Uuid>, AppError> {
-    let mut tx = pool.begin().await.map_err(db_err)?;
-
-    let tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?;
-    let Some(expected_tenant_id) = tenant_id else {
-        return Err(AppError::not_found(format!(
-            "no soft-deleted resource {id} to purge"
-        )));
-    };
-    crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
-    crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "resources", id).await?;
-
-    let purged_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "DELETE FROM resources WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
-    )
-    .bind(id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
-    let tenant_id = purged_tenant_id
-        .ok_or_else(|| AppError::not_found(format!("no soft-deleted resource {id} to purge")))?;
-
-    purge_authz_references_for_ids(&mut tx, &[id]).await?;
-
-    let event = crate::audit::AuditEvent {
-        actor_entity_id: actor_id,
-        tenant_id,
-        target_kind: Some("resource"),
-        target_id: Some(id),
-        event: "resource.purge",
-        outcome: crate::models::enums::AuditOutcome::Allow,
-        details: serde_json::json!({}),
-    };
-    crate::audit::commit_with_audit(pool, tx, events_enabled, &event).await?;
-    Ok(tenant_id)
-}
-
-pub async fn purge_resource(pool: &Database, id: Uuid) -> Result<Option<Uuid>, AppError> {
-    purge_resource_with_audit(pool, false, None, id).await
 }
 
 /// The UUIDs an alias path resolves to.
@@ -1003,22 +715,6 @@ async fn delete_resource_object_groups_in_tx(
     .map_err(db_err)?
     .rows_affected();
     Ok(deleted)
-}
-
-/// Object group membership is a set, and a scalar attribute cannot express one.
-/// The attribute write path is gone: membership is mutated only through the
-/// explicit `addResourceToObjectGroup` / `removeResourceFromObjectGroup` /
-/// `clearResourceObjectGroups` mutations. Rejecting the attribute rather than
-/// ignoring it keeps the break loud — a caller that still sends it would
-/// otherwise believe it had placed the resource in a group.
-fn reject_parent_group_attribute(attrs: &Value) -> Result<(), AppError> {
-    if attrs.get("parent_group_id").is_some() {
-        return Err(AppError::bad_request(
-            "the parent_group_id attribute is no longer supported; \
-             use addResourceToObjectGroup / removeResourceFromObjectGroup",
-        ));
-    }
-    Ok(())
 }
 
 // ─── Roles ────────────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@
 //! is the jsonb `@>` equivalent, registered on every connection
 //! (`crate::db::sqlite_functions`).
 
+use serde_json::Value;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -189,4 +190,166 @@ pub(super) async fn list(
     .map_err(db_err)?;
 
     Ok(ResourceList { items, total })
+}
+
+pub(super) async fn live_tenant_id(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+) -> Result<Option<Option<Uuid>>, AppError> {
+    sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(tx)
+    .await
+    .map_err(db_err)
+}
+
+pub(super) async fn lock_live_row(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> Result<bool, AppError> {
+    // No FOR UPDATE: SQLite has no row locks — the write transaction
+    // (BEGIN IMMEDIATE) already serialises every mutation. `IS` is SQLite's
+    // NULL-safe equality, i.e. PostgreSQL's IS NOT DISTINCT FROM.
+    sqlx::query_scalar::<_, Uuid>(
+        r#"SELECT id FROM resources
+           WHERE id = $1
+             AND tenant_id IS $2
+             AND deleted_at IS NULL"#,
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .fetch_optional(tx)
+    .await
+    .map(|row| row.is_some())
+    .map_err(db_err)
+}
+
+pub(super) async fn apply_update(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+    name: Option<String>,
+    attributes: Option<Value>,
+    alias_is_set: bool,
+    alias: Option<String>,
+) -> Result<Resource, AppError> {
+    sqlx::query_as::<_, Resource>(
+        r#"UPDATE resources
+           SET name       = COALESCE($2, name),
+               attributes = COALESCE($3, attributes),
+               alias      = CASE WHEN $4 THEN $5 ELSE alias END,
+               updated_at = now()
+           WHERE id = $1 AND deleted_at IS NULL
+           RETURNING id, kind, name, alias, tenant_id, owner_id, attributes,
+                     deleted_at, deleted_by, created_at, updated_at"#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(attributes.map(|attrs| attrs.to_string()))
+    .bind(alias_is_set)
+    .bind(alias)
+    .fetch_one(tx)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
+        other => AppError::Database(other),
+    })
+}
+
+pub(super) async fn is_live(tx: &mut SqliteConnection, id: Uuid) -> Result<bool, AppError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM resources WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(id)
+    .fetch_one(tx)
+    .await
+    .map_err(db_err)
+}
+
+pub(super) async fn soft_delete(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+    deleted_by: Option<Uuid>,
+) -> Result<u64, AppError> {
+    sqlx::query(
+        "UPDATE resources SET deleted_at = now(), deleted_by = $2
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(deleted_by)
+    .execute(tx)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(db_err)
+}
+
+pub(super) async fn deleted_tenant_id(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+) -> Result<Option<Option<Uuid>>, AppError> {
+    sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(tx)
+    .await
+    .map_err(db_err)
+}
+
+pub(super) async fn deleted_tenant_info(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+    expected_tenant_id: Option<Uuid>,
+) -> Result<Option<(Option<Uuid>, bool)>, AppError> {
+    sqlx::query_as::<_, (Option<Uuid>, bool)>(
+        "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
+         FROM resources r
+         LEFT JOIN tenants t ON t.id = r.tenant_id
+         WHERE r.id = $1
+           AND r.tenant_id IS $2
+           AND r.deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .bind(expected_tenant_id)
+    .fetch_optional(tx)
+    .await
+    .map_err(db_err)
+}
+
+pub(super) async fn restore_row(tx: &mut SqliteConnection, id: Uuid) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE resources SET deleted_at = NULL, deleted_by = NULL
+         WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .execute(tx)
+    .await
+    .map_err(crate::error::restore_conflict)?;
+    Ok(())
+}
+
+pub(super) async fn any_tenant_id(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+) -> Result<Option<Option<Uuid>>, AppError> {
+    sqlx::query_scalar::<_, Option<Uuid>>("SELECT tenant_id FROM resources WHERE id = $1")
+        .bind(id)
+        .fetch_optional(tx)
+        .await
+        .map_err(db_err)
+}
+
+pub(super) async fn purge_row(
+    tx: &mut SqliteConnection,
+    id: Uuid,
+) -> Result<Option<Option<Uuid>>, AppError> {
+    sqlx::query_scalar::<_, Option<Uuid>>(
+        "DELETE FROM resources WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
+    )
+    .bind(id)
+    .fetch_optional(tx)
+    .await
+    .map_err(db_err)
 }
