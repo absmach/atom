@@ -79,6 +79,13 @@ host development, certificate setup, custom ports, and troubleshooting.
 
 ## Development
 
+Host builds link with [mold](https://github.com/rui314/mold) for faster
+rebuilds (configured in `.cargo/config.toml`), so first install it:
+
+```bash
+sudo apt install clang mold
+```
+
 Start only PostgreSQL and run Atom on the host:
 
 ```bash

@@ -39,7 +39,7 @@ COMPOSE_ENV = ATOM_IMAGE="$(ATOM_IMAGE)" ATOM_UI_IMAGE="$(ATOM_UI_IMAGE)"
 DEV_HTTP_PORT ?= 8090
 DEV_UI_PORT ?= 3000
 
-.PHONY: help migrate-dev-env db dev build build-prod latest release release-check atom-build atom-build-prod docker_atom_dev ui-build ui-build-prod up down logs restart docker-build docker-build-prod docker-build-release docker-build-release-prod proto proto-lint proto-check pki-material
+.PHONY: help migrate-dev-env db dev check build build-prod latest release release-check atom-build atom-build-prod docker_atom_dev ui-build ui-build-prod up down logs restart docker-build docker-build-prod docker-build-release docker-build-release-prod proto proto-lint proto-check pki-material
 
 help:
 	@echo "First run: create .env in the repo root — see README Quick Start"
@@ -56,6 +56,7 @@ help:
 	@echo "  make ui-build                  Rebuild only the Atom UI image (cached)"
 	@echo "  make ui-build-prod             Rebuild only the Atom UI image (--no-cache)"
 	@echo "  make up                        Start Postgres, Atom, and Atom UI (builds images only if missing)"
+	@echo "  make check                     Type-check only (cargo check — no codegen or linking)"
 	@echo "  make db                        Start only Postgres (for host 'cargo run')"
 	@echo "  make dev                       Postgres (Docker) + host cargo run (:$(DEV_HTTP_PORT)) + host UI (:$(DEV_UI_PORT)); runs alongside 'make up'"
 	@echo "  make restart                   Restart the Compose stack (no rebuild; use 'make build' first)"
@@ -136,6 +137,9 @@ dev: db
 	( cd ui && pnpm install --frozen-lockfile && \
 	  ATOM_GRAPHQL_URL=http://localhost:$(DEV_HTTP_PORT)/graphql PORT=$(DEV_UI_PORT) pnpm dev ) & \
 	wait
+
+check:
+	cargo check
 
 build: atom-build ui-build
 

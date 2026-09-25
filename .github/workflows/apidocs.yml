@@ -92,6 +92,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
 
+      # The committed .cargo/config.toml links with mold on GNU hosts; the
+      # contract tests and schema export below link binaries.
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y clang mold
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install protoc
