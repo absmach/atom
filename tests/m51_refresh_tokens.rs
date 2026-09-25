@@ -9,6 +9,7 @@
 
 mod common;
 
+use atom::db::Database;
 use atom::{
     auth::{authenticate_token, parse_refresh_token, JwtSigner},
     config::Config,
@@ -19,7 +20,6 @@ use atom::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 const SECRET: &str = "dev1_key";
@@ -51,13 +51,13 @@ fn refresh_enabled_config(access_token_expiry_secs: u64, refresh_token_expiry_se
     cfg
 }
 
-async fn active_keys(pool: &PgPool) -> ActiveKeys {
+async fn active_keys(pool: &Database) -> ActiveKeys {
     keys::rotate(pool, &Config::for_tests().signing_keys)
         .await
         .expect("rotate signing key")
 }
 
-async fn make_tenant(pool: &PgPool) -> Uuid {
+async fn make_tenant(pool: &Database) -> Uuid {
     atom::tenants::repo::create_tenant(
         pool,
         CreateTenant {
@@ -77,7 +77,7 @@ async fn make_tenant(pool: &PgPool) -> Uuid {
 /// A device entity with a password credential — mirrors `tests/m23_authenticate_credential.rs`'s
 /// `make_device`, avoiding any email-verification path so login always
 /// succeeds regardless of `dev_allow_unverified_email_login`.
-async fn make_device(pool: &PgPool, tenant_id: Uuid) -> (Uuid, String) {
+async fn make_device(pool: &Database, tenant_id: Uuid) -> (Uuid, String) {
     let name = slug("dev");
     let device = identity_repo::create_entity(
         pool,
@@ -102,7 +102,7 @@ async fn make_device(pool: &PgPool, tenant_id: Uuid) -> (Uuid, String) {
 }
 
 async fn login(
-    pool: &PgPool,
+    pool: &Database,
     keys: &ActiveKeys,
     cfg: &Config,
     identifier: &str,
@@ -112,8 +112,8 @@ async fn login(
         .expect("login")
 }
 
-async fn active_refresh_token_count(pool: &PgPool, session_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn active_refresh_token_count(pool: &Database, session_id: Uuid) -> i64 {
+    atom::db::query_scalar(
         "SELECT COUNT(*) FROM refresh_tokens WHERE session_id = $1 AND consumed_at IS NULL AND revoked_at IS NULL",
     )
     .bind(session_id)
@@ -122,9 +122,9 @@ async fn active_refresh_token_count(pool: &PgPool, session_id: Uuid) -> i64 {
     .expect("count active refresh tokens")
 }
 
-async fn session_revoked(pool: &PgPool, session_id: Uuid) -> bool {
+async fn session_revoked(pool: &Database, session_id: Uuid) -> bool {
     let revoked_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
+        atom::db::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
             .bind(session_id)
             .fetch_one(pool)
             .await
@@ -187,7 +187,7 @@ async fn login_with_refresh_enabled_returns_one_active_refresh_token() {
 
     let (_, secret_bytes) = parse_refresh_token(&refresh_token).expect("parse issued token");
     let secret_hash: Vec<u8> =
-        sqlx::query_scalar("SELECT secret_hash FROM refresh_tokens WHERE session_id = $1")
+        atom::db::query_scalar("SELECT secret_hash FROM refresh_tokens WHERE session_id = $1")
             .bind(response.session_id)
             .fetch_one(&pool)
             .await
@@ -237,7 +237,7 @@ async fn exchange_rotates_the_token_and_works_after_access_jwt_expiry() {
     );
     let (original_id, _) = parse_refresh_token(&original_refresh).expect("parse original");
     let (consumed_at, replaced_by): (Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>) =
-        sqlx::query_as("SELECT consumed_at, replaced_by FROM refresh_tokens WHERE id = $1")
+        atom::db::query_as("SELECT consumed_at, replaced_by FROM refresh_tokens WHERE id = $1")
             .bind(original_id)
             .fetch_one(&pool)
             .await
@@ -420,7 +420,7 @@ async fn logout_revokes_the_family_and_expired_family_is_rejected() {
     let inactive_cfg = refresh_enabled_config(3600, 7200);
     let (inactive_id, inactive_name) = make_device(&pool, make_tenant(&pool).await).await;
     let inactive_login = login(&pool, &keys, &inactive_cfg, &inactive_name).await;
-    sqlx::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
         .bind(inactive_id)
         .execute(&pool)
         .await
@@ -452,7 +452,7 @@ async fn inactive_tenant_rejects_exchange_with_the_generic_error() {
     let tenant_id = make_tenant(&pool).await;
     let (_, name) = make_device(&pool, tenant_id).await;
     let login_response = login(&pool, &keys, &cfg, &name).await;
-    sqlx::query("UPDATE tenants SET status = 'inactive' WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'inactive' WHERE id = $1")
         .bind(tenant_id)
         .execute(&pool)
         .await
@@ -505,7 +505,7 @@ async fn refresh_session_never_truncates_a_refresh_enabled_session() {
     .expect("legacy refresh_session still works");
 
     let session_expires_at: chrono::DateTime<chrono::Utc> =
-        sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id = $1")
+        atom::db::query_scalar("SELECT expires_at FROM sessions WHERE id = $1")
             .bind(login_response.session_id)
             .fetch_one(&pool)
             .await

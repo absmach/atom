@@ -35,16 +35,16 @@ fn capability_config(name: &str, object_type: &str) -> BootstrapConfig {
     }
 }
 
-async fn action_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+async fn action_id(pool: &atom::db::Database, name: &str) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
         .bind(name)
         .fetch_one(pool)
         .await
         .expect("capability id lookup")
 }
 
-async fn managed_by(pool: &sqlx::PgPool, name: &str) -> Option<String> {
-    sqlx::query_scalar("SELECT managed_by FROM actions WHERE name = $1")
+async fn managed_by(pool: &atom::db::Database, name: &str) -> Option<String> {
+    atom::db::query_scalar("SELECT managed_by FROM actions WHERE name = $1")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -66,7 +66,7 @@ async fn capability_bootstrap_stamps_managed_by_config() {
 
     assert_eq!(managed_by(&p, &name).await.as_deref(), Some("config"));
 
-    let app_managed: Option<String> = sqlx::query_scalar(
+    let app_managed: Option<String> = atom::db::query_scalar(
         r#"SELECT ca.managed_by
              FROM action_applicability ca
              JOIN actions a ON a.id = ca.action_id
@@ -92,14 +92,14 @@ async fn capability_bootstrap_is_idempotent() {
     apply(&p, &signing_keys, &cfg).await.expect("first apply");
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM actions WHERE name = $1")
+    let count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM actions WHERE name = $1")
         .bind(&name)
         .fetch_one(&p)
         .await
         .expect("count capabilities");
     assert_eq!(count, 1);
 
-    let app_count: i64 = sqlx::query_scalar(
+    let app_count: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*)
              FROM action_applicability ca
              JOIN actions a ON a.id = ca.action_id
@@ -236,7 +236,7 @@ async fn assignment_rule_bootstrap_stamps_managed_by_and_guards_delete() {
         .await
         .expect("apply bootstrap");
 
-    let (rule_id, rule_managed_by): (Uuid, Option<String>) = sqlx::query_as(
+    let (rule_id, rule_managed_by): (Uuid, Option<String>) = atom::db::query_as(
         r#"SELECT id, managed_by
              FROM action_assignment_rules
             WHERE entity_kind = 'device'

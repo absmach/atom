@@ -104,6 +104,12 @@ jobs:
       - name: Vendored proto matches upstream
         run: scripts/check-vendored-proto.sh
 
+      # Application code reaches the database only through crate::db, and the
+      # SQLite baseline must declare the same tables, views and indexes as the
+      # PostgreSQL one; this fails on either kind of drift before tests run.
+      - name: Database boundary and schema parity
+        run: scripts/check-db-boundary.sh
+
       - name: cargo fmt
         run: cargo fmt --check
 
@@ -164,6 +170,35 @@ jobs:
           # Leave the PKCS#11 integration database and populated token in place
           # for the recovery proof in the following step.
           run_one --test m42_pki_pkcs11
+
+      # The same DB-gated suites, unchanged, against the SQLite backend. SQLite
+      # needs no service: each binary gets its own fresh database file, so every
+      # binary starts from the migrated baseline exactly as the PostgreSQL loop
+      # above does. Redis is still shared (and flushed) for the cache-gated
+      # suites. m42_pki_pkcs11 is exercised on PostgreSQL only: it proves the
+      # HSM key backend, which is independent of the storage engine.
+      - name: Run tests on SQLite (each binary against a fresh database file)
+        env:
+          ATOM_TEST_REDIS_URL: redis://localhost:6379/0
+          ATOM_TEST_BACKEND: sqlite
+        run: |
+          set -euo pipefail
+          run_one_sqlite() {
+            redis-cli -h localhost -p 6379 FLUSHALL >/dev/null
+            rm -f "${ATOM_TEST_SQLITE_PATH}" "${ATOM_TEST_SQLITE_PATH}-wal" \
+              "${ATOM_TEST_SQLITE_PATH}-shm" "${ATOM_TEST_SQLITE_PATH}.atom-lock"
+            cargo test "$@" -- --include-ignored --test-threads=1
+          }
+          export ATOM_TEST_SQLITE_PATH="${RUNNER_TEMP}/atom-test-lib.db"
+          run_one_sqlite --lib
+          for f in tests/*.rs; do
+            name="$(basename "$f" .rs)"
+            case "$name" in
+              m27_live_amqp_delivery|m28_amqp_mtls_local_principal|m42_pki_pkcs11) continue ;;
+            esac
+            export ATOM_TEST_SQLITE_PATH="${RUNNER_TEMP}/atom-test-${name}.db"
+            run_one_sqlite --test "$name"
+          done
 
       - name: Exercise PKCS#11 backup recovery runbook
         run: |

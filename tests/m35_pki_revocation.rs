@@ -6,12 +6,12 @@
 mod common;
 
 use async_graphql::{Request, Variables};
+use atom::db::Database;
 use atom::{
     auth::AuthContext, certs::service, graphql::build_schema, models::enums::TenantStatus, tenants,
 };
 use rcgen::{CertificateParams, DnType, KeyPair};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -192,15 +192,15 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     // this test binary retain their original data set.
     let duplicate_a = issue_managed(&pool, &config, tenant_a, entity_a, "duplicate-a").await;
     let duplicate_b = issue_managed(&pool, &config, tenant_b, entity_b, "duplicate-b").await;
-    let mut duplicate_tx = pool.begin().await.unwrap();
-    sqlx::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
-        .execute(&mut *duplicate_tx)
+    let mut duplicate_tx = pool.clone().begin().await.unwrap();
+    atom::db::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
+        .execute(&mut duplicate_tx)
         .await
         .unwrap();
-    sqlx::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
+    atom::db::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
         .bind(&duplicate_a.serial_number)
         .bind(duplicate_b.credential_id)
-        .execute(&mut *duplicate_tx)
+        .execute(&mut duplicate_tx)
         .await
         .unwrap();
     let duplicate_result = service::revoke_certificate_v2_in_tx(
@@ -223,9 +223,9 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
         duplicate_b.credential_id
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM credentials WHERE id = $1")
+        atom::db::query_scalar::<String>("SELECT status FROM credentials WHERE id = $1")
             .bind(duplicate_a.credential_id)
-            .fetch_one(&mut *duplicate_tx)
+            .fetch_one(&mut duplicate_tx)
             .await
             .unwrap(),
         "active"
@@ -268,7 +268,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     // issuer dirtiness back together.
     let rollback_cert = issue_managed(&pool, &config, tenant_b, entity_b, "rollback").await;
     set_artifact_clean(&pool, issuer_b.id, issuer_b.fingerprint_sha256.as_deref()).await;
-    let mut rollback_tx = pool.begin().await.unwrap();
+    let mut rollback_tx = pool.clone().begin().await.unwrap();
     service::revoke_certificate_v2_in_tx(
         &mut rollback_tx,
         service::RevokeCertificateV2 {
@@ -369,7 +369,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
         .bind(lifecycle_entity)
         .execute(&pool)
         .await
@@ -386,7 +386,7 @@ async fn issuer_aware_revocation_enforces_the_pr008_contract() {
     )
     .await
     .is_err());
-    sqlx::query("UPDATE entities SET status = 'active' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'active' WHERE id = $1")
         .bind(lifecycle_entity)
         .execute(&pool)
         .await
@@ -475,7 +475,7 @@ async fn assert_v2_schema_contract(schema: &atom::graphql::AtomSchema) {
 }
 
 async fn issue_managed(
-    pool: &PgPool,
+    pool: &Database,
     config: &atom::config::Config,
     tenant_id: Uuid,
     entity_id: Uuid,
@@ -548,8 +548,8 @@ fn errors_contain(errors: &[async_graphql::ServerError], expected: &str) -> bool
     errors.iter().any(|error| error.message.contains(expected))
 }
 
-async fn certificate_status(pool: &PgPool, credential_id: Uuid) -> String {
-    sqlx::query_scalar("SELECT status FROM credentials WHERE id = $1")
+async fn certificate_status(pool: &Database, credential_id: Uuid) -> String {
+    atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
         .bind(credential_id)
         .fetch_one(pool)
         .await
@@ -557,13 +557,13 @@ async fn certificate_status(pool: &PgPool, credential_id: Uuid) -> String {
 }
 
 async fn assert_revocation_row(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
     issuer_id: Uuid,
     reason: &str,
     actor_entity_id: Option<Uuid>,
 ) {
-    let row = sqlx::query(
+    let row = atom::db::query(
         r#"SELECT issuer_id, issuer_fingerprint_sha256, serial_number,
                   reason, actor_entity_id, revoked_at
              FROM certificate_revocations WHERE credential_id = $1"#,
@@ -588,9 +588,9 @@ async fn assert_revocation_row(
     let _: chrono::DateTime<chrono::Utc> = row.get("revoked_at");
 }
 
-async fn set_artifact_clean(pool: &PgPool, issuer_id: Uuid, fingerprint: Option<&str>) {
+async fn set_artifact_clean(pool: &Database, issuer_id: Uuid, fingerprint: Option<&str>) {
     let fingerprint = fingerprint.expect("managed issuer fingerprint");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO certificate_crl_state
               (issuer_fingerprint_sha256, issuer_id, crl_number, dirty)
            VALUES ($1, $2, 0, FALSE)
@@ -604,16 +604,16 @@ async fn set_artifact_clean(pool: &PgPool, issuer_id: Uuid, fingerprint: Option<
     .unwrap();
 }
 
-async fn artifact_dirty(pool: &PgPool, issuer_id: Uuid) -> bool {
-    sqlx::query_scalar("SELECT dirty FROM certificate_crl_state WHERE issuer_id = $1")
+async fn artifact_dirty(pool: &Database, issuer_id: Uuid) -> bool {
+    atom::db::query_scalar("SELECT dirty FROM certificate_crl_state WHERE issuer_id = $1")
         .bind(issuer_id)
         .fetch_one(pool)
         .await
         .unwrap()
 }
 
-async fn revocation_exists(pool: &PgPool, credential_id: Uuid) -> bool {
-    sqlx::query_scalar::<_, bool>(
+async fn revocation_exists(pool: &Database, credential_id: Uuid) -> bool {
+    atom::db::query_scalar::<bool>(
         "SELECT EXISTS(SELECT 1 FROM certificate_revocations WHERE credential_id = $1)",
     )
     .bind(credential_id)
@@ -622,8 +622,8 @@ async fn revocation_exists(pool: &PgPool, credential_id: Uuid) -> bool {
     .unwrap()
 }
 
-async fn event_count(pool: &PgPool, event: &str, credential_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn event_count(pool: &Database, event: &str, credential_id: Uuid) -> i64 {
+    atom::db::query_scalar(
         "SELECT COUNT(*) FROM event_outbox WHERE event = $1 AND (payload->>'target_id')::uuid = $2",
     )
     .bind(event)
@@ -633,8 +633,8 @@ async fn event_count(pool: &PgPool, event: &str, credential_id: Uuid) -> i64 {
     .unwrap()
 }
 
-async fn assert_audit_and_outbox(pool: &PgPool, credential_id: Uuid, issuer_id: Uuid) {
-    let audit: Value = sqlx::query_scalar(
+async fn assert_audit_and_outbox(pool: &Database, credential_id: Uuid, issuer_id: Uuid) {
+    let audit: Value = atom::db::query_scalar(
         r#"SELECT details FROM audit_logs
            WHERE event = 'certificate.revoke' AND target_id = $1
            ORDER BY created_at DESC LIMIT 1"#,
@@ -646,7 +646,7 @@ async fn assert_audit_and_outbox(pool: &PgPool, credential_id: Uuid, issuer_id: 
     assert_eq!(audit["credential_id"], credential_id.to_string());
     assert_eq!(audit["issuer_id"], issuer_id.to_string());
     assert_eq!(audit["reason"], "key_compromise");
-    let outbox: Value = sqlx::query_scalar(
+    let outbox: Value = atom::db::query_scalar(
         r#"SELECT payload FROM event_outbox
            WHERE event = 'certificate.revoke' AND (payload->>'target_id')::uuid = $1
            ORDER BY created_at DESC LIMIT 1"#,
@@ -666,8 +666,8 @@ async fn assert_audit_and_outbox(pool: &PgPool, credential_id: Uuid, issuer_id: 
     assert!(!serialized.contains("BEGIN CERTIFICATE"));
 }
 
-async fn assert_tenant_delete_event(pool: &PgPool, tenant_id: Uuid, credential_id: Uuid) {
-    let payload: Value = sqlx::query_scalar(
+async fn assert_tenant_delete_event(pool: &Database, tenant_id: Uuid, credential_id: Uuid) {
+    let payload: Value = atom::db::query_scalar(
         r#"SELECT payload FROM event_outbox
            WHERE event = 'tenant.delete' AND tenant_id = $1
            ORDER BY created_at DESC LIMIT 1"#,
@@ -685,38 +685,22 @@ async fn assert_tenant_delete_event(pool: &PgPool, tenant_id: Uuid, credential_i
     assert!(!payload.to_string().contains("PRIVATE KEY"));
 }
 
-async fn install_rejecting_outbox_trigger(pool: &PgPool) {
-    sqlx::query(
-        r#"CREATE OR REPLACE FUNCTION m35_reject_certificate_revoke_event()
-           RETURNS trigger AS $$
-           BEGIN
-             IF NEW.event = 'certificate.revoke' THEN
-               RAISE EXCEPTION 'forced PR-008 outbox failure';
-             END IF;
-             RETURN NEW;
-           END;
-           $$ LANGUAGE plpgsql"#,
+async fn install_rejecting_outbox_trigger(pool: &Database) {
+    atom::db::testing::install_rejecting_trigger(
+        pool,
+        "m35_reject_certificate_revoke_event",
+        "event_outbox",
+        "NEW.event = 'certificate.revoke'",
+        "forced PR-008 outbox failure",
     )
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"CREATE TRIGGER m35_reject_certificate_revoke_event
-           BEFORE INSERT ON event_outbox
-           FOR EACH ROW EXECUTE FUNCTION m35_reject_certificate_revoke_event()"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+    .await;
 }
 
-async fn drop_rejecting_outbox_trigger(pool: &PgPool) {
-    sqlx::query("DROP TRIGGER m35_reject_certificate_revoke_event ON event_outbox")
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("DROP FUNCTION m35_reject_certificate_revoke_event()")
-        .execute(pool)
-        .await
-        .unwrap();
+async fn drop_rejecting_outbox_trigger(pool: &Database) {
+    atom::db::testing::drop_rejecting_trigger(
+        pool,
+        "m35_reject_certificate_revoke_event",
+        "event_outbox",
+    )
+    .await;
 }

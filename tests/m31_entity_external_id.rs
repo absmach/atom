@@ -10,6 +10,7 @@ mod common;
 use common::pool;
 
 use atom::authz::repo as authz_repo;
+use atom::db::Database;
 use atom::error::AppError;
 use atom::identity::repo as identity_repo;
 use atom::models::access::AuthorizedObjectIdsQuery;
@@ -19,7 +20,6 @@ use atom::models::external_id::MAX_EXTERNAL_ID_LEN;
 use atom::models::tenant::CreateTenant;
 use atom::tenants::repo as tenant_repo;
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn slug(prefix: &str) -> String {
@@ -27,7 +27,7 @@ fn slug(prefix: &str) -> String {
     format!("{prefix}-{}", &id[..12])
 }
 
-async fn make_tenant(pool: &PgPool) -> Uuid {
+async fn make_tenant(pool: &Database) -> Uuid {
     tenant_repo::create_tenant(
         pool,
         CreateTenant {
@@ -73,7 +73,7 @@ fn no_op_update() -> UpdateEntity {
     }
 }
 
-async fn create(pool: &PgPool, req: CreateEntity) -> Entity {
+async fn create(pool: &Database, req: CreateEntity) -> Entity {
     identity_repo::create_entity(pool, req)
         .await
         .expect("create entity")
@@ -275,7 +275,7 @@ async fn the_schema_enforces_the_trim_and_length_decisions_against_direct_writes
         String::new(),
         "x".repeat(MAX_EXTERNAL_ID_LEN + 1),
     ] {
-        let err = sqlx::query(
+        let err = atom::db::query(
             "INSERT INTO entities (kind, name, external_id, tenant_id)
              VALUES ('device', $1, $2, $3)",
         )
@@ -286,13 +286,8 @@ async fn the_schema_enforces_the_trim_and_length_decisions_against_direct_writes
         .await
         .expect_err("the schema must reject {bad:?}");
 
-        let code = err
-            .as_database_error()
-            .and_then(|db| db.code())
-            .map(|code| code.into_owned());
-        assert_eq!(
-            code.as_deref(),
-            Some("23514"),
+        assert!(
+            atom::error::is_check_violation(&err),
             "{bad:?} must violate a CHECK constraint"
         );
     }
@@ -587,7 +582,7 @@ async fn restore_succeeds_when_the_external_id_was_not_reused() {
 
 /// The live `entities(externalId:)` path: the authorized listing the resolver
 /// calls, run as the seeded platform admin.
-async fn list_by_external_id(pool: &PgPool, external_id: &str) -> Vec<Uuid> {
+async fn list_by_external_id(pool: &Database, external_id: &str) -> Vec<Uuid> {
     authz_repo::authorized_object_ids_with_ceiling(
         pool,
         AuthorizedObjectIdsQuery {
@@ -776,7 +771,7 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
 
     // A seq scan is genuinely cheapest on a handful of rows, so the plan only
     // means something once the table is big enough for the choice to matter.
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (kind, name, external_id, tenant_id)
          SELECT 'device', 'plan-filler-' || g, 'PLAN-FILLER-' || g, $1
          FROM generate_series(1, 5000) g",
@@ -785,7 +780,7 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
     .execute(&p)
     .await
     .expect("seed filler entities");
-    sqlx::query("ANALYZE entities")
+    atom::db::query("ANALYZE entities")
         .execute(&p)
         .await
         .expect("analyze");
@@ -793,23 +788,42 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
     // The predicate shape is the one `authorized_entity_ids` builds, parameter
     // form and all — testing a hand-simplified query would prove nothing about
     // the resolver.
-    let plan: Vec<String> = sqlx::query_scalar(
-        "EXPLAIN SELECT e.id
-         FROM entities e
-         WHERE e.deleted_at IS NULL
-           AND ($1::uuid IS NULL OR e.tenant_id = $1)
-           AND ($2::text IS NULL OR e.external_id = $2)",
-    )
-    .bind(Option::<Uuid>::None)
-    .bind(&serial)
-    .fetch_all(&p)
-    .await
-    .expect("explain the external_id filter");
-    let plan = plan.join("\n");
+    let plan = if atom::db::testing::is_sqlite() {
+        let rows = atom::db::query(
+            "EXPLAIN QUERY PLAN SELECT e.id
+             FROM entities e
+             WHERE e.deleted_at IS NULL
+               AND ($1::uuid IS NULL OR e.tenant_id = $1)
+               AND ($2::text IS NULL OR e.external_id = $2)",
+        )
+        .bind(Option::<Uuid>::None)
+        .bind(&serial)
+        .fetch_all(&p)
+        .await
+        .expect("explain the external_id filter");
+        rows.iter()
+            .map(|row| row.get::<String, _>(3))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        let plan: Vec<String> = atom::db::query_scalar(
+            "EXPLAIN SELECT e.id
+             FROM entities e
+             WHERE e.deleted_at IS NULL
+               AND ($1::uuid IS NULL OR e.tenant_id = $1)
+               AND ($2::text IS NULL OR e.external_id = $2)",
+        )
+        .bind(Option::<Uuid>::None)
+        .bind(&serial)
+        .fetch_all(&p)
+        .await
+        .expect("explain the external_id filter");
+        plan.join("\n")
+    };
 
     // Drop the filler before asserting, so a failure does not also leave 5000
     // rows behind for every other test sharing this database.
-    sqlx::query("DELETE FROM entities WHERE tenant_id = $1 AND name LIKE 'plan-filler-%'")
+    atom::db::query("DELETE FROM entities WHERE tenant_id = $1 AND name LIKE 'plan-filler-%'")
         .bind(tenant_id)
         .execute(&p)
         .await
@@ -820,15 +834,15 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
         "the externalId filter must seek the index, not scan the table. Plan was:\n{plan}"
     );
     assert!(
-        !plan.contains("Seq Scan on entities"),
+        !plan.contains("Seq Scan on entities") && !plan.contains("SCAN e"),
         "the externalId filter must not fall back to a sequential scan. Plan was:\n{plan}"
     );
 }
 
 // ─── The value travels on the domain events ────────────────────────────────
 
-async fn latest_outbox_details(pool: &PgPool, target_id: Uuid, event: &str) -> serde_json::Value {
-    sqlx::query_scalar::<_, serde_json::Value>(
+async fn latest_outbox_details(pool: &Database, target_id: Uuid, event: &str) -> serde_json::Value {
+    atom::db::query_scalar::<serde_json::Value>(
         "SELECT payload -> 'details'
          FROM event_outbox
          WHERE event = $1 AND payload ->> 'target_id' = $2::text
@@ -924,13 +938,15 @@ async fn rows_written_without_an_external_id_are_untouched_by_the_migration() {
     // Stands in for a row that predates the migration: written through the
     // column list as it was before, so the new column takes its default.
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)")
-        .bind(id)
-        .bind(slug("legacy"))
-        .bind(tenant_id)
-        .execute(&p)
-        .await
-        .expect("insert a pre-migration-shaped row");
+    atom::db::query(
+        "INSERT INTO entities (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)",
+    )
+    .bind(id)
+    .bind(slug("legacy"))
+    .bind(tenant_id)
+    .execute(&p)
+    .await
+    .expect("insert a pre-migration-shaped row");
 
     let legacy = identity_repo::get_entity(&p, id)
         .await
@@ -964,7 +980,7 @@ async fn every_pre_existing_entity_survived_the_migration_with_a_null_external_i
     // The seeded bootstrap rows (`atom-admin` et al.) predate this column in
     // every existing deployment.
     let seeded: Option<String> =
-        sqlx::query_scalar("SELECT external_id FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT external_id FROM entities WHERE id = $1")
             .bind(common::admin_id())
             .fetch_one(&p)
             .await

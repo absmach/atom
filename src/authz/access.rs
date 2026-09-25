@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use crate::db::Database;
 use uuid::Uuid;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub async fn authz_request_tenant_id(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
 ) -> Result<Option<Uuid>, AppError> {
     if req.object_kind.as_deref() == Some("platform") {
@@ -32,7 +32,7 @@ pub async fn authz_request_tenant_id(
 }
 
 pub async fn require_authz_check_access(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     subject_id: Uuid,
     tenant_id: Option<Uuid>,

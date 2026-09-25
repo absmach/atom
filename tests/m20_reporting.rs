@@ -13,9 +13,9 @@ use common::pool;
 use serde_json::json;
 use uuid::Uuid;
 
-async fn tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("m20-tenant-{id}"))
         .execute(pool)
@@ -24,9 +24,9 @@ async fn tenant(pool: &sqlx::PgPool) -> Uuid {
     id
 }
 
-async fn human(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+async fn human(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status)
          VALUES ($1, 'human', $2, $3, 'active')",
     )
@@ -39,7 +39,7 @@ async fn human(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
     id
 }
 
-async fn principal_group(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
+async fn principal_group(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
     atom::identity::repo::create_group(
         pool,
         CreateGroup {
@@ -86,11 +86,11 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
     .await
     .expect("create conditional deny role");
     let read_action: Uuid =
-        sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
             .fetch_one(&pool)
             .await
             .expect("read action");
-    let block: Uuid = sqlx::query_scalar(
+    let block: Uuid = atom::db::query_scalar(
         "INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions)
          VALUES ('tenant', $1, 'deny', $2) RETURNING id",
     )
@@ -99,7 +99,7 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
     .fetch_one(&pool)
     .await
     .expect("insert conditional deny block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block)
@@ -158,7 +158,7 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
     )
     .await
     .expect("create foreign role");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO role_assignments (tenant_id, subject_kind, subject_id, role_id)
          VALUES ($1, 'entity', $2, $3)",
     )

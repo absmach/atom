@@ -8,6 +8,7 @@
 mod common;
 
 use async_graphql::Request;
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     config::Config,
@@ -18,11 +19,10 @@ use atom::{
     state::AppState,
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn seeded_client_profile(pool: &PgPool) -> Uuid {
-    sqlx::query_scalar(
+async fn seeded_client_profile(pool: &Database) -> Uuid {
+    atom::db::query_scalar(
         "SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL",
     )
     .fetch_one(pool)
@@ -30,7 +30,7 @@ async fn seeded_client_profile(pool: &PgPool) -> Uuid {
     .expect("seeded client profile")
 }
 
-async fn profile_with_schema(pool: &PgPool, json_schema: Value) -> Uuid {
+async fn profile_with_schema(pool: &Database, json_schema: Value) -> Uuid {
     let suffix = Uuid::new_v4();
     let profile = profile_repo::create_profile(
         pool,
@@ -63,7 +63,7 @@ async fn profile_with_schema(pool: &PgPool, json_schema: Value) -> Uuid {
     profile.id
 }
 
-fn state(pool: PgPool) -> AppState {
+fn state(pool: Database) -> AppState {
     let config = Config::for_tests();
     let primary = LoadedKey {
         kid: "test".into(),
@@ -162,7 +162,7 @@ async fn unauthorized_profile_lookup_does_not_reveal_id_existence() {
     let pool = common::pool().await;
     let profile_id = seeded_client_profile(&pool).await;
     let caller_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
     )
     .bind(caller_id)

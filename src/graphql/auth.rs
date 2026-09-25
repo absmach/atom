@@ -30,14 +30,14 @@ impl AuthQuery {
     async fn session(&self, ctx: &Context<'_>, id: ID) -> Result<Session> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let session = repo::get_session(&state.pool, parse_id(id, "id")?)
+        let session = repo::get_session(state.pool(), parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
         if session.entity_id != auth.entity_id {
-            let entity = repo::get_entity(&state.pool, session.entity_id)
+            let entity = repo::get_entity(state.pool(), session.entity_id)
                 .await
                 .map_err(gql_error)?;
-            require_read_access(&state.pool, &auth, entity.tenant_id, session.entity_id).await?;
+            require_read_access(state.pool(), &auth, entity.tenant_id, session.entity_id).await?;
         }
         Ok(session.into())
     }
@@ -54,7 +54,7 @@ impl AuthMutation {
         let state = ctx.data::<AppState>()?;
         let keys = state.keys.read().await;
         let response = service::login_credential_with_tenant(
-            &state.pool,
+            state.pool(),
             &state.config,
             &keys.primary,
             service::CredentialLoginRequest {
@@ -77,7 +77,7 @@ impl AuthMutation {
             return Err(async_graphql::Error::new("sign up is not enabled"));
         }
         let response = service::signup_human(
-            &state.pool,
+            state.pool(),
             &state.config,
             SignupRequest {
                 name: input.name,
@@ -119,10 +119,10 @@ impl AuthMutation {
                     crate::cache::CacheCategory::Session,
                     std::slice::from_ref(&crate::cache::keys::session(session_id)),
                     || async {
-                        let mut tx = state.pool.begin().await.map_err(crate::error::db_err)?;
+                        let mut tx = state.begin().await.map_err(crate::error::db_err)?;
                         repo::revoke_session_in_tx(&mut tx, session_id).await?;
                         audit::commit_with_audit(
-                            &state.pool,
+                            state.pool(),
                             tx,
                             state.config.events.enabled(),
                             &event,
@@ -135,11 +135,10 @@ impl AuthMutation {
             }
             None => {
                 let tx = state
-                    .pool
                     .begin()
                     .await
                     .map_err(|e| gql_error(crate::error::db_err(e)))?;
-                audit::commit_with_audit(&state.pool, tx, state.config.events.enabled(), &event)
+                audit::commit_with_audit(state.pool(), tx, state.config.events.enabled(), &event)
                     .await
                     .map_err(gql_error)?;
             }
@@ -171,7 +170,7 @@ impl AuthMutation {
         // the locked read takes (only replay-detection revokes the session),
         // which isn't known until partway through that transaction.
         let response = service::exchange_refresh_token(
-            &state.pool,
+            state.pool(),
             &state.config,
             &signer,
             state.cache.as_deref(),
@@ -215,7 +214,7 @@ impl AuthMutation {
             std::slice::from_ref(&crate::cache::keys::session(session_id)),
             || {
                 service::refresh_session(
-                    &state.pool,
+                    state.pool(),
                     &state.config,
                     &signer,
                     auth.entity_id,
@@ -241,15 +240,15 @@ fn parse_login_credential_kind(value: &str) -> Result<CredentialKind> {
 
 pub(crate) fn gql_error(err: AppError) -> async_graphql::Error {
     match &err {
-        AppError::Database(sqlx::Error::Database(db)) => match db.code().as_deref() {
-            Some("23505") => async_graphql::Error::new("already exists"),
-            Some("23503") => async_graphql::Error::new("invalid reference"),
-            Some("23514") => async_graphql::Error::new("invalid value"),
-            Some(_) | None => {
-                tracing::error!("db error: {}", db);
-                async_graphql::Error::new("database error")
-            }
-        },
+        AppError::Database(e) if crate::error::is_unique_violation(e) => {
+            async_graphql::Error::new("already exists")
+        }
+        AppError::Database(e) if crate::error::is_foreign_key_violation(e) => {
+            async_graphql::Error::new("invalid reference")
+        }
+        AppError::Database(e) if crate::error::is_check_violation(e) => {
+            async_graphql::Error::new("invalid value")
+        }
         AppError::Database(e) => {
             tracing::error!("db error: {}", e);
             async_graphql::Error::new("database error")
@@ -283,7 +282,7 @@ pub(crate) fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {
 }
 
 pub(crate) async fn require_any_capability(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     checks: &[(&str, Scope)],
 ) -> Result<()> {
@@ -301,7 +300,7 @@ pub(crate) async fn require_any_capability(
 // Keeping the logic in crate::auth avoids a divergent second copy.
 
 pub(crate) async fn require_list_access(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
@@ -311,7 +310,7 @@ pub(crate) async fn require_list_access(
 }
 
 pub(crate) async fn require_read_access(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
     object_id: Uuid,
@@ -322,7 +321,7 @@ pub(crate) async fn require_read_access(
 }
 
 pub(crate) async fn require_role_read(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
@@ -332,7 +331,7 @@ pub(crate) async fn require_role_read(
 }
 
 pub(crate) async fn require_policy_read(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<()> {
@@ -341,7 +340,10 @@ pub(crate) async fn require_policy_read(
         .map_err(gql_error)
 }
 
-pub(crate) async fn require_explain_access(pool: &sqlx::PgPool, auth: &AuthContext) -> Result<()> {
+pub(crate) async fn require_explain_access(
+    pool: &crate::db::Database,
+    auth: &AuthContext,
+) -> Result<()> {
     crate::auth::require_explain_access(pool, auth)
         .await
         .map_err(gql_error)
@@ -360,20 +362,25 @@ pub(crate) async fn require_credential_management(
     target_entity_id: Uuid,
 ) -> Result<Option<Uuid>> {
     deny_scoped_token(auth)?;
-    let target = repo::get_entity(&state.pool, target_entity_id)
+    let target = repo::get_entity(state.pool(), target_entity_id)
         .await
         .map_err(gql_error)?;
     if auth.entity_id == target_entity_id {
         return Ok(target.tenant_id);
     }
-    if has_capability_in_scope(&state.pool, auth, "manage", Scope::Object(target_entity_id))
-        .await
-        .map_err(gql_error)?
+    if has_capability_in_scope(
+        state.pool(),
+        auth,
+        "manage",
+        Scope::Object(target_entity_id),
+    )
+    .await
+    .map_err(gql_error)?
     {
         return Ok(target.tenant_id);
     }
     require_capability(
-        &state.pool,
+        state.pool(),
         auth,
         "manage",
         scope_for_tenant(target.tenant_id),

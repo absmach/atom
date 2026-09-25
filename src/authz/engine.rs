@@ -1,5 +1,5 @@
+use crate::db::Database;
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -68,7 +68,7 @@ pub(crate) struct ProtectedObject {
 /// explicit target, pairs `object_kind = "platform"` with an `object_id`, or
 /// supplies an unsupported `object_kind`.
 pub(crate) async fn resolve_object(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
 ) -> Result<Option<ProtectedObject>, AppError> {
     if req.object_kind.as_deref() == Some("platform") {
@@ -130,7 +130,7 @@ pub(crate) async fn resolve_object(
 /// `application`), which combined with the coarse `entity` kind yields the
 /// namespaced `object_type` (e.g., `entity:device`).
 async fn load_entity_as_object(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
     load_protected_object(
@@ -141,12 +141,12 @@ async fn load_entity_as_object(
     .await
 }
 
-async fn load_resource(pool: &PgPool, id: Uuid) -> Result<Option<ProtectedObject>, AppError> {
+async fn load_resource(pool: &Database, id: Uuid) -> Result<Option<ProtectedObject>, AppError> {
     load_protected_object(pool, "resource", repo::load_authz_resource(pool, id).await?).await
 }
 
 async fn load_group_as_object(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
     load_protected_object(
@@ -158,7 +158,7 @@ async fn load_group_as_object(
 }
 
 async fn load_credential_as_object(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
     load_protected_object(
@@ -169,12 +169,15 @@ async fn load_credential_as_object(
     .await
 }
 
-async fn load_role_as_object(pool: &PgPool, id: Uuid) -> Result<Option<ProtectedObject>, AppError> {
+async fn load_role_as_object(
+    pool: &Database,
+    id: Uuid,
+) -> Result<Option<ProtectedObject>, AppError> {
     load_protected_object(pool, "role", repo::load_authz_role_object(pool, id).await?).await
 }
 
 async fn load_policy_as_object(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
     load_protected_object(
@@ -186,7 +189,7 @@ async fn load_policy_as_object(
 }
 
 async fn load_api_endpoint_as_object(
-    pool: &PgPool,
+    pool: &Database,
     id: Uuid,
 ) -> Result<Option<ProtectedObject>, AppError> {
     load_protected_object(
@@ -198,7 +201,7 @@ async fn load_api_endpoint_as_object(
 }
 
 async fn load_protected_object(
-    pool: &PgPool,
+    pool: &Database,
     coarse_kind: &str,
     record: Option<repo::AuthzObjectRecord>,
 ) -> Result<Option<ProtectedObject>, AppError> {
@@ -295,7 +298,7 @@ fn denied(
 /// from drifting from the real decision (it previously inlined its own subject
 /// and action SQL).
 async fn load_decision_context(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
     cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
     cache: Option<&CacheClient>,
@@ -436,7 +439,7 @@ fn scope_target<'a>(
 /// cache (caching disabled, or `AuthContext::default()` in tests) reproduces
 /// pre-caching behavior exactly.
 pub async fn evaluate(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
     auth: &crate::auth::AuthContext,
 ) -> Result<AuthzResponse, AppError> {
@@ -462,7 +465,7 @@ pub async fn evaluate(
 /// the PDP's decision logic directly; cache behavior has its own dedicated test
 /// suite against the real `evaluate`/`explain` entry points.
 pub async fn evaluate_with_ceiling(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
 ) -> Result<AuthzResponse, AppError> {
@@ -470,7 +473,7 @@ pub async fn evaluate_with_ceiling(
 }
 
 async fn evaluate_prepared(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
     cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
@@ -485,7 +488,7 @@ async fn evaluate_prepared(
 }
 
 async fn evaluate_inner(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
     ceiling: Option<&repo::CredentialCeiling>,
     cached_grants: Option<std::sync::Arc<Vec<repo::EffectiveGrant>>>,
@@ -549,7 +552,7 @@ fn ceiling_permits(
 /// caller who can `read` *or* `manage` the object — without falling back to the
 /// coarse control-plane gate.
 pub async fn allows_any(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     subject_id: Uuid,
     object_kind: &str,
@@ -582,7 +585,7 @@ pub async fn allows_any(
 /// ABAC conditions, tenant lifecycle, and access-token ceilings all retain the
 /// same semantics as `authzCheck`.
 pub async fn require_any_on_object(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     object_kind: &str,
     object_id: Uuid,
@@ -605,7 +608,7 @@ pub async fn require_any_on_object(
 /// repository's native missing result (`NotFound`, or an empty child list)
 /// without letting an unprivileged caller distinguish missing from forbidden.
 pub async fn require_any_on_object_or_platform_if_missing(
-    pool: &PgPool,
+    pool: &Database,
     auth: &crate::auth::AuthContext,
     object_kind: &str,
     object_id: Uuid,
@@ -665,7 +668,7 @@ fn deny_reason(grant: &repo::EffectiveGrant) -> String {
 /// PDP explain for request-path callers. Like [`evaluate`], the access-token
 /// ceiling comes from the caller's `AuthContext`, never a hand-passed parameter.
 pub async fn explain(
-    pool: &PgPool,
+    pool: &Database,
     req: &AuthzRequest,
     auth: &crate::auth::AuthContext,
 ) -> Result<AuthzExplainResponse, AppError> {
@@ -808,7 +811,7 @@ enum TenantLoad {
 /// Load the object's owning tenant a single time, serving both the lifecycle
 /// short-circuit and the ABAC context (previously two separate queries of the
 /// same row).
-async fn load_tenant(pool: &PgPool, tenant_id: Option<Uuid>) -> Result<TenantLoad, AppError> {
+async fn load_tenant(pool: &Database, tenant_id: Option<Uuid>) -> Result<TenantLoad, AppError> {
     let Some(tenant_id) = tenant_id else {
         return Ok(TenantLoad::None);
     };
@@ -1727,25 +1730,17 @@ mod db_tests {
     //! DB-gated authorization tests. Each is `#[ignore]` because it
     //! needs a live Postgres reachable via `DATABASE_URL`.
     use super::*;
+    use crate::db::Database;
     use crate::models::{
         enums::{Effect, GrantKind, ScopeKind, SubjectKind},
         policy::CreatePolicyBinding,
         tenant::CreateTenant,
     };
     use serde_json::json;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
-    async fn pool() -> PgPool {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-        let pool = PgPool::connect(&url).await.expect("connect");
-        sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
-            .await
-            .expect("load migrations")
-            .run(&pool)
-            .await
-            .expect("migrate");
-        pool
+    async fn pool() -> Database {
+        crate::db::testing::database().await
     }
 
     fn admin_id() -> Uuid {
@@ -2039,19 +2034,20 @@ mod db_tests {
             };
             let rust = scope_values_match(&case.kind, case.scope_ref.as_deref(), &target);
 
-            let sql: bool =
-                sqlx::query_scalar("SELECT grant_scope_matches($1, $2, $3, $4, $5, $6, $7, $8)")
-                    .bind(case.text)
-                    .bind(case.scope_ref.as_deref())
-                    .bind(case.coarse)
-                    .bind(case.sub)
-                    .bind(object)
-                    .bind(case.object_tenant)
-                    .bind(&case.parent_groups)
-                    .bind(&case.ancestors)
-                    .fetch_one(&pool)
-                    .await
-                    .expect("grant_scope_matches");
+            let sql: bool = crate::db::query_scalar(
+                "SELECT grant_scope_matches($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(case.text)
+            .bind(case.scope_ref.as_deref())
+            .bind(case.coarse)
+            .bind(case.sub)
+            .bind(object)
+            .bind(case.object_tenant)
+            .bind(&case.parent_groups)
+            .bind(&case.ancestors)
+            .fetch_one(&pool)
+            .await
+            .expect("grant_scope_matches");
 
             assert_eq!(
                 rust, sql,
@@ -2097,7 +2093,7 @@ mod db_tests {
             .expect("evaluate");
         assert!(resp.allowed, "admin should be allowed: {}", resp.reason);
 
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+        let _ = crate::db::query("DELETE FROM tenants WHERE id = $1")
             .bind(t.id)
             .execute(&pool)
             .await;
@@ -2108,7 +2104,7 @@ mod db_tests {
     async fn non_holder_denied_for_tenant() {
         let pool = pool().await;
         let entity_id = Uuid::new_v4();
-        sqlx::query(
+        crate::db::query(
             "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
         )
         .bind(entity_id)
@@ -2144,11 +2140,11 @@ mod db_tests {
             .expect("evaluate");
         assert!(!resp.allowed);
 
-        let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+        let _ = crate::db::query("DELETE FROM entities WHERE id = $1")
             .bind(entity_id)
             .execute(&pool)
             .await;
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+        let _ = crate::db::query("DELETE FROM tenants WHERE id = $1")
             .bind(t.id)
             .execute(&pool)
             .await;
@@ -2159,7 +2155,7 @@ mod db_tests {
     async fn legacy_resource_id_check_still_works() {
         let pool = pool().await;
         let entity_id = Uuid::new_v4();
-        sqlx::query(
+        crate::db::query(
             "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
         )
         .bind(entity_id)
@@ -2169,14 +2165,14 @@ mod db_tests {
         .expect("insert entity");
 
         let resource_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO resources (id, kind) VALUES ($1, 'channel')")
+        crate::db::query("INSERT INTO resources (id, kind) VALUES ($1, 'channel')")
             .bind(resource_id)
             .execute(&pool)
             .await
             .expect("insert resource");
 
         let read_cap: Uuid =
-            sqlx::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
+            crate::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
                 .fetch_one(&pool)
                 .await
                 .expect("read cap");
@@ -2211,11 +2207,11 @@ mod db_tests {
             .expect("evaluate");
         assert!(resp.allowed, "legacy form must still work: {}", resp.reason);
 
-        let _ = sqlx::query("DELETE FROM resources WHERE id = $1")
+        let _ = crate::db::query("DELETE FROM resources WHERE id = $1")
             .bind(resource_id)
             .execute(&pool)
             .await;
-        let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+        let _ = crate::db::query("DELETE FROM entities WHERE id = $1")
             .bind(entity_id)
             .execute(&pool)
             .await;
@@ -2226,7 +2222,7 @@ mod db_tests {
     async fn repository_loaders_resolve_group_and_credential_objects() {
         let pool = pool().await;
         let entity_id = Uuid::new_v4();
-        sqlx::query(
+        crate::db::query(
             "INSERT INTO entities (id, kind, name, status, attributes)
              VALUES ($1, 'human', $2, 'active', $3)",
         )
@@ -2245,7 +2241,7 @@ mod db_tests {
             (parent_group_id, "loader-parent"),
             (child_group_id, "loader-child"),
         ] {
-            sqlx::query(
+            crate::db::query(
                 "INSERT INTO object_groups (id, name, status, attributes)
                  VALUES ($1, $2, 'active', $3)",
             )
@@ -2260,7 +2256,7 @@ mod db_tests {
             (grandparent_group_id, parent_group_id),
             (parent_group_id, child_group_id),
         ] {
-            sqlx::query(
+            crate::db::query(
                 "INSERT INTO object_group_hierarchy (parent_id, child_id)
                  VALUES ($1, $2)",
             )
@@ -2290,7 +2286,7 @@ mod db_tests {
         assert_eq!(group.ancestor_group_ids, vec![grandparent_group_id]);
 
         let credential_id = Uuid::new_v4();
-        sqlx::query(
+        crate::db::query(
             "INSERT INTO credentials (id, entity_id, kind, identifier, metadata)
              VALUES ($1, $2, 'access_token', $3, $4)",
         )
@@ -2364,7 +2360,7 @@ mod db_tests {
             serde_json::Value::String(t.id.to_string())
         );
 
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+        let _ = crate::db::query("DELETE FROM tenants WHERE id = $1")
             .bind(t.id)
             .execute(&pool)
             .await;

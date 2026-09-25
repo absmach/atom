@@ -2003,3 +2003,25 @@ callouts:
         assert!(identity_repo.contains("entity tenant changed after authorization"));
     }
 }
+
+crate::impl_db_enum_arg!(
+    EntityKind,
+    EntityStatus,
+    CredentialKind,
+    CredentialStatus,
+    SubjectKind,
+    GrantKind,
+    ScopeKind,
+    ObjectKind,
+    ActionAssignmentDecision,
+    Effect,
+    AuditOutcome,
+    TenantStatus,
+    DeletedFilter,
+    InvitationState,
+    SortDir,
+    EntityOrderField,
+    ResourceOrderField,
+    GroupOrderField,
+    TenantOrderField,
+);

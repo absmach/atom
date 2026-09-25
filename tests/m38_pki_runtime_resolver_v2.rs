@@ -8,6 +8,7 @@
 mod common;
 
 use async_graphql::{Request as GraphqlRequest, Variables};
+use atom::db::Database;
 use atom::{
     auth::{encode_jwt, AuthContext},
     certs::service::{self, CertificateRecord, ResolveCertificateV2},
@@ -26,7 +27,6 @@ use atom::{
 use rcgen::{CertificateParams, DnType, KeyPair};
 use ring::digest;
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio::{
     task::JoinSet,
@@ -54,13 +54,13 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     // The same serial may exist under two managed issuers because the unique
     // index is `(issuer_id, identifier)`. A duplicate inside one issuer is
     // still a database-level conflict.
-    sqlx::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
+    atom::db::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
         .bind(&leaf_a.serial_number)
         .bind(leaf_b.credential_id)
         .execute(&pool)
         .await
         .unwrap();
-    let same_issuer_conflict = sqlx::query(
+    let same_issuer_conflict = atom::db::query(
         "INSERT INTO credentials
              (id, entity_id, kind, identifier, issuer_id, metadata, expires_at)
          VALUES ($1, $2, 'certificate', $3, $4, $5, now() + interval '1 hour')",
@@ -73,10 +73,7 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     .execute(&pool)
     .await
     .expect_err("one issuer cannot reuse a certificate serial");
-    assert_eq!(
-        database_code(&same_issuer_conflict).as_deref(),
-        Some("23505")
-    );
+    assert!(atom::error::is_unique_violation(&same_issuer_conflict));
 
     let issuer_a_fingerprint = issuer_a.fingerprint_sha256.as_deref().unwrap();
     let issuer_b_fingerprint = issuer_b.fingerprint_sha256.as_deref().unwrap();
@@ -222,26 +219,28 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     .await;
     set_issuer_status(&pool, issuer_a.id, "active", true).await;
 
-    sqlx::query("UPDATE credentials SET status = 'revocation_pending' WHERE id = $1")
+    atom::db::query("UPDATE credentials SET status = 'revocation_pending' WHERE id = $1")
         .bind(leaf_a.credential_id)
         .execute(&pool)
         .await
         .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    sqlx::query("UPDATE credentials SET status = 'active' WHERE id = $1")
+    atom::db::query("UPDATE credentials SET status = 'active' WHERE id = $1")
         .bind(leaf_a.credential_id)
         .execute(&pool)
         .await
         .unwrap();
 
     let original_expiry = leaf_a.expires_at.as_ref().unwrap();
-    sqlx::query("UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1")
-        .bind(leaf_a.credential_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    atom::db::query(
+        "UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(leaf_a.credential_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    sqlx::query("UPDATE credentials SET expires_at = $2 WHERE id = $1")
+    atom::db::query("UPDATE credentials SET expires_at = $2 WHERE id = $1")
         .bind(leaf_a.credential_id)
         .bind(original_expiry)
         .execute(&pool)
@@ -256,47 +255,47 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
     set_issuer_status(&pool, issuer_a.id, "active", true).await;
 
-    sqlx::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
         .bind(entity_a)
         .execute(&pool)
         .await
         .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    sqlx::query("UPDATE entities SET status = 'active' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'active' WHERE id = $1")
         .bind(entity_a)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE entities SET status = 'inactive', deleted_at = now() WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'inactive', deleted_at = now() WHERE id = $1")
         .bind(entity_a)
         .execute(&pool)
         .await
         .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    sqlx::query("UPDATE entities SET status = 'active', deleted_at = NULL WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'active', deleted_at = NULL WHERE id = $1")
         .bind(entity_a)
         .execute(&pool)
         .await
         .unwrap();
 
-    sqlx::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
         .bind(tenant_a)
         .execute(&pool)
         .await
         .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    sqlx::query("UPDATE tenants SET status = 'active' WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'active' WHERE id = $1")
         .bind(tenant_a)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
         .bind(tenant_a)
         .execute(&pool)
         .await
         .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    sqlx::query("UPDATE tenants SET status = 'active', deleted_at = NULL WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'active', deleted_at = NULL WHERE id = $1")
         .bind(tenant_a)
         .execute(&pool)
         .await
@@ -320,7 +319,7 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
         )
         .await;
     assert!(revoked.errors.is_empty(), "{:?}", revoked.errors);
-    let lifecycle_event: Value = sqlx::query_scalar(
+    let lifecycle_event: Value = atom::db::query_scalar(
         "SELECT payload FROM event_outbox
          WHERE event = 'certificate.revoke' AND (payload->>'target_id')::uuid = $1",
     )
@@ -464,7 +463,7 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     server.abort();
 }
 
-async fn resolve(pool: &PgPool, input: ResolveCertificateV2) -> service::CertificateIdentity {
+async fn resolve(pool: &Database, input: ResolveCertificateV2) -> service::CertificateIdentity {
     service::resolve_certificate_identity_v2(pool, input)
         .await
         .unwrap()
@@ -515,14 +514,14 @@ fn assert_unauthorized(result: Result<service::CertificateIdentity, AppError>) {
     );
 }
 
-async fn assert_fingerprint_denied(pool: &PgPool, fingerprint: &str) {
+async fn assert_fingerprint_denied(pool: &Database, fingerprint: &str) {
     assert_unauthorized(
         service::resolve_certificate_identity_v2(pool, fingerprint_input(fingerprint, None)).await,
     );
 }
 
 async fn issue_managed(
-    pool: &PgPool,
+    pool: &Database,
     config: &atom::config::Config,
     tenant_id: Uuid,
     entity_id: Uuid,
@@ -532,7 +531,7 @@ async fn issue_managed(
 }
 
 async fn issue_managed_optional_tenant(
-    pool: &PgPool,
+    pool: &Database,
     config: &atom::config::Config,
     tenant_id: Option<Uuid>,
     entity_id: Uuid,
@@ -563,8 +562,8 @@ fn csr(label: &str) -> String {
     params.serialize_request(&key).unwrap().pem().unwrap()
 }
 
-async fn set_issuer_status(pool: &PgPool, issuer_id: Uuid, status: &str, enabled: bool) {
-    sqlx::query(
+async fn set_issuer_status(pool: &Database, issuer_id: Uuid, status: &str, enabled: bool) {
+    atom::db::query(
         "UPDATE pki_authorities
          SET status = $2, issuance_enabled = $3,
              retiring_at = CASE WHEN $2 = 'retiring' THEN now() ELSE NULL END,
@@ -607,13 +606,6 @@ fn colon_fingerprint(fingerprint: &str) -> String {
         .to_uppercase()
 }
 
-fn database_code(error: &sqlx::Error) -> Option<String> {
-    match error {
-        sqlx::Error::Database(error) => error.code().map(|code| code.into_owned()),
-        _ => None,
-    }
-}
-
 fn admin_auth() -> AuthContext {
     AuthContext {
         entity_id: common::admin_id(),
@@ -623,14 +615,14 @@ fn admin_auth() -> AuthContext {
     }
 }
 
-async fn active_keys(pool: &PgPool, config: &atom::config::Config) -> ActiveKeys {
+async fn active_keys(pool: &Database, config: &atom::config::Config) -> ActiveKeys {
     keys::rotate(pool, &config.signing_keys)
         .await
         .expect("rotate signing key")
 }
 
 async fn token_for(
-    pool: &PgPool,
+    pool: &Database,
     config: &atom::config::Config,
     keys: &ActiveKeys,
     entity_id: Uuid,

@@ -70,10 +70,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::config::SigningKeyConfig;
+use crate::db::{Database, DbTransaction};
 use crate::identity;
 use crate::models::action_assignment_rule::CreateActionAssignmentRule;
 use crate::models::alias::validate_alias_opt;
@@ -800,7 +800,7 @@ pub fn v1_json_schema() -> Result<Value> {
 /// Apply the bootstrap config against the database, in dependency order.
 /// Idempotent.
 pub async fn apply(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     cfg: &BootstrapConfig,
 ) -> Result<()> {
@@ -808,7 +808,7 @@ pub async fn apply(
 }
 
 pub async fn apply_with_cache(
-    pool: &PgPool,
+    pool: &Database,
     signing_keys: &SigningKeyConfig,
     cfg: &BootstrapConfig,
     cache: Option<&crate::cache::CacheClient>,
@@ -817,12 +817,12 @@ pub async fn apply_with_cache(
         .begin()
         .await
         .context("failed to begin bootstrap transaction")?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+    crate::db::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind("atom:config-bootstrap:v1")
-        .execute(&mut *tx)
+        .execute(tx.exec())
         .await
         .context("failed to acquire bootstrap advisory lock")?;
-    sqlx::query(
+    crate::db::query(
         r#"LOCK TABLE
                tenants, entities, entity_emails, credentials, resources,
                principal_groups, principal_group_hierarchy, principal_group_members,
@@ -833,12 +833,12 @@ pub async fn apply_with_cache(
                protected_object_ids, tenant_admin_default_actions
            IN EXCLUSIVE MODE"#,
     )
-    .execute(&mut *tx)
+    .execute(tx.exec())
     .await
     .context("failed to acquire bootstrap write barrier")?;
 
-    let mut entity_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM entities")
-        .fetch_all(&mut *tx)
+    let mut entity_ids: Vec<Uuid> = crate::db::query_scalar("SELECT id FROM entities")
+        .fetch_all(tx.exec())
         .await
         .context("failed to enumerate bootstrap grants-cache subjects")?;
     entity_ids.extend(cfg.entities.iter().map(|entity| entity.id));
@@ -884,7 +884,7 @@ pub async fn apply_with_cache(
 }
 
 async fn apply_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     signing_keys: &SigningKeyConfig,
     cfg: &BootstrapConfig,
 ) -> Result<()> {
@@ -932,7 +932,7 @@ async fn apply_in_tx(
 }
 
 async fn reconcile_tenant_admin_defaults(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     defaults: &BootstrapTenantDefaults,
 ) -> Result<()> {
     let capabilities = defaults
@@ -941,14 +941,14 @@ async fn reconcile_tenant_admin_defaults(
         .map(|name| name.trim().to_string())
         .collect::<Vec<_>>();
 
-    let missing: Vec<String> = sqlx::query_scalar(
+    let missing: Vec<String> = crate::db::query_scalar(
         r#"SELECT requested.name
            FROM unnest($1::text[]) AS requested(name)
            WHERE NOT EXISTS (SELECT 1 FROM actions WHERE actions.name = requested.name)
            ORDER BY requested.name"#,
     )
     .bind(&capabilities)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .context("failed to validate tenant-admin default capabilities")?;
     if !missing.is_empty() {
@@ -958,16 +958,16 @@ async fn reconcile_tenant_admin_defaults(
         );
     }
 
-    sqlx::query("DELETE FROM tenant_admin_default_actions")
-        .execute(&mut **tx)
+    crate::db::query("DELETE FROM tenant_admin_default_actions")
+        .execute(tx.exec())
         .await
         .context("failed to replace tenant-admin defaults")?;
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO tenant_admin_default_actions (action_id)
            SELECT id FROM actions WHERE name = ANY($1::text[])"#,
     )
     .bind(&capabilities)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .context("failed to persist tenant-admin defaults")?;
 
@@ -979,20 +979,20 @@ async fn reconcile_tenant_admin_defaults(
     desired_capabilities.sort();
     desired_capabilities.dedup();
 
-    let roles = sqlx::query(
+    let roles = crate::db::query(
         r#"SELECT id, tenant_id
            FROM roles
            WHERE managed_by = 'system:tenant-admin' AND deleted_at IS NULL
            ORDER BY id"#,
     )
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .context("failed to enumerate system tenant-admin roles")?;
 
     for role in roles {
         let role_id: Uuid = role.try_get("id")?;
         let tenant_id: Uuid = role.try_get("tenant_id")?;
-        let current_block_id: Option<Uuid> = sqlx::query_scalar(
+        let current_block_id: Option<Uuid> = crate::db::query_scalar(
             r#"SELECT pb.id
                FROM role_permission_blocks rpb
                JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
@@ -1002,12 +1002,12 @@ async fn reconcile_tenant_admin_defaults(
                LIMIT 1"#,
         )
         .bind(role_id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.exec())
         .await
         .with_context(|| format!("failed to inspect tenant-admin role {role_id}"))?;
 
         let current_names: Vec<String> = match current_block_id {
-            Some(block_id) => sqlx::query_scalar(
+            Some(block_id) => crate::db::query_scalar(
                 r#"SELECT a.name
                    FROM permission_block_actions pba
                    JOIN actions a ON a.id = pba.action_id
@@ -1015,7 +1015,7 @@ async fn reconcile_tenant_admin_defaults(
                    ORDER BY a.name"#,
             )
             .bind(block_id)
-            .fetch_all(&mut **tx)
+            .fetch_all(tx.exec())
             .await
             .with_context(|| format!("failed to inspect tenant-admin block {block_id}"))?,
             None => Vec::new(),
@@ -1024,23 +1024,23 @@ async fn reconcile_tenant_admin_defaults(
             continue;
         }
 
-        let replacement_id: Uuid = sqlx::query_scalar(
+        let replacement_id: Uuid = crate::db::query_scalar(
             r#"INSERT INTO permission_blocks
                   (tenant_id, scope_mode, effect, conditions, managed_by)
                VALUES ($1, 'tenant', 'allow', '{}'::jsonb, 'system:tenant-admin')
                RETURNING id"#,
         )
         .bind(tenant_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.exec())
         .await
         .with_context(|| format!("failed to create replacement block for role {role_id}"))?;
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                SELECT $1, id FROM actions WHERE name = ANY($2::text[])"#,
         )
         .bind(replacement_id)
         .bind(&desired_capabilities)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to populate replacement block {replacement_id}"))?;
 
@@ -1048,26 +1048,26 @@ async fn reconcile_tenant_admin_defaults(
             .await
             .map_err(|err| anyhow!("tenant-admin role {role_id}: {err}"))?;
 
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
                VALUES ($1, $2)"#,
         )
         .bind(role_id)
         .bind(replacement_id)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to link replacement block {replacement_id}"))?;
 
         if let Some(block_id) = current_block_id {
-            sqlx::query(
+            crate::db::query(
                 "DELETE FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2",
             )
             .bind(role_id)
             .bind(block_id)
-            .execute(&mut **tx)
+            .execute(tx.exec())
             .await
             .with_context(|| format!("failed to unlink old tenant-admin block {block_id}"))?;
-            sqlx::query(
+            crate::db::query(
                 r#"DELETE FROM permission_blocks pb
                    WHERE pb.id = $1
                      AND NOT EXISTS (
@@ -1078,7 +1078,7 @@ async fn reconcile_tenant_admin_defaults(
                      )"#,
             )
             .bind(block_id)
-            .execute(&mut **tx)
+            .execute(tx.exec())
             .await
             .with_context(|| format!("failed to garbage-collect old block {block_id}"))?;
         }
@@ -1087,7 +1087,7 @@ async fn reconcile_tenant_admin_defaults(
     Ok(())
 }
 
-async fn ensure_tenant(tx: &mut Transaction<'_, Postgres>, tenant: &BootstrapTenant) -> Result<()> {
+async fn ensure_tenant(tx: &mut DbTransaction<'_>, tenant: &BootstrapTenant) -> Result<()> {
     let alias = validate_alias_opt(tenant.alias.clone())
         .map_err(|e| anyhow!("bootstrap tenant {}: {e}", tenant.id))?;
     let attributes = tenant
@@ -1095,7 +1095,7 @@ async fn ensure_tenant(tx: &mut Transaction<'_, Postgres>, tenant: &BootstrapTen
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO tenants (id, name, alias, status, tags, attributes, managed_by)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (id) DO NOTHING"#,
@@ -1107,11 +1107,11 @@ async fn ensure_tenant(tx: &mut Transaction<'_, Postgres>, tenant: &BootstrapTen
     .bind(&tenant.tags)
     .bind(&attributes)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap tenant {}", tenant.id))?;
 
-    let matches: Option<bool> = sqlx::query_scalar(
+    let matches: Option<bool> = crate::db::query_scalar(
         r#"SELECT name = $2
                   AND alias IS NOT DISTINCT FROM $3
                   AND status = $4
@@ -1128,7 +1128,7 @@ async fn ensure_tenant(tx: &mut Transaction<'_, Postgres>, tenant: &BootstrapTen
     .bind(&tenant.status)
     .bind(&tenant.tags)
     .bind(&attributes)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap tenant {}", tenant.id))?;
     if matches != Some(true) {
@@ -1138,10 +1138,10 @@ async fn ensure_tenant(tx: &mut Transaction<'_, Postgres>, tenant: &BootstrapTen
         );
     }
 
-    let stamped = sqlx::query("UPDATE tenants SET managed_by = $2 WHERE id = $1")
+    let stamped = crate::db::query("UPDATE tenants SET managed_by = $2 WHERE id = $1")
         .bind(tenant.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap tenant {}", tenant.id))?;
     if stamped.rows_affected() != 1 {
@@ -1158,7 +1158,7 @@ async fn ensure_tenant(tx: &mut Transaction<'_, Postgres>, tenant: &BootstrapTen
 /// match the declaration exactly; it is never silently overwritten or claimed
 /// after runtime drift. The row is stamped `managed_by='config'` so
 /// update/delete/restore endpoints refuse to touch it via the API.
-async fn ensure_entity(tx: &mut Transaction<'_, Postgres>, entity: &BootstrapEntity) -> Result<()> {
+async fn ensure_entity(tx: &mut DbTransaction<'_>, entity: &BootstrapEntity) -> Result<()> {
     let alias = validate_alias_opt(entity.alias.clone())
         .map_err(|e| anyhow!("bootstrap entity {}: {e}", entity.id))?;
     let attributes = entity
@@ -1167,9 +1167,9 @@ async fn ensure_entity(tx: &mut Transaction<'_, Postgres>, entity: &BootstrapEnt
         .unwrap_or_else(|| serde_json::json!({}));
 
     let persisted_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
             .bind(entity.id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.exec())
             .await
             .with_context(|| format!("failed to inspect bootstrap entity {} tenant", entity.id))?;
     let mut tenant_ids = vec![entity.tenant_id];
@@ -1177,7 +1177,7 @@ async fn ensure_entity(tx: &mut Transaction<'_, Postgres>, entity: &BootstrapEnt
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids)
         .await
         .map_err(|e| anyhow!("bootstrap entity {} tenant lock: {e}", entity.id))?;
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO entities (id, kind, name, alias, tenant_id, status, attributes, managed_by)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (id) DO NOTHING"#,
@@ -1190,14 +1190,14 @@ async fn ensure_entity(tx: &mut Transaction<'_, Postgres>, entity: &BootstrapEnt
     .bind(&entity.status)
     .bind(&attributes)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap entity {}", entity.id))?;
 
     // A re-run never overwrites the entity row. Synchronize from the persisted
     // kind/attributes rather than from the YAML so claiming an existing row
     // cannot silently change its login identity.
-    let persisted = sqlx::query(
+    let persisted = crate::db::query(
         r#"SELECT kind, attributes,
                   kind = $2
                   AND name = $3
@@ -1217,7 +1217,7 @@ async fn ensure_entity(tx: &mut Transaction<'_, Postgres>, entity: &BootstrapEnt
     .bind(entity.tenant_id)
     .bind(&entity.status)
     .bind(&attributes)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap entity {}", entity.id))?
     .ok_or_else(|| {
@@ -1253,10 +1253,10 @@ async fn ensure_entity(tx: &mut Transaction<'_, Postgres>, entity: &BootstrapEnt
     // Stamp even when the row already existed, so an entity created earlier via
     // the API becomes protected once it appears in the bootstrap file. The
     // entity and canonical email changes commit atomically.
-    let stamped = sqlx::query("UPDATE entities SET managed_by = $2 WHERE id = $1")
+    let stamped = crate::db::query("UPDATE entities SET managed_by = $2 WHERE id = $1")
         .bind(entity.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap entity {}", entity.id))?;
     if stamped.rows_affected() != 1 {
@@ -1273,7 +1273,7 @@ async fn ensure_entity(tx: &mut Transaction<'_, Postgres>, entity: &BootstrapEnt
 /// must securely verify the declared material and metadata; bootstrap never
 /// picks an arbitrary credential or overwrites drift.
 async fn ensure_credential(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     signing_keys: &SigningKeyConfig,
     entity: &BootstrapEntity,
     cred: &BootstrapCredential,
@@ -1287,8 +1287,8 @@ async fn ensure_credential(
             {
                 bail!("bootstrap password entity {} is not active", entity.id);
             }
-            let rows = sqlx::query("SELECT id, secret_hash, metadata, scoped, expires_at FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active' FOR UPDATE")
-                .bind(entity.id).bind(CredentialKind::Password).fetch_all(&mut **tx).await?;
+            let rows = crate::db::query("SELECT id, secret_hash, metadata, scoped, expires_at FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active' FOR UPDATE")
+                .bind(entity.id).bind(CredentialKind::Password).fetch_all(tx.exec()).await?;
             let matches = rows
                 .iter()
                 .filter(|row| {
@@ -1332,8 +1332,8 @@ async fn ensure_credential(
                 bail!("bootstrap shared-key entity {} is not active", entity.id);
             }
             let metadata = serde_json::json!({ "description": description });
-            let rows = sqlx::query("SELECT id, secret_hash, secret_lookup_hash, metadata, scoped, expires_at FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active' FOR UPDATE")
-                .bind(entity.id).bind(CredentialKind::SharedKey).fetch_all(&mut **tx).await?;
+            let rows = crate::db::query("SELECT id, secret_hash, secret_lookup_hash, metadata, scoped, expires_at FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active' FOR UPDATE")
+                .bind(entity.id).bind(CredentialKind::SharedKey).fetch_all(tx.exec()).await?;
             let matches = rows
                 .iter()
                 .filter(|row| {
@@ -1409,13 +1409,13 @@ async fn ensure_credential(
 /// config-managed. Used for Password and SharedKey where the shared identity
 /// service creates the row without a `managed_by` opinion.
 async fn stamp_managed_credential_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     credential_id: Uuid,
 ) -> Result<()> {
-    let stamped = sqlx::query("UPDATE credentials SET managed_by = $2 WHERE id = $1")
+    let stamped = crate::db::query("UPDATE credentials SET managed_by = $2 WHERE id = $1")
         .bind(credential_id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap credential {credential_id}"))?;
     if stamped.rows_affected() != 1 {
@@ -1429,7 +1429,7 @@ async fn stamp_managed_credential_in_tx(
 /// then inserts the credential row directly — no ceiling, no expiry. Idempotent
 /// on the credential id.
 async fn ensure_bootstrap_access_token(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     signing_keys: &SigningKeyConfig,
     entity: &BootstrapEntity,
     token: &str,
@@ -1476,7 +1476,7 @@ async fn ensure_bootstrap_access_token(
         bail!("bootstrap access-token entity {} is not active", entity.id);
     }
 
-    let inserted = sqlx::query(
+    let inserted = crate::db::query(
         r#"INSERT INTO credentials
              (id, entity_id, kind, identifier, secret_hash, secret_lookup_hash,
               scoped, expires_at, metadata, managed_by)
@@ -1491,11 +1491,11 @@ async fn ensure_bootstrap_access_token(
     .bind(secret_lookup_hash)
     .bind(&metadata)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap access token {cred_id}"))?;
 
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT entity_id, kind, status, identifier, secret_hash,
                   secret_lookup_hash, scoped, expires_at IS NULL AS no_expiry,
                   metadata
@@ -1504,7 +1504,7 @@ async fn ensure_bootstrap_access_token(
            FOR UPDATE"#,
     )
     .bind(cred_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .with_context(|| format!("failed to reconcile bootstrap access token {cred_id}"))?;
     let owner: Uuid = row.try_get("entity_id")?;
@@ -1539,24 +1539,24 @@ async fn ensure_bootstrap_access_token(
             "bootstrap access token credential {cred_id} exists with different owner, kind, status, name, verifier, or token semantics"
         );
     }
-    sqlx::query("UPDATE credentials SET managed_by = $2 WHERE id = $1")
+    crate::db::query("UPDATE credentials SET managed_by = $2 WHERE id = $1")
         .bind(cred_id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap access token {cred_id}"))?;
     let _ = inserted;
     Ok(())
 }
 
-async fn ensure_group(tx: &mut Transaction<'_, Postgres>, group: &BootstrapGroup) -> Result<()> {
+async fn ensure_group(tx: &mut DbTransaction<'_>, group: &BootstrapGroup) -> Result<()> {
     let attributes = group
         .attributes
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
 
     lock_bootstrap_principal_group_tenants(tx, group).await?;
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO principal_groups (id, name, tenant_id, description, attributes)
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (id) DO NOTHING"#,
@@ -1566,11 +1566,11 @@ async fn ensure_group(tx: &mut Transaction<'_, Postgres>, group: &BootstrapGroup
     .bind(group.tenant_id)
     .bind(&group.description)
     .bind(&attributes)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap group {}", group.id))?;
 
-    let matches: Option<bool> = sqlx::query_scalar(
+    let matches: Option<bool> = crate::db::query_scalar(
         r#"SELECT name = $2
                   AND tenant_id IS NOT DISTINCT FROM $3
                   AND description IS NOT DISTINCT FROM $4
@@ -1586,7 +1586,7 @@ async fn ensure_group(tx: &mut Transaction<'_, Postgres>, group: &BootstrapGroup
     .bind(group.tenant_id)
     .bind(&group.description)
     .bind(&attributes)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap group {}", group.id))?;
     if matches != Some(true) {
@@ -1600,11 +1600,11 @@ async fn ensure_group(tx: &mut Transaction<'_, Postgres>, group: &BootstrapGroup
     desired_members.sort_unstable();
     desired_members.dedup();
     if result.rows_affected() == 0 {
-        let mut persisted_members: Vec<Uuid> = sqlx::query_scalar(
+        let mut persisted_members: Vec<Uuid> = crate::db::query_scalar(
             "SELECT entity_id FROM principal_group_members WHERE group_id = $1 ORDER BY entity_id",
         )
         .bind(group.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .with_context(|| format!("failed to compare bootstrap group {} members", group.id))?;
         persisted_members.sort_unstable();
@@ -1622,10 +1622,10 @@ async fn ensure_group(tx: &mut Transaction<'_, Postgres>, group: &BootstrapGroup
             .await
             .map_err(|e| anyhow!("bootstrap group {} member {entity_id}: {e}", group.id))?;
     }
-    let stamped = sqlx::query("UPDATE principal_groups SET managed_by = $2 WHERE id = $1")
+    let stamped = crate::db::query("UPDATE principal_groups SET managed_by = $2 WHERE id = $1")
         .bind(group.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap group {}", group.id))?;
     if stamped.rows_affected() != 1 {
@@ -1644,25 +1644,25 @@ async fn ensure_group(tx: &mut Transaction<'_, Postgres>, group: &BootstrapGroup
 /// membership and group-subject policy mutations, including invalid
 /// cross-tenant declarations that will be rejected later.
 async fn lock_bootstrap_principal_group_tenants(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     group: &BootstrapGroup,
 ) -> Result<()> {
     let mut tenant_ids = vec![group.tenant_id];
     tenant_ids.extend(
-        sqlx::query_scalar::<_, Option<Uuid>>(
+        crate::db::query_scalar::<Option<Uuid>>(
             "SELECT tenant_id FROM principal_groups WHERE id = $1",
         )
         .bind(group.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .with_context(|| format!("failed to inspect bootstrap group {} tenant", group.id))?,
     );
     tenant_ids.extend(
-        sqlx::query_scalar::<_, Option<Uuid>>(
+        crate::db::query_scalar::<Option<Uuid>>(
             "SELECT tenant_id FROM entities WHERE id = ANY($1::uuid[])",
         )
         .bind(&group.members)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .with_context(|| {
             format!(
@@ -1676,10 +1676,7 @@ async fn lock_bootstrap_principal_group_tenants(
         .map_err(|e| anyhow!("bootstrap group {} tenant lock: {e}", group.id))
 }
 
-async fn ensure_resource(
-    tx: &mut Transaction<'_, Postgres>,
-    resource: &BootstrapResource,
-) -> Result<()> {
+async fn ensure_resource(tx: &mut DbTransaction<'_>, resource: &BootstrapResource) -> Result<()> {
     let alias = validate_alias_opt(resource.alias.clone())
         .map_err(|e| anyhow!("bootstrap resource {}: {e}", resource.id))?;
     let attributes = resource
@@ -1688,9 +1685,9 @@ async fn ensure_resource(
         .unwrap_or_else(|| serde_json::json!({}));
 
     let persisted_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
             .bind(resource.id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.exec())
             .await
             .with_context(|| {
                 format!(
@@ -1704,7 +1701,7 @@ async fn ensure_resource(
         .await
         .map_err(|e| anyhow!("bootstrap resource {} tenant lock: {e}", resource.id))?;
 
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO resources
                (id, kind, name, alias, tenant_id, owner_id, attributes, managed_by)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1718,10 +1715,10 @@ async fn ensure_resource(
     .bind(resource.owner_id)
     .bind(&attributes)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap resource {}", resource.id))?;
-    let matches: Option<bool> = sqlx::query_scalar(
+    let matches: Option<bool> = crate::db::query_scalar(
         r#"SELECT kind = $2
                   AND name IS NOT DISTINCT FROM $3
                   AND alias IS NOT DISTINCT FROM $4
@@ -1740,7 +1737,7 @@ async fn ensure_resource(
     .bind(resource.tenant_id)
     .bind(resource.owner_id)
     .bind(&attributes)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap resource {}", resource.id))?;
     if matches != Some(true) {
@@ -1749,10 +1746,10 @@ async fn ensure_resource(
             resource.id
         );
     }
-    let stamped = sqlx::query("UPDATE resources SET managed_by = $2 WHERE id = $1")
+    let stamped = crate::db::query("UPDATE resources SET managed_by = $2 WHERE id = $1")
         .bind(resource.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap resource {}", resource.id))?;
     if stamped.rows_affected() != 1 {
@@ -1769,7 +1766,7 @@ async fn ensure_resource(
 /// second pass ([`ensure_object_group_links`]) so a parent declared later in the
 /// file still resolves.
 async fn ensure_object_groups(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     groups: &[BootstrapObjectGroup],
 ) -> Result<()> {
     if groups.is_empty() {
@@ -1800,7 +1797,7 @@ async fn ensure_object_groups(
 /// only then reach back for that foreign tenant while another mutation holds
 /// the canonical tenant -> advisory -> group order.
 async fn lock_bootstrap_object_group_tenants(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     groups: &[BootstrapObjectGroup],
 ) -> Result<()> {
     let mut tenant_ids = groups
@@ -1821,29 +1818,29 @@ async fn lock_bootstrap_object_group_tenants(
         .collect::<Vec<_>>();
 
     tenant_ids.extend(
-        sqlx::query_scalar::<_, Option<Uuid>>(
+        crate::db::query_scalar::<Option<Uuid>>(
             "SELECT tenant_id FROM groups WHERE id = ANY($1::uuid[])",
         )
         .bind(&group_ids)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .context("failed to inspect bootstrap object-group tenants")?,
     );
     tenant_ids.extend(
-        sqlx::query_scalar::<_, Option<Uuid>>(
+        crate::db::query_scalar::<Option<Uuid>>(
             "SELECT tenant_id FROM entities WHERE id = ANY($1::uuid[])",
         )
         .bind(&entity_ids)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .context("failed to inspect bootstrap object-group entity tenants")?,
     );
     tenant_ids.extend(
-        sqlx::query_scalar::<_, Option<Uuid>>(
+        crate::db::query_scalar::<Option<Uuid>>(
             "SELECT tenant_id FROM resources WHERE id = ANY($1::uuid[])",
         )
         .bind(&resource_ids)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .context("failed to inspect bootstrap object-group resource tenants")?,
     );
@@ -1854,7 +1851,7 @@ async fn lock_bootstrap_object_group_tenants(
 }
 
 async fn ensure_object_group_row(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     group: &BootstrapObjectGroup,
 ) -> Result<bool> {
     let attributes = group
@@ -1866,7 +1863,7 @@ async fn ensure_object_group_row(
     // The row is still transaction-private here, and delaying the stamp lets
     // the shared hierarchy validator run without mistaking bootstrap's own
     // initial link for a forbidden API mutation.
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO object_groups
                (id, name, tenant_id, description, attributes)
            VALUES ($1, $2, $3, $4, $5)
@@ -1877,11 +1874,11 @@ async fn ensure_object_group_row(
     .bind(group.tenant_id)
     .bind(&group.description)
     .bind(&attributes)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap object group {}", group.id))?;
     let inserted = result.rows_affected() > 0;
-    let matches: Option<bool> = sqlx::query_scalar(
+    let matches: Option<bool> = crate::db::query_scalar(
         r#"SELECT name = $2
                   AND tenant_id IS NOT DISTINCT FROM $3
                   AND description IS NOT DISTINCT FROM $4
@@ -1897,7 +1894,7 @@ async fn ensure_object_group_row(
     .bind(group.tenant_id)
     .bind(&group.description)
     .bind(&attributes)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap object group {}", group.id))?;
     if matches != Some(true) {
@@ -1914,7 +1911,7 @@ async fn ensure_object_group_row(
 /// `(group_id, member_id)`: declaring a member adds it to that group and leaves
 /// its other memberships alone, and re-running the bootstrap is a no-op.
 async fn ensure_object_group_links(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     group: &BootstrapObjectGroup,
     inserted: bool,
 ) -> Result<()> {
@@ -1929,11 +1926,11 @@ async fn ensure_object_group_links(
     desired_resources.sort_unstable();
     desired_resources.dedup();
     if !inserted {
-        let persisted_entities: Vec<Uuid> = sqlx::query_scalar(
+        let persisted_entities: Vec<Uuid> = crate::db::query_scalar(
             "SELECT entity_id FROM object_group_entities WHERE group_id = $1 ORDER BY entity_id",
         )
         .bind(group.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .with_context(|| {
             format!(
@@ -1941,11 +1938,11 @@ async fn ensure_object_group_links(
                 group.id
             )
         })?;
-        let persisted_resources: Vec<Uuid> = sqlx::query_scalar(
+        let persisted_resources: Vec<Uuid> = crate::db::query_scalar(
             "SELECT resource_id FROM object_group_resources WHERE group_id = $1 ORDER BY resource_id",
         )
         .bind(group.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .with_context(|| {
             format!(
@@ -1962,9 +1959,9 @@ async fn ensure_object_group_links(
     }
 
     let existing_parent: Option<Uuid> =
-        sqlx::query_scalar("SELECT parent_id FROM object_group_hierarchy WHERE child_id = $1")
+        crate::db::query_scalar("SELECT parent_id FROM object_group_hierarchy WHERE child_id = $1")
             .bind(group.id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.exec())
             .await
             .with_context(|| {
                 format!(
@@ -2019,10 +2016,10 @@ async fn ensure_object_group_links(
                 )
             })?;
     }
-    let stamped = sqlx::query("UPDATE object_groups SET managed_by = $2 WHERE id = $1")
+    let stamped = crate::db::query("UPDATE object_groups SET managed_by = $2 WHERE id = $1")
         .bind(group.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap object group {}", group.id))?;
     if stamped.rows_affected() != 1 {
@@ -2036,14 +2033,14 @@ async fn ensure_object_group_links(
 }
 
 async fn validate_existing_object_group_parent_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut DbTransaction<'_>,
     child_id: Uuid,
     parent_id: Uuid,
 ) -> Result<()> {
     if child_id == parent_id {
         bail!("bootstrap object group {child_id} has an existing self-parent relation");
     }
-    let relation = sqlx::query(
+    let relation = crate::db::query(
         r#"SELECT child.tenant_id AS child_tenant_id,
                   parent.tenant_id AS parent_tenant_id,
                   hierarchy.tenant_id AS hierarchy_tenant_id
@@ -2056,7 +2053,7 @@ async fn validate_existing_object_group_parent_in_tx(
     )
     .bind(child_id)
     .bind(parent_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .context("failed to validate existing bootstrap object-group hierarchy")?
     .ok_or_else(|| {
@@ -2076,19 +2073,19 @@ async fn validate_existing_object_group_parent_in_tx(
     crate::tenants::repo::lock_optional_active_tenant(tx, child_tenant_id)
         .await
         .map_err(|e| anyhow!("bootstrap object group {child_id} parent tenant: {e}"))?;
-    let locked: Vec<Uuid> = sqlx::query_scalar(
+    let locked: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT id FROM object_groups
            WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
            ORDER BY id FOR UPDATE"#,
     )
     .bind(vec![child_id, parent_id])
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .context("failed to lock existing bootstrap object-group hierarchy")?;
     if locked.len() != 2 {
         bail!("bootstrap object group {child_id} parent or child is deleted");
     }
-    let creates_cycle: bool = sqlx::query_scalar(
+    let creates_cycle: bool = crate::db::query_scalar(
         r#"WITH RECURSIVE ancestors(id) AS (
                SELECT $1::uuid
                UNION
@@ -2100,7 +2097,7 @@ async fn validate_existing_object_group_parent_in_tx(
     )
     .bind(parent_id)
     .bind(child_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .context("failed to check existing bootstrap object-group hierarchy cycle")?;
     if creates_cycle {
@@ -2110,7 +2107,7 @@ async fn validate_existing_object_group_parent_in_tx(
 }
 
 async fn ensure_permission_block(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     block: &BootstrapPermissionBlock,
 ) -> Result<()> {
     let conditions = block
@@ -2121,9 +2118,9 @@ async fn ensure_permission_block(
 
     let mut configured_action_ids = Vec::with_capacity(block.actions.len());
     for action_name in &block.actions {
-        let action_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+        let action_id: Uuid = crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
             .bind(action_name)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.exec())
             .await
             .with_context(|| format!("failed to resolve action {action_name}"))?
             .ok_or_else(|| {
@@ -2146,7 +2143,7 @@ async fn ensure_permission_block(
         conditions: conditions.clone(),
         action_ids: configured_action_ids.clone(),
     };
-    crate::authz::repo::validate_permission_block_input_on_connection(tx, &desired)
+    crate::authz::repo::validate_permission_block_input_on_connection(&mut *tx, &desired)
         .await
         .map_err(|e| anyhow!("bootstrap permission block {}: {e}", block.id))?;
 
@@ -2154,23 +2151,23 @@ async fn ensure_permission_block(
     configured_action_ids.dedup();
     // Existing rows are idempotent only when their complete stored semantics,
     // including the action set, exactly match the normalized YAML declaration.
-    let existing = sqlx::query(
+    let existing = crate::db::query(
         r#"SELECT tenant_id, scope_mode, object_kind, object_type, object_id,
                   group_id, effect, conditions
            FROM permission_blocks
            WHERE id = $1"#,
     )
     .bind(block.id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to inspect bootstrap permission block {}", block.id))?;
 
     if let Some(row) = &existing {
-        let persisted_action_ids: Vec<Uuid> = sqlx::query_scalar(
+        let persisted_action_ids: Vec<Uuid> = crate::db::query_scalar(
             "SELECT action_id FROM permission_block_actions WHERE permission_block_id = $1 ORDER BY action_id",
         )
         .bind(block.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .with_context(|| {
             format!(
@@ -2204,7 +2201,7 @@ async fn ensure_permission_block(
                 block.id
             );
         }
-        crate::authz::repo::validate_permission_block_input_on_connection(tx, &persisted)
+        crate::authz::repo::validate_permission_block_input_on_connection(&mut *tx, &persisted)
             .await
             .map_err(|e| {
                 anyhow!(
@@ -2214,7 +2211,7 @@ async fn ensure_permission_block(
             })?;
     }
 
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO permission_blocks
              (id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -2229,11 +2226,11 @@ async fn ensure_permission_block(
     .bind(scope.group_id)
     .bind(&block.effect)
     .bind(&conditions)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap permission block {}", block.id))?;
     if result.rows_affected() == 0 {
-        let matches: bool = sqlx::query_scalar(
+        let matches: bool = crate::db::query_scalar(
             r#"SELECT EXISTS (
                  SELECT 1 FROM permission_blocks
                  WHERE id = $1
@@ -2256,13 +2253,13 @@ async fn ensure_permission_block(
         .bind(scope.group_id)
         .bind(&block.effect)
         .bind(&conditions)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.exec())
         .await?;
-        let persisted_actions: Vec<Uuid> = sqlx::query_scalar(
+        let persisted_actions: Vec<Uuid> = crate::db::query_scalar(
             "SELECT action_id FROM permission_block_actions WHERE permission_block_id = $1 ORDER BY action_id",
         )
         .bind(block.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await?;
         if !matches || persisted_actions != configured_action_ids {
             bail!(
@@ -2272,32 +2269,32 @@ async fn ensure_permission_block(
         }
     }
     for action_id in &configured_action_ids {
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                VALUES ($1, $2)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(block.id)
         .bind(action_id)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to attach action to permission block {}", block.id))?;
     }
-    sqlx::query("UPDATE permission_blocks SET managed_by = $2 WHERE id = $1")
+    crate::db::query("UPDATE permission_blocks SET managed_by = $2 WHERE id = $1")
         .bind(block.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap permission block {}", block.id))?;
     let _ = result;
     Ok(())
 }
 
-async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -> Result<()> {
+async fn ensure_role(tx: &mut DbTransaction<'_>, role: &BootstrapRole) -> Result<()> {
     let persisted_tenant_id: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
+        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
             .bind(role.id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(tx.exec())
             .await
             .with_context(|| format!("failed to inspect bootstrap role {} tenant", role.id))?;
     let mut tenant_ids = vec![role.tenant_id];
@@ -2305,7 +2302,7 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids)
         .await
         .map_err(|e| anyhow!("bootstrap role {} tenant lock: {e}", role.id))?;
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO roles (id, name, tenant_id, description)
            VALUES ($1, $2, $3, $4)
            ON CONFLICT (id) DO NOTHING"#,
@@ -2314,7 +2311,7 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
     .bind(&role.name)
     .bind(role.tenant_id)
     .bind(&role.description)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap role {}", role.id))?;
 
@@ -2330,7 +2327,7 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
     desired_block_ids.sort_unstable();
     desired_block_ids.dedup();
     if result.rows_affected() == 0 {
-        let matches: bool = sqlx::query_scalar(
+        let matches: bool = crate::db::query_scalar(
             r#"SELECT EXISTS (
                    SELECT 1 FROM roles
                    WHERE id = $1 AND name = $2
@@ -2343,14 +2340,14 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
         .bind(&role.name)
         .bind(role.tenant_id)
         .bind(&role.description)
-        .fetch_one(&mut **tx)
+        .fetch_one(tx.exec())
         .await
         .with_context(|| format!("failed to compare bootstrap role {}", role.id))?;
-        let persisted_block_ids: Vec<Uuid> = sqlx::query_scalar(
+        let persisted_block_ids: Vec<Uuid> = crate::db::query_scalar(
             "SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1 ORDER BY permission_block_id",
         )
         .bind(role.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await
         .with_context(|| format!("failed to compare bootstrap role {} links", role.id))?;
         if !matches || persisted_block_ids != desired_block_ids {
@@ -2358,28 +2355,29 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
         }
     }
 
-    let persisted_tenant_id: Option<Uuid> = sqlx::query_scalar(
+    let persisted_tenant_id: Option<Uuid> = crate::db::query_scalar(
         "SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(role.id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to inspect bootstrap role {}", role.id))?
     .ok_or_else(|| anyhow!("bootstrap role {} is deleted", role.id))?;
 
     for block_id in &desired_block_ids {
-        let block_tenant_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
-                .bind(block_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .with_context(|| format!("failed to inspect permission block {block_id}"))?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "bootstrap role {} references unknown permission block {block_id}",
-                        role.id
-                    )
-                })?;
+        let block_tenant_id: Option<Uuid> = crate::db::query_scalar(
+            "SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE",
+        )
+        .bind(block_id)
+        .fetch_optional(tx.exec())
+        .await
+        .with_context(|| format!("failed to inspect permission block {block_id}"))?
+        .ok_or_else(|| {
+            anyhow!(
+                "bootstrap role {} references unknown permission block {block_id}",
+                role.id
+            )
+        })?;
         if block_tenant_id != persisted_tenant_id {
             bail!(
                 "bootstrap role {} and permission block {block_id} must belong to the same tenant",
@@ -2394,14 +2392,14 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
                     role.id
                 )
             })?;
-        sqlx::query(
+        crate::db::query(
             r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
                VALUES ($1, $2)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(role.id)
         .bind(block_id)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| {
             format!(
@@ -2410,10 +2408,10 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
             )
         })?;
     }
-    sqlx::query("UPDATE roles SET managed_by = $2 WHERE id = $1")
+    crate::db::query("UPDATE roles SET managed_by = $2 WHERE id = $1")
         .bind(role.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap role {}", role.id))?;
     let _ = result;
@@ -2421,7 +2419,7 @@ async fn ensure_role(tx: &mut Transaction<'_, Postgres>, role: &BootstrapRole) -
 }
 
 async fn ensure_role_assignment(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     assignment: &BootstrapRoleAssignment,
 ) -> Result<()> {
     let desired = CreateRoleAssignment {
@@ -2437,7 +2435,7 @@ async fn ensure_role_assignment(
         .await
         .map_err(|e| anyhow!("bootstrap role assignment {}: {e}", assignment.id))?;
 
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO role_assignments (id, tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (id) DO NOTHING"#,
@@ -2447,7 +2445,7 @@ async fn ensure_role_assignment(
     .bind(&assignment.subject.kind)
     .bind(assignment.subject.id)
     .bind(assignment.role_id)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| {
         format!(
@@ -2456,14 +2454,14 @@ async fn ensure_role_assignment(
         )
     })?;
 
-    let persisted = sqlx::query(
+    let persisted = crate::db::query(
         r#"SELECT tenant_id, subject_kind, subject_id, role_id
            FROM role_assignments
            WHERE id = $1
            FOR UPDATE"#,
     )
     .bind(assignment.id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .with_context(|| {
         format!(
@@ -2495,10 +2493,10 @@ async fn ensure_role_assignment(
                 assignment.id
             )
         })?;
-    sqlx::query("UPDATE role_assignments SET managed_by = $2 WHERE id = $1")
+    crate::db::query("UPDATE role_assignments SET managed_by = $2 WHERE id = $1")
         .bind(assignment.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| {
             format!(
@@ -2515,11 +2513,11 @@ async fn ensure_role_assignment(
 /// The row is then stamped `managed_by='config'` so mutation endpoints
 /// (`update_capability`, `delete_capability`) refuse to touch it out of band.
 async fn ensure_capability(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     capability: &BootstrapCapability,
 ) -> Result<()> {
     let name = capability.name.trim().to_string();
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO actions (name, description, managed_by)
            VALUES ($1, $2, $3)
            ON CONFLICT (name) DO NOTHING"#,
@@ -2527,23 +2525,24 @@ async fn ensure_capability(
     .bind(&name)
     .bind(&capability.description)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to upsert bootstrap capability {name}"))?;
-    let persisted = sqlx::query("SELECT id, description FROM actions WHERE name = $1 FOR UPDATE")
-        .bind(&name)
-        .fetch_one(&mut **tx)
-        .await
-        .with_context(|| format!("failed to inspect bootstrap capability {name}"))?;
+    let persisted =
+        crate::db::query("SELECT id, description FROM actions WHERE name = $1 FOR UPDATE")
+            .bind(&name)
+            .fetch_one(tx.exec())
+            .await
+            .with_context(|| format!("failed to inspect bootstrap capability {name}"))?;
     let action_id: Uuid = persisted.try_get("id")?;
     let description: Option<String> = persisted.try_get("description")?;
     if description != capability.description {
         bail!("bootstrap capability {name} exists with different semantics");
     }
-    let stamped = sqlx::query("UPDATE actions SET managed_by = $2 WHERE id = $1")
+    let stamped = crate::db::query("UPDATE actions SET managed_by = $2 WHERE id = $1")
         .bind(action_id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap capability {name}"))?;
     if stamped.rows_affected() != 1 {
@@ -2560,7 +2559,7 @@ async fn ensure_capability(
             )
         })
         .collect::<HashSet<_>>();
-    let persisted = sqlx::query(
+    let persisted = crate::db::query(
         r#"SELECT object_kind, object_type
            FROM action_applicability
            WHERE action_id = $1
@@ -2568,7 +2567,7 @@ async fn ensure_capability(
            FOR UPDATE"#,
     )
     .bind(action_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .with_context(|| format!("failed to inspect bootstrap applicability for {name}"))?
     .into_iter()
@@ -2597,11 +2596,11 @@ async fn ensure_capability(
     for app in &capability.applicability {
         ensure_capability_applicability(tx, action_id, &name, app).await?;
     }
-    let final_rows = sqlx::query(
+    let final_rows = crate::db::query(
         "SELECT object_kind, object_type FROM action_applicability WHERE action_id = $1",
     )
     .bind(action_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .with_context(|| format!("failed to verify bootstrap applicability for {name}"))?
     .into_iter()
@@ -2619,7 +2618,7 @@ async fn ensure_capability(
 }
 
 async fn ensure_capability_applicability(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     action_id: Uuid,
     action_name: &str,
     app: &BootstrapCapabilityApplicability,
@@ -2627,7 +2626,7 @@ async fn ensure_capability_applicability(
     // Two-step upsert: the unique index on this table is functional
     // (`COALESCE(object_type, '')`), which makes ON CONFLICT target awkward.
     // Insert-then-update is simpler and equally atomic per row.
-    sqlx::query(
+    crate::db::query(
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type, managed_by)
            VALUES ($1, $2, $3, $4)
            ON CONFLICT DO NOTHING"#,
@@ -2636,13 +2635,13 @@ async fn ensure_capability_applicability(
     .bind(app.object_kind.as_str())
     .bind(&app.object_type)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| {
         format!("failed to insert bootstrap applicability for capability {action_name}")
     })?;
 
-    sqlx::query(
+    crate::db::query(
         r#"UPDATE action_applicability
               SET managed_by = $4
             WHERE action_id = $1
@@ -2653,7 +2652,7 @@ async fn ensure_capability_applicability(
     .bind(app.object_kind.as_str())
     .bind(&app.object_type)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| {
         format!("failed to stamp bootstrap applicability for capability {action_name}")
@@ -2662,7 +2661,7 @@ async fn ensure_capability_applicability(
 }
 
 async fn ensure_action_assignment_rule(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     rule: &BootstrapActionAssignmentRule,
 ) -> Result<()> {
     let normalized =
@@ -2693,7 +2692,7 @@ async fn ensure_action_assignment_rule(
     // The natural key is backed by a functional unique index. A conflicting
     // uncommitted insert blocks this statement; after it resolves, the locked
     // re-read below observes and validates the winning row.
-    let inserted = sqlx::query(
+    let inserted = crate::db::query(
         r#"INSERT INTO action_assignment_rules
                (tenant_id, entity_kind, action_name, object_kind, object_type,
                 decision, is_absolute, managed_by)
@@ -2708,7 +2707,7 @@ async fn ensure_action_assignment_rule(
     .bind(normalized.decision)
     .bind(normalized.is_absolute)
     .bind(MANAGED_BY_CONFIG)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| {
         format!(
@@ -2717,7 +2716,7 @@ async fn ensure_action_assignment_rule(
         )
     })?;
 
-    let persisted = sqlx::query(
+    let persisted = crate::db::query(
         r#"SELECT id, tenant_id, entity_kind, action_name, object_kind,
                   object_type, decision, is_absolute
            FROM action_assignment_rules
@@ -2733,7 +2732,7 @@ async fn ensure_action_assignment_rule(
     .bind(&normalized.action_name)
     .bind(normalized.object_kind)
     .bind(&normalized.object_type)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .with_context(|| {
         format!(
@@ -2769,17 +2768,18 @@ async fn ensure_action_assignment_rule(
         );
     }
 
-    let stamped = sqlx::query("UPDATE action_assignment_rules SET managed_by = $2 WHERE id = $1")
-        .bind(id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to stamp bootstrap assignment rule for action {}",
-                normalized.action_name
-            )
-        })?;
+    let stamped =
+        crate::db::query("UPDATE action_assignment_rules SET managed_by = $2 WHERE id = $1")
+            .bind(id)
+            .bind(MANAGED_BY_CONFIG)
+            .execute(tx.exec())
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to stamp bootstrap assignment rule for action {}",
+                    normalized.action_name
+                )
+            })?;
     if stamped.rows_affected() != 1 {
         bail!(
             "bootstrap action_assignment_rule for {} disappeared before it could be stamped",
@@ -2791,7 +2791,7 @@ async fn ensure_action_assignment_rule(
 }
 
 async fn ensure_direct_policy(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     policy: &BootstrapDirectPolicy,
 ) -> Result<()> {
     let desired = CreateDirectPolicy {
@@ -2800,17 +2800,17 @@ async fn ensure_direct_policy(
         subject_id: policy.subject.id,
         permission_block_id: policy.permission_block_id,
     };
-    crate::authz::repo::prepare_direct_policy_in_tx(tx, &desired)
+    crate::authz::repo::prepare_direct_policy_in_tx(&mut *tx, &desired)
         .await
         .map_err(|e| anyhow!("bootstrap direct policy {}: {e}", policy.id))?;
-    crate::authz::repo::validate_direct_policy_in_tx(tx, &desired)
+    crate::authz::repo::validate_direct_policy_in_tx(&mut *tx, &desired)
         .await
         .map_err(|e| anyhow!("bootstrap direct policy {}: {e}", policy.id))?;
-    crate::guardrails::validate_direct_policy(tx, &desired)
+    crate::guardrails::validate_direct_policy(&mut *tx, &desired)
         .await
         .map_err(|e| anyhow!("bootstrap direct policy {}: {e}", policy.id))?;
 
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"INSERT INTO direct_policies (id, tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (id) DO NOTHING"#,
@@ -2820,18 +2820,18 @@ async fn ensure_direct_policy(
     .bind(&policy.subject.kind)
     .bind(policy.subject.id)
     .bind(policy.permission_block_id)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap direct policy {}", policy.id))?;
 
-    let persisted = sqlx::query(
+    let persisted = crate::db::query(
         r#"SELECT tenant_id, subject_kind, subject_id, permission_block_id
            FROM direct_policies
            WHERE id = $1
            FOR UPDATE"#,
     )
     .bind(policy.id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .with_context(|| format!("failed to inspect bootstrap direct policy {}", policy.id))?;
     let persisted = CreateDirectPolicy {
@@ -2850,7 +2850,7 @@ async fn ensure_direct_policy(
             policy.id
         );
     }
-    crate::authz::repo::validate_direct_policy_in_tx(tx, &persisted)
+    crate::authz::repo::validate_direct_policy_in_tx(&mut *tx, &persisted)
         .await
         .map_err(|e| {
             anyhow!(
@@ -2858,7 +2858,7 @@ async fn ensure_direct_policy(
                 policy.id
             )
         })?;
-    crate::guardrails::validate_direct_policy(tx, &persisted)
+    crate::guardrails::validate_direct_policy(&mut *tx, &persisted)
         .await
         .map_err(|e| {
             anyhow!(
@@ -2866,10 +2866,10 @@ async fn ensure_direct_policy(
                 policy.id
             )
         })?;
-    sqlx::query("UPDATE direct_policies SET managed_by = $2 WHERE id = $1")
+    crate::db::query("UPDATE direct_policies SET managed_by = $2 WHERE id = $1")
         .bind(policy.id)
         .bind(MANAGED_BY_CONFIG)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await
         .with_context(|| format!("failed to stamp bootstrap direct policy {}", policy.id))?;
     let _ = result;

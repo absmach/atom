@@ -1,9 +1,9 @@
 mod common;
 
 use atom::certs::authority::{self, repo, AuthorityKeyBackend, AuthorityKind, AuthorityStatus};
+use atom::db::Database;
 use chrono::{Duration, Utc};
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 struct TestAuthority {
@@ -117,7 +117,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         "revoked",
         "expired",
     ] {
-        sqlx::query(
+        atom::db::query(
             r#"UPDATE pki_authorities
                SET status = $2,
                    issuance_enabled = false,
@@ -147,7 +147,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     assert_eq!(readiness.active_count, 1);
     assert_eq!(readiness.active_backends, vec![AuthorityKeyBackend::Pkcs11]);
 
-    sqlx::query("UPDATE pki_authorities SET issuance_enabled = false WHERE id = $1")
+    atom::db::query("UPDATE pki_authorities SET issuance_enabled = false WHERE id = $1")
         .bind(platform_leaf_id)
         .execute(&pool)
         .await
@@ -155,24 +155,28 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
     assert_eq!(readiness.active_count, 1);
     assert!(readiness.active_backends.is_empty());
-    sqlx::query("UPDATE pki_authorities SET issuance_enabled = true WHERE id = $1")
+    atom::db::query("UPDATE pki_authorities SET issuance_enabled = true WHERE id = $1")
         .bind(platform_leaf_id)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE pki_authorities SET not_after = now() - interval '1 second' WHERE id = $1")
-        .bind(platform_leaf_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    atom::db::query(
+        "UPDATE pki_authorities SET not_after = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(platform_leaf_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
     assert_eq!(readiness.active_count, 1);
     assert!(readiness.active_backends.is_empty());
-    sqlx::query("UPDATE pki_authorities SET not_after = now() + interval '365 days' WHERE id = $1")
-        .bind(platform_leaf_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    atom::db::query(
+        "UPDATE pki_authorities SET not_after = now() + interval '365 days' WHERE id = $1",
+    )
+    .bind(platform_leaf_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     assert!(authority::validate_authority_shape(AuthorityKind::Root, None, None).is_ok());
     assert!(authority::validate_authority_shape(
@@ -213,7 +217,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let conflict = insert_authority(&pool, &conflicting_v2).await.unwrap_err();
     assert!(is_database_code(&conflict, "23505"));
 
-    sqlx::query(
+    atom::db::query(
         "UPDATE pki_authorities SET status = 'retiring', issuance_enabled = false, \
          retiring_at = now(), updated_at = now() WHERE id = $1",
     )
@@ -273,7 +277,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     .unwrap_err();
     assert!(is_database_code(&wrong_global_issuer, "23514"));
 
-    let delete_in_use_issuer = sqlx::query("DELETE FROM pki_authorities WHERE id = $1")
+    let delete_in_use_issuer = atom::db::query("DELETE FROM pki_authorities WHERE id = $1")
         .bind(platform_leaf_id)
         .execute(&pool)
         .await
@@ -286,7 +290,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
             || is_database_code(&delete_in_use_issuer, "23503")
     );
 
-    let tenant_move = sqlx::query("UPDATE entities SET tenant_id = $1 WHERE id = $2")
+    let tenant_move = atom::db::query("UPDATE entities SET tenant_id = $1 WHERE id = $2")
         .bind(tenant_b)
         .bind(entity_a)
         .execute(&pool)
@@ -304,7 +308,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         .unwrap_err();
     assert!(is_database_code(&duplicate_global_error, "23505"));
 
-    let outside_parent_validity = sqlx::query(
+    let outside_parent_validity = atom::db::query(
         "UPDATE pki_authorities SET not_after = now() + interval '500 days' WHERE id = $1",
     )
     .bind(conflicting_v2.id)
@@ -335,7 +339,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     )
     .await
     .unwrap();
-    let shared_serial_count: i64 = sqlx::query_scalar(
+    let shared_serial_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE kind = 'certificate' AND identifier = $1",
     )
     .bind("01020304")
@@ -344,7 +348,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     .unwrap();
     assert_eq!(shared_serial_count, 2);
 
-    let null_entity = sqlx::query(
+    let null_entity = atom::db::query(
         r#"INSERT INTO credentials
              (id, entity_id, kind, identifier, issuer_id, metadata, expires_at)
            VALUES ($1, NULL, 'certificate', $2, $3, $4, $5)"#,
@@ -373,7 +377,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
+    atom::db::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
         .bind(purge_tenant_id)
         .execute(&pool)
         .await
@@ -383,7 +387,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         .await
         .unwrap();
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tenants WHERE id = $1")
+        atom::db::query_scalar::<i64>("SELECT COUNT(*) FROM tenants WHERE id = $1")
             .bind(purge_tenant_id)
             .fetch_one(&pool)
             .await
@@ -391,7 +395,7 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pki_authorities WHERE id = $1")
+        atom::db::query_scalar::<i64>("SELECT COUNT(*) FROM pki_authorities WHERE id = $1")
             .bind(purge_authority.id)
             .fetch_one(&pool)
             .await
@@ -400,9 +404,9 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     );
 }
 
-async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
+async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("{prefix}-{id}"))
         .execute(pool)
@@ -411,26 +415,28 @@ async fn create_tenant(pool: &PgPool, prefix: &str) -> Uuid {
     id
 }
 
-async fn create_entity(pool: &PgPool, tenant_id: Option<Uuid>, prefix: &str) -> Uuid {
+async fn create_entity(pool: &Database, tenant_id: Option<Uuid>, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, tenant_id, name, kind) VALUES ($1, $2, $3, 'service')")
-        .bind(id)
-        .bind(tenant_id)
-        .bind(format!("{prefix}-{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    atom::db::query(
+        "INSERT INTO entities (id, tenant_id, name, kind) VALUES ($1, $2, $3, 'service')",
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(format!("{prefix}-{id}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
-async fn insert_authority(pool: &PgPool, authority: &TestAuthority) -> Result<(), sqlx::Error> {
+async fn insert_authority(pool: &Database, authority: &TestAuthority) -> Result<(), sqlx::Error> {
     let now = Utc::now();
     let (not_before, not_after) = match authority.kind {
         "root" => (now - Duration::hours(3), now + Duration::days(400)),
         "platform_intermediate" => (now - Duration::hours(2), now + Duration::days(390)),
         _ => (now - Duration::hours(1), now + Duration::days(365)),
     };
-    sqlx::query(
+    atom::db::query(
         r#"
         INSERT INTO pki_authorities (
             id, tenant_id, parent_id, kind, version, status, issuance_enabled,
@@ -467,13 +473,13 @@ async fn insert_authority(pool: &PgPool, authority: &TestAuthority) -> Result<()
 }
 
 async fn insert_certificate(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Uuid,
     issuer_id: Uuid,
     serial: &str,
     certificate_fingerprint: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    atom::db::query(
         r#"
         INSERT INTO credentials (
             id, entity_id, kind, identifier, issuer_id, metadata, expires_at
@@ -496,6 +502,19 @@ fn fingerprint(value: u64) -> String {
     format!("{value:064x}")
 }
 
+/// Backend-neutral form of "the database rejected this with SQLSTATE `code`":
+/// 23505 unique, 23503 foreign key, 23514 check (including invariant triggers).
 fn is_database_code(error: &sqlx::Error, code: &str) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some(code))
+    match code {
+        "23505" => atom::error::is_unique_violation(error),
+        "23503" => atom::error::is_foreign_key_violation(error),
+        // 23001 is PostgreSQL 18's restrict_violation (ON DELETE RESTRICT);
+        // SQLite reports the same failure as a foreign-key violation.
+        "23001" => {
+            atom::error::is_foreign_key_violation(error)
+                || matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23001"))
+        }
+        "23514" => atom::error::is_check_violation(error),
+        other => panic!("unmapped SQLSTATE {other}"),
+    }
 }

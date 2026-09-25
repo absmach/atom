@@ -1,4 +1,4 @@
 {
   "title": "Operations",
-  "pages": ["pkcs11"]
+  "pages": ["pkcs11", "sqlite"]
 }

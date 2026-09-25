@@ -7,6 +7,7 @@ mod common;
 
 use std::{fs, process::Command, time::Duration as StdDuration};
 
+use atom::db::Database;
 use atom::{
     certs::{
         authority::{provisioning, repo as authority_repo, AuthorityStatus},
@@ -27,7 +28,6 @@ use der::{
 use rcgen::{CertificateParams, DnType, KeyPair};
 use ring::digest;
 use spki::AlgorithmIdentifierOwned;
-use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -274,11 +274,11 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
     // PR-011's production uniqueness model permits the same serial under two
     // issuers. Exact issuer+serial lookup keeps A and B independent even after
     // A is revoked.
-    sqlx::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
+    atom::db::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
+    atom::db::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
         .bind(&leaf_a.serial_number)
         .bind(leaf_b.credential_id)
         .execute(&pool)
@@ -309,7 +309,7 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
         ref other => panic!("expected revoked status, got {other:?}"),
     };
     assert_eq!(revoked.revocation_reason, Some(CrlReason::KeyCompromise));
-    let (recorded_at, recorded_reason): (DateTime<Utc>, String) = sqlx::query_as(
+    let (recorded_at, recorded_reason): (DateTime<Utc>, String) = atom::db::query_as(
         "SELECT revoked_at, reason FROM certificate_revocations WHERE credential_id = $1",
     )
     .bind(leaf_a.credential_id)
@@ -329,7 +329,7 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
 
     // A physical credential purge must not turn a revoked issuer/serial into
     // unknown while the certificate is still valid.
-    sqlx::query("DELETE FROM credentials WHERE id = $1")
+    atom::db::query("DELETE FROM credentials WHERE id = $1")
         .bind(leaf_a.credential_id)
         .execute(&pool)
         .await
@@ -353,7 +353,7 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
             .await
             .unwrap();
     assert_status(&retiring_response, CertStatus::revoked(revoked));
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = pool.clone().begin().await.unwrap();
     provisioning::complete_retirement_in_tx(&mut tx, issuer_a.id)
         .await
         .unwrap();
@@ -378,7 +378,7 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
 }
 
 async fn issue_managed(
-    pool: &PgPool,
+    pool: &Database,
     config: &atom::config::Config,
     tenant_id: Uuid,
     entity_id: Uuid,
@@ -401,7 +401,7 @@ async fn issue_managed(
 }
 
 async fn revoke(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
     entity_id: Uuid,
     tenant_id: Uuid,

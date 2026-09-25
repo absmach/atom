@@ -8,6 +8,7 @@
 mod common;
 
 use async_graphql::{Request, Response};
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     config::Config,
@@ -15,10 +16,9 @@ use atom::{
     keys::{ActiveKeys, LoadedKey},
     state::AppState,
 };
-use sqlx::PgPool;
 use uuid::Uuid;
 
-fn state(pool: PgPool) -> AppState {
+fn state(pool: Database) -> AppState {
     let primary = LoadedKey {
         kid: "test".into(),
         public_key_pem: String::new(),
@@ -84,9 +84,9 @@ fn assert_forbidden(response: &Response, context: &str) {
     assert_eq!(response.errors[0].message, "forbidden", "{context}");
 }
 
-async fn global_human(pool: &PgPool) -> Uuid {
+async fn global_human(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
            VALUES ($1, 'human', $2, NULL, 'active', $3)"#,
     )
@@ -110,13 +110,13 @@ async fn session_user_can_edit_own_global_profile_while_switched_to_a_tenant() {
     let pool = common::pool().await;
     let caller = global_human(&pool).await;
     let tenant_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(tenant_id)
         .bind(format!("self-profile-switched-{tenant_id}"))
         .execute(&pool)
         .await
         .expect("insert switched tenant");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id, status)
          VALUES ($1, $2, 'active')",
     )
@@ -171,7 +171,7 @@ async fn session_user_can_edit_own_global_profile_while_switched_to_a_tenant() {
     );
 
     let persisted: (String, serde_json::Value, Option<Uuid>) =
-        sqlx::query_as("SELECT name, attributes, tenant_id FROM entities WHERE id = $1")
+        atom::db::query_as("SELECT name, attributes, tenant_id FROM entities WHERE id = $1")
             .bind(caller)
             .fetch_one(&pool)
             .await
@@ -188,7 +188,7 @@ async fn self_profile_path_does_not_authorize_entity_administration() {
     let pool = common::pool().await;
     let caller = global_human(&pool).await;
     let destination = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(destination)
         .bind(format!("self-profile-destination-{destination}"))
         .execute(&pool)
@@ -226,12 +226,13 @@ async fn self_profile_path_does_not_authorize_entity_administration() {
         assert_forbidden(&response, context);
     }
 
-    let persisted: (String, Option<Uuid>, serde_json::Value) =
-        sqlx::query_as("SELECT status::text, tenant_id, attributes FROM entities WHERE id = $1")
-            .bind(caller)
-            .fetch_one(&pool)
-            .await
-            .expect("entity after denied updates");
+    let persisted: (String, Option<Uuid>, serde_json::Value) = atom::db::query_as(
+        "SELECT status::text, tenant_id, attributes FROM entities WHERE id = $1",
+    )
+    .bind(caller)
+    .fetch_one(&pool)
+    .await
+    .expect("entity after denied updates");
     assert_eq!(persisted.0, "active");
     assert_eq!(persisted.1, None);
     assert_eq!(persisted.2["department"], "operations");
@@ -266,7 +267,7 @@ async fn access_tokens_cannot_use_the_session_only_self_profile_path() {
     }
 
     let attributes: serde_json::Value =
-        sqlx::query_scalar("SELECT attributes FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT attributes FROM entities WHERE id = $1")
             .bind(caller)
             .fetch_one(&pool)
             .await
@@ -281,7 +282,7 @@ async fn self_profile_path_rejects_other_targets_and_non_global_humans() {
     let caller = global_human(&pool).await;
     let other = global_human(&pool).await;
     let tenant_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(tenant_id)
         .bind(format!("self-profile-scope-{tenant_id}"))
         .execute(&pool)
@@ -289,7 +290,7 @@ async fn self_profile_path_rejects_other_targets_and_non_global_humans() {
         .expect("insert tenant");
 
     let tenant_human = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
          VALUES ($1, 'human', $2, $3, 'active', '{}')",
     )
@@ -301,7 +302,7 @@ async fn self_profile_path_rejects_other_targets_and_non_global_humans() {
     .expect("insert tenant human");
 
     let global_device = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
          VALUES ($1, 'device', $2, NULL, 'active', '{}')",
     )
@@ -339,7 +340,7 @@ async fn self_profile_path_rejects_other_targets_and_non_global_humans() {
 async fn self_profile_null_removes_fields_and_preserves_legacy_metadata() {
     let pool = common::pool().await;
     let caller = global_human(&pool).await;
-    sqlx::query(
+    atom::db::query(
         "UPDATE entities
          SET attributes = attributes || $2
          WHERE id = $1",
@@ -376,7 +377,7 @@ async fn self_profile_null_removes_fields_and_preserves_legacy_metadata() {
     assert!(response.errors.is_empty(), "{:?}", response.errors);
 
     let attributes: serde_json::Value =
-        sqlx::query_scalar("SELECT attributes FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT attributes FROM entities WHERE id = $1")
             .bind(caller)
             .fetch_one(&pool)
             .await
@@ -394,7 +395,7 @@ async fn self_profile_name_is_normalized_and_cannot_create_login_ambiguity() {
     let pool = common::pool().await;
     let caller = global_human(&pool).await;
     let existing = global_human(&pool).await;
-    let existing_name: String = sqlx::query_scalar("SELECT name FROM entities WHERE id = $1")
+    let existing_name: String = atom::db::query_scalar("SELECT name FROM entities WHERE id = $1")
         .bind(existing)
         .fetch_one(&pool)
         .await
@@ -439,7 +440,7 @@ async fn self_profile_name_is_normalized_and_cannot_create_login_ambiguity() {
         ))
         .await;
     assert!(success.errors.is_empty(), "{:?}", success.errors);
-    let persisted: String = sqlx::query_scalar("SELECT name FROM entities WHERE id = $1")
+    let persisted: String = atom::db::query_scalar("SELECT name FROM entities WHERE id = $1")
         .bind(caller)
         .fetch_one(&pool)
         .await
@@ -455,10 +456,10 @@ async fn self_profile_update_preserves_concurrent_admin_attributes() {
     let schema = build_schema(state(pool.clone()));
 
     let mut admin_tx = pool.begin().await.expect("begin admin update");
-    sqlx::query("UPDATE entities SET attributes = attributes || $2 WHERE id = $1")
+    atom::db::query("UPDATE entities SET attributes = attributes || $2 WHERE id = $1")
         .bind(caller)
         .bind(serde_json::json!({ "department": "security" }))
-        .execute(&mut *admin_tx)
+        .execute(&mut admin_tx)
         .await
         .expect("stage concurrent admin attributes");
 
@@ -495,7 +496,7 @@ async fn self_profile_update_preserves_concurrent_admin_attributes() {
     assert!(response.errors.is_empty(), "{:?}", response.errors);
 
     let attributes: serde_json::Value =
-        sqlx::query_scalar("SELECT attributes FROM entities WHERE id = $1")
+        atom::db::query_scalar("SELECT attributes FROM entities WHERE id = $1")
             .bind(caller)
             .fetch_one(&pool)
             .await

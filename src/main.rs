@@ -26,13 +26,18 @@ async fn main() -> anyhow::Result<()> {
     );
 
     metrics::init(cfg.metrics.enabled);
-    let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
+    let database = db::Database::connect(&cfg.database_url, &cfg.db_pool).await?;
+    match db::location(&cfg.database_url) {
+        Ok(loc) => tracing::info!(backend = %loc.kind, location = %loc, "database connected"),
+        Err(_) => tracing::info!(backend = %database.kind(), "database connected"),
+    }
+    let pool = database.clone();
     let bootstrap_cfg = match cfg.bootstrap_file.as_deref() {
         Some(path) => Some(bootstrap::load(std::path::Path::new(path)).await?),
         None => None,
     };
 
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    database.run_migrations().await?;
     tracing::info!("migrations applied");
 
     certs::authority::key_provider::validate_startup(&pool, &cfg.pki_ca_keys).await?;
@@ -89,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
 
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
-    let mut state =
-        state::AppState::new(pool, cfg.clone(), active_keys, cache).with_callouts(callout_service);
+    let mut state = state::AppState::new(database, cfg.clone(), active_keys, cache)
+        .with_callouts(callout_service);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await
@@ -294,7 +299,7 @@ mod tracing_tests {
     }
 }
 
-async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<()> {
+async fn bootstrap_pki_root(pool: &atom::db::Database, path: &str) -> anyhow::Result<()> {
     let pem = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("failed to read ATOM_PKI_ROOT_CERT_PATH ({path})"))?;
@@ -328,7 +333,7 @@ async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<(
 }
 
 async fn bootstrap_platform_intermediate(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     ca_keys: &config::PkiCaKeyConfig,
     cert_path: &str,
     key_path: &str,
@@ -374,7 +379,7 @@ async fn bootstrap_platform_intermediate(
 }
 
 async fn bootstrap_admin_credentials(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     admin_entity_id: Uuid,
     secret: &str,
 ) -> anyhow::Result<()> {
@@ -382,7 +387,7 @@ async fn bootstrap_admin_credentials(
 }
 
 async fn bootstrap_password_credentials(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     entity_id: Uuid,
     secret: &str,
     label: &str,
@@ -401,22 +406,22 @@ async fn bootstrap_password_credentials(
     {
         anyhow::bail!("active {label} entity {entity_id} not found");
     }
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = crate::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
     .bind(entity_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.exec())
     .await?;
 
     let mut created = false;
     if count == 0 {
-        sqlx::query(
+        crate::db::query(
             "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
         )
         .bind(Uuid::new_v4())
         .bind(entity_id)
         .bind(hash)
-        .execute(&mut *tx)
+        .execute(tx.exec())
         .await?;
         created = true;
     }

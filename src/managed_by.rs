@@ -7,10 +7,13 @@
 //! The table name is looked up in a closed static match, not interpolated,
 //! so a caller cannot inject arbitrary SQL.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use crate::db::Database;
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 /// Reject a mutation attempt on a row that was provisioned from the bootstrap
 /// YAML. Returns:
@@ -20,7 +23,7 @@ use crate::error::{db_err, AppError};
 /// - `Err(AppError::conflict)` — the row is stamped `managed_by='config'`;
 ///   the operator must edit the YAML and restart Atom.
 pub async fn ensure_not_config_managed(
-    pool: &PgPool,
+    pool: &Database,
     table: &'static str,
     id: Uuid,
 ) -> Result<(), AppError> {
@@ -47,7 +50,7 @@ pub async fn ensure_not_config_managed(
             )))
         }
     };
-    let managed_by: Option<Option<String>> = sqlx::query_scalar(sql)
+    let managed_by: Option<Option<String>> = crate::db::query_scalar(sql)
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -74,7 +77,7 @@ pub async fn ensure_not_config_managed(
 /// this helper. The row lock here is intentionally the final lock in that
 /// order: tenant -> hierarchy advisory lock (when applicable) -> owner row.
 pub(crate) async fn ensure_not_config_managed_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     table: &'static str,
     id: Uuid,
 ) -> Result<(), AppError> {
@@ -102,9 +105,9 @@ pub(crate) async fn ensure_not_config_managed_in_tx(
             )))
         }
     };
-    let managed_by: Option<Option<String>> = sqlx::query_scalar(sql)
+    let managed_by: Option<Option<String>> = crate::db::query_scalar(sql)
         .bind(id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(tx.exec())
         .await
         .map_err(db_err)?;
     reject_config_managed(table, id, managed_by)

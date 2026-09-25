@@ -1,9 +1,13 @@
+use crate::db::Database;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::FromRow;
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct CertificateCredential {
@@ -98,9 +102,9 @@ pub struct CertificateListFilter {
 
 pub async fn entity_tenant_id<'e, E>(executor: E, entity_id: Uuid) -> Result<Option<Uuid>, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"
         SELECT e.tenant_id
         FROM entities e
@@ -119,14 +123,14 @@ where
 }
 
 pub async fn insert_managed_certificate_credential(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     issuer_id: Uuid,
     serial_number: &str,
     metadata: Value,
     expires_at: DateTime<Utc>,
 ) -> Result<Uuid, AppError> {
-    sqlx::query_scalar(
+    crate::db::query_scalar(
         r#"
         INSERT INTO credentials (
             id, entity_id, kind, identifier, metadata, expires_at, issuer_id
@@ -141,19 +145,19 @@ pub async fn insert_managed_certificate_credential(
     .bind(metadata)
     .bind(expires_at)
     .bind(issuer_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn claim_certificate_issuance_request(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     entity_id: Uuid,
     request_key_hash: &str,
     request_fingerprint_sha256: &str,
 ) -> Result<CertificateIssuanceRequestClaim, AppError> {
     let request_id = Uuid::new_v4();
-    let inserted = sqlx::query_scalar::<_, Uuid>(
+    let inserted = crate::db::query_scalar::<Uuid>(
         r#"
         INSERT INTO certificate_issuance_requests (
             id, entity_id, request_key_hash, request_fingerprint_sha256
@@ -167,14 +171,14 @@ pub async fn claim_certificate_issuance_request(
     .bind(entity_id)
     .bind(request_key_hash)
     .bind(request_fingerprint_sha256)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .map_err(AppError::Database)?;
     if inserted.is_some() {
         return Ok(CertificateIssuanceRequestClaim::New { request_id });
     }
 
-    let existing = sqlx::query_as::<_, (String, Option<Uuid>)>(
+    let existing = crate::db::query_as::<(String, Option<Uuid>)>(
         r#"
         SELECT request_fingerprint_sha256, credential_id
         FROM certificate_issuance_requests
@@ -184,7 +188,7 @@ pub async fn claim_certificate_issuance_request(
     )
     .bind(entity_id)
     .bind(request_key_hash)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     if existing.0 != request_fingerprint_sha256 {
@@ -203,11 +207,11 @@ pub async fn claim_certificate_issuance_request(
 }
 
 pub async fn complete_certificate_issuance_request(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     request_id: Uuid,
     credential_id: Uuid,
 ) -> Result<(), AppError> {
-    let completed = sqlx::query_scalar::<_, Uuid>(
+    let completed = crate::db::query_scalar::<Uuid>(
         r#"
         UPDATE certificate_issuance_requests
         SET credential_id = $2, completed_at = now()
@@ -217,7 +221,7 @@ pub async fn complete_certificate_issuance_request(
     )
     .bind(request_id)
     .bind(credential_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .map_err(AppError::Database)?;
     if completed.is_none() {
@@ -229,14 +233,14 @@ pub async fn complete_certificate_issuance_request(
 }
 
 pub async fn claim_certificate_renewal(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     previous_credential_id: Uuid,
     request_key_hash: &str,
     request_fingerprint_sha256: &str,
     key_mode: &str,
 ) -> Result<CertificateRenewalRequestClaim, AppError> {
     let renewal_id = Uuid::new_v4();
-    let inserted = sqlx::query_scalar::<_, Uuid>(
+    let inserted = crate::db::query_scalar::<Uuid>(
         r#"
         INSERT INTO certificate_renewals (
             id, previous_credential_id, request_key_hash,
@@ -252,14 +256,14 @@ pub async fn claim_certificate_renewal(
     .bind(request_key_hash)
     .bind(request_fingerprint_sha256)
     .bind(key_mode)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .map_err(AppError::Database)?;
     if inserted.is_some() {
         return Ok(CertificateRenewalRequestClaim::New { renewal_id });
     }
 
-    let existing = sqlx::query_as::<_, (String, String, String, Option<Uuid>)>(
+    let existing = crate::db::query_as::<(String, String, String, Option<Uuid>)>(
         r#"
         SELECT request_key_hash, request_fingerprint_sha256, key_mode,
                replacement_credential_id
@@ -269,7 +273,7 @@ pub async fn claim_certificate_renewal(
         "#,
     )
     .bind(previous_credential_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     if existing.0 != request_key_hash
@@ -291,11 +295,11 @@ pub async fn claim_certificate_renewal(
 }
 
 pub async fn complete_certificate_renewal(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     renewal_id: Uuid,
     replacement_credential_id: Uuid,
 ) -> Result<(), AppError> {
-    let completed = sqlx::query_scalar::<_, Uuid>(
+    let completed = crate::db::query_scalar::<Uuid>(
         r#"
         UPDATE certificate_renewals
         SET replacement_credential_id = $2, completed_at = now()
@@ -305,7 +309,7 @@ pub async fn complete_certificate_renewal(
     )
     .bind(renewal_id)
     .bind(replacement_credential_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .map_err(AppError::Database)?;
     if completed.is_none() {
@@ -317,10 +321,10 @@ pub async fn complete_certificate_renewal(
 }
 
 pub async fn runtime_certificate_by_fingerprint(
-    pool: &PgPool,
+    pool: &Database,
     fingerprint_sha256: &str,
 ) -> Result<RuntimeCertificateCredential, AppError> {
-    sqlx::query_as::<_, RuntimeCertificateCredential>(
+    crate::db::query_as::<RuntimeCertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier,
                c.status AS credential_status, c.metadata, c.expires_at,
@@ -346,11 +350,11 @@ pub async fn runtime_certificate_by_fingerprint(
 }
 
 pub async fn runtime_certificate_by_issuer_fingerprint_serial(
-    pool: &PgPool,
+    pool: &Database,
     issuer_fingerprint_sha256: &str,
     serial_number: &str,
 ) -> Result<RuntimeCertificateCredential, AppError> {
-    sqlx::query_as::<_, RuntimeCertificateCredential>(
+    crate::db::query_as::<RuntimeCertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier,
                c.status AS credential_status, c.metadata, c.expires_at,
@@ -378,7 +382,7 @@ pub async fn runtime_certificate_by_issuer_fingerprint_serial(
 }
 
 pub async fn certificate_by_id(
-    pool: &PgPool,
+    pool: &Database,
     credential_id: Uuid,
 ) -> Result<CertificateCredential, AppError> {
     fetch_certificate_by_id(pool, credential_id).await
@@ -391,9 +395,9 @@ pub async fn fetch_certificate_by_id<'e, E>(
     credential_id: Uuid,
 ) -> Result<CertificateCredential, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, CertificateCredential>(
+    crate::db::query_as::<CertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -409,10 +413,10 @@ where
 }
 
 pub async fn lock_certificate_by_id(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     credential_id: Uuid,
 ) -> Result<CertificateCredential, AppError> {
-    sqlx::query_as::<_, CertificateCredential>(
+    crate::db::query_as::<CertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -423,7 +427,7 @@ pub async fn lock_certificate_by_id(
         "#,
     )
     .bind(credential_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -433,9 +437,9 @@ pub async fn certificate_by_fingerprint<'e, E>(
     fingerprint_sha256: &str,
 ) -> Result<CertificateCredential, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, CertificateCredential>(
+    crate::db::query_as::<CertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -452,10 +456,10 @@ where
 }
 
 pub async fn lock_certificate_by_fingerprint(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     fingerprint_sha256: &str,
 ) -> Result<CertificateCredential, AppError> {
-    sqlx::query_as::<_, CertificateCredential>(
+    crate::db::query_as::<CertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -467,7 +471,7 @@ pub async fn lock_certificate_by_fingerprint(
         "#,
     )
     .bind(fingerprint_sha256)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)
 }
@@ -478,9 +482,9 @@ pub async fn certificate_by_issuer_serial<'e, E>(
     serial_number: &str,
 ) -> Result<CertificateCredential, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, CertificateCredential>(
+    crate::db::query_as::<CertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -499,11 +503,11 @@ where
 }
 
 pub async fn lock_certificate_by_issuer_serial(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
     serial_number: &str,
 ) -> Result<CertificateCredential, AppError> {
-    sqlx::query_as::<_, CertificateCredential>(
+    crate::db::query_as::<CertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -517,13 +521,13 @@ pub async fn lock_certificate_by_issuer_serial(
     )
     .bind(issuer_id)
     .bind(serial_number)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .map_err(db_err)
 }
 
 pub async fn list_certificates(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Option<Uuid>,
     tenant_id: Option<Uuid>,
     status: Option<&str>,
@@ -545,10 +549,10 @@ pub async fn list_certificates(
 }
 
 pub async fn list_certificates_filtered(
-    pool: &PgPool,
+    pool: &Database,
     filter: &CertificateListFilter,
 ) -> Result<Vec<CertificateCredential>, AppError> {
-    let mut query = QueryBuilder::<Postgres>::new(
+    let mut query = crate::db::QueryBuilder::new(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -598,10 +602,10 @@ pub async fn list_certificates_filtered(
 }
 
 pub async fn count_certificates(
-    pool: &PgPool,
+    pool: &Database,
     filter: &CertificateListFilter,
 ) -> Result<i64, AppError> {
-    let mut query = QueryBuilder::<Postgres>::new(
+    let mut query = crate::db::QueryBuilder::new(
         r#"
         SELECT COUNT(*)::bigint
         FROM credentials c
@@ -646,9 +650,9 @@ pub async fn revoke_certificate<'e, E>(
     metadata: Value,
 ) -> Result<(), AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query(
+    crate::db::query(
         r#"
         UPDATE credentials
         SET status = 'revoked', metadata = $2
@@ -664,11 +668,11 @@ where
 }
 
 pub async fn revoke_certificate_if_active(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     credential_id: Uuid,
     metadata: Value,
 ) -> Result<bool, AppError> {
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"
         UPDATE credentials
         SET status = 'revoked', metadata = $2
@@ -677,7 +681,7 @@ pub async fn revoke_certificate_if_active(
     )
     .bind(credential_id)
     .bind(metadata)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .map_err(AppError::Database)?;
     Ok(result.rows_affected() == 1)
@@ -688,9 +692,9 @@ pub async fn certificate_revocation_by_id<'e, E>(
     credential_id: Uuid,
 ) -> Result<CertificateRevocationRecord, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, CertificateRevocationRecord>(
+    crate::db::query_as::<CertificateRevocationRecord>(
         r#"
         SELECT credential_id, issuer_id, issuer_fingerprint_sha256,
                serial_number, reason, actor_entity_id, revoked_at
@@ -710,9 +714,9 @@ pub async fn certificate_revocation_by_issuer_serial<'e, E>(
     serial_number: &str,
 ) -> Result<Option<CertificateRevocationRecord>, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, CertificateRevocationRecord>(
+    crate::db::query_as::<CertificateRevocationRecord>(
         r#"
         SELECT credential_id, issuer_id, issuer_fingerprint_sha256,
                serial_number, reason, actor_entity_id, revoked_at
@@ -732,9 +736,9 @@ pub async fn active_entity_certificates<'e, E>(
     entity_id: Uuid,
 ) -> Result<Vec<CertificateCredential>, AppError>
 where
-    E: sqlx::Executor<'e, Database = Postgres>,
+    E: crate::db::IntoTarget<'e>,
 {
-    sqlx::query_as::<_, CertificateCredential>(
+    crate::db::query_as::<CertificateCredential>(
         r#"
         SELECT c.id, c.issuer_id, c.entity_id, e.tenant_id, c.identifier, c.status, c.metadata,
                c.expires_at, c.created_at
@@ -751,10 +755,10 @@ where
 }
 
 pub async fn issuer_crl_state(
-    pool: &PgPool,
+    pool: &Database,
     issuer_id: Uuid,
 ) -> Result<Option<CrlState>, AppError> {
-    sqlx::query_as::<_, CrlState>(
+    crate::db::query_as::<CrlState>(
         r#"
         SELECT issuer_fingerprint_sha256, crl_number, crl_der, crl_sha256,
                this_update, next_update, dirty
@@ -769,11 +773,11 @@ pub async fn issuer_crl_state(
 }
 
 pub async fn issuer_crl_state_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
     issuer_fingerprint_sha256: &str,
 ) -> Result<CrlState, AppError> {
-    sqlx::query(
+    crate::db::query(
         r#"
         INSERT INTO certificate_crl_state
             (issuer_id, issuer_fingerprint_sha256, crl_number, dirty)
@@ -783,11 +787,11 @@ pub async fn issuer_crl_state_tx(
     )
     .bind(issuer_id)
     .bind(issuer_fingerprint_sha256)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .map_err(AppError::Database)?;
 
-    let state = sqlx::query_as::<_, CrlState>(
+    let state = crate::db::query_as::<CrlState>(
         r#"
         SELECT issuer_fingerprint_sha256, crl_number, crl_der, crl_sha256,
                this_update, next_update, dirty
@@ -797,7 +801,7 @@ pub async fn issuer_crl_state_tx(
         "#,
     )
     .bind(issuer_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(tx.exec())
     .await
     .map_err(AppError::Database)?;
 
@@ -811,10 +815,10 @@ pub async fn issuer_crl_state_tx(
 }
 
 pub async fn issuer_revocations_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
 ) -> Result<Vec<IssuerRevocationEntry>, AppError> {
-    sqlx::query_as::<_, IssuerRevocationEntry>(
+    crate::db::query_as::<IssuerRevocationEntry>(
         r#"
         SELECT credential_id, serial_number, reason, revoked_at
         FROM certificate_revocations
@@ -824,13 +828,13 @@ pub async fn issuer_revocations_tx(
         "#,
     )
     .bind(issuer_id)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn store_issuer_crl_tx(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     issuer_id: Uuid,
     crl_number: i64,
     crl_der: &[u8],
@@ -838,7 +842,7 @@ pub async fn store_issuer_crl_tx(
     this_update: DateTime<Utc>,
     next_update: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    let result = sqlx::query(
+    let result = crate::db::query(
         r#"
         UPDATE certificate_crl_state
         SET crl_number = $1,
@@ -857,7 +861,7 @@ pub async fn store_issuer_crl_tx(
     .bind(this_update)
     .bind(next_update)
     .bind(issuer_id)
-    .execute(&mut **tx)
+    .execute(tx.exec())
     .await
     .map_err(AppError::Database)?;
     if result.rows_affected() != 1 {

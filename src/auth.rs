@@ -1,3 +1,4 @@
+use crate::db::Database;
 use axum::{
     async_trait,
     extract::{FromRef, FromRequestParts},
@@ -8,7 +9,6 @@ use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -280,12 +280,11 @@ struct SessionEntityTenantSnapshot {
 /// introduced. This remains the single cache-miss loader — it is never split
 /// into per-field queries.
 async fn load_session_entity_tenant(
-    pool: &PgPool,
+    pool: &Database,
     session_id: Uuid,
     entity_id: Uuid,
 ) -> Result<SessionEntityTenantSnapshot, AppError> {
-    use sqlx::Row;
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT s.revoked_at,
                   s.expires_at,
                   e.tenant_id,
@@ -401,7 +400,7 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
         .map_err(|_| AppError::unauthorized("invalid tenant id in token"))?;
 
     let Some(cache) = &state.cache else {
-        let snapshot = load_session_entity_tenant(&state.pool, session_id, entity_id).await?;
+        let snapshot = load_session_entity_tenant(state.pool(), session_id, entity_id).await?;
         check_session_entity_tenant(&snapshot, entity_id, tenant_id)?;
         return Ok(jwt_auth_context(state, entity_id, session_id, &snapshot));
     };
@@ -462,7 +461,7 @@ async fn auth_from_jwt(state: &AppState, token: &str) -> Result<AuthContext, App
 
     // Any miss/dirty/unavailable key: fall back to the existing combined
     // query, unchanged, then best-effort populate whichever entries missed.
-    let snapshot = load_session_entity_tenant(&state.pool, session_id, entity_id).await?;
+    let snapshot = load_session_entity_tenant(state.pool(), session_id, entity_id).await?;
 
     if let Lookup::Miss { version, epoch } = session_lookup {
         let entry = SessionCacheEntry {
@@ -576,11 +575,13 @@ fn credential_cache_entry(snapshot: &CredentialSnapshot) -> CredentialCacheEntry
 /// The existing credential/entity/tenant join, unchanged from before caching
 /// was introduced. This remains the single cache-miss loader for all three
 /// cached entities it touches — it is never split into per-field queries.
-async fn load_credential_row(pool: &PgPool, cred_id: Uuid) -> Result<CredentialSnapshot, AppError> {
-    use sqlx::Row;
+async fn load_credential_row(
+    pool: &Database,
+    cred_id: Uuid,
+) -> Result<CredentialSnapshot, AppError> {
     // Only access-token credentials enter this cache. Password credentials
     // remain uncached and are verified through the normal password path.
-    let row = sqlx::query(
+    let row = crate::db::query(
         r#"SELECT c.entity_id,
                   c.secret_hash,
                   c.secret_lookup_hash,
@@ -706,12 +707,12 @@ async fn finish_api_key_auth(
                 CacheCategory::Credential,
                 std::slice::from_ref(&credential_key),
                 || async {
-                    sqlx::query(
+                    crate::db::query(
                         "UPDATE credentials SET secret_lookup_hash = $1, secret_hash = NULL WHERE id = $2",
                     )
                     .bind(digest)
                     .bind(cred_id)
-                    .execute(&state.pool)
+                    .execute(state.pool())
                     .await
                     .map_err(AppError::Database)
                 },
@@ -731,14 +732,14 @@ async fn finish_api_key_auth(
     // one write per credential per five minutes so the auth hot path stays
     // read-mostly. Best-effort: a failed stamp never fails authentication.
     // Not cached data, so no invalidation is needed.
-    if let Err(err) = sqlx::query(
+    if let Err(err) = crate::db::query(
         r#"UPDATE credentials
            SET last_used_at = now()
            WHERE id = $1
              AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')"#,
     )
     .bind(cred_id)
-    .execute(&state.pool)
+    .execute(state.pool())
     .await
     {
         tracing::warn!(
@@ -756,7 +757,7 @@ async fn finish_api_key_auth(
             state.cache.as_deref(),
             CacheCategory::CredentialCeiling,
             &cache_keys::cred_ceiling(cred_id),
-            || crate::authz::repo::load_credential_ceiling(&state.pool, cred_id),
+            || crate::authz::repo::load_credential_ceiling(state.pool(), cred_id),
         )
         .await?;
         Some(std::sync::Arc::new(ceiling))
@@ -780,7 +781,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         parse_api_key(key).ok_or_else(|| AppError::unauthorized("malformed api key"))?;
 
     let Some(cache) = &state.cache else {
-        let row = load_credential_row(&state.pool, cred_id).await?;
+        let row = load_credential_row(state.pool(), cred_id).await?;
         return finish_api_key_auth(state, cred_id, &secret_bytes, &row).await;
     };
 
@@ -829,7 +830,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
         // whichever entries missed — always keyed off `row`'s freshly
         // joined entity_id/tenant_id, mirroring the cold-start path exactly,
         // never off the credential entry's stale copy.
-        let row = load_credential_row(&state.pool, cred_id).await?;
+        let row = load_credential_row(state.pool(), cred_id).await?;
         // `entity_key` (and the version observed for it) came from
         // `cred_entry.entity_id`, which is the credential entry's own,
         // possibly stale copy; the payload below comes from `row`. Populate
@@ -878,7 +879,7 @@ async fn auth_from_api_key(state: &AppState, key: &str) -> Result<AuthContext, A
     // Credential missed (or dirty/unavailable): one combined query loads
     // everything; populate the credential entry and, best-effort, the
     // entity/tenant entries too (each with its own freshly-observed version).
-    let row = load_credential_row(&state.pool, cred_id).await?;
+    let row = load_credential_row(state.pool(), cred_id).await?;
 
     if let Lookup::Miss { version, epoch } = credential_lookup {
         let entry = credential_cache_entry(&row);
@@ -958,7 +959,7 @@ impl AuthContext {
     /// `load_decision_context`, keyed the same way.
     pub async fn effective_grants(
         &self,
-        pool: &PgPool,
+        pool: &Database,
     ) -> Result<std::sync::Arc<Vec<crate::authz::repo::EffectiveGrant>>, AppError> {
         crate::cache::cached_or_load(
             self.cache.as_deref(),
@@ -1128,7 +1129,7 @@ pub enum Scope {
 /// object grants do the same for `scope_kind = object`, and both inherit from
 /// platform-scope bindings for the same capability.
 pub async fn has_capability_in_scope(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     capability_name: &str,
     scope: Scope,
@@ -1159,7 +1160,7 @@ pub async fn has_capability_in_scope(
 /// platform gate has no tenant; a tenant gate is that tenant; an object gate is
 /// the object's owning tenant, resolved here exactly as the PDP resolves it.
 /// A missing object and a platform/global object both resolve to `None`.
-async fn gate_tenant_context(pool: &PgPool, scope: Scope) -> Result<Option<Uuid>, AppError> {
+async fn gate_tenant_context(pool: &Database, scope: Scope) -> Result<Option<Uuid>, AppError> {
     Ok(match scope {
         Scope::Platform => None,
         Scope::Tenant(tenant_id) => Some(tenant_id),
@@ -1254,8 +1255,8 @@ fn is_unconditional(conditions: &serde_json::Value) -> bool {
     conditions.as_object().is_some_and(|map| map.is_empty())
 }
 
-async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppError> {
-    let active: Option<bool> = sqlx::query_scalar(
+async fn actor_is_active(pool: &Database, entity_id: Uuid) -> Result<bool, AppError> {
+    let active: Option<bool> = crate::db::query_scalar(
         r#"SELECT (actor.status = 'active'
                    AND actor.deleted_at IS NULL
                    AND (actor.tenant_id IS NULL OR (actor_tenant.status = 'active' AND actor_tenant.deleted_at IS NULL)))
@@ -1270,8 +1271,8 @@ async fn actor_is_active(pool: &PgPool, entity_id: Uuid) -> Result<bool, AppErro
     Ok(active.unwrap_or(false))
 }
 
-async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppError> {
-    let active: Option<bool> = sqlx::query_scalar(
+async fn tenant_is_active(pool: &Database, tenant_id: Uuid) -> Result<bool, AppError> {
+    let active: Option<bool> = crate::db::query_scalar(
         "SELECT status = 'active' AND deleted_at IS NULL FROM tenants WHERE id = $1",
     )
     .bind(tenant_id)
@@ -1281,8 +1282,8 @@ async fn tenant_is_active(pool: &PgPool, tenant_id: Uuid) -> Result<bool, AppErr
     Ok(active.unwrap_or(false))
 }
 
-async fn action_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1")
+async fn action_id_by_name(pool: &Database, name: &str) -> Result<Option<Uuid>, AppError> {
+    crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
         .bind(name)
         .fetch_optional(pool)
         .await
@@ -1290,7 +1291,7 @@ async fn action_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>, Ap
 }
 
 pub async fn require_any_capability(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     checks: &[(&str, Scope)],
 ) -> Result<(), AppError> {
@@ -1366,12 +1367,11 @@ pub async fn require_any_capability(
 }
 
 async fn action_ids_by_name(
-    pool: &PgPool,
+    pool: &Database,
     names: &[&str],
 ) -> Result<std::collections::HashMap<String, Uuid>, AppError> {
-    use sqlx::Row;
     let owned: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-    let rows = sqlx::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
+    let rows = crate::db::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
         .bind(&owned)
         .fetch_all(pool)
         .await
@@ -1394,7 +1394,7 @@ pub fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {
 }
 
 pub async fn require_list_access(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -1403,7 +1403,7 @@ pub async fn require_list_access(
 }
 
 pub async fn require_read_access(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
     object_id: Uuid,
@@ -1423,7 +1423,7 @@ pub async fn require_read_access(
 }
 
 pub async fn require_role_read(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -1434,7 +1434,7 @@ pub async fn require_role_read(
 /// Gate for reading policy records in a tenant (or platform when `tenant_id` is
 /// `None`): `policy.manage`, `read`, or `manage` at that scope.
 pub async fn require_policy_read(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -1447,7 +1447,7 @@ pub async fn require_policy_read(
     .await
 }
 
-pub async fn require_explain_access(pool: &PgPool, auth: &AuthContext) -> Result<(), AppError> {
+pub async fn require_explain_access(pool: &Database, auth: &AuthContext) -> Result<(), AppError> {
     require_any_capability(
         pool,
         auth,
@@ -1461,7 +1461,7 @@ pub async fn require_explain_access(pool: &PgPool, auth: &AuthContext) -> Result
 
 /// Convenience for the common platform-`manage` check used by the existing
 /// `RequireManage` extractor and admin hygiene endpoints.
-pub async fn has_global_manage(pool: &PgPool, auth: &AuthContext) -> Result<bool, AppError> {
+pub async fn has_global_manage(pool: &Database, auth: &AuthContext) -> Result<bool, AppError> {
     has_capability_in_scope(pool, auth, "manage", Scope::Platform).await
 }
 
@@ -1469,7 +1469,7 @@ pub async fn has_global_manage(pool: &PgPool, auth: &AuthContext) -> Result<bool
 /// requested capability at the given scope. Use from handlers that need a
 /// finer check than `RequireManage`.
 pub async fn require_capability(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     capability_name: &str,
     scope: Scope,
@@ -1516,7 +1516,7 @@ where
         let app_state = AppState::from_ref(state);
         let auth = AuthContext::from_request_parts(parts, state).await?;
 
-        if !has_global_manage(&app_state.pool, &auth).await? {
+        if !has_global_manage(app_state.pool(), &auth).await? {
             return Err(AppError::Forbidden);
         }
 

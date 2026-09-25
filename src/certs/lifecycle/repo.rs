@@ -1,8 +1,11 @@
+use crate::db::Database;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
-use crate::error::{db_err, AppError};
+use crate::{
+    db::DbTransaction,
+    error::{db_err, AppError},
+};
 
 use super::BulkRevocationSelector;
 
@@ -51,14 +54,14 @@ pub struct AuthorityMetricRow {
 /// The stored PR-007 snapshot wins; pre-PR-007 rows fall back to their
 /// referenced/effective profile, never to a process-wide renewal constant.
 pub async fn due_certificate_windows(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
     expiry_warning_secs: u64,
     limit: i64,
 ) -> Result<Vec<CertificateWindowCandidate>, AppError> {
     let expiry_warning_secs = i64::try_from(expiry_warning_secs)
         .map_err(|_| AppError::bad_request("certificate expiry warning is too large"))?;
-    sqlx::query_as::<_, CertificateWindowCandidate>(
+    crate::db::query_as::<CertificateWindowCandidate>(
         r#"
         WITH certificate_windows AS (
             SELECT c.id AS credential_id,
@@ -132,20 +135,20 @@ pub async fn due_certificate_windows(
     .bind(now)
     .bind(expiry_warning_secs)
     .bind(limit)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn due_authority_windows(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
     warning_secs: u64,
     limit: i64,
 ) -> Result<Vec<AuthorityWindowCandidate>, AppError> {
     let warning_secs = i64::try_from(warning_secs)
         .map_err(|_| AppError::bad_request("authority expiry warning is too large"))?;
-    sqlx::query_as::<_, AuthorityWindowCandidate>(
+    crate::db::query_as::<AuthorityWindowCandidate>(
         r#"
         SELECT a.id AS issuer_id,
                a.tenant_id,
@@ -168,19 +171,19 @@ pub async fn due_authority_windows(
     .bind(now)
     .bind(warning_secs)
     .bind(limit)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn claim_notification(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     subject_kind: &str,
     subject_id: Uuid,
     window_kind: &str,
     window_at: DateTime<Utc>,
 ) -> Result<bool, AppError> {
-    let claimed: Option<bool> = sqlx::query_scalar(
+    let claimed: Option<bool> = crate::db::query_scalar(
         r#"
         INSERT INTO pki_lifecycle_notifications (
             subject_kind, subject_id, window_kind, window_at
@@ -193,17 +196,17 @@ pub async fn claim_notification(
     .bind(subject_id)
     .bind(window_kind)
     .bind(window_at)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(tx.exec())
     .await
     .map_err(AppError::Database)?;
     Ok(claimed.unwrap_or(false))
 }
 
 pub async fn expiry_metrics(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
 ) -> Result<Vec<ExpiryMetricRow>, AppError> {
-    sqlx::query_as::<_, ExpiryMetricRow>(
+    crate::db::query_as::<ExpiryMetricRow>(
         r#"
         SELECT c.status,
                CASE
@@ -220,16 +223,16 @@ pub async fn expiry_metrics(
         "#,
     )
     .bind(now)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn authority_metrics(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     now: DateTime<Utc>,
 ) -> Result<Vec<AuthorityMetricRow>, AppError> {
-    sqlx::query_as::<_, AuthorityMetricRow>(
+    crate::db::query_as::<AuthorityMetricRow>(
         r#"
         SELECT kind,
                GREATEST(MIN(EXTRACT(epoch FROM (not_after - $1))), 0)::float8 AS seconds
@@ -239,17 +242,17 @@ pub async fn authority_metrics(
         "#,
     )
     .bind(now)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await
     .map_err(AppError::Database)
 }
 
 pub async fn selector_tenant_id(
-    pool: &PgPool,
+    pool: &Database,
     selector: BulkRevocationSelector,
 ) -> Result<Option<Uuid>, AppError> {
     match selector {
-        BulkRevocationSelector::Tenant(tenant_id) => sqlx::query_scalar::<_, Uuid>(
+        BulkRevocationSelector::Tenant(tenant_id) => crate::db::query_scalar::<Uuid>(
             "SELECT id FROM tenants WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(tenant_id)
@@ -258,13 +261,13 @@ pub async fn selector_tenant_id(
         .map(Some)
         .map_err(db_err),
         BulkRevocationSelector::Issuer(issuer_id) => {
-            sqlx::query_scalar("SELECT tenant_id FROM pki_authorities WHERE id = $1")
+            crate::db::query_scalar("SELECT tenant_id FROM pki_authorities WHERE id = $1")
                 .bind(issuer_id)
                 .fetch_one(pool)
                 .await
                 .map_err(db_err)
         }
-        BulkRevocationSelector::PrincipalGroup(group_id) => sqlx::query_scalar(
+        BulkRevocationSelector::PrincipalGroup(group_id) => crate::db::query_scalar(
             "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(group_id)
@@ -277,22 +280,22 @@ pub async fn selector_tenant_id(
 /// Database-clock cutoff used to freeze the membership of a paginated bulk
 /// operation. Credential creation also uses the database clock, avoiding
 /// process/DB clock skew at the page boundary.
-pub async fn bulk_snapshot_at(pool: &PgPool) -> Result<DateTime<Utc>, AppError> {
-    sqlx::query_scalar("SELECT clock_timestamp()")
+pub async fn bulk_snapshot_at(pool: &Database) -> Result<DateTime<Utc>, AppError> {
+    crate::db::query_scalar("SELECT clock_timestamp()")
         .fetch_one(pool)
         .await
         .map_err(AppError::Database)
 }
 
 pub async fn bulk_candidates(
-    pool: &PgPool,
+    pool: &Database,
     selector: BulkRevocationSelector,
     after: Option<Uuid>,
     snapshot_at: &DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<BulkCandidate>, AppError> {
     match selector {
-        BulkRevocationSelector::PrincipalGroup(group_id) => sqlx::query_as::<_, BulkCandidate>(
+        BulkRevocationSelector::PrincipalGroup(group_id) => crate::db::query_as::<BulkCandidate>(
             r#"
                 WITH RECURSIVE root_group(id, tenant_id) AS (
                     SELECT id, tenant_id
@@ -333,7 +336,7 @@ pub async fn bulk_candidates(
         .await
         .map_err(AppError::Database),
         selector => {
-            let mut query = QueryBuilder::<Postgres>::new(
+            let mut query = crate::db::QueryBuilder::new(
                 r#"
                 SELECT c.id AS credential_id, c.issuer_id, c.entity_id, e.tenant_id
                 FROM credentials c

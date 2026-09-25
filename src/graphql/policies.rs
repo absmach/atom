@@ -70,15 +70,15 @@ impl PolicyQuery {
             // A platform `manage` grant is sufficient even when it does not
             // also contain `read`/`role.manage`, so do not apply the live
             // candidate filter to this branch.
-            require_any_capability(&state.pool, &auth, &[("manage", Scope::Platform)]).await?;
-            authz_repo::list_roles(&state.pool, params).await
+            require_any_capability(state.pool(), &auth, &[("manage", Scope::Platform)]).await?;
+            authz_repo::list_roles(state.pool(), params).await
         } else {
             // Preserve the frozen query-level gate. The authorized repository
             // additionally filters individual role objects, but must not turn
             // a caller with no role-read capability into a successful empty
             // response.
-            require_role_read(&state.pool, &auth, tenant_id).await?;
-            authz_repo::list_roles_authorized(&state.pool, &auth, params).await
+            require_role_read(state.pool(), &auth, tenant_id).await?;
+            authz_repo::list_roles_authorized(state.pool(), &auth, params).await
         }
         .map_err(gql_error)?;
 
@@ -93,7 +93,7 @@ impl PolicyQuery {
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
         require_any_on_object_or_platform_if_missing(
-            &state.pool,
+            state.pool(),
             &auth,
             "role",
             id,
@@ -101,7 +101,7 @@ impl PolicyQuery {
         )
         .await
         .map_err(gql_error)?;
-        let role = authz_repo::get_role(&state.pool, id)
+        let role = authz_repo::get_role(state.pool(), id)
             .await
             .map_err(gql_error)?;
         Ok(role.into())
@@ -119,9 +119,9 @@ impl PolicyQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_policy_read(&state.pool, &auth, tenant_id).await?;
+        require_policy_read(state.pool(), &auth, tenant_id).await?;
         let list = authz_repo::list_capabilities(
-            &state.pool,
+            state.pool(),
             ListCapabilities {
                 object_kind,
                 object_type,
@@ -151,9 +151,9 @@ impl PolicyQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_policy_read(&state.pool, &auth, tenant_id).await?;
+        require_policy_read(state.pool(), &auth, tenant_id).await?;
         let list = authz_repo::list_capability_applicability(
-            &state.pool,
+            state.pool(),
             action_name,
             object_kind,
             object_type,
@@ -188,12 +188,12 @@ impl PolicyQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_policy_read(&state.pool, &auth, tenant_id).await?;
+        require_policy_read(state.pool(), &auth, tenant_id).await?;
         let object_kind = object_kind
             .map(|value| parse_object_kind(value, "objectKind"))
             .transpose()?;
         let list = authz_repo::list_action_assignment_rules(
-            &state.pool,
+            state.pool(),
             ListActionAssignmentRules {
                 tenant_id,
                 entity_kind: parse_optional_entity_kind(entity_kind),
@@ -216,8 +216,8 @@ impl PolicyQuery {
     async fn action(&self, ctx: &Context<'_>, id: ID) -> Result<Action> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        require_policy_read(&state.pool, &auth, None).await?;
-        let action = authz_repo::get_capability(&state.pool, parse_id(id, "id")?)
+        require_policy_read(state.pool(), &auth, None).await?;
+        let action = authz_repo::get_capability(state.pool(), parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
         Ok(action.into())
@@ -234,9 +234,9 @@ impl PolicyQuery {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
-        require_policy_read(&state.pool, &auth, tenant_id).await?;
+        require_policy_read(state.pool(), &auth, tenant_id).await?;
         let list = authz_repo::list_permission_blocks(
-            &state.pool,
+            state.pool(),
             ListPermissionBlocks {
                 tenant_id,
                 scope_mode,
@@ -255,10 +255,10 @@ impl PolicyQuery {
     async fn permission_block(&self, ctx: &Context<'_>, id: ID) -> Result<PermissionBlock> {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
-        let block = authz_repo::get_permission_block(&state.pool, parse_id(id, "id")?)
+        let block = authz_repo::get_permission_block(state.pool(), parse_id(id, "id")?)
             .await
             .map_err(gql_error)?;
-        require_policy_read(&state.pool, &auth, block.tenant_id).await?;
+        require_policy_read(state.pool(), &auth, block.tenant_id).await?;
         Ok(block.into())
     }
 
@@ -278,9 +278,9 @@ impl PolicyQuery {
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         // Keep the established policy-list invocation gate, then apply the
         // exact policy-object visibility filter in the repository.
-        require_policy_read(&state.pool, &auth, tenant_id).await?;
+        require_policy_read(state.pool(), &auth, tenant_id).await?;
         let list = authz_repo::list_role_assignments_authorized(
-            &state.pool,
+            state.pool(),
             &auth,
             ListRoleAssignments {
                 tenant_id,
@@ -335,12 +335,12 @@ impl PolicyQuery {
         let tenant_id = parse_optional_id(tenant_id, "tenantId")?;
         // Reverse and subject-forward policy lookup share the same frozen
         // coarse gate; candidate filtering below prevents cross-object leaks.
-        require_policy_read(&state.pool, &auth, tenant_id).await?;
+        require_policy_read(state.pool(), &auth, tenant_id).await?;
         let object_kind = object_kind
             .map(|value| parse_object_kind(value, "objectKind"))
             .transpose()?;
         let list = authz_repo::list_direct_policies_authorized(
-            &state.pool,
+            state.pool(),
             &auth,
             ListDirectPolicies {
                 tenant_id,
@@ -387,14 +387,14 @@ impl PolicyMutation {
         };
         let result = async {
             require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "role.manage",
                 scope_for_tenant(tenant_id),
             )
             .await?;
             authz_repo::create_role_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 create_req,
@@ -404,7 +404,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -429,7 +429,7 @@ impl PolicyMutation {
         let details = serde_json::json!({});
         let result = async {
             require_any_on_object_or_platform_if_missing(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "role",
                 id,
@@ -442,7 +442,7 @@ impl PolicyMutation {
             };
             let Some(cache) = state.cache.as_deref() else {
                 return authz_repo::update_role_with_audit(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     Some(auth.entity_id),
                     id,
@@ -457,7 +457,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                &state.pool,
+                &state.db,
                 |tx| {
                     Box::pin(
                         async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
@@ -494,7 +494,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -524,14 +524,14 @@ impl PolicyMutation {
         permission_block_ids.dedup();
         let result = async {
             require_any_on_object_or_platform_if_missing(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "role",
                 role_id,
                 &["role.manage"],
             )
             .await?;
-            let role = authz_repo::get_role(&state.pool, role_id).await?;
+            let role = authz_repo::get_role(state.pool(), role_id).await?;
             let tenant_id = role.tenant_id;
             // The role's assignees (entity and group) are locked and
             // enumerated together as one step — see
@@ -540,7 +540,7 @@ impl PolicyMutation {
             // can't commit a membership change this misses.
             let Some(cache) = state.cache.as_deref() else {
                 authz_repo::replace_role_permission_block_links_with_audit(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     Some(auth.entity_id),
                     role_id,
@@ -552,7 +552,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                &state.pool,
+                &state.db,
                 |tx| {
                     Box::pin(async move {
                         authz_repo::lock_role_and_collect_grants_keys(tx, role_id).await
@@ -591,7 +591,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -622,20 +622,20 @@ impl PolicyMutation {
         let details = serde_json::json!({});
         let result = async {
             require_any_on_object_or_platform_if_missing(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "role",
                 id,
                 &["role.manage"],
             )
             .await?;
-            let role = authz_repo::get_role(&state.pool, id).await?;
+            let role = authz_repo::get_role(state.pool(), id).await?;
             let tenant_id = role.tenant_id;
             // See `replace_role_permission_blocks` above for why the role
             // and its assignees are locked (not just enumerated) together.
             let Some(cache) = state.cache.as_deref() else {
                 authz_repo::delete_role_with_audit(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     Some(auth.entity_id),
                     id,
@@ -647,7 +647,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                &state.pool,
+                &state.db,
                 |tx| {
                     Box::pin(
                         async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
@@ -685,7 +685,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -713,12 +713,12 @@ impl PolicyMutation {
         };
         let details = serde_json::json!({});
         let result = async {
-            require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+            require_capability(state.pool(), &auth, "manage", Scope::Platform).await?;
             // See `replace_role_permission_blocks` above for why the role
             // and its assignees are locked (not just enumerated) together.
             let Some(cache) = state.cache.as_deref() else {
                 return authz_repo::restore_role_with_audit(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     Some(auth.entity_id),
                     id,
@@ -729,7 +729,7 @@ impl PolicyMutation {
             crate::cache::invalidate::guarded_tx_mutation(
                 cache,
                 crate::cache::CacheCategory::Grants,
-                &state.pool,
+                &state.db,
                 |tx| {
                     Box::pin(
                         async move { authz_repo::lock_role_and_collect_grants_keys(tx, id).await },
@@ -767,12 +767,12 @@ impl PolicyMutation {
             // see `audit::commit_with_audit`'s doc comment. Only needed on
             // this locked path; the cache-disabled fallback above already
             // gets it from `restore_role_with_audit` itself.
-            let tenant_id = authz_repo::get_role(&state.pool, id)
+            let tenant_id = authz_repo::get_role(state.pool(), id)
                 .await
                 .ok()
                 .and_then(|r| r.tenant_id);
             audit::write(
-                &state.pool,
+                state.pool(),
                 false,
                 audit::AuditEvent {
                     actor_entity_id: Some(auth.entity_id),
@@ -790,7 +790,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -817,9 +817,9 @@ impl PolicyMutation {
         };
         let details = serde_json::json!({});
         let result = async {
-            require_capability(&state.pool, &auth, "manage", Scope::Platform).await?;
+            require_capability(state.pool(), &auth, "manage", Scope::Platform).await?;
             authz_repo::purge_role_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -829,7 +829,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -855,9 +855,9 @@ impl PolicyMutation {
                 .collect()
         });
         let result = async {
-            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
+            require_capability(state.pool(), &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::create_capability_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 CreateCapability {
@@ -871,7 +871,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -899,9 +899,9 @@ impl PolicyMutation {
         let object_kind = input.object_kind;
         let object_type = input.object_type;
         let result = async {
-            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
+            require_capability(state.pool(), &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::add_capability_applicability_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 action_id,
@@ -913,7 +913,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -941,9 +941,9 @@ impl PolicyMutation {
         let object_kind = input.object_kind;
         let object_type = input.object_type;
         let result = async {
-            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
+            require_capability(state.pool(), &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::remove_capability_applicability_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 action_id,
@@ -955,7 +955,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -981,7 +981,7 @@ impl PolicyMutation {
         let state = ctx.data::<AppState>()?;
         let tenant_id = parse_optional_id(input.tenant_id.clone(), "tenantId")?;
         require_capability(
-            &state.pool,
+            state.pool(),
             &auth,
             "policy.manage",
             scope_for_tenant(tenant_id),
@@ -989,7 +989,7 @@ impl PolicyMutation {
         .await
         .map_err(gql_error)?;
         let rule = authz_repo::create_action_assignment_rule_with_audit(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             Some(auth.entity_id),
             CreateActionAssignmentRule {
@@ -1012,11 +1012,11 @@ impl PolicyMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let existing = authz_repo::get_action_assignment_rule(&state.pool, id)
+        let existing = authz_repo::get_action_assignment_rule(state.pool(), id)
             .await
             .map_err(gql_error)?;
         require_capability(
-            &state.pool,
+            state.pool(),
             &auth,
             "policy.manage",
             scope_for_tenant(existing.tenant_id),
@@ -1024,7 +1024,7 @@ impl PolicyMutation {
         .await
         .map_err(gql_error)?;
         authz_repo::delete_action_assignment_rule_with_audit(
-            &state.pool,
+            state.pool(),
             state.config.events.enabled(),
             Some(auth.entity_id),
             id,
@@ -1056,9 +1056,9 @@ impl PolicyMutation {
                 .collect()
         });
         let result = async {
-            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
+            require_capability(state.pool(), &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::update_capability_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 action_id,
@@ -1073,7 +1073,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -1095,9 +1095,9 @@ impl PolicyMutation {
         let state = ctx.data::<AppState>()?;
         let action_id = parse_id(id, "id")?;
         let result = async {
-            require_capability(&state.pool, &auth, "policy.manage", Scope::Platform).await?;
+            require_capability(state.pool(), &auth, "policy.manage", Scope::Platform).await?;
             authz_repo::delete_capability_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 action_id,
@@ -1107,7 +1107,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -1141,14 +1141,14 @@ impl PolicyMutation {
             .collect::<Result<Vec<_>>>()?;
         let result = async {
             require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy.manage",
                 scope_for_tenant(tenant_id),
             )
             .await?;
             authz_repo::create_permission_block_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 CreatePermissionBlock {
@@ -1168,7 +1168,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -1190,17 +1190,17 @@ impl PolicyMutation {
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
         let result = async {
-            let block = authz_repo::get_permission_block(&state.pool, id).await?;
+            let block = authz_repo::get_permission_block(state.pool(), id).await?;
             let tenant_id = block.tenant_id;
             require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy.manage",
                 scope_for_tenant(tenant_id),
             )
             .await?;
             authz_repo::delete_permission_block_with_audit(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 id,
@@ -1211,7 +1211,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &audit::AuditMeta {
                     actor_entity_id: Some(auth.entity_id),
@@ -1251,7 +1251,7 @@ impl PolicyMutation {
         let details = serde_json::json!({});
         let result = async {
             require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy.manage",
                 scope_for_tenant(tenant_id),
@@ -1272,7 +1272,7 @@ impl PolicyMutation {
                         &grants_keys,
                         || {
                             authz_repo::create_role_assignment_with_audit(
-                                &state.pool,
+                                state.pool(),
                                 state.config.events.enabled(),
                                 Some(auth.entity_id),
                                 req,
@@ -1284,7 +1284,7 @@ impl PolicyMutation {
                 crate::models::enums::SubjectKind::Group => {
                     let Some(cache) = state.cache.as_deref() else {
                         return authz_repo::create_role_assignment_with_audit(
-                            &state.pool,
+                            state.pool(),
                             state.config.events.enabled(),
                             Some(auth.entity_id),
                             req,
@@ -1304,7 +1304,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        &state.pool,
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::prepare_role_assignment_in_tx(tx, &prepare_req).await
@@ -1342,7 +1342,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -1367,14 +1367,14 @@ impl PolicyMutation {
         let details = serde_json::json!({});
         let result = async {
             require_any_on_object_or_platform_if_missing(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy",
                 id,
                 &["policy.manage"],
             )
             .await?;
-            let assignment = authz_repo::get_role_assignment(&state.pool, id).await?;
+            let assignment = authz_repo::get_role_assignment(state.pool(), id).await?;
             let tenant_id = assignment.tenant_id;
             match assignment.subject_kind {
                 crate::models::enums::SubjectKind::Entity => {
@@ -1385,7 +1385,7 @@ impl PolicyMutation {
                         &grants_keys,
                         || {
                             authz_repo::delete_role_assignment_with_audit(
-                                &state.pool,
+                                state.pool(),
                                 state.config.events.enabled(),
                                 Some(auth.entity_id),
                                 id,
@@ -1397,7 +1397,7 @@ impl PolicyMutation {
                 crate::models::enums::SubjectKind::Group => {
                     let Some(cache) = state.cache.as_deref() else {
                         authz_repo::delete_role_assignment_with_audit(
-                            &state.pool,
+                            state.pool(),
                             state.config.events.enabled(),
                             Some(auth.entity_id),
                             id,
@@ -1408,7 +1408,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        &state.pool,
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::lock_group_closures_and_collect_grants_keys(
@@ -1451,7 +1451,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -1483,7 +1483,7 @@ impl PolicyMutation {
         let details = serde_json::json!({});
         let result = async {
             require_capability(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy.manage",
                 scope_for_tenant(tenant_id),
@@ -1504,7 +1504,7 @@ impl PolicyMutation {
                         &grants_keys,
                         || {
                             authz_repo::create_direct_policy_with_audit(
-                                &state.pool,
+                                state.pool(),
                                 state.config.events.enabled(),
                                 Some(auth.entity_id),
                                 req,
@@ -1516,7 +1516,7 @@ impl PolicyMutation {
                 crate::models::enums::SubjectKind::Group => {
                     let Some(cache) = state.cache.as_deref() else {
                         return authz_repo::create_direct_policy_with_audit(
-                            &state.pool,
+                            state.pool(),
                             state.config.events.enabled(),
                             Some(auth.entity_id),
                             req,
@@ -1527,7 +1527,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        &state.pool,
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::prepare_direct_policy_in_tx(tx, &prepare_req).await
@@ -1565,7 +1565,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,
@@ -1590,14 +1590,14 @@ impl PolicyMutation {
         let details = serde_json::json!({});
         let result = async {
             require_any_on_object_or_platform_if_missing(
-                &state.pool,
+                state.pool(),
                 &auth,
                 "policy",
                 id,
                 &["policy.manage"],
             )
             .await?;
-            let policy = authz_repo::get_direct_policy(&state.pool, id).await?;
+            let policy = authz_repo::get_direct_policy(state.pool(), id).await?;
             let tenant_id = policy.tenant_id;
             match policy.subject_kind {
                 crate::models::enums::SubjectKind::Entity => {
@@ -1608,7 +1608,7 @@ impl PolicyMutation {
                         &grants_keys,
                         || {
                             authz_repo::delete_direct_policy_with_audit(
-                                &state.pool,
+                                state.pool(),
                                 state.config.events.enabled(),
                                 Some(auth.entity_id),
                                 id,
@@ -1620,7 +1620,7 @@ impl PolicyMutation {
                 crate::models::enums::SubjectKind::Group => {
                     let Some(cache) = state.cache.as_deref() else {
                         authz_repo::delete_direct_policy_with_audit(
-                            &state.pool,
+                            state.pool(),
                             state.config.events.enabled(),
                             Some(auth.entity_id),
                             id,
@@ -1631,7 +1631,7 @@ impl PolicyMutation {
                     crate::cache::invalidate::guarded_tx_mutation(
                         cache,
                         crate::cache::CacheCategory::Grants,
-                        &state.pool,
+                        &state.db,
                         |tx| {
                             Box::pin(async move {
                                 authz_repo::lock_group_closures_and_collect_grants_keys(
@@ -1674,7 +1674,7 @@ impl PolicyMutation {
         .await;
         if let Err(ref err) = result {
             audit::observe_error(
-                &state.pool,
+                state.pool(),
                 state.config.events.enabled(),
                 &meta,
                 &details,

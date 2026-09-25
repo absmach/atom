@@ -8,6 +8,7 @@
 mod common;
 
 use async_graphql::Request;
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     config::Config,
@@ -16,10 +17,9 @@ use atom::{
     state::AppState,
 };
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-fn state(pool: PgPool) -> AppState {
+fn state(pool: Database) -> AppState {
     let primary = LoadedKey {
         kid: "test".into(),
         public_key_pem: String::new(),
@@ -57,9 +57,9 @@ fn authed(query: impl Into<String>) -> Request {
 // against (a tenant-scoped block over the same object, for instance) and so the
 // fixture stays readable next to the assertion it supports.
 
-async fn tenant(pool: &PgPool) -> Uuid {
+async fn tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("reverse-lookup-tenant-{id}"))
         .execute(pool)
@@ -68,9 +68,9 @@ async fn tenant(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn entity(pool: &PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
+async fn entity(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
     )
     .bind(id)
@@ -83,9 +83,9 @@ async fn entity(pool: &PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
     id
 }
 
-async fn resource(pool: &PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
+async fn resource(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
+    atom::db::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
         .bind(id)
         .bind(kind)
         .bind(format!("reverse-lookup-{kind}-{id}"))
@@ -96,9 +96,9 @@ async fn resource(pool: &PgPool, tenant_id: Uuid, kind: &str) -> Uuid {
     id
 }
 
-async fn object_group(pool: &PgPool, tenant_id: Uuid) -> Uuid {
+async fn object_group(pool: &Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(format!("reverse-lookup-group-{id}"))
         .bind(tenant_id)
@@ -108,8 +108,8 @@ async fn object_group(pool: &PgPool, tenant_id: Uuid) -> Uuid {
     id
 }
 
-async fn set_group_parent(pool: &PgPool, tenant_id: Uuid, child_id: Uuid, parent_id: Uuid) {
-    sqlx::query(
+async fn set_group_parent(pool: &Database, tenant_id: Uuid, child_id: Uuid, parent_id: Uuid) {
+    atom::db::query(
         "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(parent_id)
@@ -120,8 +120,8 @@ async fn set_group_parent(pool: &PgPool, tenant_id: Uuid, child_id: Uuid, parent
     .expect("insert object group hierarchy");
 }
 
-async fn add_entity_to_group(pool: &PgPool, tenant_id: Uuid, group_id: Uuid, entity_id: Uuid) {
-    sqlx::query(
+async fn add_entity_to_group(pool: &Database, tenant_id: Uuid, group_id: Uuid, entity_id: Uuid) {
+    atom::db::query(
         "INSERT INTO object_group_entities (group_id, entity_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(group_id)
@@ -132,8 +132,13 @@ async fn add_entity_to_group(pool: &PgPool, tenant_id: Uuid, group_id: Uuid, ent
     .expect("insert object group entity");
 }
 
-async fn add_resource_to_group(pool: &PgPool, tenant_id: Uuid, group_id: Uuid, resource_id: Uuid) {
-    sqlx::query(
+async fn add_resource_to_group(
+    pool: &Database,
+    tenant_id: Uuid,
+    group_id: Uuid,
+    resource_id: Uuid,
+) {
+    atom::db::query(
         "INSERT INTO object_group_resources (group_id, resource_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(group_id)
@@ -186,8 +191,8 @@ impl BlockSpec {
     }
 }
 
-async fn block(pool: &PgPool, spec: BlockSpec) -> Uuid {
-    sqlx::query_scalar(
+async fn block(pool: &Database, spec: BlockSpec) -> Uuid {
+    atom::db::query_scalar(
         r#"INSERT INTO permission_blocks
              (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect)
            VALUES ($1, $2, $3, $4, $5, $6, 'allow')
@@ -204,8 +209,13 @@ async fn block(pool: &PgPool, spec: BlockSpec) -> Uuid {
     .expect("insert permission block")
 }
 
-async fn policy(pool: &PgPool, tenant_id: Option<Uuid>, subject_id: Uuid, block_id: Uuid) -> Uuid {
-    sqlx::query_scalar(
+async fn policy(
+    pool: &Database,
+    tenant_id: Option<Uuid>,
+    subject_id: Uuid,
+    block_id: Uuid,
+) -> Uuid {
+    atom::db::query_scalar(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)
            RETURNING id"#,
@@ -218,16 +228,16 @@ async fn policy(pool: &PgPool, tenant_id: Option<Uuid>, subject_id: Uuid, block_
     .expect("insert direct policy")
 }
 
-async fn seeded_action(pool: &PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
+async fn seeded_action(pool: &Database, name: &str) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
         .expect("seeded action")
 }
 
-async fn attach_action(pool: &PgPool, block_id: Uuid, action_id: Uuid) {
-    sqlx::query(
+async fn attach_action(pool: &Database, block_id: Uuid, action_id: Uuid) {
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -239,14 +249,14 @@ async fn attach_action(pool: &PgPool, block_id: Uuid, action_id: Uuid) {
 
 /// One subject + one block + one policy, so every fixture row in a test is
 /// distinguishable by the policy id it produced.
-async fn granted(pool: &PgPool, tenant_id: Uuid, spec: BlockSpec) -> Uuid {
+async fn granted(pool: &Database, tenant_id: Uuid, spec: BlockSpec) -> Uuid {
     granted_to(pool, tenant_id, spec, None).await.1
 }
 
 /// As [`granted`], optionally wiring an action onto the block so the PDP can
 /// decide on it too. Returns `(subject, policy)`.
 async fn granted_to(
-    pool: &PgPool,
+    pool: &Database,
     tenant_id: Uuid,
     spec: BlockSpec,
     action_id: Option<Uuid>,

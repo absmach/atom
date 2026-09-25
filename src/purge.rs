@@ -7,11 +7,15 @@
 //! disabled by default — see [`crate::config::PurgeConfig`].
 
 use chrono::{Duration, Utc};
-use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    audit, config::PurgeConfig, error::AppError, models::enums::AuditOutcome, state::AppState,
+    audit,
+    config::PurgeConfig,
+    db::{Database, DbTransaction},
+    error::AppError,
+    models::enums::AuditOutcome,
+    state::AppState,
 };
 
 /// Simple object tables purged generically (one batch each). Entities (their
@@ -40,10 +44,10 @@ pub fn spawn_purge_cleanup(state: AppState) {
 
         loop {
             interval.tick().await;
-            match purge_expired(&state.pool, cfg).await {
+            match purge_expired(state.pool(), cfg).await {
                 Ok(summary) if summary.deleted_rows > 0 => {
                     audit::write(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         audit::AuditEvent {
                             actor_entity_id: None,
@@ -89,11 +93,11 @@ pub fn spawn_refresh_token_cleanup(state: AppState) {
 
         loop {
             interval.tick().await;
-            match crate::identity::refresh_tokens::purge_expired(&state.pool, batch_size).await {
+            match crate::identity::refresh_tokens::purge_expired(state.pool(), batch_size).await {
                 Ok(0) => {}
                 Ok(deleted_rows) => {
                     audit::write(
-                        &state.pool,
+                        state.pool(),
                         state.config.events.enabled(),
                         audit::AuditEvent {
                             actor_entity_id: None,
@@ -124,12 +128,12 @@ pub fn spawn_refresh_token_cleanup(state: AppState) {
 /// [`crate::authz::repo::purge_authz_references_for_ids`] so no bare-UUID authz
 /// reference (`permission_blocks.object_id`, `*_id` subject grants) is left
 /// dangling — the same cleanup the explicit purge mutations use.
-pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSummary, AppError> {
+pub async fn purge_expired(pool: &Database, cfg: PurgeConfig) -> Result<PurgeSummary, AppError> {
     let cutoff = Utc::now() - Duration::days(cfg.retention_days);
     let mut tx = pool.begin().await?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(PURGE_ADVISORY_LOCK_ID)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.exec())
         .await?;
 
     if !acquired {
@@ -154,17 +158,17 @@ pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSumma
     // Entities: capture cascaded credential ids before the delete removes them.
     let entity_ids = select_doomed(&mut tx, "entities", cutoff, cfg.batch_size).await?;
     if !entity_ids.is_empty() {
-        sqlx::query(
+        crate::db::query(
             "DELETE FROM pki_enrollment_rate_windows
              WHERE scope_kind = 'entity' AND scope_id = ANY($1)",
         )
         .bind(&entity_ids)
-        .execute(&mut *tx)
+        .execute(tx.exec())
         .await?;
         let credential_ids: Vec<Uuid> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE entity_id = ANY($1)")
+            crate::db::query_scalar("SELECT id FROM credentials WHERE entity_id = ANY($1)")
                 .bind(&entity_ids)
-                .fetch_all(&mut *tx)
+                .fetch_all(tx.exec())
                 .await?;
         deleted_rows += delete_by_ids(&mut tx, "entities", &entity_ids).await?;
         doomed_ids.extend(entity_ids);
@@ -196,7 +200,7 @@ pub async fn purge_expired(pool: &PgPool, cfg: PurgeConfig) -> Result<PurgeSumma
 
 /// Locks and returns one bounded batch of tombstoned ids past the cutoff.
 async fn select_doomed(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     table: &str,
     cutoff: chrono::DateTime<Utc>,
     batch_size: i64,
@@ -209,15 +213,15 @@ async fn select_doomed(
            LIMIT $2
            FOR UPDATE SKIP LOCKED"#
     );
-    Ok(sqlx::query_scalar(&sql)
+    Ok(crate::db::query_scalar(&sql)
         .bind(cutoff)
         .bind(batch_size)
-        .fetch_all(&mut **tx)
+        .fetch_all(tx.exec())
         .await?)
 }
 
 async fn delete_by_ids(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     table: &str,
     ids: &[Uuid],
 ) -> Result<i64, AppError> {
@@ -225,7 +229,7 @@ async fn delete_by_ids(
         return Ok(0);
     }
     let sql = format!("DELETE FROM {table} WHERE id = ANY($1)");
-    let result = sqlx::query(&sql).bind(ids).execute(&mut **tx).await?;
+    let result = crate::db::query(&sql).bind(ids).execute(tx.exec()).await?;
     Ok(i64::try_from(result.rows_affected()).unwrap_or(i64::MAX))
 }
 
@@ -233,7 +237,7 @@ async fn delete_by_ids(
 /// by their removal, returning the physically removed role ids so the caller can
 /// fold them into the canonical authz-reference cleanup.
 async fn purge_roles(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     cutoff: chrono::DateTime<Utc>,
     batch_size: i64,
 ) -> Result<Vec<Uuid>, AppError> {
@@ -242,22 +246,22 @@ async fn purge_roles(
         return Ok(role_ids);
     }
 
-    let candidate_block_ids: Vec<Uuid> = sqlx::query_scalar(
+    let candidate_block_ids: Vec<Uuid> = crate::db::query_scalar(
         r#"SELECT DISTINCT permission_block_id
            FROM role_permission_blocks
            WHERE role_id = ANY($1)"#,
     )
     .bind(&role_ids)
-    .fetch_all(&mut **tx)
+    .fetch_all(tx.exec())
     .await?;
 
-    sqlx::query("DELETE FROM roles WHERE id = ANY($1)")
+    crate::db::query("DELETE FROM roles WHERE id = ANY($1)")
         .bind(&role_ids)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await?;
 
     if !candidate_block_ids.is_empty() {
-        sqlx::query(
+        crate::db::query(
             r#"DELETE FROM permission_blocks pb
                WHERE pb.id = ANY($1)
                  AND NOT EXISTS (
@@ -270,7 +274,7 @@ async fn purge_roles(
                  )"#,
         )
         .bind(&candidate_block_ids)
-        .execute(&mut **tx)
+        .execute(tx.exec())
         .await?;
     }
 

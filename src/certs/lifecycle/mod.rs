@@ -4,13 +4,13 @@ pub mod repo;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
     audit,
     certs::service::{self as certificates, CertificateRevocationSelector, RevokeCertificateV2},
     config::PkiLifecycleConfig,
+    db::Database,
     error::AppError,
     models::enums::AuditOutcome,
     state::AppState,
@@ -89,7 +89,7 @@ pub fn spawn(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            match sweep_once(&state.pool, cfg, state.config.events.enabled(), Utc::now()).await {
+            match sweep_once(state.pool(), cfg, state.config.events.enabled(), Utc::now()).await {
                 Ok(summary) if summary.certificate_events + summary.authority_events > 0 => {
                     tracing::info!(
                         certificate_events = summary.certificate_events,
@@ -107,7 +107,7 @@ pub fn spawn(state: AppState) {
 /// Run one bounded sweep at a caller-supplied time. Public for deterministic
 /// restart/replica tests and future operator-triggered maintenance.
 pub async fn sweep_once(
-    pool: &PgPool,
+    pool: &Database,
     cfg: PkiLifecycleConfig,
     events_enabled: bool,
     now: DateTime<Utc>,
@@ -117,9 +117,9 @@ pub async fn sweep_once(
     }
 
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(LIFECYCLE_SWEEP_ADVISORY_LOCK_ID)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.exec())
         .await
         .map_err(AppError::Database)?;
     if !acquired {
@@ -167,7 +167,7 @@ pub async fn sweep_once(
                 "rotation_procedure": "PR-003",
             });
             crate::events::enqueue(
-                &mut *tx,
+                &mut tx,
                 true,
                 None,
                 window.tenant_id,
@@ -210,7 +210,7 @@ pub async fn sweep_once(
                     "expires_at": window.expires_at,
                 });
                 crate::events::enqueue(
-                    &mut *tx,
+                    &mut tx,
                     true,
                     None,
                     window.tenant_id,
@@ -232,7 +232,7 @@ pub async fn sweep_once(
 }
 
 pub async fn selector_tenant_id(
-    pool: &PgPool,
+    pool: &Database,
     selector: BulkRevocationSelector,
 ) -> Result<Option<Uuid>, AppError> {
     repo::selector_tenant_id(pool, selector).await
@@ -260,7 +260,7 @@ pub async fn bulk_revoke(
             "snapshotAt is required when afterCredentialId is provided",
         ));
     }
-    let database_now = repo::bulk_snapshot_at(&state.pool).await?;
+    let database_now = repo::bulk_snapshot_at(state.pool()).await?;
     if snapshot_at
         .as_ref()
         .is_some_and(|snapshot| snapshot > &database_now)
@@ -274,7 +274,7 @@ pub async fn bulk_revoke(
     // One look-ahead row determines whether a successful page has more work.
     // The creation-time cutoff freezes membership across all UUID pages.
     let candidates = repo::bulk_candidates(
-        &state.pool,
+        state.pool(),
         selector,
         after_credential_id,
         &snapshot_at,
@@ -294,7 +294,7 @@ pub async fn bulk_revoke(
             Err(error) => {
                 let error_code = public_error_code(&error);
                 audit::observe_error(
-                    &state.pool,
+                    state.pool(),
                     state.config.events.enabled(),
                     &audit::AuditMeta {
                         actor_entity_id: Some(actor_entity_id),
@@ -348,7 +348,7 @@ async fn revoke_candidate(
     reason: Option<String>,
     candidate: &repo::BulkCandidate,
 ) -> Result<BulkRevocationItem, AppError> {
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = state.begin().await.map_err(AppError::Database)?;
     let revoked = certificates::revoke_certificate_v2_in_tx(
         &mut tx,
         RevokeCertificateV2 {
@@ -379,7 +379,7 @@ async fn revoke_candidate(
         certificates::record_lifecycle_commit("revocation", &commit);
         commit?;
         audit::write(
-            &state.pool,
+            state.pool(),
             false,
             audit::AuditEvent {
                 actor_entity_id: Some(actor_entity_id),
@@ -394,7 +394,7 @@ async fn revoke_candidate(
         .await;
     } else {
         let commit = audit::commit_with_audit(
-            &state.pool,
+            state.pool(),
             tx,
             state.config.events.enabled(),
             &audit::AuditEvent {

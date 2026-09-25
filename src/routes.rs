@@ -163,7 +163,7 @@ pub fn create_router(state: AppState) -> Router {
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        crate::metrics::render(&state.pool),
+        crate::metrics::render(state.pool()),
     )
 }
 

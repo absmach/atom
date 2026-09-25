@@ -6,13 +6,13 @@
 
 use std::fmt;
 
+use crate::db::Database;
 use p256::{
     ecdsa::{signature::Signer, Signature, SigningKey},
     pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey},
 };
 use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -821,7 +821,7 @@ impl AuthorityKeyProvider for ManagedAuthorityKeyProvider {
 /// Validate every configured provider and every persisted managed key before
 /// serving. Encrypted keys are checked by metadata only; PKCS#11 keys are
 /// opened through their opaque references and matched to stored certificates.
-pub async fn validate_startup(pool: &PgPool, config: &PkiCaKeyConfig) -> Result<(), AppError> {
+pub async fn validate_startup(pool: &Database, config: &PkiCaKeyConfig) -> Result<(), AppError> {
     if repo::kms_authority_count(pool).await? != 0 {
         return Err(AppError::Internal(anyhow::anyhow!(
             "stored KMS authority requires an unavailable provider"

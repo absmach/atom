@@ -7,7 +7,7 @@ Lightweight replacement for Keycloak — single Rust binary, single Postgres dat
 - **Language:** Rust (edition 2021)
 - **HTTP framework:** Axum 0.7
 - **APIs:** GraphQL (async-graphql `=7.2.1`, depth/complexity/introspection limits) + gRPC (Tonic 0.12 + tonic-health). The legacy tenant Axum handlers are **unmounted** (see `routes.rs`); the dead authz REST handler module has been removed.
-- **Database:** PostgreSQL via sqlx 0.8.6 (dynamic `query`/`query_as`; the `macros` feature is enabled only for `migrate!` — query macros are not used, so no compile-time DB is required)
+- **Database:** PostgreSQL **or** SQLite (selected by the `DATABASE_URL` scheme) via sqlx 0.8.6. Every statement goes through the `crate::db` query layer (`query`/`query_as`/`query_scalar`/`QueryBuilder`) against a `Database`/`DbTransaction`/`DbConn`; the `macros` feature is enabled only for `migrate!` — query macros are not used, so no compile-time DB is required
 - **Auth:** argon2 (password hashing); keyed HMAC-SHA256 under the deployment KEK for access-token and shared-key verification (argon2 fallback for access tokens without a KEK); **ES256** JWTs via `p256` with `kid` rotation + JWKS (tokens carry identity/session, never permissions)
 - **PKI:** `rcgen`/`ring`/`ocsp`/`x509-parser` (certificate issuance, CSR, renewal, CRL, OCSP)
 - **Runtime:** Tokio (full features)
@@ -207,6 +207,9 @@ cargo test
 # Run the DB-gated tests too (needs DATABASE_URL)
 cargo test -- --include-ignored
 
+# ...or against SQLite (no server; each test process gets a fresh file)
+ATOM_TEST_BACKEND=sqlite cargo test -- --include-ignored
+
 # Lint
 cargo clippy -- -D warnings
 cargo fmt --check
@@ -399,7 +402,8 @@ change in `src/metrics.rs` only — call sites do not move.
 
 - DENY always overrides ALLOW — never change this without explicit discussion.
 - Default deny — no matching allow policy means denied.
-- `db_err()` must be used when converting sqlx errors in repo functions so `RowNotFound` maps correctly.
+- `db_err()` must be used when converting sqlx errors in repo functions so `RowNotFound` maps correctly. Classify database failures with `error::{is_unique_violation, is_foreign_key_violation, is_check_violation}` — never compare a SQLSTATE or a driver message, which only holds on one backend.
+- **One dialect, two backends.** SQL is written once, in the PostgreSQL dialect, and only through `crate::db` — application code never names `sqlx::query*`, `PgPool`, or another driver type (`scripts/check-db-boundary.sh` enforces it). PostgreSQL runs the text unchanged; SQLite runs `db::translate` of it. When a construct has no mechanical translation (a data-modifying CTE, an inner `LATERAL`, a recursive array walk, `generate_series` used as a SELECT-list expression rather than a `FROM` source) give that statement an explicit `.sqlite("…")` / `.sqlite_all(&[…])` override rather than contorting the PostgreSQL text. New table-valued or PL/pgSQL functions need a SQLite form too. A new migration `NNN_<name>.sql` must have a same-named counterpart in `migrations/sqlite/` (the script fails otherwise); SQLite table/CHECK/index definitions use only SQLite built-ins, and only triggers may call the `atom_*` functions registered in `src/db/sqlite_functions.rs`. SQLite is single-process: hold no second pool connection inside a transaction, and remember row/advisory locks are no-ops there (the single write lock orders writers). A statement combining `INSERT ... SELECT ... FROM <source>` (no `WHERE`) with an upsert clause is valid PostgreSQL but a SQLite grammar ambiguity (`near "DO": syntax error`) — give the SELECT any `WHERE` (`WHERE true` if none is otherwise needed) to disambiguate it; this is unrelated to, and not fixed by, `db::translate`.
 - API keys are one-time reveal — the plaintext secret is never stored; once the creation response is sent it cannot be recovered.
 - No `PUT /groups/:id` — groups are immutable after creation (name/tenant change would break policy references).
 - Enum variants must stay in sync with DB CHECK constraints — changing a variant's serialized name is a schema-breaking change requiring a migration.

@@ -13,6 +13,7 @@ mod common;
 use common::pool;
 
 use atom::authz::repo as authz_repo;
+use atom::authz::resources as resource_repo;
 use atom::identity::repo as identity_repo;
 use atom::models::alias::AliasObjectClass;
 use atom::models::entity::{CreateEntity, UpdateEntity};
@@ -29,7 +30,7 @@ fn slug(prefix: &str) -> String {
     format!("{prefix}-{}", &id[..12])
 }
 
-async fn make_tenant(pool: &sqlx::PgPool, alias: &str) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database, alias: &str) -> Uuid {
     tenant_repo::create_tenant(
         pool,
         CreateTenant {
@@ -66,17 +67,17 @@ async fn alias_unique_within_tenant_but_reusable_across_tenants() {
     let tenant_b = make_tenant(&p, &slug("b")).await;
     let alias = slug("chan");
 
-    authz_repo::create_resource(&p, resource_req(tenant_a, &alias))
+    resource_repo::create_resource(&p, resource_req(tenant_a, &alias))
         .await
         .expect("first resource in tenant A");
 
     // Same alias in a different tenant is allowed.
-    authz_repo::create_resource(&p, resource_req(tenant_b, &alias))
+    resource_repo::create_resource(&p, resource_req(tenant_b, &alias))
         .await
         .expect("same alias reusable across tenants");
 
     // Same alias again within tenant A is rejected (scoped uniqueness).
-    let dup = authz_repo::create_resource(&p, resource_req(tenant_a, &alias)).await;
+    let dup = resource_repo::create_resource(&p, resource_req(tenant_a, &alias)).await;
     assert!(
         dup.is_err(),
         "duplicate alias within a tenant must be rejected"
@@ -90,7 +91,7 @@ async fn resolve_alias_resolves_tenant_and_object() {
     let tenant_alias = slug("dom");
     let tenant_id = make_tenant(&p, &tenant_alias).await;
     let object_alias = slug("meter");
-    let resource = authz_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
+    let resource = resource_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
         .await
         .expect("create resource");
     let tenant_lookup = format!("  {}  ", tenant_alias.to_uppercase());
@@ -128,7 +129,7 @@ async fn resolve_alias_is_case_insensitive() {
     let tenant_alias = slug("dom");
     let tenant_id = make_tenant(&p, &tenant_alias).await;
     // Stored lowercased on write; resolve with mixed case must still match.
-    let resource = authz_repo::create_resource(&p, resource_req(tenant_id, "watermeters"))
+    let resource = resource_repo::create_resource(&p, resource_req(tenant_id, "watermeters"))
         .await
         .expect("create resource");
 
@@ -151,13 +152,13 @@ async fn resolve_alias_ignores_deleted_object_after_alias_reuse() {
     let p = pool().await;
     let tenant_id = make_tenant(&p, &slug("dom")).await;
     let object_alias = slug("reused");
-    let old = authz_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
+    let old = resource_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
         .await
         .expect("create old resource");
     authz_repo::delete_resource(&p, old.id, None)
         .await
         .expect("delete old resource");
-    let replacement = authz_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
+    let replacement = resource_repo::create_resource(&p, resource_req(tenant_id, &object_alias))
         .await
         .expect("reuse alias");
 
@@ -186,9 +187,10 @@ async fn resolve_alias_ignores_deleted_tenant_after_alias_reuse() {
 
     let replacement_tenant = make_tenant(&p, &tenant_alias).await;
     let object_alias = slug("meter");
-    let resource = authz_repo::create_resource(&p, resource_req(replacement_tenant, &object_alias))
-        .await
-        .expect("create replacement resource");
+    let resource =
+        resource_repo::create_resource(&p, resource_req(replacement_tenant, &object_alias))
+            .await
+            .expect("create replacement resource");
 
     let resolved = authz_repo::resolve_alias(
         &p,
@@ -209,7 +211,7 @@ async fn resolve_alias_ignores_deleted_tenant_after_alias_reuse() {
 async fn resolve_alias_supports_explicit_global_scope() {
     let p = pool().await;
     let object_alias = slug("global");
-    let resource = authz_repo::create_resource(
+    let resource = resource_repo::create_resource(
         &p,
         CreateResource {
             id: None,
@@ -260,7 +262,7 @@ async fn alias_updates_can_clear_existing_values() {
     )
     .await
     .expect("create entity");
-    let resource = authz_repo::create_resource(&p, resource_req(tenant_id, &slug("resource")))
+    let resource = resource_repo::create_resource(&p, resource_req(tenant_id, &slug("resource")))
         .await
         .expect("create resource");
 
@@ -319,12 +321,12 @@ async fn database_rejects_uuid_shaped_aliases() {
     let uuid_alias = "465358f9-07f4-4ea0-8cbb-2abc654442bd";
 
     for result in [
-        sqlx::query("INSERT INTO tenants (name, alias) VALUES ($1, $2)")
+        atom::db::query("INSERT INTO tenants (name, alias) VALUES ($1, $2)")
             .bind(slug("bad-tenant"))
             .bind(uuid_alias)
             .execute(&p)
             .await,
-        sqlx::query(
+        atom::db::query(
             "INSERT INTO entities (kind, name, alias, tenant_id) \
              VALUES ('device', $1, $2, $3)",
         )
@@ -333,7 +335,7 @@ async fn database_rejects_uuid_shaped_aliases() {
         .bind(tenant_id)
         .execute(&p)
         .await,
-        sqlx::query(
+        atom::db::query(
             "INSERT INTO resources (kind, name, alias, tenant_id) \
              VALUES ('resource:channel', $1, $2, $3)",
         )
@@ -344,11 +346,10 @@ async fn database_rejects_uuid_shaped_aliases() {
         .await,
     ] {
         let err = result.expect_err("UUID-shaped alias must violate a CHECK constraint");
-        let code = err
-            .as_database_error()
-            .and_then(|db| db.code())
-            .map(|code| code.into_owned());
-        assert_eq!(code.as_deref(), Some("23514"));
+        assert!(
+            atom::error::is_check_violation(&err),
+            "expected a CHECK violation, got {err}"
+        );
     }
 }
 
@@ -359,13 +360,13 @@ async fn create_resource_rejects_invalid_aliases() {
     let tenant_id = make_tenant(&p, &slug("dom")).await;
 
     assert!(
-        authz_repo::create_resource(&p, resource_req(tenant_id, "has space"))
+        resource_repo::create_resource(&p, resource_req(tenant_id, "has space"))
             .await
             .is_err(),
         "non-slug alias must be rejected"
     );
     assert!(
-        authz_repo::create_resource(
+        resource_repo::create_resource(
             &p,
             resource_req(tenant_id, "465358f9-07f4-4ea0-8cbb-2abc654442bd"),
         )
@@ -380,7 +381,7 @@ async fn create_resource_rejects_invalid_aliases() {
 async fn resource_alias_is_stored_case_folded() {
     let p = pool().await;
     let tenant_id = make_tenant(&p, &slug("dom")).await;
-    let created = authz_repo::create_resource(&p, resource_req(tenant_id, "Sensor-01"))
+    let created = resource_repo::create_resource(&p, resource_req(tenant_id, "Sensor-01"))
         .await
         .expect("create resource with mixed-case alias");
     assert_eq!(created.alias.as_deref(), Some("sensor-01"));

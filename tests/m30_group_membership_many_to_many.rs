@@ -24,9 +24,9 @@ use uuid::Uuid;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-async fn make_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
         .bind(id)
         .bind(format!("{name}-{id}"))
         .execute(pool)
@@ -35,7 +35,12 @@ async fn make_tenant(pool: &sqlx::PgPool, name: &str) -> Uuid {
     id
 }
 
-async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, kind: EntityKind, name: &str) -> Uuid {
+async fn make_entity(
+    pool: &atom::db::Database,
+    tenant_id: Uuid,
+    kind: EntityKind,
+    name: &str,
+) -> Uuid {
     atom::identity::repo::create_entity(
         pool,
         CreateEntity {
@@ -55,8 +60,8 @@ async fn make_entity(pool: &sqlx::PgPool, tenant_id: Uuid, kind: EntityKind, nam
     .id
 }
 
-async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
-    atom::authz::repo::create_resource(
+async fn make_resource(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
+    atom::authz::resources::create_resource(
         pool,
         CreateResource {
             id: None,
@@ -73,9 +78,9 @@ async fn make_resource(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid
     .id
 }
 
-async fn make_object_group(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> Uuid {
+async fn make_object_group(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
+    atom::db::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(format!("m30-{name}-{id}"))
         .bind(tenant_id)
@@ -85,8 +90,8 @@ async fn make_object_group(pool: &sqlx::PgPool, tenant_id: Uuid, name: &str) -> 
     id
 }
 
-async fn link_object_groups(pool: &sqlx::PgPool, tenant_id: Uuid, parent: Uuid, child: Uuid) {
-    sqlx::query(
+async fn link_object_groups(pool: &atom::db::Database, tenant_id: Uuid, parent: Uuid, child: Uuid) {
+    atom::db::query(
         "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
     )
     .bind(parent)
@@ -97,8 +102,8 @@ async fn link_object_groups(pool: &sqlx::PgPool, tenant_id: Uuid, parent: Uuid, 
     .expect("link object groups");
 }
 
-async fn action_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
+async fn action_id(pool: &atom::db::Database, name: &str) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
@@ -109,7 +114,7 @@ async fn action_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
 /// (`group_direct_objects`) or across its whole subtree
 /// (`group_descendant_objects`).
 async fn grant_over_group(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     subject_id: Uuid,
     group_id: Uuid,
@@ -118,7 +123,7 @@ async fn grant_over_group(
     action: Uuid,
 ) {
     let object_kind = object_type.split(':').next().expect("namespaced type");
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks
            (scope_mode, object_kind, object_type, tenant_id, group_id, effect)
            VALUES ($1, $2, $3, $4, $5, 'allow')
@@ -132,7 +137,7 @@ async fn grant_over_group(
     .fetch_one(pool)
     .await
     .expect("insert permission block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -140,7 +145,7 @@ async fn grant_over_group(
     .execute(pool)
     .await
     .expect("insert block action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -153,14 +158,14 @@ async fn grant_over_group(
 }
 
 async fn grant_tenant_wide(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Uuid,
     subject_id: Uuid,
     object_type: &str,
     action: Uuid,
 ) {
     let object_kind = object_type.split(':').next().expect("namespaced type");
-    let block_id: Uuid = sqlx::query_scalar(
+    let block_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO permission_blocks
            (scope_mode, object_kind, object_type, tenant_id, effect)
            VALUES ('object_type', $1, $2, $3, 'allow')
@@ -172,7 +177,7 @@ async fn grant_tenant_wide(
     .fetch_one(pool)
     .await
     .expect("insert permission block");
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
     )
     .bind(block_id)
@@ -180,7 +185,7 @@ async fn grant_tenant_wide(
     .execute(pool)
     .await
     .expect("insert block action");
-    sqlx::query(
+    atom::db::query(
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -193,7 +198,7 @@ async fn grant_tenant_wide(
 }
 
 async fn pdp_allows(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     subject_id: Uuid,
     object_kind: &str,
     object_id: Uuid,
@@ -216,7 +221,7 @@ async fn pdp_allows(
 }
 
 async fn authorized(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     subject_id: Uuid,
     object_kind: &str,
     object_type: &str,
@@ -670,8 +675,8 @@ async fn removing_one_group_leaves_the_other_membership_and_its_grants() {
 
 // ─── No-op removals do not publish membership-change events ───────────────────
 
-async fn outbox_row_exists(pool: &sqlx::PgPool, event: &str, target_id: Uuid) -> bool {
-    sqlx::query_scalar::<_, bool>(
+async fn outbox_row_exists(pool: &atom::db::Database, event: &str, target_id: Uuid) -> bool {
+    atom::db::query_scalar::<bool>(
         "SELECT EXISTS (SELECT 1 FROM event_outbox
                          WHERE event = $1 AND (payload->>'target_id')::uuid = $2)",
     )
@@ -859,7 +864,7 @@ async fn re_adding_an_existing_membership_is_idempotent() {
             .expect("re-add resource membership");
     }
 
-    let entity_rows: i64 = sqlx::query_scalar(
+    let entity_rows: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_entities WHERE entity_id = $1 AND group_id = $2",
     )
     .bind(device)
@@ -869,7 +874,7 @@ async fn re_adding_an_existing_membership_is_idempotent() {
     .expect("count entity memberships");
     assert_eq!(entity_rows, 1);
 
-    let resource_rows: i64 = sqlx::query_scalar(
+    let resource_rows: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_resources WHERE resource_id = $1 AND group_id = $2",
     )
     .bind(channel)
@@ -905,7 +910,7 @@ async fn cross_tenant_membership_is_rejected() {
         "a resource must not join a group in another tenant"
     );
 
-    let rows: i64 = sqlx::query_scalar(
+    let rows: i64 = atom::db::query_scalar(
         "SELECT (SELECT COUNT(*) FROM object_group_entities WHERE group_id = $1)
               + (SELECT COUNT(*) FROM object_group_resources WHERE group_id = $1)",
     )
@@ -949,7 +954,7 @@ async fn parent_group_id_attribute_is_rejected_on_create_and_update() {
         "createEntity must reject the parent_group_id attribute"
     );
 
-    let resource_err = atom::authz::repo::create_resource(
+    let resource_err = atom::authz::resources::create_resource(
         &pool,
         CreateResource {
             id: None,
