@@ -61,8 +61,19 @@ class ContractGateTests(unittest.TestCase):
                 path.unlink()
         self.check()
 
+    def next_free_migration_version(self):
+        versions = [
+            int(path.name[:3])
+            for path in (self.root / "migrations").glob("[0-9][0-9][0-9]_*.sql")
+        ]
+        return max(versions, default=0) + 1
+
     def test_forward_migration_needs_no_manifest_update(self):
-        (self.root / "migrations/004_next.sql").write_text("SELECT 1;\n")
+        # The fixture must take the next free version, not a hardcoded one:
+        # any branch carrying the next number (this one carries 004) would
+        # otherwise look like a duplicate-version regression.
+        version = self.next_free_migration_version()
+        (self.root / f"migrations/{version:03d}_next.sql").write_text("SELECT 1;\n")
         self.check()
 
     def test_missing_launch_baseline_fails(self):
