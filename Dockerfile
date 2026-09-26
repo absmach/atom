@@ -20,6 +20,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && rm -rf src
 
 FROM base AS deps-dev
+ENV CARGO_INCREMENTAL=1
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo build \

@@ -79,6 +79,32 @@ host development, certificate setup, custom ports, and troubleshooting.
 
 ## Development
 
+Build the Docker images with an incremental development backend:
+
+```bash
+make build-dev
+make up
+```
+
+This reuses the Rust build cache between builds and uses the existing cached UI
+build. The first build still compiles dependencies. `make build` continues to
+build the release backend.
+
+Measured `make build-dev` wall-clock times on 2026-09-26, including both the
+backend and UI image builds, with Docker 28.5.2 and 16 CPUs / approximately
+31 GiB of memory available to Docker:
+
+| Scenario | Total time |
+| --- | ---: |
+| First measured run, existing cache, no source changes | 5.47 seconds |
+| Immediate repeat, no source changes | 3.17 seconds |
+
+Both runs succeeded and reused the cached Rust and UI compilation layers;
+neither performed compilation. These are unchanged-build timings, not cold-build
+or source-change rebuild timings, and do not establish a speedup over
+`make build`. Cold builds and rebuilds after source changes have not been
+measured in this benchmark. Results depend on the machine and available cache.
+
 Host builds link with [mold](https://github.com/rui314/mold) for faster
 rebuilds (configured in `.cargo/config.toml`), so first install it:
 
