@@ -39,14 +39,15 @@ COMPOSE_ENV = ATOM_IMAGE="$(ATOM_IMAGE)" ATOM_UI_IMAGE="$(ATOM_UI_IMAGE)"
 DEV_HTTP_PORT ?= 8090
 DEV_UI_PORT ?= 3000
 
-.PHONY: help migrate-dev-env db dev check build build-prod latest release release-check atom-build atom-build-prod docker_atom_dev ui-build ui-build-prod up down logs restart docker-build docker-build-prod docker-build-release docker-build-release-prod proto proto-lint proto-check pki-material
+.PHONY: help migrate-dev-env db dev check build build-dev build-prod latest release release-check atom-build atom-build-prod docker_atom_dev ui-build ui-build-prod up down logs restart docker-build docker-build-prod docker-build-release docker-build-release-prod proto proto-lint proto-check pki-material
 
 help:
 	@echo "First run: create .env in the repo root — see README Quick Start"
 	@echo "  (PKI trust anchor material is generated into ./certs/ automatically)"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make build                     Rebuild both images with BuildKit cache reuse (dev)"
+	@echo "  make build                     Rebuild both images with BuildKit cache reuse (release backend)"
+	@echo "  make build-dev                 Rebuild both images with an incremental development backend"
 	@echo "  make build-prod                Rebuild both images with --no-cache (release-clean)"
 	@echo "  make latest                    Build both images as :latest with Git-derived build metadata"
 	@echo "  make release                   Build both images from a clean exact vX.Y.Z tag, also tagging :latest (no-cache)"
@@ -142,6 +143,9 @@ check:
 	cargo check
 
 build: atom-build ui-build
+
+build-dev:
+	$(MAKE) build BUILD_TARGET=dev
 
 build-prod:
 	$(MAKE) build DOCKER_NO_CACHE=1
