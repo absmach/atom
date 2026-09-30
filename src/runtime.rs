@@ -18,13 +18,18 @@ use crate::{
 /// Initializes persisted state; callers own logging and the process runtime.
 pub async fn initialize(cfg: config::Config) -> anyhow::Result<AppState> {
     metrics::init(cfg.metrics.enabled);
-    let pool = db::create_pool(&cfg.database_url, &cfg.db_pool).await?;
+    let database = db::Database::connect(&cfg.database_url, &cfg.db_pool).await?;
+    match db::location(&cfg.database_url) {
+        Ok(loc) => tracing::info!(backend = %loc.kind, location = %loc, "database connected"),
+        Err(_) => tracing::info!(backend = %database.kind(), "database connected"),
+    }
+    let pool = database.clone();
     let bootstrap_cfg = match cfg.bootstrap_file.as_deref() {
         Some(path) => Some(bootstrap::load(std::path::Path::new(path)).await?),
         None => None,
     };
 
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    database.run_migrations().await?;
     tracing::info!("migrations applied");
 
     certs::authority::key_provider::validate_startup(&pool, &cfg.pki_ca_keys).await?;
@@ -72,8 +77,8 @@ pub async fn initialize(cfg: config::Config) -> anyhow::Result<AppState> {
 
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
-    let mut state =
-        state::AppState::new(pool, cfg.clone(), active_keys, cache).with_callouts(callout_service);
+    let mut state = state::AppState::new(database, cfg.clone(), active_keys, cache)
+        .with_callouts(callout_service);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await
@@ -269,7 +274,7 @@ async fn serve_inner(
             }
         }
         certs::authority::key_provider::wait_for_idle().await;
-        state.pool.close().await;
+        state.pool().close().await;
     };
     if tokio::time::timeout(drain_timeout, drain).await.is_err() {
         // Never wait past the deadline. The executable also bounds Tokio
@@ -323,7 +328,7 @@ async fn init_cache(cfg: &config::CacheConfig) -> anyhow::Result<Option<cache::C
     Ok(Some(client))
 }
 
-async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<()> {
+async fn bootstrap_pki_root(pool: &db::Database, path: &str) -> anyhow::Result<()> {
     let pem = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("failed to read ATOM_PKI_ROOT_CERT_PATH ({path})"))?;
@@ -357,7 +362,7 @@ async fn bootstrap_pki_root(pool: &sqlx::PgPool, path: &str) -> anyhow::Result<(
 }
 
 async fn bootstrap_platform_intermediate(
-    pool: &sqlx::PgPool,
+    pool: &db::Database,
     ca_keys: &config::PkiCaKeyConfig,
     cert_path: &str,
     key_path: &str,
@@ -403,7 +408,7 @@ async fn bootstrap_platform_intermediate(
 }
 
 async fn bootstrap_admin_credentials(
-    pool: &sqlx::PgPool,
+    pool: &db::Database,
     admin_entity_id: Uuid,
     secret: &str,
 ) -> anyhow::Result<()> {
@@ -411,7 +416,7 @@ async fn bootstrap_admin_credentials(
 }
 
 async fn bootstrap_password_credentials(
-    pool: &sqlx::PgPool,
+    pool: &db::Database,
     entity_id: Uuid,
     secret: &str,
     label: &str,
@@ -430,22 +435,22 @@ async fn bootstrap_password_credentials(
     {
         anyhow::bail!("active {label} entity {entity_id} not found");
     }
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
     )
     .bind(entity_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.exec())
     .await?;
 
     let mut created = false;
     if count == 0 {
-        sqlx::query(
+        db::query(
             "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
         )
         .bind(Uuid::new_v4())
         .bind(entity_id)
         .bind(hash)
-        .execute(&mut *tx)
+        .execute(tx.exec())
         .await?;
         created = true;
     }
@@ -491,7 +496,7 @@ mod tests {
         cfg.listen_addr = "127.0.0.1:0".into();
         cfg.grpc_addr = "127.0.0.1:0".into();
         let state = test_state(cfg);
-        let pool = state.pool.clone();
+        let pool = state.pool().clone();
         let (release, released) = tokio::sync::oneshot::channel();
         state.background_tasks.spawn(async move {
             released.await.unwrap();
@@ -534,7 +539,7 @@ mod tests {
         // Production config rejects zero. Inject it here to crash the worker.
         cfg.audit_retention.cleanup_interval_secs = 0;
         let state = test_state(cfg);
-        let pool = state.pool.clone();
+        let pool = state.pool().clone();
         let result = tokio::time::timeout(
             Duration::from_secs(3),
             serve(state, CancellationToken::new(), Duration::from_secs(2)),
@@ -556,7 +561,7 @@ mod tests {
         // Invalid only in this test: force the independent refresh worker to fail.
         cfg.purge.interval_secs = 0;
         let state = test_state(cfg);
-        let pool = state.pool.clone();
+        let pool = state.pool().clone();
         let result = tokio::time::timeout(
             Duration::from_secs(3),
             serve(state, CancellationToken::new(), Duration::from_secs(2)),

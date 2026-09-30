@@ -6,6 +6,7 @@
 mod common;
 
 use async_graphql::{Request, Variables};
+use atom::db::Database;
 use atom::{
     auth::AuthContext,
     certs::{authority::AuthorityStatus, service},
@@ -15,7 +16,6 @@ use atom::{
 use chrono::Utc;
 use rcgen::{CertificateParams, KeyPair};
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 use x509_parser::pem::parse_x509_pem;
 use zeroize::Zeroize;
@@ -374,7 +374,7 @@ async fn assert_v2_schema_contract(schema: &atom::graphql::AtomSchema) {
 }
 
 async fn issue_managed(
-    pool: &PgPool,
+    pool: &Database,
     config: &Config,
     tenant_id: Uuid,
     entity_id: Uuid,
@@ -499,8 +499,8 @@ fn errors_contain(errors: &[async_graphql::ServerError], expected: &str) -> bool
     errors.iter().any(|error| error.message.contains(expected))
 }
 
-async fn renewal_replacement(pool: &PgPool, old_id: Uuid) -> Uuid {
-    sqlx::query_scalar(
+async fn renewal_replacement(pool: &Database, old_id: Uuid) -> Uuid {
+    atom::db::query_scalar(
         "SELECT replacement_credential_id FROM certificate_renewals WHERE previous_credential_id = $1",
     )
     .bind(old_id)
@@ -509,8 +509,8 @@ async fn renewal_replacement(pool: &PgPool, old_id: Uuid) -> Uuid {
     .unwrap()
 }
 
-async fn renewal_count(pool: &PgPool, old_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn renewal_count(pool: &Database, old_id: Uuid) -> i64 {
+    atom::db::query_scalar(
         "SELECT COUNT(*) FROM certificate_renewals WHERE previous_credential_id = $1",
     )
     .bind(old_id)
@@ -519,9 +519,9 @@ async fn renewal_count(pool: &PgPool, old_id: Uuid) -> i64 {
     .unwrap()
 }
 
-async fn assert_profile_window(pool: &PgPool, credential_id: Uuid) {
+async fn assert_profile_window(pool: &Database, credential_id: Uuid) {
     let (metadata, expires_at): (Value, chrono::DateTime<Utc>) =
-        sqlx::query_as("SELECT metadata, expires_at FROM credentials WHERE id = $1")
+        atom::db::query_as("SELECT metadata, expires_at FROM credentials WHERE id = $1")
             .bind(credential_id)
             .fetch_one(pool)
             .await
@@ -537,13 +537,13 @@ async fn assert_profile_window(pool: &PgPool, credential_id: Uuid) {
     assert!(due_at < expires_at);
 }
 
-async fn assert_audit_and_outbox_linkage(pool: &PgPool, old_id: Uuid, new_id: Uuid) {
+async fn assert_audit_and_outbox_linkage(pool: &Database, old_id: Uuid, new_id: Uuid) {
     let details = audit_details(pool, "certificate.renew", old_id).await;
     assert_eq!(details["old_credential_id"], old_id.to_string());
     assert_eq!(details["new_credential_id"], new_id.to_string());
     assert_eq!(details["key_mode"], "csr");
     assert_eq!(details["revoke_old"], false);
-    let payload: Value = sqlx::query_scalar(
+    let payload: Value = atom::db::query_scalar(
         r#"SELECT payload FROM event_outbox
            WHERE event = 'certificate.renew'
              AND payload->>'outcome' = 'allow'
@@ -554,7 +554,7 @@ async fn assert_audit_and_outbox_linkage(pool: &PgPool, old_id: Uuid, new_id: Uu
     .await
     .unwrap();
     assert_eq!(payload["details"]["new_credential_id"], new_id.to_string());
-    let event_count: i64 = sqlx::query_scalar(
+    let event_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM event_outbox
          WHERE event = 'certificate.renew'
            AND payload->>'outcome' = 'allow'
@@ -565,7 +565,7 @@ async fn assert_audit_and_outbox_linkage(pool: &PgPool, old_id: Uuid, new_id: Uu
     .await
     .unwrap();
     assert_eq!(event_count, 1);
-    let replay_count: i64 = sqlx::query_scalar(
+    let replay_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM audit_logs WHERE event = 'certificate.renew_replayed' AND target_id = $1",
     )
     .bind(old_id)
@@ -575,8 +575,8 @@ async fn assert_audit_and_outbox_linkage(pool: &PgPool, old_id: Uuid, new_id: Uu
     assert_eq!(replay_count, 1);
 }
 
-async fn audit_details(pool: &PgPool, event: &str, old_id: Uuid) -> Value {
-    sqlx::query_scalar(
+async fn audit_details(pool: &Database, event: &str, old_id: Uuid) -> Value {
+    atom::db::query_scalar(
         "SELECT details FROM audit_logs WHERE event = $1 AND target_id = $2 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(event)
@@ -586,8 +586,8 @@ async fn audit_details(pool: &PgPool, event: &str, old_id: Uuid) -> Value {
     .unwrap()
 }
 
-async fn error_event_count(pool: &PgPool, event: &str, target_id: Uuid) -> i64 {
-    sqlx::query_scalar(
+async fn error_event_count(pool: &Database, event: &str, target_id: Uuid) -> i64 {
+    atom::db::query_scalar(
         r#"SELECT COUNT(*) FROM event_outbox
            WHERE event = $1
              AND (payload->>'target_id')::uuid = $2
@@ -601,8 +601,8 @@ async fn error_event_count(pool: &PgPool, event: &str, target_id: Uuid) -> i64 {
     .unwrap()
 }
 
-async fn expire_certificate(pool: &PgPool, credential_id: Uuid) {
-    sqlx::query(
+async fn expire_certificate(pool: &Database, credential_id: Uuid) {
+    atom::db::query(
         r#"UPDATE credentials
            SET expires_at = now() - interval '1 minute',
                metadata = jsonb_set(
@@ -618,8 +618,8 @@ async fn expire_certificate(pool: &PgPool, credential_id: Uuid) {
     .unwrap();
 }
 
-async fn revoke_certificate(pool: &PgPool, credential_id: Uuid) {
-    sqlx::query(
+async fn revoke_certificate(pool: &Database, credential_id: Uuid) {
+    atom::db::query(
         r#"UPDATE credentials
            SET status = 'revoked',
                metadata = jsonb_set(

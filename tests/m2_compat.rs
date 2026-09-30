@@ -16,16 +16,16 @@ use common::{admin_id, pool};
 use serde_json::json;
 use uuid::Uuid;
 
-async fn manage_capability_id(pool: &sqlx::PgPool) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
+async fn manage_capability_id(pool: &atom::db::Database) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
         .fetch_one(pool)
         .await
         .expect("manage cap")
 }
 
-async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(id)
         .bind(format!("m2-tenant-{id}"))
         .execute(pool)
@@ -34,9 +34,13 @@ async fn make_tenant(pool: &sqlx::PgPool) -> Uuid {
     id
 }
 
-async fn make_active_entity(pool: &sqlx::PgPool, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
+async fn make_active_entity(
+    pool: &atom::db::Database,
+    tenant_id: Option<Uuid>,
+    kind: &str,
+) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')")
+    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')")
         .bind(id)
         .bind(kind)
         .bind(format!("m2-ent-{id}"))
@@ -105,11 +109,11 @@ async fn entity_as_object_can_be_authorised_via_object_kind_form() {
         .expect("evaluate");
     assert!(!resp.allowed);
 
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = ANY($1::uuid[])")
+    let _ = atom::db::query("DELETE FROM entities WHERE id = ANY($1::uuid[])")
         .bind(&[alice, device, other_device][..])
         .execute(&p)
         .await;
@@ -177,11 +181,11 @@ async fn entity_subtype_scope_uses_namespaced_object_type() {
         resp.reason
     );
 
-    let _ = sqlx::query("DELETE FROM direct_policies WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
         .bind(binding.id)
         .execute(&p)
         .await;
-    let _ = sqlx::query("DELETE FROM entities WHERE id = ANY($1::uuid[])")
+    let _ = atom::db::query("DELETE FROM entities WHERE id = ANY($1::uuid[])")
         .bind(&[alice, device1, device2, svc][..])
         .execute(&p)
         .await;
@@ -212,7 +216,7 @@ async fn admin_platform_inherits_into_entity_objects() {
         resp.reason
     );
 
-    let _ = sqlx::query("DELETE FROM entities WHERE id = $1")
+    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
         .bind(target)
         .execute(&p)
         .await;

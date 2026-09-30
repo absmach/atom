@@ -281,3 +281,16 @@ mod tests {
         );
     }
 }
+
+crate::impl_db_enum_arg!(AuthorityKind, AuthorityStatus, AuthorityKeyBackend);
+
+impl TryFrom<crate::db::TextList> for Vec<AuthorityKeyBackend> {
+    type Error = serde_json::Error;
+
+    fn try_from(list: crate::db::TextList) -> Result<Self, Self::Error> {
+        list.0
+            .into_iter()
+            .map(|name| serde_json::from_value(serde_json::Value::String(name)))
+            .collect()
+    }
+}

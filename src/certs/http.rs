@@ -16,7 +16,7 @@ pub async fn issuer_crl(
     State(state): State<AppState>,
     request_headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let artifact = service::issuer_crl(&state.pool, &state.config, issuer_id).await?;
+    let artifact = service::issuer_crl(state.pool(), &state.config, issuer_id).await?;
     let etag = format!("\"{}\"", artifact.sha256);
     let max_age = (artifact.next_update - Utc::now())
         .num_seconds()
@@ -53,7 +53,7 @@ pub async fn issuer_ocsp(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let der = match service::issuer_ocsp_response(&state.pool, &state.config, issuer_id, &body)
+    let der = match service::issuer_ocsp_response(state.pool(), &state.config, issuer_id, &body)
         .await
     {
         Ok(der) => der,

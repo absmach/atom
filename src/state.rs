@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::{
-    cache::CacheClient, callout::CalloutService, config::Config, events::publisher::EventPublisher,
-    keys::ActiveKeys, rate_limit::RateLimiter,
+    cache::CacheClient, callout::CalloutService, config::Config, db::Database,
+    events::publisher::EventPublisher, keys::ActiveKeys, rate_limit::RateLimiter,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +51,11 @@ impl GrpcRuntimeStatus {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: sqlx::PgPool,
+    /// Backend-neutral database handle. Storage code that has not yet moved
+    /// onto `Database`/`DbTransaction` reaches the pool through
+    /// [`AppState::pool`] rather than this field directly, so a repository
+    /// migration to the façade never touches transport call sites.
+    pub db: Database,
     /// Tracks database work that can outlive a request during runtime drain.
     pub background_tasks: tokio_util::task::TaskTracker,
     pub config: Config,
@@ -77,14 +81,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(
-        pool: sqlx::PgPool,
+        db: impl Into<Database>,
         config: Config,
         keys: ActiveKeys,
         cache: Option<CacheClient>,
     ) -> Self {
         let grpc_status = GrpcRuntimeStatus::starting(config.grpc_addr.clone());
         AppState {
-            pool,
+            db: db.into(),
             background_tasks: tokio_util::task::TaskTracker::new(),
             config,
             keys: Arc::new(RwLock::new(keys)),
@@ -110,6 +114,19 @@ impl AppState {
     pub fn with_callouts(mut self, callouts: CalloutService) -> Self {
         self.callouts = callouts;
         self
+    }
+
+    /// The database handle every repository and service takes as `&Database`.
+    pub fn pool(&self) -> &Database {
+        &self.db
+    }
+
+    /// Opens a new top-level transaction through the façade, replacing the
+    /// old `state.pool().begin()` (which returned a bare `sqlx::Transaction`)
+    /// now that mutation call sites hand transactions to backend-neutral
+    /// commit helpers as [`crate::db::DbTransaction`].
+    pub async fn begin(&self) -> Result<crate::db::DbTransaction<'static>, sqlx::Error> {
+        self.db.begin().await
     }
 
     pub async fn grpc_status(&self) -> GrpcRuntimeStatus {

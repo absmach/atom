@@ -1,0 +1,17 @@
+# PostgreSQL schema objects that intentionally have no SQLite counterpart.
+# Format: <TABLE|VIEW|INDEX> <name>   (blank lines and # comments ignored)
+#
+# GIN indexes accelerate jsonb containment (@>) and text[] search. SQLite has no
+# GIN; the same predicates run as a scan through atom_json_contains(), which is
+# adequate at the single-node scale SQLite is supported for.
+INDEX idx_entities_attrs
+INDEX idx_object_groups_attrs
+INDEX idx_principal_groups_attrs
+INDEX idx_resources_attrs
+INDEX idx_tenants_attrs
+INDEX idx_tenants_tags
+#
+# SQLite-only: the parameterless table functions of the PostgreSQL schema are
+# plain views here (subject_effective_grants is expanded by the query layer).
+VIEW effective_access_edges
+VIEW effective_role_actions

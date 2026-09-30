@@ -209,7 +209,7 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .certificate_pem
         .as_deref()
         .expect("issuer certificate");
-    sqlx::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
+    atom::db::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
         .bind(issuer.id)
         .bind(&root.pem)
         .execute(&pool)
@@ -225,14 +225,14 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         error.to_string(),
         "PKCS#11 authority key does not match its certificate"
     );
-    sqlx::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
+    atom::db::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
         .bind(issuer.id)
         .bind(original_certificate)
         .execute(&pool)
         .await
         .expect("restore issuer certificate");
 
-    let tenant_count: i64 = sqlx::query_scalar(
+    let tenant_count: i64 = atom::db::query_scalar(
         "SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'",
     )
     .fetch_one(&pool)
@@ -245,13 +245,13 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .expect("PKCS#11 config")
         .module_path = "/definitely/missing/libpkcs11.so".to_string();
     let outage_tenant = common::pki::create_tenant(&pool, "pkcs11-outage").await;
-    let mut tx = pool.begin().await.expect("outage transaction");
+    let mut tx = pool.clone().begin().await.expect("outage transaction");
     provisioning::provision_tenant_automatically_in_tx(&mut tx, &unavailable_keys, outage_tenant)
         .await
         .expect_err("provider outage");
     tx.rollback().await.expect("outage rollback");
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
+        atom::db::query_scalar::<i64>(
             "SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'",
         )
         .fetch_one(&pool)
@@ -265,7 +265,7 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
     // Rolling that outer transaction back must also remove the token objects;
     // otherwise retries would accumulate usable keys with no authority row.
     let rollback_tenant = common::pki::create_tenant(&pool, "pkcs11-rollback").await;
-    let mut tx = pool.begin().await.expect("rollback transaction");
+    let mut tx = pool.clone().begin().await.expect("rollback transaction");
     let rolled_back = provisioning::provision_tenant_automatically_in_tx(
         &mut tx,
         &app_config.pki_ca_keys,
@@ -293,7 +293,7 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
     let rotated_tenant = common::pki::create_tenant(&pool, "encrypted-rotation").await;
     let mut rotated_keys = app_config.pki_ca_keys.clone();
     rotated_keys.provisioning_backend = PkiCaProvisioningBackend::EncryptedDatabase;
-    let mut tx = pool.begin().await.expect("rotation transaction");
+    let mut tx = pool.clone().begin().await.expect("rotation transaction");
     let mut rotated =
         provisioning::provision_tenant_automatically_in_tx(&mut tx, &rotated_keys, rotated_tenant)
             .await

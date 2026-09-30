@@ -8,6 +8,7 @@
 mod common;
 
 use async_graphql::Request as GraphqlRequest;
+use atom::db::Database;
 use atom::{
     api_endpoints::repo as api_endpoint_repo,
     auth::{encode_jwt, has_capability_in_scope, has_global_manage, AuthContext, Scope},
@@ -30,26 +31,25 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn state(pool: PgPool, keys: ActiveKeys) -> AppState {
+fn state(pool: Database, keys: ActiveKeys) -> AppState {
     let config = Config::for_tests();
     AppState::new(pool, config, keys, None)
 }
 
-async fn active_keys(pool: &PgPool) -> ActiveKeys {
+async fn active_keys(pool: &Database) -> ActiveKeys {
     keys::rotate(pool, &Config::for_tests().signing_keys)
         .await
         .expect("rotate test signing key")
 }
 
-async fn admin_token(pool: &PgPool, keys: &ActiveKeys) -> String {
+async fn admin_token(pool: &Database, keys: &ActiveKeys) -> String {
     token_for_entity(pool, keys, common::admin_id()).await
 }
 
-async fn token_for_entity(pool: &PgPool, keys: &ActiveKeys, entity_id: Uuid) -> String {
+async fn token_for_entity(pool: &Database, keys: &ActiveKeys, entity_id: Uuid) -> String {
     let session = identity_repo::create_session(pool, entity_id, 3600)
         .await
         .expect("create session");
@@ -102,9 +102,9 @@ fn endpoint_req(key: &str, path: &str, graphql: &str) -> CreateApiEndpoint {
     }
 }
 
-async fn tenant_manager(pool: &PgPool) -> (Uuid, Uuid) {
+async fn tenant_manager(pool: &Database) -> (Uuid, Uuid) {
     let tenant_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
+    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
         .bind(tenant_id)
         .bind(format!("endpoint-tenant-{tenant_id}"))
         .execute(pool)
@@ -112,7 +112,7 @@ async fn tenant_manager(pool: &PgPool) -> (Uuid, Uuid) {
         .expect("insert tenant");
 
     let entity_id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status) \
          VALUES ($1, 'human', $2, $3, 'active')",
     )
@@ -123,10 +123,11 @@ async fn tenant_manager(pool: &PgPool) -> (Uuid, Uuid) {
     .await
     .expect("insert tenant manager");
 
-    let manage_action_id: Uuid = sqlx::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
-        .fetch_one(pool)
-        .await
-        .expect("seeded manage action");
+    let manage_action_id: Uuid =
+        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
+            .fetch_one(pool)
+            .await
+            .expect("seeded manage action");
     let role = authz_repo::create_role(
         pool,
         CreateRole {
@@ -257,7 +258,7 @@ async fn graphql_endpoint_authorization_masks_oracles_and_preserves_missing_resu
     )
     .await
     .expect("create endpoint");
-    let outsider: Uuid = sqlx::query_scalar(
+    let outsider: Uuid = atom::db::query_scalar(
         r#"INSERT INTO entities (kind, name, status, attributes)
            VALUES ('human', $1, 'active', '{}')
            RETURNING id"#,
@@ -544,7 +545,7 @@ async fn service_context_management_requires_platform_admin() {
     assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
     assert_eq!(response.errors[0].message, "forbidden");
     let rejected_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM api_endpoints WHERE key = $1")
+        atom::db::query_scalar("SELECT COUNT(*) FROM api_endpoints WHERE key = $1")
             .bind(&rejected_key)
             .fetch_one(&pool)
             .await
@@ -697,7 +698,7 @@ async fn custom_endpoint_route_runs_as_caller_and_writes_audit_row() {
     let json: Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(json["data"]["entityId"], common::admin_id().to_string());
 
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM api_endpoint_executions WHERE endpoint_id = $1 AND status = 'success'",
     )
     .bind(endpoint.id)
@@ -750,7 +751,7 @@ async fn custom_endpoint_unauthorized_caller_is_denied_and_audited() {
         .expect("missing response");
     assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
 
-    let associated: i64 = sqlx::query_scalar(
+    let associated: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM api_endpoint_executions WHERE endpoint_id = $1 AND status = 'denied'",
     )
     .bind(endpoint.id)
@@ -761,7 +762,7 @@ async fn custom_endpoint_unauthorized_caller_is_denied_and_audited() {
         associated, 0,
         "pre-auth denial must not reveal an endpoint id"
     );
-    let anonymous: i64 = sqlx::query_scalar(
+    let anonymous: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*) FROM api_endpoint_executions
            WHERE endpoint_id IS NULL AND caller_entity_id IS NULL AND status = 'denied'
              AND request_summary->>'path' = ANY($1::text[])"#,
@@ -779,7 +780,7 @@ async fn custom_endpoint_authenticated_denial_does_not_reveal_path_existence() {
     let pool = common::pool().await;
     let active_keys = active_keys(&pool).await;
     let suffix = Uuid::new_v4();
-    let caller_id: Uuid = sqlx::query_scalar(
+    let caller_id: Uuid = atom::db::query_scalar(
         r#"INSERT INTO entities (kind, name, status, attributes)
            VALUES ('human', $1, 'active', '{}')
            RETURNING id"#,
@@ -820,7 +821,7 @@ async fn custom_endpoint_authenticated_denial_does_not_reveal_path_existence() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
-    let existing_denial: i64 = sqlx::query_scalar(
+    let existing_denial: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM api_endpoint_executions WHERE endpoint_id = $1 AND caller_entity_id = $2 AND status = 'denied'",
     )
     .bind(endpoint.id)
@@ -830,7 +831,7 @@ async fn custom_endpoint_authenticated_denial_does_not_reveal_path_existence() {
     .expect("existing denial audit count");
     assert_eq!(existing_denial, 1);
 
-    let missing_denial: i64 = sqlx::query_scalar(
+    let missing_denial: i64 = atom::db::query_scalar(
         r#"SELECT COUNT(*) FROM api_endpoint_executions
            WHERE endpoint_id IS NULL AND caller_entity_id = $1 AND status = 'denied'
              AND request_summary->>'path' = $2"#,

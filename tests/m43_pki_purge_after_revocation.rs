@@ -38,7 +38,7 @@ async fn tenant_purge_succeeds_after_revocation_and_ledger_survives() {
     .unwrap();
     let cert = issued.certificate;
 
-    let mut tx = pool.begin().await.unwrap();
+    let mut tx = pool.clone().begin().await.unwrap();
     service::revoke_certificate_v2_in_tx(
         &mut tx,
         service::RevokeCertificateV2 {
@@ -53,14 +53,15 @@ async fn tenant_purge_succeeds_after_revocation_and_ledger_survives() {
     .unwrap();
     tx.commit().await.unwrap();
 
-    let (ledger_issuer_id, ledger_fingerprint): (Option<Uuid>, Option<String>) = sqlx::query_as(
-        "SELECT issuer_id, issuer_fingerprint_sha256 FROM certificate_revocations \
+    let (ledger_issuer_id, ledger_fingerprint): (Option<Uuid>, Option<String>) =
+        atom::db::query_as(
+            "SELECT issuer_id, issuer_fingerprint_sha256 FROM certificate_revocations \
          WHERE credential_id = $1",
-    )
-    .bind(cert.credential_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+        )
+        .bind(cert.credential_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(
         ledger_issuer_id,
         Some(issuer.id),
@@ -78,14 +79,14 @@ async fn tenant_purge_succeeds_after_revocation_and_ledger_survives() {
     tenants::repo::purge_tenant(&pool, tenant).await.unwrap();
 
     let authority_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM pki_authorities WHERE id = $1")
+        atom::db::query_scalar("SELECT count(*) FROM pki_authorities WHERE id = $1")
             .bind(issuer.id)
             .fetch_one(&pool)
             .await
             .unwrap();
     assert_eq!(authority_count, 0, "purge must remove the authority row");
 
-    let (post_issuer_id, post_fingerprint): (Option<Uuid>, Option<String>) = sqlx::query_as(
+    let (post_issuer_id, post_fingerprint): (Option<Uuid>, Option<String>) = atom::db::query_as(
         "SELECT issuer_id, issuer_fingerprint_sha256 FROM certificate_revocations \
          WHERE credential_id = $1",
     )

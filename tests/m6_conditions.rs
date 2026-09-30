@@ -16,15 +16,15 @@ use common::pool;
 use serde_json::json;
 use uuid::Uuid;
 
-async fn capability_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
+async fn capability_id(pool: &atom::db::Database, name: &str) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
         .expect("capability")
 }
 
-async fn tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn tenant(pool: &atom::db::Database) -> Uuid {
     atom::tenants::repo::create_tenant(
         pool,
         CreateTenant {
@@ -41,9 +41,9 @@ async fn tenant(pool: &sqlx::PgPool) -> Uuid {
     .id
 }
 
-async fn entity(pool: &sqlx::PgPool, kind: &str, attrs: serde_json::Value) -> Uuid {
+async fn entity(pool: &atom::db::Database, kind: &str, attrs: serde_json::Value) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO entities (id, kind, name, status, attributes) VALUES ($1, $2, $3, 'active', $4)",
     )
     .bind(id)
@@ -56,9 +56,9 @@ async fn entity(pool: &sqlx::PgPool, kind: &str, attrs: serde_json::Value) -> Uu
     id
 }
 
-async fn channel(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
+async fn channel(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    atom::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id, attributes) VALUES ($1, 'channel', $2, $3, $4)",
     )
     .bind(id)
@@ -72,7 +72,7 @@ async fn channel(pool: &sqlx::PgPool, tenant_id: Uuid) -> Uuid {
 }
 
 async fn bind_read(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     subject_id: Uuid,
     tenant_id: Uuid,
     conditions: serde_json::Value,
@@ -97,7 +97,7 @@ async fn bind_read(
 }
 
 async fn check(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     subject_id: Uuid,
     resource_id: Uuid,
     context: serde_json::Value,

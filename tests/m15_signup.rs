@@ -19,7 +19,6 @@ use atom::{
     },
 };
 use serde_json::json;
-use sqlx::Row;
 use uuid::Uuid;
 
 fn config(dev_allow_unverified_email_login: bool) -> Config {
@@ -59,7 +58,7 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(response.email, email);
     assert!(response.verification_required);
 
-    let entity = sqlx::query("SELECT kind, tenant_id FROM entities WHERE id = $1")
+    let entity = atom::db::query("SELECT kind, tenant_id FROM entities WHERE id = $1")
         .bind(response.entity_id)
         .fetch_one(&pool)
         .await
@@ -72,7 +71,7 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
         None
     );
 
-    let credential_count: i64 = sqlx::query_scalar(
+    let credential_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND identifier = $2 AND status = 'active'",
     )
     .bind(response.entity_id)
@@ -82,19 +81,20 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     .expect("credential count");
     assert_eq!(credential_count, 1);
 
-    let email_row =
-        sqlx::query("SELECT verified_at FROM entity_emails WHERE entity_id = $1 AND email = $2")
-            .bind(response.entity_id)
-            .bind(&email)
-            .fetch_one(&pool)
-            .await
-            .expect("email row");
+    let email_row = atom::db::query(
+        "SELECT verified_at FROM entity_emails WHERE entity_id = $1 AND email = $2",
+    )
+    .bind(response.entity_id)
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("email row");
     assert!(email_row
         .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("verified_at")
         .expect("verified_at")
         .is_none());
 
-    let token_count: i64 = sqlx::query_scalar(
+    let token_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM email_verification_tokens WHERE entity_id = $1 AND consumed_at IS NULL",
     )
     .bind(response.entity_id)
@@ -104,7 +104,7 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(token_count, 1);
 
     let membership_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM tenant_memberships WHERE entity_id = $1")
+        atom::db::query_scalar("SELECT COUNT(*) FROM tenant_memberships WHERE entity_id = $1")
             .bind(response.entity_id)
             .fetch_one(&pool)
             .await
@@ -157,7 +157,7 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(name_login.email_verified, Some(false));
     assert!(name_login.verification_required);
 
-    sqlx::query("UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1")
+    atom::db::query("UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1")
         .bind(response.entity_id)
         .execute(&pool)
         .await
@@ -175,7 +175,7 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(verified_name_login.email_verified, Some(true));
     assert!(!verified_name_login.verification_required);
 
-    sqlx::query("UPDATE entities SET status = 'suspended' WHERE id = $1")
+    atom::db::query("UPDATE entities SET status = 'suspended' WHERE id = $1")
         .bind(response.entity_id)
         .execute(&pool)
         .await
@@ -233,7 +233,7 @@ async fn signup_rejects_duplicate_email_even_with_distinct_name() {
         other => panic!("expected email conflict, got {other:?}"),
     }
 
-    let email_count: i64 = sqlx::query_scalar(
+    let email_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM entity_emails WHERE lower(email) = lower($1) AND deleted_at IS NULL",
     )
     .bind(&email)
@@ -243,7 +243,7 @@ async fn signup_rejects_duplicate_email_even_with_distinct_name() {
     assert_eq!(email_count, 1);
 
     let second_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM entities WHERE name = $1)")
+        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM entities WHERE name = $1)")
             .bind(second_name)
             .fetch_one(&pool)
             .await
@@ -510,7 +510,7 @@ async fn account_survives_an_unreachable_smtp_server() {
         "an unreachable SMTP server must surface as an error"
     );
 
-    let entity_id: Option<Uuid> = sqlx::query_scalar(
+    let entity_id: Option<Uuid> = atom::db::query_scalar(
         "SELECT e.id FROM entities e JOIN entity_emails ee ON ee.entity_id = e.id WHERE ee.email = $1",
     )
     .bind(&email)
@@ -521,7 +521,7 @@ async fn account_survives_an_unreachable_smtp_server() {
         "the account and its email must be committed before the verification email is sent",
     );
 
-    let credential_count: i64 = sqlx::query_scalar(
+    let credential_count: i64 = atom::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password'",
     )
     .bind(entity_id)

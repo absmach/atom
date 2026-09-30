@@ -19,15 +19,15 @@ use common::{admin_id, pool};
 use serde_json::json;
 use uuid::Uuid;
 
-async fn capability_id(pool: &sqlx::PgPool, name: &str) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
+async fn capability_id(pool: &atom::db::Database, name: &str) -> Uuid {
+    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
         .bind(name)
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("capability {name}: {e}"))
 }
 
-async fn tenant(pool: &sqlx::PgPool) -> Uuid {
+async fn tenant(pool: &atom::db::Database) -> Uuid {
     atom::tenants::repo::create_tenant(
         pool,
         CreateTenant {
@@ -44,9 +44,9 @@ async fn tenant(pool: &sqlx::PgPool) -> Uuid {
     .id
 }
 
-async fn entity(pool: &sqlx::PgPool, tenant_id: Option<Uuid>) -> Uuid {
+async fn entity(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')")
+    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')")
         .bind(id)
         .bind(format!("m4-ent-{id}"))
         .bind(tenant_id)
@@ -56,20 +56,22 @@ async fn entity(pool: &sqlx::PgPool, tenant_id: Option<Uuid>) -> Uuid {
     id
 }
 
-async fn channel(pool: &sqlx::PgPool, tenant_id: Option<Uuid>) -> Uuid {
+async fn channel(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)")
-        .bind(id)
-        .bind(format!("m4-chan-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    atom::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+    )
+    .bind(id)
+    .bind(format!("m4-chan-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
 async fn bind(
-    pool: &sqlx::PgPool,
+    pool: &atom::db::Database,
     tenant_id: Option<Uuid>,
     subject_id: Uuid,
     capability: &str,
@@ -95,7 +97,12 @@ async fn bind(
     .id
 }
 
-async fn check(pool: &sqlx::PgPool, subject_id: Uuid, action: &str, resource_id: Uuid) -> bool {
+async fn check(
+    pool: &atom::db::Database,
+    subject_id: Uuid,
+    action: &str,
+    resource_id: Uuid,
+) -> bool {
     atom::authz::engine::evaluate_with_ceiling(
         pool,
         &AuthzRequest {

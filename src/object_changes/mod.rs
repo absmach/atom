@@ -1,14 +1,24 @@
 //! Transactional application metadata/resources and fenced object reservations.
 //! Identity kind, credentials, profile bindings and lifecycle stay on identity APIs.
+//!
+//! Storage follows the repository-per-domain pattern
+//! (`product-docs/development/database-backends/REPOSITORY-PATTERN.md`): this
+//! module owns validation, authorization, lock ordering and audit; the private
+//! `postgres`/`sqlite` adapters own each backend's native SQL for the same
+//! operations, selected by matching on the connected [`Database`] /
+//! [`DbTransaction`].
+mod postgres;
+mod sqlite;
+
 use crate::{
     auth::{AuthContext, Scope},
+    db::{Database, DbTransaction},
     error::{db_err, AppError},
     state::AppState,
 };
 use async_graphql::{Enum, InputObject, ID};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum, Serialize, Deserialize)]
@@ -68,6 +78,42 @@ pub struct ObjectLeaseGuardInput {
     pub holder_id: ID,
     pub fence: i64,
 }
+
+/// The fields of an entity/resource row this module reads: its revision and
+/// the facts the batch rules check. Resources have no profile or external id;
+/// both adapters select `NULL` for those.
+#[derive(sqlx::FromRow)]
+pub(super) struct ObjectRow {
+    pub revision: i64,
+    pub tenant_id: Option<Uuid>,
+    pub kind: String,
+    pub managed_by: Option<String>,
+    pub profile_id: Option<Uuid>,
+    pub external_id: Option<String>,
+}
+
+/// A validated batch create, bundled so each backend's insert takes one
+/// argument.
+pub(super) struct NewObject<'a> {
+    pub object_kind: ObjectKind,
+    pub id: Uuid,
+    pub kind: &'a str,
+    pub name: Option<String>,
+    pub alias: Option<String>,
+    pub tenant_id: Option<Uuid>,
+    pub attributes: &'a Value,
+}
+
+/// A live-lease key: the object, the authenticated actor, and the holder.
+#[derive(Clone, Copy)]
+pub(super) struct LeaseKey<'a> {
+    pub object_kind: ObjectKind,
+    pub object_id: Uuid,
+    pub actor_id: Uuid,
+    pub holder_id: Uuid,
+    pub operation: &'a str,
+}
+
 pub fn uuid(id: &ID) -> Result<Uuid, AppError> {
     Uuid::parse_str(id.as_str()).map_err(|_| AppError::bad_request("invalid UUID"))
 }
@@ -75,7 +121,7 @@ fn conflict(code: &str) -> AppError {
     AppError::conflict(code)
 }
 async fn authorize(
-    pool: &PgPool,
+    pool: &Database,
     auth: &AuthContext,
     kind: ObjectKind,
     id: Uuid,
@@ -107,52 +153,82 @@ async fn authorize(
         }
     }
 }
-async fn lock_key(tx: &mut Transaction<'_, Postgres>, key: &str) -> Result<(), AppError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 17))")
-        .bind(key)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_err)?;
-    Ok(())
+async fn lock_key(tx: &mut DbTransaction<'_>, key: &str) -> Result<(), AppError> {
+    match tx {
+        DbTransaction::Postgres(tx) => postgres::lock_key(tx, key).await,
+        // SQLite admits one write transaction at a time (BEGIN IMMEDIATE), so
+        // every holder of this key is already serialized.
+        DbTransaction::Sqlite(_) => Ok(()),
+    }
 }
 fn lease_lock_key(kind: ObjectKind, id: Uuid) -> String {
     format!("lease:{}:{id}", kind.label())
 }
+async fn find_receipt_in_tx(
+    tx: &mut DbTransaction<'_>,
+    actor: Uuid,
+    request_id: Uuid,
+) -> Result<Option<(Value, Value)>, AppError> {
+    match tx {
+        DbTransaction::Postgres(tx) => postgres::find_receipt(&mut **tx, actor, request_id).await,
+        DbTransaction::Sqlite(tx) => sqlite::find_receipt(&mut **tx, actor, request_id).await,
+    }
+}
 async fn object_tenant(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     kind: ObjectKind,
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    sqlx::query_scalar(&format!(
-        "SELECT tenant_id FROM {} WHERE id=$1 AND deleted_at IS NULL",
-        kind.table()
-    ))
-    .bind(id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(db_err)
+    match tx {
+        DbTransaction::Postgres(tx) => postgres::object_tenant(tx, kind, id).await,
+        DbTransaction::Sqlite(tx) => sqlite::object_tenant(tx, kind, id).await,
+    }
 }
 async fn locked_object(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     kind: ObjectKind,
     id: Uuid,
     tenant: Option<Uuid>,
-) -> Result<Value, AppError> {
-    let table = kind.table();
+) -> Result<ObjectRow, AppError> {
     // Recheck the discovered tenant when locking the object; never acquire a
     // newly discovered tenant out of order if an external writer moved it.
     crate::tenants::repo::lock_optional_active_tenant(tx, tenant).await?;
-    sqlx::query_scalar(&format!("SELECT to_jsonb(o) FROM {table} o WHERE id=$1 AND deleted_at IS NULL AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE"))
-        .bind(id).bind(tenant).fetch_one(&mut **tx).await.map_err(db_err)
+    match tx {
+        DbTransaction::Postgres(tx) => postgres::lock_object(tx, kind, id, tenant).await,
+        DbTransaction::Sqlite(tx) => sqlite::lock_object(tx, kind, id, tenant).await,
+    }
 }
 async fn lease_guard(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut DbTransaction<'_>,
     actor: Uuid,
     guard: &ObjectLeaseGuardInput,
 ) -> Result<(), AppError> {
-    let found: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM object_leases WHERE object_kind=$1 AND object_id=$2 AND actor_id=$3 AND holder_id=$4 AND fence=$5 AND expires_at>clock_timestamp())")
-        .bind(guard.object_kind.label()).bind(uuid(&guard.object_id)?).bind(actor).bind(uuid(&guard.holder_id)?).bind(guard.fence)
-        .fetch_one(&mut **tx).await.map_err(db_err)?;
+    let object_id = uuid(&guard.object_id)?;
+    let holder_id = uuid(&guard.holder_id)?;
+    let found = match tx {
+        DbTransaction::Postgres(tx) => {
+            postgres::lease_is_live(
+                &mut **tx,
+                guard.object_kind,
+                object_id,
+                actor,
+                holder_id,
+                guard.fence,
+            )
+            .await?
+        }
+        DbTransaction::Sqlite(tx) => {
+            sqlite::lease_is_live(
+                &mut **tx,
+                guard.object_kind,
+                object_id,
+                actor,
+                holder_id,
+                guard.fence,
+            )
+            .await?
+        }
+    };
     if found {
         Ok(())
     } else {
@@ -173,14 +249,12 @@ pub async fn commit(
     // A receipt belongs to the authenticated actor, and contains only object IDs
     // and revisions. Read it before object authorization: a successful deletion
     // must remain replayable even though its target is no longer visible.
-    let prior: Option<(Value, Value)> = sqlx::query_as(
-        "SELECT request,response FROM object_change_requests WHERE actor_id=$1 AND request_id=$2",
-    )
-    .bind(auth.entity_id)
-    .bind(request_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(db_err)?;
+    let prior = match state.pool() {
+        Database::Postgres(pool) => {
+            postgres::find_receipt(pool, auth.entity_id, request_id).await?
+        }
+        Database::Sqlite(db) => sqlite::find_receipt(&db.pool, auth.entity_id, request_id).await?,
+    };
     if let Some((body, response)) = prior {
         if body != json!({"changes":changes,"guards":guards}) {
             return Err(conflict("IDEMPOTENCY_CONFLICT"));
@@ -191,7 +265,7 @@ pub async fn commit(
     for c in &changes {
         let id = uuid(&c.id)?;
         authorize(
-            &state.pool,
+            state.pool(),
             auth,
             c.object_kind,
             id,
@@ -253,7 +327,7 @@ async fn commit_inner(
         }
         let tenant = change.tenant_id.as_ref().map(uuid).transpose()?;
         authorize(
-            &state.pool,
+            state.pool(),
             auth,
             change.object_kind,
             id,
@@ -290,7 +364,7 @@ async fn commit_inner(
     }
     for guard in &guards {
         authorize(
-            &state.pool,
+            state.pool(),
             auth,
             guard.object_kind,
             uuid(&guard.object_id)?,
@@ -299,17 +373,9 @@ async fn commit_inner(
         )
         .await?;
     }
-    let mut tx = state.pool.begin().await.map_err(db_err)?;
+    let mut tx = state.pool().begin().await.map_err(db_err)?;
     lock_key(&mut tx, &format!("request:{}:{request_id}", auth.entity_id)).await?;
-    let prior: Option<(Value, Value)> = sqlx::query_as(
-        "SELECT request,response FROM object_change_requests WHERE actor_id=$1 AND request_id=$2",
-    )
-    .bind(auth.entity_id)
-    .bind(request_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_err)?;
-    if let Some((body, response)) = prior {
+    if let Some((body, response)) = find_receipt_in_tx(&mut tx, auth.entity_id, request_id).await? {
         if body != request {
             return Err(conflict("IDEMPOTENCY_CONFLICT"));
         }
@@ -354,25 +420,35 @@ async fn commit_inner(
     for (id, tenant, change) in ordered {
         if change.operation != ChangeOperation::Create {
             let existing = locked_object(&mut tx, change.object_kind, *id, *tenant).await?;
-            if existing["revision"].as_i64() != change.expected_revision {
+            if Some(existing.revision) != change.expected_revision {
                 return Err(conflict("REVISION_CONFLICT"));
             }
-            if existing["managed_by"] == "config" && change.operation != ChangeOperation::Check {
+            if existing.managed_by.as_deref() == Some("config")
+                && change.operation != ChangeOperation::Check
+            {
                 return Err(conflict("CONFIG_MANAGED"));
             }
             if change.object_kind == ObjectKind::Entity
                 && change.operation != ChangeOperation::Check
             {
-                if existing["kind"] != "application" || !existing["profile_id"].is_null() {
+                if existing.kind != "application" || existing.profile_id.is_some() {
                     return Err(AppError::bad_request(
                         "batch entity changes support application metadata without profiles only",
                     ));
                 }
                 if change.operation == ChangeOperation::Delete {
-                    let used: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM credentials WHERE entity_id=$1) OR EXISTS(SELECT 1 FROM sessions WHERE entity_id=$1)")
-                        .bind(uuid(&change.id)?).fetch_one(&mut *tx).await.map_err(db_err)?;
+                    let used = match &mut tx {
+                        DbTransaction::Postgres(tx) => {
+                            postgres::has_credentials_or_sessions(tx, *id).await?
+                        }
+                        DbTransaction::Sqlite(tx) => {
+                            sqlite::has_credentials_or_sessions(tx, *id).await?
+                        }
+                    };
                     if used {
-                        return Err(AppError::bad_request("use identity API to delete an application with credentials or sessions"));
+                        return Err(AppError::bad_request(
+                            "use identity API to delete an application with credentials or sessions",
+                        ));
                     }
                 }
             }
@@ -381,27 +457,69 @@ async fn commit_inner(
     for (id, tenant, change) in &planned {
         let id = *id;
         let tenant = *tenant;
-        let table = change.object_kind.table();
-        let row: Value=match change.operation {
-            ChangeOperation::Create=> {
-                crate::tenants::repo::lock_optional_active_tenant(&mut tx,tenant).await?;
-                let alias=crate::models::alias::validate_alias_opt(change.alias.clone())?;
-                let attrs=change.attributes.clone().unwrap_or_else(||json!({}));
-                let kind=change.kind.as_deref().ok_or_else(||AppError::bad_request("kind required"))?;
-                if change.object_kind==ObjectKind::Entity && kind!="application" {return Err(AppError::bad_request("use identity API for other entity kinds"));}
-                if kind.is_empty() || kind.len()>255 {return Err(AppError::bad_request("invalid kind"));}
-                let name=if change.object_kind==ObjectKind::Entity {Some(crate::models::entity::validate_entity_name(change.name.as_deref().unwrap_or(""))?)} else {change.name.clone()};
-                sqlx::query_scalar(&format!("INSERT INTO {table} AS o(id,kind,name,alias,tenant_id,attributes) VALUES($1,$2,$3,$4,$5,$6) RETURNING to_jsonb(o)"))
-                    .bind(id).bind(kind).bind(name).bind(alias).bind(tenant).bind(attrs).fetch_one(&mut *tx).await.map_err(db_err)?
+        let row = match change.operation {
+            ChangeOperation::Create => {
+                crate::tenants::repo::lock_optional_active_tenant(&mut tx, tenant).await?;
+                let alias = crate::models::alias::validate_alias_opt(change.alias.clone())?;
+                let attrs = change.attributes.clone().unwrap_or_else(|| json!({}));
+                let kind = change
+                    .kind
+                    .as_deref()
+                    .ok_or_else(|| AppError::bad_request("kind required"))?;
+                if change.object_kind == ObjectKind::Entity && kind != "application" {
+                    return Err(AppError::bad_request(
+                        "use identity API for other entity kinds",
+                    ));
+                }
+                if kind.is_empty() || kind.len() > 255 {
+                    return Err(AppError::bad_request("invalid kind"));
+                }
+                let name = if change.object_kind == ObjectKind::Entity {
+                    Some(crate::models::entity::validate_entity_name(
+                        change.name.as_deref().unwrap_or(""),
+                    )?)
+                } else {
+                    change.name.clone()
+                };
+                let new = NewObject {
+                    object_kind: change.object_kind,
+                    id,
+                    kind,
+                    name,
+                    alias,
+                    tenant_id: tenant,
+                    attributes: &attrs,
+                };
+                match &mut tx {
+                    DbTransaction::Postgres(tx) => postgres::insert_object(tx, new).await?,
+                    DbTransaction::Sqlite(tx) => sqlite::insert_object(tx, new).await?,
+                }
+            }
+            ChangeOperation::Update => {
+                let attrs = change
+                    .attributes
+                    .as_ref()
+                    .ok_or_else(|| AppError::bad_request("attributes required"))?;
+                match &mut tx {
+                    DbTransaction::Postgres(tx) => {
+                        postgres::update_attributes(tx, change.object_kind, id, attrs).await?
+                    }
+                    DbTransaction::Sqlite(tx) => {
+                        sqlite::update_attributes(tx, change.object_kind, id, attrs).await?
+                    }
+                }
+            }
+            ChangeOperation::Delete => match &mut tx {
+                DbTransaction::Postgres(tx) => {
+                    postgres::soft_delete(tx, change.object_kind, id, auth.entity_id).await?
+                }
+                DbTransaction::Sqlite(tx) => {
+                    sqlite::soft_delete(tx, change.object_kind, id, auth.entity_id).await?
+                }
             },
-            ChangeOperation::Update=>sqlx::query_scalar(&format!("UPDATE {table} AS o SET attributes=$2,updated_at=clock_timestamp() WHERE id=$1 RETURNING to_jsonb(o)"))
-                .bind(id).bind(change.attributes.clone().ok_or_else(||AppError::bad_request("attributes required"))?).fetch_one(&mut *tx).await.map_err(db_err)?,
-            ChangeOperation::Delete=> {
-                let status=if change.object_kind==ObjectKind::Entity {", status='inactive'"}else{""};
-                sqlx::query_scalar(&format!("UPDATE {table} AS o SET deleted_at=clock_timestamp(),deleted_by=$2,updated_at=clock_timestamp(){status} WHERE id=$1 RETURNING to_jsonb(o)"))
-                    .bind(id).bind(auth.entity_id).fetch_one(&mut *tx).await.map_err(db_err)?
-            },
-            ChangeOperation::Check=>locked_object(&mut tx,change.object_kind,id,tenant).await?,
+            ChangeOperation::Check => {
+                locked_object(&mut tx, change.object_kind, id, tenant).await?
+            }
         };
         if change.operation != ChangeOperation::Check {
             let event = match (change.object_kind, change.operation) {
@@ -413,12 +531,10 @@ async fn commit_inner(
                 (ObjectKind::Resource, ChangeOperation::Delete) => "resource.delete",
                 (_, ChangeOperation::Check) => unreachable!(),
             };
-            let tenant = row["tenant_id"]
-                .as_str()
-                .and_then(|v| Uuid::parse_str(v).ok());
+            let tenant = row.tenant_id;
             let mut details = json!({"transaction": request_id});
             if event == "entity.update" {
-                details["external_id"] = row["external_id"].clone();
+                details["external_id"] = json!(row.external_id);
             }
             if change.operation == ChangeOperation::Create {
                 observations.push((
@@ -443,7 +559,7 @@ async fn commit_inner(
                 });
             }
             crate::events::enqueue(
-                &mut *tx,
+                tx.exec(),
                 state.config.events.enabled(),
                 Some(auth.entity_id),
                 tenant,
@@ -455,18 +571,22 @@ async fn commit_inner(
             )
             .await?;
         }
-        results.push(
-            json!({"id": id, "object_kind": change.object_kind, "revision": row["revision"]}),
-        );
+        results
+            .push(json!({"id": id, "object_kind": change.object_kind, "revision": row.revision}));
     }
     // Recheck at the actual commit boundary, including time spent waiting for locks.
     for guard in &guards {
         lease_guard(&mut tx, auth.entity_id, guard).await?;
     }
     let response = json!({"objects":results});
-    sqlx::query("DELETE FROM object_change_requests WHERE actor_id=$1 AND created_at < now()-interval '7 days'").bind(auth.entity_id).execute(&mut *tx).await.map_err(db_err)?;
-    sqlx::query("INSERT INTO object_change_requests(actor_id,request_id,request,response) VALUES($1,$2,$3,$4)")
-        .bind(auth.entity_id).bind(request_id).bind(request).bind(&response).execute(&mut *tx).await.map_err(db_err)?;
+    match &mut tx {
+        DbTransaction::Postgres(tx) => {
+            postgres::record_receipt(tx, auth.entity_id, request_id, &request, &response).await?
+        }
+        DbTransaction::Sqlite(tx) => {
+            sqlite::record_receipt(tx, auth.entity_id, request_id, &request, &response).await?
+        }
+    }
     let meta = crate::audit::AuditMeta {
         actor_entity_id: Some(auth.entity_id),
         tenant_id: None,
@@ -485,7 +605,7 @@ async fn commit_inner(
         crate::audit::log_observe_allow(&meta, &details);
     }
     for event in audit_events {
-        crate::audit::write(&state.pool, false, event).await;
+        crate::audit::write(state.pool(), false, event).await;
     }
     Ok(response)
 }
@@ -502,15 +622,33 @@ pub async fn acquire(
     }
     let id = uuid(&input.object_id)?;
     let holder = uuid(&input.holder_id)?;
-    authorize(&state.pool, auth, input.object_kind, id, None, false).await?;
-    let mut tx = state.pool.begin().await.map_err(db_err)?;
+    authorize(state.pool(), auth, input.object_kind, id, None, false).await?;
+    let mut tx = state.pool().begin().await.map_err(db_err)?;
     lock_key(&mut tx, &lease_lock_key(input.object_kind, id)).await?;
     let tenant = object_tenant(&mut tx, input.object_kind, id).await?;
     locked_object(&mut tx, input.object_kind, id, tenant).await?;
-    let row:Option<Value>=sqlx::query_scalar("INSERT INTO object_leases AS l(object_kind,object_id,actor_id,holder_id,operation,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+make_interval(secs=>$6)) ON CONFLICT(object_kind,object_id) DO UPDATE SET actor_id=EXCLUDED.actor_id,holder_id=EXCLUDED.holder_id,operation=EXCLUDED.operation,fence=l.fence+1,expires_at=EXCLUDED.expires_at WHERE l.expires_at<=clock_timestamp() RETURNING to_jsonb(l)")
-        .bind(input.object_kind.label()).bind(id).bind(auth.entity_id).bind(holder).bind(&input.operation).bind(f64::from(input.ttl_seconds)).fetch_optional(&mut *tx).await.map_err(db_err)?;
-    let row=match row {Some(row)=>row,None=>sqlx::query_scalar("SELECT to_jsonb(l) FROM object_leases l WHERE object_kind=$1 AND object_id=$2 AND actor_id=$3 AND holder_id=$4 AND operation=$5 AND expires_at>clock_timestamp()")
-        .bind(input.object_kind.label()).bind(id).bind(auth.entity_id).bind(holder).bind(&input.operation).fetch_optional(&mut *tx).await.map_err(db_err)?.ok_or_else(||conflict("LEASE_HELD"))?};
+    let key = LeaseKey {
+        object_kind: input.object_kind,
+        object_id: id,
+        actor_id: auth.entity_id,
+        holder_id: holder,
+        operation: &input.operation,
+    };
+    // A takeover only succeeds over an expired lease; otherwise repeating a
+    // live acquisition by the same actor/holder/operation returns that lease.
+    let row = match &mut tx {
+        DbTransaction::Postgres(tx) => {
+            match postgres::take_lease(tx, key, input.ttl_seconds).await? {
+                Some(row) => Some(row),
+                None => postgres::current_lease(tx, key).await?,
+            }
+        }
+        DbTransaction::Sqlite(tx) => match sqlite::take_lease(tx, key, input.ttl_seconds).await? {
+            Some(row) => Some(row),
+            None => sqlite::current_lease(tx, key).await?,
+        },
+    }
+    .ok_or_else(|| conflict("LEASE_HELD"))?;
     let meta = crate::audit::AuditMeta {
         actor_entity_id: Some(auth.entity_id),
         tenant_id: None,
@@ -532,12 +670,39 @@ pub async fn finish_lease(
         return Err(AppError::bad_request("invalid lease duration"));
     }
     let id = uuid(&guard.object_id)?;
-    authorize(&state.pool, auth, guard.object_kind, id, None, false).await?;
-    let mut tx = state.pool.begin().await.map_err(db_err)?;
+    let holder = uuid(&guard.holder_id)?;
+    authorize(state.pool(), auth, guard.object_kind, id, None, false).await?;
+    let mut tx = state.pool().begin().await.map_err(db_err)?;
     lock_key(&mut tx, &lease_lock_key(guard.object_kind, id)).await?;
     lease_guard(&mut tx, auth.entity_id, &guard).await?;
-    let row:Value=sqlx::query_scalar("UPDATE object_leases AS l SET expires_at=clock_timestamp()+make_interval(secs=>$6) WHERE object_kind=$1 AND object_id=$2 AND actor_id=$3 AND holder_id=$4 AND fence=$5 RETURNING to_jsonb(l)")
-        .bind(guard.object_kind.label()).bind(id).bind(auth.entity_id).bind(uuid(&guard.holder_id)?).bind(guard.fence).bind(f64::from(ttl.unwrap_or(0))).fetch_one(&mut *tx).await.map_err(db_err)?;
+    // Release is a renewal to zero seconds: the lease stops being live now.
+    let ttl_seconds = ttl.unwrap_or(0);
+    let row = match &mut tx {
+        DbTransaction::Postgres(tx) => {
+            postgres::set_lease_expiry(
+                tx,
+                guard.object_kind,
+                id,
+                auth.entity_id,
+                holder,
+                guard.fence,
+                ttl_seconds,
+            )
+            .await?
+        }
+        DbTransaction::Sqlite(tx) => {
+            sqlite::set_lease_expiry(
+                tx,
+                guard.object_kind,
+                id,
+                auth.entity_id,
+                holder,
+                guard.fence,
+                ttl_seconds,
+            )
+            .await?
+        }
+    };
     let meta = crate::audit::AuditMeta {
         actor_entity_id: Some(auth.entity_id),
         tenant_id: None,
@@ -560,8 +725,30 @@ pub async fn validate_lease(
     guard: ObjectLeaseGuardInput,
 ) -> Result<bool, AppError> {
     let id = uuid(&guard.object_id)?;
-    authorize(&state.pool, auth, guard.object_kind, id, None, false).await?;
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM object_leases WHERE object_kind=$1 AND object_id=$2 AND actor_id=$3 AND holder_id=$4 AND fence=$5 AND expires_at>clock_timestamp())")
-        .bind(guard.object_kind.label()).bind(id).bind(auth.entity_id).bind(uuid(&guard.holder_id)?).bind(guard.fence)
-        .fetch_one(&state.pool).await.map_err(db_err)
+    let holder = uuid(&guard.holder_id)?;
+    authorize(state.pool(), auth, guard.object_kind, id, None, false).await?;
+    match state.pool() {
+        Database::Postgres(pool) => {
+            postgres::lease_is_live(
+                pool,
+                guard.object_kind,
+                id,
+                auth.entity_id,
+                holder,
+                guard.fence,
+            )
+            .await
+        }
+        Database::Sqlite(db) => {
+            sqlite::lease_is_live(
+                &db.pool,
+                guard.object_kind,
+                id,
+                auth.entity_id,
+                holder,
+                guard.fence,
+            )
+            .await
+        }
+    }
 }
