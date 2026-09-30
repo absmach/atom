@@ -1382,7 +1382,7 @@ callouts:
         );
         assert_eq!(
             artifact_names.len(),
-            168,
+            190,
             "review any deployment API addition"
         );
 
@@ -1395,6 +1395,7 @@ callouts:
             include_str!("../mail.rs"),
             include_str!("../tenants/repo.rs"),
             include_str!("../authz/engine.rs"),
+            include_str!("../storage/object_store_adapter.rs"),
         ];
         let runtime_names = sources
             .iter()

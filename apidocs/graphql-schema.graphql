@@ -670,6 +670,24 @@ enum EntityStatus {
 	suspended
 }
 
+type FileInfo {
+	sizeBytes: Int!
+	"""
+	Taken from the bytes where they carry a known signature.
+	"""
+	contentType: String!
+	"""
+	Hex SHA-256 of the bytes, also the download's ETag.
+	"""
+	sha256: String!
+	"""
+	Readable by anyone with the URL.
+	"""
+	public: Boolean!
+	url: String!
+	updatedAt: String!
+}
+
 type Group {
 	id: ID!
 	name: String!
@@ -1233,6 +1251,11 @@ type Resource {
 	`"config"` when provisioned from the bootstrap YAML.
 	"""
 	managedBy: String
+	"""
+	What is stored for a resource of kind `file`: null for other kinds,
+	and while the file is deleted. Read-only; bytes go through `/files`.
+	"""
+	file: FileInfo
 }
 
 type ResourceList {

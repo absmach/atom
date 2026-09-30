@@ -17,6 +17,7 @@ Clients → Atom (replaceable process/container) → PostgreSQL (durable storage
 | Committed domain events awaiting delivery | PostgreSQL event outbox |
 | Encryption keys, configuration, TLS material and optional template/bootstrap files | Deployment secrets and configuration, mounted read-only where applicable |
 | PKCS#11 keys, when enabled | External HSM or separately persisted token storage |
+| File bytes, when [file storage](/operations/file-storage) is enabled | The configured object store; a `local` backend needs a persistent volume |
 | Connections, loaded-key copies, rate-limit counters and metrics | Process memory; recreated on restart |
 
 Keep `DATABASE_URL`, `ATOM_KEY_ENCRYPTION_KEY` and its key ID stable across

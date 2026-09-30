@@ -1,0 +1,167 @@
+---
+title: File storage
+description: Store files such as profile photos, product images and documents, with Atom's authorization and your choice of object store.
+---
+
+Atom can store files beside its identities and policies. A file's metadata and
+access control are Atom's own; its bytes live in an object store you choose:
+a local directory, S3 or any S3-compatible service (MinIO, Cloudflare R2,
+SeaweedFS, Backblaze B2, Wasabi), Google Cloud Storage or Azure Blob Storage.
+
+File storage is off until `ATOM_STORAGE_BACKEND` is set. While it is off the
+`/files` routes are not mounted and answer `404`.
+
+## How it compares with Supabase Storage
+
+Supabase keeps file metadata in the project's Postgres (`storage.objects`),
+authorizes with row-level security policies on that table, and stores bytes in
+S3 or on disk. Atom follows the same split and reuses what it already has:
+
+| | Supabase Storage | Atom |
+| --- | --- | --- |
+| Metadata | `storage.objects` rows | A resource of kind `file`, plus a server-owned `file_objects` row |
+| Authorization | RLS policies on `storage.objects` | The PDP on the file resource: roles, tenants, owners, object groups |
+| Public files | Public buckets | `public=true` per file |
+| Private links | Signed URLs | Signed URLs, HMAC-SHA256 under a key derived from `ATOM_KEY_ENCRYPTION_KEY` |
+| Bytes | S3 or local disk | Any backend implementing Atom's `BlobStore` interface |
+| Isolation | One project | One tenant prefix; one bucket per Atom deployment if you want more |
+
+Because files belong to the Atom deployment, an application's files move with
+its tenant rather than living in one platform-wide store.
+
+## Authorization
+
+A file is a resource, so everything that governs resources governs files:
+tenant, owner (the uploader unless `owner_id` is given), object-group
+membership, attributes, soft delete, restore, audit and domain events
+(`resource.create`, `resource.update`, `resource.delete` with `kind: "file"`,
+size and type in the details).
+
+| Operation | Needs |
+| --- | --- |
+| Upload | `manage` or `write` in the tenant |
+| Download | `read` or `manage` on the file or its tenant, a valid signed URL, or nothing for a public file |
+| Replace bytes | `write` or `manage` on the file or its tenant |
+| Delete | `delete` or `manage` on the file or its tenant |
+| Issue a signed URL | `read` on the file |
+
+Where the bytes are stored is kept in `file_objects`, which only the server
+writes. It is not an attribute, so no GraphQL or REST input can point a file at
+another object.
+
+## API
+
+Bytes go through REST; GraphQL exposes the metadata read-only as
+`Resource.file { sizeBytes contentType sha256 public url updatedAt }`.
+See [the API reference](/endpoints) for the full contract.
+
+```bash
+# Upload (the body is the file; streamed, never buffered whole)
+curl -X POST "$ATOM/files?name=avatar.png&public=true" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: image/png" \
+  --data-binary @avatar.png
+
+# Download
+curl "$ATOM/files/$ID" -H "Authorization: Bearer $TOKEN" -o avatar.png
+
+# Replace the bytes (same id and URL, new ETag)
+curl -X PUT "$ATOM/files/$ID" -H "Authorization: Bearer $TOKEN" --data-binary @new.png
+
+# An expiring link for a private file
+curl -X POST "$ATOM/files/$ID/signed-url" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"expires_in": 600}'
+
+# Soft delete (restore works as for any resource)
+curl -X DELETE "$ATOM/files/$ID" -H "Authorization: Bearer $TOKEN"
+```
+
+`tenant_id` defaults to the caller's tenant. Downloads send an `ETag` (the
+SHA-256), honour `If-None-Match` and a single `Range`, and are cached for five
+minutes when public (`public, max-age=300`) and never otherwise.
+
+## Content safety
+
+- The type is read from the bytes. PNG, JPEG, GIF, WebP and PDF are recognised
+  by their signatures, and a file declaring one of those types without its
+  signature is refused. Other types are taken from `Content-Type` and must be
+  in `ATOM_FILE_ALLOWED_TYPES`.
+- Every download sends `X-Content-Type-Options: nosniff`.
+- Only raster images and PDF are served inline. Everything else, SVG and HTML
+  included, is an attachment with `Content-Security-Policy: sandbox`.
+
+## Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ATOM_STORAGE_BACKEND` | unset (off) | `local`, `s3`, `gcs`, `azure`, or `memory` (tests only) |
+| `ATOM_STORAGE_PREFIX` | none | Key prefix for every file in the store |
+| `ATOM_FILE_MAX_BYTES` | 26214400 (25 MiB) | Largest file, enforced while streaming |
+| `ATOM_FILE_TENANT_QUOTA_BYTES` | none | Bytes a tenant may keep, soft-deleted files included |
+| `ATOM_FILE_ALLOWED_TYPES` | `image/png,image/jpeg,image/webp,image/gif,application/pdf` | Accepted types |
+| `ATOM_FILE_SIGNED_URL_MAX_TTL_SECS` | 3600 | Longest signed URL (60–86400) |
+| `ATOM_FILE_DELETION_GRACE_SECS` | 3600 | Age before queued bytes are deleted; must exceed the longest upload |
+| `ATOM_FILE_DELETION_INTERVAL_SECS` | 60 | Deletion worker interval |
+| `ATOM_FILE_DELETION_BATCH` | 100 | Keys deleted per pass |
+
+Signed URLs need `ATOM_KEY_ENCRYPTION_KEY`; without it, issuing one answers
+`503`. Large uploads also need `ATOM_HTTP_REQUEST_TIMEOUT_SECS` to cover them.
+
+Provider settings are read only by the adapter that uses them:
+
+| Backend | Variables |
+| --- | --- |
+| `local` | `ATOM_STORAGE_LOCAL_PATH` (required; created if missing) |
+| `s3` | `ATOM_STORAGE_S3_BUCKET` (required), `_REGION`, `_ENDPOINT`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_ALLOW_HTTP`, `_VIRTUAL_HOSTED`; otherwise the standard `AWS_*` environment |
+| `gcs` | `ATOM_STORAGE_GCS_BUCKET` (required), `_SERVICE_ACCOUNT_PATH`; otherwise the standard `GOOGLE_*` environment |
+| `azure` | `ATOM_STORAGE_AZURE_ACCOUNT`, `_CONTAINER` (required), `_ACCESS_KEY`; otherwise the standard `AZURE_*` environment |
+
+For MinIO or SeaweedFS set `ATOM_STORAGE_S3_ENDPOINT` and, over plain HTTP,
+`ATOM_STORAGE_S3_ALLOW_HTTP=true`.
+
+At startup Atom writes, reads back and deletes a probe object under
+`<prefix>/_probe/`; an unreachable or read-only store fails startup.
+
+The adapters are Cargo features: `storage-s3` (default, includes `local`),
+`storage-gcs`, `storage-azure`. A build with none of them still supports
+`memory`, which is how Atom's own tests run.
+
+With SQLite and the `local` backend, Atom is one self-contained binary with its
+files on disk.
+
+## Key layout, export and migration
+
+```text
+<prefix>/<tenant id>/<file id>/<blob id>
+<prefix>/_platform/<file id>/<blob id>     files without a tenant
+```
+
+Every replacement writes a new blob id, so a key never changes its bytes. All
+of a tenant's bytes are under one prefix: copy that prefix together with the
+tenant's rows to export or move it.
+
+## Deletion and consistency
+
+The object store is outside every database transaction, so Atom never deletes
+bytes inline. It keeps a queue, `blob_deletions`:
+
+- An upload queues its own key before writing it and takes it off the queue in
+  the transaction that creates the file. An upload that fails or never commits
+  leaves its bytes queued.
+- Soft delete keeps the bytes, so a restore brings the file back.
+- Replacing bytes, purging a file, and purging a tenant queue the old keys in
+  the same transaction, through triggers on `file_objects`, so no path can drop
+  a row and leave its bytes behind.
+- A worker deletes keys once they are older than `ATOM_FILE_DELETION_GRACE_SECS`,
+  retrying failures on later passes. It claims keys before deleting them; an
+  upload whose key was already claimed (it outlasted the grace period) fails
+  with `503` rather than refer to bytes being deleted.
+
+## Adding another provider
+
+Domain code depends only on the `BlobStore` trait in `src/storage/mod.rs`,
+which uses Atom's own types; no provider SDK type crosses it. To add a
+provider, implement the trait in a module behind its own Cargo feature, map
+its errors to `BlobError`, register a backend name in `storage::build`, and
+pass `storage::conformance::run`, the suite every adapter must pass.
+`StorageResolver::for_tenant` is where a later change can give a tenant its
+own bucket without touching handlers.

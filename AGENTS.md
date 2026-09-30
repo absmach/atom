@@ -40,6 +40,15 @@ src/
   │  topic.rs          — the configurable topic→object grammar
   │  service.rs        — Authenticate/Authorize over the existing credential + PDP paths
   graphql/             — schema + per-domain resolvers (the live admin/API surface)
+  storage/             — the BlobStore interface (Atom-owned key/error/stream types),
+  │                       StorageResolver (store per tenant), memory adapter, the
+  │                       adapter conformance suite, and the feature-gated
+  │                       object_store adapter (local/S3/GCS/Azure) — the only
+  │                       module that may name a storage SDK (check-db-boundary.sh)
+  files/               — files as resources of kind `file`: upload/replace/delete/
+  │                       download service, sniffing, signed URLs, `/files` REST
+  │                       routes, the blob deletion worker; `repo/` holds
+  │                       `file_objects` and the `blob_deletions` queue
   db.rs                — pool creation (configurable pool)
   models/
   │  enums.rs          — typed domain enums: EntityKind, EntityStatus, CredentialKind,

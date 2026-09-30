@@ -197,7 +197,9 @@ fn category_for_path(path: &str) -> Option<RateLimitCategory> {
     if path == "/graphql" {
         return Some(RateLimitCategory::Graphql);
     }
-    if path.starts_with("/api/custom/") {
+    // Files are application traffic, like custom endpoints, and share their
+    // bucket.
+    if path.starts_with("/api/custom/") || path == "/files" || path.starts_with("/files/") {
         return Some(RateLimitCategory::CustomEndpoints);
     }
     if path.starts_with("/pki/") || path.starts_with("/.well-known/est/") {
@@ -363,6 +365,17 @@ mod tests {
             category_for_path("/certs/issuers/issuer/crl"),
             Some(RateLimitCategory::PublicRoutes)
         );
+    }
+
+    #[test]
+    fn file_paths_share_the_application_rate_limit() {
+        for path in ["/files", "/files/id", "/files/id/signed-url"] {
+            assert_eq!(
+                category_for_path(path),
+                Some(RateLimitCategory::CustomEndpoints)
+            );
+        }
+        assert_eq!(category_for_path("/filesystem"), None);
     }
 
     #[test]

@@ -16,6 +16,7 @@ platform, but its APIs and authorization model are product-neutral.
 - GraphQL management API and gRPC runtime APIs
 - Certificate issuance, renewal, revocation, CRL, OCSP, and EST enrollment
 - Transactional domain-event outbox and persisted audit trail
+- [File storage](docs/content/docs/operations/file-storage.mdx) for resources, over local disk, S3-compatible, GCS or Azure object stores
 - Optional Redis acceleration without caching authorization decisions
 - Health, readiness, metrics, rate limiting, and graceful shutdown
 - [Stateless deployment](docs/content/docs/operations/stateless.mdx) with external PostgreSQL

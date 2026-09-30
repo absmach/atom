@@ -77,8 +77,16 @@ pub async fn initialize(cfg: config::Config) -> anyhow::Result<AppState> {
 
     let callouts_config = callout::CalloutsConfig::load_from_env().await?;
     let callout_service = callout::CalloutService::build(callouts_config).await?;
+    // Storage is built and checked before serving so a misconfigured or
+    // unreachable backend fails startup, not the first upload.
+    let storage = crate::storage::build(&cfg.storage).context("configure file storage")?;
+    storage
+        .check_writable()
+        .await
+        .context("file storage is not reachable and writable")?;
     let mut state = state::AppState::new(database, cfg.clone(), active_keys, cache)
-        .with_callouts(callout_service);
+        .with_callouts(callout_service)
+        .with_storage(storage);
     if cfg.events.enabled() {
         let publisher = events::publisher::AmqpPublisher::connect(&cfg.events)
             .await
@@ -162,6 +170,13 @@ async fn serve_inner(
         (
             "pki",
             certs::lifecycle::spawn_with_shutdown(state.clone(), jobs_stop.clone()),
+        ),
+        (
+            "blob_deletions",
+            crate::files::worker::spawn_blob_deletion_with_shutdown(
+                state.clone(),
+                jobs_stop.clone(),
+            ),
         ),
     ] {
         if let Some(handle) = handle {

@@ -18,7 +18,7 @@ mod sqlite_functions;
 pub mod testing;
 pub mod translate;
 
-pub use arg::{enum_text, Arg, ArgKind, DbArg, TextList, UuidList};
+pub use arg::{enum_text, sqlite_timestamp, Arg, ArgKind, DbArg, TextList, UuidList};
 pub use query::{
     query, query_as, query_scalar, DbExecutor, DbRow, DbScalar, ExecResult, IntoTarget, Query,
     QueryAs, QueryBuilder, QueryScalar, Row, Target,

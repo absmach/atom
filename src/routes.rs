@@ -151,6 +151,15 @@ pub fn create_router(state: AppState) -> Router {
     // empty 200. It exposes internal operational data and is unauthenticated by
     // design — it must be network-restricted to the scraper (firewall / mesh /
     // private network), see AGENTS.md.
+    // File storage. Mounted only when a storage backend is configured; the
+    // bodies stream, so the routes carry no buffered body limit of their own
+    // (`ATOM_FILE_MAX_BYTES` is enforced while streaming).
+    let app = if state.storage.enabled() {
+        app.merge(crate::files::handlers::router())
+    } else {
+        app
+    };
+
     let app = if state.config.metrics.enabled && crate::metrics::enabled() {
         app.route("/metrics", get(metrics_handler))
     } else {
