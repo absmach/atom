@@ -58,11 +58,14 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(response.email, email);
     assert!(response.verification_required);
 
-    let entity = atom::db::query("SELECT kind, tenant_id FROM entities WHERE id = $1")
-        .bind(response.entity_id)
-        .fetch_one(&pool)
-        .await
-        .expect("entity");
+    let entity = crate::common::db::query(
+        "SELECT kind, tenant_id FROM entities WHERE id = $1",
+        r#"SELECT kind, tenant_id FROM entities WHERE id = $1"#,
+    )
+    .bind(response.entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("entity");
     assert_eq!(entity.try_get::<String, _>("kind").expect("kind"), "human");
     assert_eq!(
         entity
@@ -71,9 +74,7 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
         None
     );
 
-    let credential_count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND identifier = $2 AND status = 'active'",
-    )
+    let credential_count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND identifier = $2 AND status = 'active'", r#"SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND identifier = $2 AND status = 'active'"#)
     .bind(response.entity_id)
     .bind(&email)
     .fetch_one(&pool)
@@ -81,8 +82,9 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     .expect("credential count");
     assert_eq!(credential_count, 1);
 
-    let email_row = atom::db::query(
+    let email_row = crate::common::db::query(
         "SELECT verified_at FROM entity_emails WHERE entity_id = $1 AND email = $2",
+        r#"SELECT verified_at FROM entity_emails WHERE entity_id = $1 AND email = $2"#,
     )
     .bind(response.entity_id)
     .bind(&email)
@@ -94,21 +96,21 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
         .expect("verified_at")
         .is_none());
 
-    let token_count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM email_verification_tokens WHERE entity_id = $1 AND consumed_at IS NULL",
-    )
+    let token_count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM email_verification_tokens WHERE entity_id = $1 AND consumed_at IS NULL", r#"SELECT COUNT(*) FROM email_verification_tokens WHERE entity_id = $1 AND consumed_at IS NULL"#)
     .bind(response.entity_id)
     .fetch_one(&pool)
     .await
     .expect("token count");
     assert_eq!(token_count, 1);
 
-    let membership_count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM tenant_memberships WHERE entity_id = $1")
-            .bind(response.entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("membership count");
+    let membership_count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM tenant_memberships WHERE entity_id = $1",
+        r#"SELECT COUNT(*) FROM tenant_memberships WHERE entity_id = $1"#,
+    )
+    .bind(response.entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("membership count");
     assert_eq!(membership_count, 0);
 
     let strict_login = service::login_password(
@@ -157,11 +159,14 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(name_login.email_verified, Some(false));
     assert!(name_login.verification_required);
 
-    atom::db::query("UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1")
-        .bind(response.entity_id)
-        .execute(&pool)
-        .await
-        .expect("verify email");
+    crate::common::db::query(
+        "UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1",
+        r#"UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1"#,
+    )
+    .bind(response.entity_id)
+    .execute(&pool)
+    .await
+    .expect("verify email");
     let verified_name_login = service::login_password(
         &pool,
         &config(false),
@@ -175,11 +180,14 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(verified_name_login.email_verified, Some(true));
     assert!(!verified_name_login.verification_required);
 
-    atom::db::query("UPDATE entities SET status = 'suspended' WHERE id = $1")
-        .bind(response.entity_id)
-        .execute(&pool)
-        .await
-        .expect("suspend entity");
+    crate::common::db::query(
+        "UPDATE entities SET status = 'suspended' WHERE id = $1",
+        r#"UPDATE entities SET status = 'suspended' WHERE id = $1"#,
+    )
+    .bind(response.entity_id)
+    .execute(&pool)
+    .await
+    .expect("suspend entity");
     let suspended_login = service::login_password(
         &pool,
         &config(true),
@@ -233,21 +241,21 @@ async fn signup_rejects_duplicate_email_even_with_distinct_name() {
         other => panic!("expected email conflict, got {other:?}"),
     }
 
-    let email_count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM entity_emails WHERE lower(email) = lower($1) AND deleted_at IS NULL",
-    )
+    let email_count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM entity_emails WHERE lower(email) = lower($1) AND deleted_at IS NULL", r#"SELECT COUNT(*) FROM entity_emails WHERE lower(email) = lower($1) AND deleted_at IS NULL"#)
     .bind(&email)
     .fetch_one(&pool)
     .await
     .expect("email count");
     assert_eq!(email_count, 1);
 
-    let second_exists: bool =
-        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM entities WHERE name = $1)")
-            .bind(second_name)
-            .fetch_one(&pool)
-            .await
-            .expect("second entity existence");
+    let second_exists: bool = crate::common::db::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM entities WHERE name = $1)",
+        r#"SELECT EXISTS (SELECT 1 FROM entities WHERE name = $1)"#,
+    )
+    .bind(second_name)
+    .fetch_one(&pool)
+    .await
+    .expect("second entity existence");
     assert!(!second_exists);
 }
 
@@ -510,9 +518,7 @@ async fn account_survives_an_unreachable_smtp_server() {
         "an unreachable SMTP server must surface as an error"
     );
 
-    let entity_id: Option<Uuid> = atom::db::query_scalar(
-        "SELECT e.id FROM entities e JOIN entity_emails ee ON ee.entity_id = e.id WHERE ee.email = $1",
-    )
+    let entity_id: Option<Uuid> = crate::common::db::query_scalar("SELECT e.id FROM entities e JOIN entity_emails ee ON ee.entity_id = e.id WHERE ee.email = $1", r#"SELECT e.id FROM entities e JOIN entity_emails ee ON ee.entity_id = e.id WHERE ee.email = $1"#)
     .bind(&email)
     .fetch_optional(&pool)
     .await
@@ -521,8 +527,9 @@ async fn account_survives_an_unreachable_smtp_server() {
         "the account and its email must be committed before the verification email is sent",
     );
 
-    let credential_count: i64 = atom::db::query_scalar(
+    let credential_count: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password'",
+        r#"SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password'"#,
     )
     .bind(entity_id)
     .fetch_one(&pool)

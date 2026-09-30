@@ -209,12 +209,15 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .certificate_pem
         .as_deref()
         .expect("issuer certificate");
-    atom::db::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
-        .bind(issuer.id)
-        .bind(&root.pem)
-        .execute(&pool)
-        .await
-        .expect("inject mismatched public certificate");
+    crate::common::db::query(
+        "UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1",
+        r#"UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1"#,
+    )
+    .bind(issuer.id)
+    .bind(&root.pem)
+    .execute(&pool)
+    .await
+    .expect("inject mismatched public certificate");
     let error = validate_startup(&pool, &app_config.pki_ca_keys)
         .await
         .expect_err("wrong key/certificate pair");
@@ -225,15 +228,19 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         error.to_string(),
         "PKCS#11 authority key does not match its certificate"
     );
-    atom::db::query("UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1")
-        .bind(issuer.id)
-        .bind(original_certificate)
-        .execute(&pool)
-        .await
-        .expect("restore issuer certificate");
+    crate::common::db::query(
+        "UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1",
+        r#"UPDATE pki_authorities SET certificate_pem = $2 WHERE id = $1"#,
+    )
+    .bind(issuer.id)
+    .bind(original_certificate)
+    .execute(&pool)
+    .await
+    .expect("restore issuer certificate");
 
-    let tenant_count: i64 = atom::db::query_scalar(
+    let tenant_count: i64 = crate::common::db::query_scalar(
         "SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'",
+        r#"SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'"#,
     )
     .fetch_one(&pool)
     .await
@@ -251,8 +258,9 @@ async fn softhsm_enforces_the_pr013_provider_contract() {
         .expect_err("provider outage");
     tx.rollback().await.expect("outage rollback");
     assert_eq!(
-        atom::db::query_scalar::<i64>(
+        crate::common::db::query_scalar::<i64>(
             "SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'",
+            r#"SELECT count(*) FROM pki_authorities WHERE kind = 'tenant_intermediate'"#
         )
         .fetch_one(&pool)
         .await

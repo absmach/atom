@@ -89,8 +89,7 @@ async fn require_ownership_management(
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 pub async fn health(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    crate::db::query("SELECT 1")
-        .execute(state.pool())
+    crate::health::database_ping(state.pool())
         .await
         .map_err(AppError::Database)?;
     Ok(Json(serde_json::json!({"status": "ok"})))
@@ -640,15 +639,7 @@ async fn credential_tenant_id(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    crate::db::query_scalar::<Option<Uuid>>(
-        "SELECT e.tenant_id FROM credentials c JOIN entities e ON e.id = c.entity_id WHERE c.id = $1 AND c.entity_id = $2",
-    )
-    .bind(credential_id)
-    .bind(entity_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Database)?
-    .ok_or_else(|| AppError::not_found("credential not found"))
+    crate::identity::repo::credential_tenant_id(pool, entity_id, credential_id).await
 }
 
 // ─── Groups ───────────────────────────────────────────────────────────────────

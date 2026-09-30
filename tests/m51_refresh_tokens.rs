@@ -113,9 +113,7 @@ async fn login(
 }
 
 async fn active_refresh_token_count(pool: &Database, session_id: Uuid) -> i64 {
-    atom::db::query_scalar(
-        "SELECT COUNT(*) FROM refresh_tokens WHERE session_id = $1 AND consumed_at IS NULL AND revoked_at IS NULL",
-    )
+    crate::common::db::query_scalar("SELECT COUNT(*) FROM refresh_tokens WHERE session_id = $1 AND consumed_at IS NULL AND revoked_at IS NULL", r#"SELECT COUNT(*) FROM refresh_tokens WHERE session_id = $1 AND consumed_at IS NULL AND revoked_at IS NULL"#)
     .bind(session_id)
     .fetch_one(pool)
     .await
@@ -123,12 +121,14 @@ async fn active_refresh_token_count(pool: &Database, session_id: Uuid) -> i64 {
 }
 
 async fn session_revoked(pool: &Database, session_id: Uuid) -> bool {
-    let revoked_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_one(pool)
-            .await
-            .expect("session row");
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT revoked_at FROM sessions WHERE id = $1",
+        r#"SELECT revoked_at FROM sessions WHERE id = $1"#,
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .expect("session row");
     revoked_at.is_some()
 }
 
@@ -186,12 +186,14 @@ async fn login_with_refresh_enabled_returns_one_active_refresh_token() {
     );
 
     let (_, secret_bytes) = parse_refresh_token(&refresh_token).expect("parse issued token");
-    let secret_hash: Vec<u8> =
-        atom::db::query_scalar("SELECT secret_hash FROM refresh_tokens WHERE session_id = $1")
-            .bind(response.session_id)
-            .fetch_one(&pool)
-            .await
-            .expect("secret_hash column");
+    let secret_hash: Vec<u8> = crate::common::db::query_scalar(
+        "SELECT secret_hash FROM refresh_tokens WHERE session_id = $1",
+        r#"SELECT secret_hash FROM refresh_tokens WHERE session_id = $1"#,
+    )
+    .bind(response.session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("secret_hash column");
     assert_eq!(secret_hash.len(), 32, "HMAC-SHA256 digest length");
     assert_ne!(
         secret_hash,
@@ -237,11 +239,14 @@ async fn exchange_rotates_the_token_and_works_after_access_jwt_expiry() {
     );
     let (original_id, _) = parse_refresh_token(&original_refresh).expect("parse original");
     let (consumed_at, replaced_by): (Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>) =
-        atom::db::query_as("SELECT consumed_at, replaced_by FROM refresh_tokens WHERE id = $1")
-            .bind(original_id)
-            .fetch_one(&pool)
-            .await
-            .expect("original row still present");
+        crate::common::db::query_as(
+            "SELECT consumed_at, replaced_by FROM refresh_tokens WHERE id = $1",
+            r#"SELECT consumed_at, replaced_by FROM refresh_tokens WHERE id = $1"#,
+        )
+        .bind(original_id)
+        .fetch_one(&pool)
+        .await
+        .expect("original row still present");
     assert!(consumed_at.is_some());
     let (new_id, _) = parse_refresh_token(&pair.refresh_token).expect("parse new token");
     assert_eq!(replaced_by, Some(new_id));
@@ -313,8 +318,20 @@ async fn concurrent_exchange_of_the_same_token_yields_exactly_one_success() {
     );
     let successes = [&first, &second].iter().filter(|r| r.is_ok()).count();
     assert_eq!(
-        successes, 1,
-        "exactly one of two concurrent exchanges of the same token must succeed"
+        successes,
+        1,
+        "exactly one of two concurrent exchanges must succeed; errors: first={:?}, second={:?}",
+        first.as_ref().err(),
+        second.as_ref().err(),
+    );
+    let loser = first
+        .as_ref()
+        .err()
+        .or(second.as_ref().err())
+        .expect("one loser");
+    assert!(
+        matches!(loser, atom::error::AppError::Unauthorized(message) if message == "invalid refresh token"),
+        "the losing exchange must detect replay, not fail with a database error: {loser:?}"
     );
 
     // The loser observed replay (it blocked on the row lock, then saw
@@ -324,6 +341,75 @@ async fn concurrent_exchange_of_the_same_token_yields_exactly_one_success() {
     assert!(session_revoked(&pool, login_response.session_id).await);
     assert_eq!(
         active_refresh_token_count(&pool, login_response.session_id).await,
+        0
+    );
+}
+
+/// PostgreSQL-specific regression: an audit insert checks its actor foreign key
+/// before its tenant foreign key. Keep that first KEY SHARE lock held while two
+/// exchanges rotate and detect replay; neither may wait on it while holding the
+/// tenant guard, or the real audit insert and exchange can deadlock. SQLite's
+/// BEGIN IMMEDIATE serializes writers instead of using these row-lock modes.
+#[tokio::test]
+#[ignore]
+async fn postgres_concurrent_refresh_exchanges_allow_audit_foreign_key_locks() {
+    if atom::db::testing::is_sqlite() {
+        return;
+    }
+    let pool = common::pool().await;
+    let keys = active_keys(&pool).await;
+    let cfg = refresh_enabled_config(3600, 7200);
+    let signer = JwtSigner::from_key(&keys.primary).expect("signer");
+    let (entity_id, name) = make_device(&pool, make_tenant(&pool).await).await;
+    let response = login(&pool, &keys, &cfg, &name).await;
+    let refresh_token = response.refresh_token.expect("refresh token");
+
+    let Database::Postgres(pg) = &pool else {
+        panic!("PostgreSQL-only lock regression");
+    };
+    let mut audit_fk = pg.begin().await.expect("begin audit foreign-key check");
+    sqlx::query("SELECT id FROM entities WHERE id = $1 FOR KEY SHARE")
+        .bind(entity_id)
+        .fetch_one(&mut *audit_fk)
+        .await
+        .expect("hold audit actor foreign-key lock");
+
+    let exchange_results = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            identity_service::exchange_refresh_token(&pool, &cfg, &signer, None, &refresh_token),
+            identity_service::exchange_refresh_token(&pool, &cfg, &signer, None, &refresh_token),
+        )
+    })
+    .await;
+    // Release the deliberate blocker even if the timeout catches a regression.
+    audit_fk
+        .rollback()
+        .await
+        .expect("release audit foreign-key lock");
+    let (first, second) = exchange_results
+        .expect("refresh exchanges must not wait for an audit actor foreign-key lock");
+    assert_eq!(
+        [&first, &second]
+            .iter()
+            .filter(|result| result.is_ok())
+            .count(),
+        1,
+        "one rotation must succeed; errors: first={:?}, second={:?}",
+        first.as_ref().err(),
+        second.as_ref().err(),
+    );
+    let loser = first
+        .as_ref()
+        .err()
+        .or(second.as_ref().err())
+        .expect("one loser");
+    assert!(
+        matches!(loser, atom::error::AppError::Unauthorized(message) if message == "invalid refresh token"),
+        "the losing exchange must detect replay: {loser:?}"
+    );
+    assert!(session_revoked(&pool, response.session_id).await);
+    assert_eq!(
+        active_refresh_token_count(&pool, response.session_id).await,
         0
     );
 }
@@ -420,11 +506,14 @@ async fn logout_revokes_the_family_and_expired_family_is_rejected() {
     let inactive_cfg = refresh_enabled_config(3600, 7200);
     let (inactive_id, inactive_name) = make_device(&pool, make_tenant(&pool).await).await;
     let inactive_login = login(&pool, &keys, &inactive_cfg, &inactive_name).await;
-    atom::db::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
-        .bind(inactive_id)
-        .execute(&pool)
-        .await
-        .expect("deactivate entity");
+    crate::common::db::query(
+        "UPDATE entities SET status = 'inactive' WHERE id = $1",
+        r#"UPDATE entities SET status = 'inactive' WHERE id = $1"#,
+    )
+    .bind(inactive_id)
+    .execute(&pool)
+    .await
+    .expect("deactivate entity");
     let inactive = identity_service::exchange_refresh_token(
         &pool,
         &inactive_cfg,
@@ -452,11 +541,14 @@ async fn inactive_tenant_rejects_exchange_with_the_generic_error() {
     let tenant_id = make_tenant(&pool).await;
     let (_, name) = make_device(&pool, tenant_id).await;
     let login_response = login(&pool, &keys, &cfg, &name).await;
-    atom::db::query("UPDATE tenants SET status = 'inactive' WHERE id = $1")
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("deactivate tenant");
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'inactive' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'inactive' WHERE id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("deactivate tenant");
 
     let err = identity_service::exchange_refresh_token(
         &pool,
@@ -504,12 +596,14 @@ async fn refresh_session_never_truncates_a_refresh_enabled_session() {
     .await
     .expect("legacy refresh_session still works");
 
-    let session_expires_at: chrono::DateTime<chrono::Utc> =
-        atom::db::query_scalar("SELECT expires_at FROM sessions WHERE id = $1")
-            .bind(login_response.session_id)
-            .fetch_one(&pool)
-            .await
-            .expect("session row");
+    let session_expires_at: chrono::DateTime<chrono::Utc> = crate::common::db::query_scalar(
+        "SELECT expires_at FROM sessions WHERE id = $1",
+        r#"SELECT expires_at FROM sessions WHERE id = $1"#,
+    )
+    .bind(login_response.session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("session row");
     assert!(
         session_expires_at >= family_deadline - chrono::Duration::seconds(1),
         "refresh_session must never shorten the session below the refresh family's deadline"

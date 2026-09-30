@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 async fn truncate_event_outbox(pool: &Database) {
-    atom::db::query("TRUNCATE TABLE event_outbox")
+    crate::common::db::query("TRUNCATE TABLE event_outbox", r#"DELETE FROM event_outbox"#)
         .execute(pool)
         .await
         .expect("truncate event_outbox");
@@ -55,32 +55,40 @@ fn sample_payload(event: &str) -> DomainEventPayload {
 
 async fn insert_outbox_row(pool: &Database, payload: &DomainEventPayload) -> Uuid {
     let id = payload.event_id;
-    atom::db::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
-        .bind(id)
-        .bind(&payload.event)
-        .bind(serde_json::to_value(payload).expect("serialize payload"))
-        .execute(pool)
-        .await
-        .expect("insert event_outbox row");
+    crate::common::db::query(
+        "INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)",
+        r#"INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)"#,
+    )
+    .bind(id)
+    .bind(&payload.event)
+    .bind(serde_json::to_value(payload).expect("serialize payload"))
+    .execute(pool)
+    .await
+    .expect("insert event_outbox row");
     id
 }
 
 async fn delivered_at(pool: &Database, id: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
-    atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .expect("fetch delivered_at")
-        .flatten()
+    crate::common::db::query_scalar(
+        "SELECT delivered_at FROM event_outbox WHERE id = $1",
+        r#"SELECT delivered_at FROM event_outbox WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .expect("fetch delivered_at")
+    .flatten()
 }
 
 async fn attempts_and_error(pool: &Database, id: Uuid) -> (i32, Option<String>) {
-    let row: (i32, Option<String>) =
-        atom::db::query_as("SELECT attempts, last_error FROM event_outbox WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .expect("fetch attempts/last_error");
+    let row: (i32, Option<String>) = crate::common::db::query_as(
+        "SELECT attempts, last_error FROM event_outbox WHERE id = $1",
+        r#"SELECT attempts, last_error FROM event_outbox WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("fetch attempts/last_error");
     row
 }
 
@@ -371,13 +379,16 @@ async fn an_unparseable_row_stops_being_retried_and_unblocks_newer_rows() {
     truncate_event_outbox(&pool).await;
 
     let poison_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
-        .bind(poison_id)
-        .bind("resource.create")
-        .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
-        .execute(&pool)
-        .await
-        .expect("insert malformed event_outbox row");
+    crate::common::db::query(
+        "INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)",
+        r#"INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)"#,
+    )
+    .bind(poison_id)
+    .bind("resource.create")
+    .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
+    .execute(&pool)
+    .await
+    .expect("insert malformed event_outbox row");
     let healthy_id = insert_outbox_row(&pool, &sample_payload("resource.create")).await;
 
     let publisher = MockPublisher::default();
@@ -423,13 +434,16 @@ async fn a_row_with_an_unparseable_payload_is_never_marked_delivered() {
     truncate_event_outbox(&pool).await;
 
     let bad_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
-        .bind(bad_id)
-        .bind("resource.create")
-        .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
-        .execute(&pool)
-        .await
-        .expect("insert malformed event_outbox row");
+    crate::common::db::query(
+        "INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)",
+        r#"INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)"#,
+    )
+    .bind(bad_id)
+    .bind("resource.create")
+    .bind(serde_json::json!({"this": "does not match DomainEventPayload"}))
+    .execute(&pool)
+    .await
+    .expect("insert malformed event_outbox row");
 
     let good_payload = sample_payload("resource.create");
     let good_id = insert_outbox_row(&pool, &good_payload).await;
@@ -495,11 +509,14 @@ impl EventPublisher for SelectivePublisher {
 }
 
 async fn unparseable_flag(pool: &Database, id: Uuid) -> bool {
-    atom::db::query_scalar("SELECT unparseable FROM event_outbox WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .expect("fetch unparseable")
+    crate::common::db::query_scalar(
+        "SELECT unparseable FROM event_outbox WHERE id = $1",
+        r#"SELECT unparseable FROM event_outbox WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("fetch unparseable")
 }
 
 #[tokio::test]
@@ -538,19 +555,20 @@ async fn outbox_retention_cleanup_deletes_old_delivered_and_unparseable_rows() {
     truncate_event_outbox(&pool).await;
 
     let old_delivered_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
-         VALUES ($1, 'old.event', '{}'::jsonb, now() - interval '40 days', now() - interval '40 days')",
-    )
+    crate::common::db::query("INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
+         VALUES ($1, 'old.event', '{}'::jsonb, now() - interval '40 days', now() - interval '40 days')", r#"INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
+         VALUES ($1, 'old.event', '{}', atom_ts_add(now(), -(3456000)), atom_ts_add(now(), -(3456000)))"#)
     .bind(old_delivered_id)
     .execute(&pool)
     .await
     .expect("insert old delivered row");
 
     let fresh_delivered_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
          VALUES ($1, 'fresh.event', '{}'::jsonb, now(), now())",
+        r#"INSERT INTO event_outbox (id, event, payload, delivered_at, created_at)
+         VALUES ($1, 'fresh.event', '{}', now(), now())"#,
     )
     .bind(fresh_delivered_id)
     .execute(&pool)
@@ -558,9 +576,11 @@ async fn outbox_retention_cleanup_deletes_old_delivered_and_unparseable_rows() {
     .expect("insert fresh delivered row");
 
     let unparseable_retryable_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO event_outbox (id, event, payload, unparseable, attempts, created_at)
          VALUES ($1, 'retryable.event', '{}'::jsonb, true, 1, now() - interval '40 days')",
+        r#"INSERT INTO event_outbox (id, event, payload, unparseable, attempts, created_at)
+         VALUES ($1, 'retryable.event', '{}', true, 1, atom_ts_add(now(), -(3456000)))"#,
     )
     .bind(unparseable_retryable_id)
     .execute(&pool)

@@ -53,8 +53,9 @@ async fn freeze_to(pool: &atom::db::Database, tenant_id: uuid::Uuid, status: Ten
 
 async fn channel_in(pool: &atom::db::Database, tenant_id: uuid::Uuid) -> uuid::Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)"#,
     )
     .bind(id)
     .bind(format!("m3-chan-{id}"))
@@ -89,10 +90,13 @@ async fn inactive_tenant_denies_with_lifecycle_reason() {
     assert_eq!(details["tenant_status"], "inactive");
     assert_eq!(details["tenant_id"], serde_json::json!(t.to_string()));
 
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(t)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(t)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -117,10 +121,13 @@ async fn frozen_tenant_denies_with_lifecycle_reason() {
     assert_eq!(resp.reason, "tenant is frozen");
     assert_eq!(resp.details.unwrap()["tenant_status"], "frozen");
 
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(t)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(t)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -145,10 +152,13 @@ async fn deleted_tenant_denies_with_lifecycle_reason() {
     assert_eq!(resp.reason, "tenant is deleted");
     assert_eq!(resp.details.unwrap()["tenant_status"], "deleted");
 
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(t)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(t)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -175,14 +185,20 @@ async fn frozen_tenant_blocks_authz_on_objects_inside_it() {
     assert!(!resp.allowed);
     assert_eq!(resp.reason, "tenant is frozen");
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
-        .bind(chan)
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(t)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = $1",
+        r#"DELETE FROM resources WHERE id = $1"#,
+    )
+    .bind(chan)
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(t)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -197,7 +213,11 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
     // Sibling lifecycle-deny tests pass without this because tenant-frozen
     // deny short-circuits before applicability is checked; this platform test
     // has no tenant to short-circuit on.
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           SELECT id, 'resource', 'resource:channel'
+             FROM actions WHERE name = 'publish'
+           ON CONFLICT DO NOTHING"#,
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            SELECT id, 'resource', 'resource:channel'
              FROM actions WHERE name = 'publish'
@@ -208,12 +228,15 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
     .expect("seed publish applicability");
 
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
-        .bind(id)
-        .bind(format!("m3-platform-{id}"))
-        .execute(&p)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)",
+        r#"INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)"#,
+    )
+    .bind(id)
+    .bind(format!("m3-platform-{id}"))
+    .execute(&p)
+    .await
+    .expect("insert resource");
 
     let req = AuthzRequest {
         subject_id: admin_id(),
@@ -232,10 +255,13 @@ async fn platform_resource_unaffected_by_tenant_lifecycle() {
         resp.reason
     );
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
-        .bind(id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = $1",
+        r#"DELETE FROM resources WHERE id = $1"#,
+    )
+    .bind(id)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -260,8 +286,11 @@ async fn explain_surfaces_lifecycle_reason_too() {
     assert_eq!(resp.reason, "tenant is frozen");
     assert!(resp.matched_binding.is_none());
 
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(t)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(t)
+    .execute(&p)
+    .await;
 }

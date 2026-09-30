@@ -29,20 +29,16 @@ const PASSWORD: &str = "correct-horse-battery-staple";
 async fn human_with_session(pool: &Database) -> (Uuid, Uuid, String) {
     let entity_id = Uuid::new_v4();
     let email = format!("old-{entity_id}@example.test");
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status, attributes) \
-         VALUES ($1, 'human', $2, NULL, 'active', $3)",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status, attributes) \
+         VALUES ($1, 'human', $2, NULL, 'active', $3)", r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes) VALUES ($1, 'human', $2, NULL, 'active', $3)"#)
     .bind(entity_id)
     .bind(format!("email-change-{entity_id}"))
     .bind(serde_json::json!({ "email": email }))
     .execute(pool)
     .await
     .expect("insert human");
-    atom::db::query(
-        "INSERT INTO entity_emails (id, entity_id, email, verified_at) \
-         VALUES ($1, $2, $3, now())",
-    )
+    crate::common::db::query("INSERT INTO entity_emails (id, entity_id, email, verified_at) \
+         VALUES ($1, $2, $3, now())", r#"INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())"#)
     .bind(Uuid::new_v4())
     .bind(entity_id)
     .bind(&email)
@@ -50,10 +46,8 @@ async fn human_with_session(pool: &Database) -> (Uuid, Uuid, String) {
     .await
     .expect("insert entity_emails");
     let password_hash = service::hash_secret(PASSWORD.as_bytes()).expect("hash password");
-    atom::db::query(
-        "INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash) \
-         VALUES ($1, $2, 'password', $3, $4)",
-    )
+    crate::common::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash) \
+         VALUES ($1, $2, 'password', $3, $4)", r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash) VALUES ($1, $2, 'password', $3, $4)"#)
     .bind(Uuid::new_v4())
     .bind(entity_id)
     .bind(&email)
@@ -87,8 +81,9 @@ fn token_auth(entity_id: Uuid, scoped: bool) -> AuthContext {
 }
 
 async fn pending_token_count(pool: &Database, entity_id: Uuid) -> i64 {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM email_change_tokens WHERE entity_id = $1 AND consumed_at IS NULL",
+        r#"SELECT COUNT(*) FROM email_change_tokens WHERE entity_id = $1 AND consumed_at IS NULL"#,
     )
     .bind(entity_id)
     .fetch_one(pool)
@@ -111,7 +106,10 @@ async fn mint_confirm_token(
     let secret = "ab".repeat(32);
     let token = format!("atomc_{}_{}", hex::encode(token_id.as_bytes()), secret);
     let secret_hash = service::hash_secret(secret.as_bytes()).expect("hash token secret");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO email_change_tokens
+             (id, entity_id, session_id, current_email, new_email, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
         r#"INSERT INTO email_change_tokens
              (id, entity_id, session_id, current_email, new_email, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
@@ -148,11 +146,9 @@ async fn request_does_not_change_the_current_login_before_confirmation() {
     .expect("request email change");
 
     let (live_email, identifier): (String, Option<String>) =
-        atom::db::query_as::<(String, Option<String>)>(
-            "SELECT ee.email, c.identifier FROM entity_emails ee \
+        crate::common::db::query_as::<(String, Option<String>)>("SELECT ee.email, c.identifier FROM entity_emails ee \
          JOIN credentials c ON c.entity_id = ee.entity_id AND c.kind = 'password' \
-         WHERE ee.entity_id = $1",
-        )
+         WHERE ee.entity_id = $1", r#"SELECT ee.email, c.identifier FROM entity_emails ee JOIN credentials c ON c.entity_id = ee.entity_id AND c.kind = 'password' WHERE ee.entity_id = $1"#)
         .bind(entity_id)
         .fetch_one(&pool)
         .await
@@ -192,11 +188,14 @@ async fn request_rejects_access_tokens_scoped_and_unscoped() {
 async fn request_rejects_a_stale_session() {
     let pool = common::pool().await;
     let (entity_id, session_id, _email) = human_with_session(&pool).await;
-    atom::db::query("UPDATE sessions SET created_at = now() - interval '1 day' WHERE id = $1")
-        .bind(session_id)
-        .execute(&pool)
-        .await
-        .expect("age the session");
+    crate::common::db::query(
+        "UPDATE sessions SET created_at = now() - interval '1 day' WHERE id = $1",
+        r#"UPDATE sessions SET created_at = atom_ts_add(now(), -(86400)) WHERE id = $1"#,
+    )
+    .bind(session_id)
+    .execute(&pool)
+    .await
+    .expect("age the session");
 
     let err = service::request_email_change(
         &pool,
@@ -299,9 +298,10 @@ async fn request_rejects_the_same_email_and_supersedes_prior_pending_requests() 
         1,
         "only the newest request stays pending"
     );
-    let live_pending: String = atom::db::query_scalar(
+    let live_pending: String = crate::common::db::query_scalar(
         "SELECT new_email FROM email_change_tokens \
          WHERE entity_id = $1 AND consumed_at IS NULL",
+        r#"SELECT new_email FROM email_change_tokens WHERE entity_id = $1 AND consumed_at IS NULL"#,
     )
     .bind(entity_id)
     .fetch_one(&pool)
@@ -412,12 +412,14 @@ async fn confirm_rejects_wrong_expired_replayed_and_superseded_tokens() {
     .expect_err("superseded token must be rejected");
     assert!(matches!(err, AppError::BadRequest(_)));
 
-    let live_email2: String =
-        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-            .bind(entity2)
-            .fetch_one(&pool)
-            .await
-            .expect("entity2 email unchanged");
+    let live_email2: String = crate::common::db::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT email FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(entity2)
+    .fetch_one(&pool)
+    .await
+    .expect("entity2 email unchanged");
     assert_eq!(live_email2, old_email2);
 }
 
@@ -448,8 +450,9 @@ async fn confirm_updates_email_credential_and_attributes_mirror_atomically() {
     .expect("confirm email change");
 
     let (live_email, verified): (String, Option<chrono::DateTime<Utc>>) =
-        atom::db::query_as::<(String, Option<chrono::DateTime<Utc>>)>(
+        crate::common::db::query_as::<(String, Option<chrono::DateTime<Utc>>)>(
             "SELECT email, verified_at FROM entity_emails WHERE entity_id = $1",
+            r#"SELECT email, verified_at FROM entity_emails WHERE entity_id = $1"#,
         )
         .bind(entity_id)
         .fetch_one(&pool)
@@ -458,8 +461,9 @@ async fn confirm_updates_email_credential_and_attributes_mirror_atomically() {
     assert_eq!(live_email, new_email);
     assert!(verified.is_some(), "new email must come out verified");
 
-    let identifier: String = atom::db::query_scalar(
+    let identifier: String = crate::common::db::query_scalar(
         "SELECT identifier FROM credentials WHERE entity_id = $1 AND kind = 'password'",
+        r#"SELECT identifier FROM credentials WHERE entity_id = $1 AND kind = 'password'"#,
     )
     .bind(entity_id)
     .fetch_one(&pool)
@@ -467,19 +471,22 @@ async fn confirm_updates_email_credential_and_attributes_mirror_atomically() {
     .expect("credential identifier after confirm");
     assert_eq!(identifier, new_email);
 
-    let attributes: serde_json::Value =
-        atom::db::query_scalar("SELECT attributes FROM entities WHERE id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("attributes after confirm");
+    let attributes: serde_json::Value = crate::common::db::query_scalar(
+        "SELECT attributes FROM entities WHERE id = $1",
+        r#"SELECT attributes FROM entities WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("attributes after confirm");
     assert_eq!(
         attributes["email"], new_email,
         "attributes.email compatibility mirror must stay in sync"
     );
 
-    let active_sessions: i64 = atom::db::query_scalar(
+    let active_sessions: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
+        r#"SELECT COUNT(*) FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL"#,
     )
     .bind(entity_id)
     .fetch_one(&pool)
@@ -494,11 +501,14 @@ async fn confirm_leaves_the_attributes_mirror_untouched_when_never_present() {
     let pool = common::pool().await;
     let (entity_id, session_id, old_email) = human_with_session(&pool).await;
     // This account never carried attributes.email.
-    atom::db::query("UPDATE entities SET attributes = '{}' WHERE id = $1")
-        .bind(entity_id)
-        .execute(&pool)
-        .await
-        .expect("clear attributes");
+    crate::common::db::query(
+        "UPDATE entities SET attributes = '{}' WHERE id = $1",
+        r#"UPDATE entities SET attributes = '{}' WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .execute(&pool)
+    .await
+    .expect("clear attributes");
     let new_email = format!("new-{entity_id}@example.test");
     let token = mint_confirm_token(
         &pool,
@@ -520,12 +530,14 @@ async fn confirm_leaves_the_attributes_mirror_untouched_when_never_present() {
     .await
     .expect("confirm email change");
 
-    let attributes: serde_json::Value =
-        atom::db::query_scalar("SELECT attributes FROM entities WHERE id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("attributes after confirm");
+    let attributes: serde_json::Value = crate::common::db::query_scalar(
+        "SELECT attributes FROM entities WHERE id = $1",
+        r#"SELECT attributes FROM entities WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("attributes after confirm");
     assert!(
         attributes.get("email").is_none(),
         "a never-present mirror key must not be created by this flow"
@@ -551,15 +563,19 @@ async fn confirm_rechecks_collision_at_confirmation_time_including_case_variants
     // Someone else takes a case-variant of the exact same address after the
     // token was minted but before it is confirmed.
     let (other_id, _other_session, _other_email) = human_with_session(&pool).await;
-    atom::db::query("UPDATE entity_emails SET email = $2 WHERE entity_id = $1")
-        .bind(other_id)
-        .bind(contested_email.to_ascii_uppercase())
-        .execute(&pool)
-        .await
-        .expect("collide on a case variant");
-    atom::db::query(
+    crate::common::db::query(
+        "UPDATE entity_emails SET email = $2 WHERE entity_id = $1",
+        r#"UPDATE entity_emails SET email = $2 WHERE entity_id = $1"#,
+    )
+    .bind(other_id)
+    .bind(contested_email.to_ascii_uppercase())
+    .execute(&pool)
+    .await
+    .expect("collide on a case variant");
+    crate::common::db::query(
         "UPDATE credentials SET identifier = $2 \
          WHERE entity_id = $1 AND kind = 'password'",
+        r#"UPDATE credentials SET identifier = $2 WHERE entity_id = $1 AND kind = 'password'"#,
     )
     .bind(other_id)
     .bind(contested_email.to_ascii_uppercase())
@@ -579,11 +595,9 @@ async fn confirm_rechecks_collision_at_confirmation_time_including_case_variants
     assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
 
     let (live_email, identifier): (String, Option<String>) =
-        atom::db::query_as::<(String, Option<String>)>(
-            "SELECT ee.email, c.identifier FROM entity_emails ee \
+        crate::common::db::query_as::<(String, Option<String>)>("SELECT ee.email, c.identifier FROM entity_emails ee \
          JOIN credentials c ON c.entity_id = ee.entity_id AND c.kind = 'password' \
-         WHERE ee.entity_id = $1",
-        )
+         WHERE ee.entity_id = $1", r#"SELECT ee.email, c.identifier FROM entity_emails ee JOIN credentials c ON c.entity_id = ee.entity_id AND c.kind = 'password' WHERE ee.entity_id = $1"#)
         .bind(entity_id)
         .fetch_one(&pool)
         .await
@@ -664,17 +678,21 @@ async fn old_email_login_fails_and_new_email_login_succeeds_after_confirmation()
 async fn confirm_invalidates_stale_verification_and_reset_tokens_for_the_old_email() {
     let pool = common::pool().await;
     let (entity_id, session_id, old_email) = human_with_session(&pool).await;
-    let email_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM entity_emails WHERE entity_id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("email id");
+    let email_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT id FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("email id");
 
     let verify_token_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         r#"INSERT INTO email_verification_tokens (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 day')"#,
+        r#"INSERT INTO email_verification_tokens (id, entity_id, email_id, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, atom_ts_add(now(), (86400)))"#,
     )
     .bind(verify_token_id)
     .bind(entity_id)
@@ -685,9 +703,11 @@ async fn confirm_invalidates_stale_verification_and_reset_tokens_for_the_old_ema
     .expect("insert stale verification token");
 
     let reset_token_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         r#"INSERT INTO password_reset_tokens (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 hour')"#,
+        r#"INSERT INTO password_reset_tokens (id, entity_id, email_id, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, atom_ts_add(now(), (3600)))"#,
     )
     .bind(reset_token_id)
     .bind(entity_id)
@@ -719,20 +739,24 @@ async fn confirm_invalidates_stale_verification_and_reset_tokens_for_the_old_ema
     .await
     .expect("confirm email change");
 
-    let verify_consumed: Option<chrono::DateTime<Utc>> =
-        atom::db::query_scalar("SELECT consumed_at FROM email_verification_tokens WHERE id = $1")
-            .bind(verify_token_id)
-            .fetch_one(&pool)
-            .await
-            .expect("verification token state");
+    let verify_consumed: Option<chrono::DateTime<Utc>> = crate::common::db::query_scalar(
+        "SELECT consumed_at FROM email_verification_tokens WHERE id = $1",
+        r#"SELECT consumed_at FROM email_verification_tokens WHERE id = $1"#,
+    )
+    .bind(verify_token_id)
+    .fetch_one(&pool)
+    .await
+    .expect("verification token state");
     assert!(verify_consumed.is_some());
 
-    let reset_consumed: Option<chrono::DateTime<Utc>> =
-        atom::db::query_scalar("SELECT consumed_at FROM password_reset_tokens WHERE id = $1")
-            .bind(reset_token_id)
-            .fetch_one(&pool)
-            .await
-            .expect("reset token state");
+    let reset_consumed: Option<chrono::DateTime<Utc>> = crate::common::db::query_scalar(
+        "SELECT consumed_at FROM password_reset_tokens WHERE id = $1",
+        r#"SELECT consumed_at FROM password_reset_tokens WHERE id = $1"#,
+    )
+    .bind(reset_token_id)
+    .fetch_one(&pool)
+    .await
+    .expect("reset token state");
     assert!(reset_consumed.is_some());
 
     // And a stale reset token cannot be redeemed even before confirm ran —
@@ -775,12 +799,15 @@ async fn confirm_fails_safely_when_the_current_email_drifted_since_the_request()
     // Simulate an admin (or OAuth linking) changing the email out from under
     // the pending request.
     let drifted_email = format!("drifted-{entity_id}@example.test");
-    atom::db::query("UPDATE entity_emails SET email = $2 WHERE entity_id = $1")
-        .bind(entity_id)
-        .bind(&drifted_email)
-        .execute(&pool)
-        .await
-        .expect("simulate concurrent drift");
+    crate::common::db::query(
+        "UPDATE entity_emails SET email = $2 WHERE entity_id = $1",
+        r#"UPDATE entity_emails SET email = $2 WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .bind(&drifted_email)
+    .execute(&pool)
+    .await
+    .expect("simulate concurrent drift");
 
     let err = service::confirm_email_change(
         &pool,
@@ -795,22 +822,27 @@ async fn confirm_fails_safely_when_the_current_email_drifted_since_the_request()
     .expect_err("drifted current email must fail safely");
     assert!(matches!(err, AppError::BadRequest(_)));
 
-    let live_email: String =
-        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("email unchanged by the failed confirm");
+    let live_email: String = crate::common::db::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT email FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("email unchanged by the failed confirm");
     assert_eq!(live_email, drifted_email);
 
     // The token is not consumed by this failure mode — reverting the drift
     // lets the same token still succeed.
-    atom::db::query("UPDATE entity_emails SET email = $2 WHERE entity_id = $1")
-        .bind(entity_id)
-        .bind(&old_email)
-        .execute(&pool)
-        .await
-        .expect("revert drift");
+    crate::common::db::query(
+        "UPDATE entity_emails SET email = $2 WHERE entity_id = $1",
+        r#"UPDATE entity_emails SET email = $2 WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .bind(&old_email)
+    .execute(&pool)
+    .await
+    .expect("revert drift");
     service::confirm_email_change(
         &pool,
         &Config::for_tests(),
@@ -836,9 +868,7 @@ async fn oauth_style_auto_link_lookup_blocks_on_a_concurrent_email_change_lock_h
     let (entity_id, _session_id, email) = human_with_session(&pool).await;
 
     let mut holder_tx = pool.begin().await.expect("begin holder tx");
-    atom::db::query(
-        "SELECT id, email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL FOR UPDATE",
-    )
+    crate::common::db::query("SELECT id, email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL FOR UPDATE", r#"SELECT id, email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL"#).locked()
     .bind(entity_id)
     .fetch_one(holder_tx.exec())
     .await
@@ -848,13 +878,18 @@ async fn oauth_style_auto_link_lookup_blocks_on_a_concurrent_email_change_lock_h
     let email2 = email.clone();
     let mut racer = tokio::spawn(async move {
         let mut tx = pool2.begin().await.expect("begin racer tx");
-        atom::db::query(
+        crate::common::db::query(
             "SELECT ee.entity_id, ee.verified_at
              FROM entity_emails ee
              JOIN entities e ON e.id = ee.entity_id
              WHERE ee.email = $1 AND ee.deleted_at IS NULL
              FOR UPDATE OF e, ee",
+            r#"SELECT ee.entity_id, ee.verified_at
+             FROM entity_emails ee
+             JOIN entities e ON e.id = ee.entity_id
+             WHERE ee.email = $1 AND ee.deleted_at IS NULL"#,
         )
+        .locked()
         .bind(&email2)
         .fetch_optional(tx.exec())
         .await
@@ -918,12 +953,14 @@ async fn confirm_email_change_works_with_a_single_connection_pool() {
     .expect("single-connection confirm must not deadlock")
     .expect("confirm email change");
 
-    let live_email: String =
-        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-            .bind(entity_id)
-            .fetch_one(&shared)
-            .await
-            .expect("email changed");
+    let live_email: String = crate::common::db::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT email FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&shared)
+    .await
+    .expect("email changed");
     assert_eq!(live_email, new_email);
 }
 
@@ -965,12 +1002,14 @@ async fn password_reset_consumes_pending_email_change_tokens() {
     // The owner recovers the account with a password reset (reset token
     // minted directly, following m21_soft_delete's pattern — SMTP is not
     // configured in tests).
-    let email_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM entity_emails WHERE entity_id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("email id");
+    let email_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT id FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("email id");
     let reset_token_id = Uuid::new_v4();
     let reset_secret = "ef".repeat(32);
     let reset_token = format!(
@@ -979,10 +1018,13 @@ async fn password_reset_consumes_pending_email_change_tokens() {
         reset_secret
     );
     let reset_hash = service::hash_secret(reset_secret.as_bytes()).expect("hash reset secret");
-    atom::db::query(
+    crate::common::db::query(
         r#"INSERT INTO password_reset_tokens
               (id, entity_id, email_id, secret_hash, expires_at)
             VALUES ($1, $2, $3, $4, now() + interval '1 hour')"#,
+        r#"INSERT INTO password_reset_tokens
+              (id, entity_id, email_id, secret_hash, expires_at)
+            VALUES ($1, $2, $3, $4, atom_ts_add(now(), (3600)))"#,
     )
     .bind(reset_token_id)
     .bind(entity_id)
@@ -1022,12 +1064,14 @@ async fn password_reset_consumes_pending_email_change_tokens() {
     .expect_err("a token minted before the password reset must be dead");
     assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
 
-    let live_email: String =
-        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("email unchanged");
+    let live_email: String = crate::common::db::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT email FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("email unchanged");
     assert_eq!(live_email, old_email);
 }
 
@@ -1041,11 +1085,14 @@ async fn password_reset_consumes_pending_email_change_tokens() {
 async fn email_change_rejects_config_managed_identities() {
     let pool = common::pool().await;
     let (entity_id, session_id, old_email) = human_with_session(&pool).await;
-    atom::db::query("UPDATE entities SET managed_by = 'config' WHERE id = $1")
-        .bind(entity_id)
-        .execute(&pool)
-        .await
-        .expect("stamp the entity config-managed");
+    crate::common::db::query(
+        "UPDATE entities SET managed_by = 'config' WHERE id = $1",
+        r#"UPDATE entities SET managed_by = 'config' WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .execute(&pool)
+    .await
+    .expect("stamp the entity config-managed");
 
     let err = service::request_email_change(
         &pool,
@@ -1086,12 +1133,14 @@ async fn email_change_rejects_config_managed_identities() {
     .expect_err("confirm must reject a config-managed identity");
     assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
 
-    let live_email: String =
-        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("email unchanged");
+    let live_email: String = crate::common::db::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT email FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("email unchanged");
     assert_eq!(live_email, old_email);
 }
 
@@ -1109,11 +1158,15 @@ async fn concurrent_requests_serialize_on_the_entity_lock_and_leave_one_pending_
     let (entity_id, session_id, _old_email) = human_with_session(&pool).await;
 
     let mut holder = pool.begin().await.expect("begin holder tx");
-    atom::db::query("SELECT id FROM entities WHERE id = $1 FOR UPDATE")
-        .bind(entity_id)
-        .fetch_one(holder.exec())
-        .await
-        .expect("hold the entity lock, as lock_active_entity would");
+    crate::common::db::query(
+        "SELECT id FROM entities WHERE id = $1 FOR UPDATE",
+        r#"SELECT id FROM entities WHERE id = $1"#,
+    )
+    .locked()
+    .bind(entity_id)
+    .fetch_one(holder.exec())
+    .await
+    .expect("hold the entity lock, as lock_active_entity would");
 
     let pool_a = pool.clone();
     let auth_a = session_auth(entity_id, session_id);

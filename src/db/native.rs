@@ -1,6 +1,5 @@
 //! Small helpers for domain repositories that write native SQL per backend
-//! (see `product-docs/development/database-backends/REPOSITORY-PATTERN.md`)
-//! instead of going through the [`super::translate`] compatibility layer.
+//! (see `product-docs/development/database-backends/REPOSITORY-PATTERN.md`).
 //! This is deliberately thin: encoding conventions shared by every SQLite
 //! adapter, not a query-building API.
 
@@ -11,9 +10,7 @@ use uuid::Uuid;
 /// parameter of an `id IN (SELECT unhex(value) FROM json_each($1))` filter, or
 /// of `NULLIF(instr($1, lower(hex(id))), 0)` to recover the caller's ordering
 /// (`instr` position is monotonic with array index because every element is
-/// the same fixed width). Kept in sync with `crate::db::arg`'s `UuidArray`
-/// encoding so a native SQLite adapter's wire format matches the general
-/// query layer's.
+/// the same fixed width). All SQLite adapters use this one encoding.
 pub fn uuid_array_json(ids: &[Uuid]) -> String {
     let simple: Vec<String> = ids.iter().map(|id| id.simple().to_string()).collect();
     serde_json::to_string(&simple).expect("a vec of strings always serializes")

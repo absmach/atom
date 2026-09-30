@@ -275,9 +275,11 @@ async fn the_schema_enforces_the_trim_and_length_decisions_against_direct_writes
         String::new(),
         "x".repeat(MAX_EXTERNAL_ID_LEN + 1),
     ] {
-        let err = atom::db::query(
+        let err = crate::common::db::query(
             "INSERT INTO entities (kind, name, external_id, tenant_id)
              VALUES ('device', $1, $2, $3)",
+            r#"INSERT INTO entities (kind, name, external_id, tenant_id)
+             VALUES ('device', $1, $2, $3)"#,
         )
         .bind(slug("direct"))
         .bind(&bad)
@@ -771,16 +773,16 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
 
     // A seq scan is genuinely cheapest on a handful of rows, so the plan only
     // means something once the table is big enough for the choice to matter.
-    atom::db::query(
-        "INSERT INTO entities (kind, name, external_id, tenant_id)
+    crate::common::db::query("INSERT INTO entities (kind, name, external_id, tenant_id)
          SELECT 'device', 'plan-filler-' || g, 'PLAN-FILLER-' || g, $1
-         FROM generate_series(1, 5000) g",
-    )
+         FROM generate_series(1, 5000) g", r#"INSERT INTO entities (kind, name, external_id, tenant_id)
+         SELECT 'device', 'plan-filler-' || g, 'PLAN-FILLER-' || g, $1
+         FROM (WITH RECURSIVE series(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < 5000) SELECT i AS g FROM series) AS g"#)
     .bind(tenant_id)
     .execute(&p)
     .await
     .expect("seed filler entities");
-    atom::db::query("ANALYZE entities")
+    crate::common::db::query("ANALYZE entities", r#"ANALYZE entities"#)
         .execute(&p)
         .await
         .expect("analyze");
@@ -789,12 +791,17 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
     // form and all — testing a hand-simplified query would prove nothing about
     // the resolver.
     let plan = if atom::db::testing::is_sqlite() {
-        let rows = atom::db::query(
+        let rows = crate::common::db::query(
             "EXPLAIN QUERY PLAN SELECT e.id
              FROM entities e
              WHERE e.deleted_at IS NULL
                AND ($1::uuid IS NULL OR e.tenant_id = $1)
                AND ($2::text IS NULL OR e.external_id = $2)",
+            r#"EXPLAIN QUERY PLAN SELECT e.id
+             FROM entities e
+             WHERE e.deleted_at IS NULL
+               AND $1 IS NULL
+               AND e.external_id = $2"#,
         )
         .bind(Option::<Uuid>::None)
         .bind(&serial)
@@ -806,12 +813,17 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
             .collect::<Vec<_>>()
             .join("\n")
     } else {
-        let plan: Vec<String> = atom::db::query_scalar(
+        let plan: Vec<String> = crate::common::db::query_scalar(
             "EXPLAIN SELECT e.id
              FROM entities e
              WHERE e.deleted_at IS NULL
                AND ($1::uuid IS NULL OR e.tenant_id = $1)
                AND ($2::text IS NULL OR e.external_id = $2)",
+            r#"EXPLAIN SELECT e.id
+             FROM entities e
+             WHERE e.deleted_at IS NULL
+               AND ($1 IS NULL OR e.tenant_id = $1)
+               AND ($2 IS NULL OR e.external_id = $2)"#,
         )
         .bind(Option::<Uuid>::None)
         .bind(&serial)
@@ -823,11 +835,14 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
 
     // Drop the filler before asserting, so a failure does not also leave 5000
     // rows behind for every other test sharing this database.
-    atom::db::query("DELETE FROM entities WHERE tenant_id = $1 AND name LIKE 'plan-filler-%'")
-        .bind(tenant_id)
-        .execute(&p)
-        .await
-        .expect("remove filler entities");
+    crate::common::db::query(
+        "DELETE FROM entities WHERE tenant_id = $1 AND name LIKE 'plan-filler-%'",
+        r#"DELETE FROM entities WHERE tenant_id = $1 AND name LIKE 'plan-filler-%'"#,
+    )
+    .bind(tenant_id)
+    .execute(&p)
+    .await
+    .expect("remove filler entities");
 
     assert!(
         plan.contains("idx_entities_external_id"),
@@ -842,12 +857,17 @@ async fn the_external_id_filter_uses_the_index_rather_than_scanning() {
 // ─── The value travels on the domain events ────────────────────────────────
 
 async fn latest_outbox_details(pool: &Database, target_id: Uuid, event: &str) -> serde_json::Value {
-    atom::db::query_scalar::<serde_json::Value>(
+    crate::common::db::query_scalar::<serde_json::Value>(
         "SELECT payload -> 'details'
          FROM event_outbox
          WHERE event = $1 AND payload ->> 'target_id' = $2::text
          ORDER BY created_at DESC
          LIMIT 1",
+        r#"SELECT payload -> 'details'
+         FROM event_outbox
+         WHERE event = $1 AND payload ->> 'target_id' = $2
+         ORDER BY created_at DESC
+         LIMIT 1"#,
     )
     .bind(event)
     .bind(target_id.to_string())
@@ -938,8 +958,9 @@ async fn rows_written_without_an_external_id_are_untouched_by_the_migration() {
     // Stands in for a row that predates the migration: written through the
     // column list as it was before, so the new column takes its default.
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)",
+        r#"INSERT INTO entities (id, kind, name, tenant_id) VALUES ($1, 'device', $2, $3)"#,
     )
     .bind(id)
     .bind(slug("legacy"))
@@ -979,11 +1000,13 @@ async fn every_pre_existing_entity_survived_the_migration_with_a_null_external_i
 
     // The seeded bootstrap rows (`atom-admin` et al.) predate this column in
     // every existing deployment.
-    let seeded: Option<String> =
-        atom::db::query_scalar("SELECT external_id FROM entities WHERE id = $1")
-            .bind(common::admin_id())
-            .fetch_one(&p)
-            .await
-            .expect("read the seeded admin entity");
+    let seeded: Option<String> = crate::common::db::query_scalar(
+        "SELECT external_id FROM entities WHERE id = $1",
+        r#"SELECT external_id FROM entities WHERE id = $1"#,
+    )
+    .bind(common::admin_id())
+    .fetch_one(&p)
+    .await
+    .expect("read the seeded admin entity");
     assert_eq!(seeded, None);
 }

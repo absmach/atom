@@ -144,7 +144,13 @@ pub async fn rotate_tenant_issuer(
 ) -> AuthorityRecord {
     // Retire the currently-active tenant intermediate so
     // `provision_tenant_automatically_in_tx` mints a new one.
-    atom::db::query(
+    crate::common::db::query(
+        r#"UPDATE pki_authorities
+           SET status = 'retiring', issuance_enabled = false,
+               retiring_at = now(), updated_at = now()
+           WHERE tenant_id = $1
+             AND kind = 'tenant_intermediate'
+             AND status = 'active'"#,
         r#"UPDATE pki_authorities
            SET status = 'retiring', issuance_enabled = false,
                retiring_at = now(), updated_at = now()
@@ -397,20 +403,21 @@ fn normalize_hex(value: &str) -> String {
 
 pub async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("{prefix}-{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("{prefix}-{id}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
 pub async fn create_entity(pool: &Database, tenant_id: Uuid, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')"#)
     .bind(id)
     .bind(format!("{prefix}-{id}"))
     .bind(tenant_id)
@@ -422,8 +429,9 @@ pub async fn create_entity(pool: &Database, tenant_id: Uuid, prefix: &str) -> Uu
 
 pub async fn create_global_entity(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
     )
     .bind(id)
     .bind(format!("{prefix}-{id}"))
@@ -547,7 +555,20 @@ async fn insert_bare_authority_row(
     not_after: chrono::DateTime<chrono::Utc>,
 ) {
     let issuance_enabled = matches!(kind, "platform_leaf_issuer" | "tenant_intermediate");
-    atom::db::query(
+    crate::common::db::query(
+        r#"
+        INSERT INTO pki_authorities (
+            id, tenant_id, parent_id, kind, version, status, issuance_enabled,
+            subject, serial_number, fingerprint_sha256,
+            certificate_pem, chain_pem, not_before, not_after,
+            key_backend, key_reference
+        ) VALUES ($1, $2, $3, $4, $5, 'active', $6,
+                  $7, $8, $9,
+                  '-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n',
+                  '-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n',
+                  $10, $11,
+                  'pkcs11', $12)
+        "#,
         r#"
         INSERT INTO pki_authorities (
             id, tenant_id, parent_id, kind, version, status, issuance_enabled,

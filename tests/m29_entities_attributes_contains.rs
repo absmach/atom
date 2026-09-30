@@ -42,12 +42,15 @@ fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
 
 async fn make_tenant(pool: &Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("{name}-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("{name}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
@@ -59,7 +62,9 @@ async fn make_entity(
     attributes: Value,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
         r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
            VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
@@ -82,7 +87,9 @@ async fn make_object_group(
     attributes: Value,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO object_groups (id, name, tenant_id, status, attributes)
+           VALUES ($1, $2, $3, $4, $5)"#,
         r#"INSERT INTO object_groups (id, name, tenant_id, status, attributes)
            VALUES ($1, $2, $3, $4, $5)"#,
     )
@@ -100,7 +107,9 @@ async fn make_object_group(
 /// Object-scoped `read` allow for `subject_id` on one object, mirroring how the
 /// GraphQL surface grants a subject visibility of a single entity or group.
 async fn grant_read(pool: &Database, tenant_id: Uuid, subject_id: Uuid, object_id: Uuid) {
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
     )
@@ -109,7 +118,9 @@ async fn grant_read(pool: &Database, tenant_id: Uuid, subject_id: Uuid, object_i
     .fetch_one(pool)
     .await
     .expect("insert read block");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+           SELECT $1, id FROM actions WHERE name = 'read'"#,
         r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            SELECT $1, id FROM actions WHERE name = 'read'"#,
     )
@@ -117,7 +128,9 @@ async fn grant_read(pool: &Database, tenant_id: Uuid, subject_id: Uuid, object_i
     .execute(pool)
     .await
     .expect("insert read action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )

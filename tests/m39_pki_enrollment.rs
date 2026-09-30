@@ -265,7 +265,12 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     assert_eq!(replay["idempotent_replay"], true);
 
     // Headers never substitute for the connection-bound extension.
-    let native_denials_before: i64 = atom::db::query_scalar(
+    let native_denials_before: i64 = crate::common::db::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->>'outcome' = 'deny'
+             AND payload->'details'->>'transport' = 'native'"#,
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -294,7 +299,12 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     // Missing-peer failures happen before authentication on this public
     // endpoint. They are observable through metrics and tracing, but must not
     // let anonymous traffic amplify durable outbox writes.
-    let native_denials_after: i64 = atom::db::query_scalar(
+    let native_denials_after: i64 = crate::common::db::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->>'outcome' = 'deny'
+             AND payload->'details'->>'transport' = 'native'"#,
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -356,11 +366,14 @@ async fn native_enrollment_enforces_the_pr014_contract() {
     };
 
     // Runtime lifecycle state remains authoritative after TLS verification.
-    atom::db::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
-        .bind(access_entity)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE entities SET status = 'inactive' WHERE id = $1",
+        r#"UPDATE entities SET status = 'inactive' WHERE id = $1"#,
+    )
+    .bind(access_entity)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_reenrollment_denied(
         address,
         &server_cert_pem,
@@ -368,17 +381,23 @@ async fn native_enrollment_enforces_the_pr014_contract() {
         "inactive-entity",
     )
     .await;
-    atom::db::query("UPDATE entities SET status = 'active' WHERE id = $1")
-        .bind(access_entity)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE entities SET status = 'active' WHERE id = $1",
+        r#"UPDATE entities SET status = 'active' WHERE id = $1"#,
+    )
+    .bind(access_entity)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    atom::db::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
-        .bind(tenant)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'frozen' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'frozen' WHERE id = $1"#,
+    )
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_reenrollment_denied(
         address,
         &server_cert_pem,
@@ -386,39 +405,40 @@ async fn native_enrollment_enforces_the_pr014_contract() {
         "frozen-tenant",
     )
     .await;
-    atom::db::query("UPDATE tenants SET status = 'active' WHERE id = $1")
-        .bind(tenant)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'active' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'active' WHERE id = $1"#,
+    )
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let original_fingerprint: String = atom::db::query_scalar(
+    let original_fingerprint: String = crate::common::db::query_scalar(
         "SELECT metadata->>'fingerprint_sha256' FROM credentials WHERE id = $1",
+        r#"SELECT metadata->>'fingerprint_sha256' FROM credentials WHERE id = $1"#,
     )
     .bind(renewed_credential)
     .fetch_one(&pool)
     .await
     .unwrap();
-    atom::db::query(
-        "UPDATE credentials SET metadata = jsonb_set(metadata, '{fingerprint_sha256}', to_jsonb($2::text)) WHERE id = $1",
-    )
+    crate::common::db::query("UPDATE credentials SET metadata = jsonb_set(metadata, '{fingerprint_sha256}', to_jsonb($2::text)) WHERE id = $1", r#"UPDATE credentials SET metadata = json_set(metadata, '$.fingerprint_sha256', json(json_quote($2))) WHERE id = $1"#)
     .bind(renewed_credential)
     .bind("00".repeat(32))
     .execute(&pool)
     .await
     .unwrap();
     assert_reenrollment_denied(address, &server_cert_pem, &renewed_identity, "unknown-peer").await;
-    atom::db::query(
-        "UPDATE credentials SET metadata = jsonb_set(metadata, '{fingerprint_sha256}', to_jsonb($2::text)) WHERE id = $1",
-    )
+    crate::common::db::query("UPDATE credentials SET metadata = jsonb_set(metadata, '{fingerprint_sha256}', to_jsonb($2::text)) WHERE id = $1", r#"UPDATE credentials SET metadata = json_set(metadata, '$.fingerprint_sha256', json(json_quote($2))) WHERE id = $1"#)
     .bind(renewed_credential)
     .bind(original_fingerprint)
     .execute(&pool)
     .await
     .unwrap();
 
-    atom::db::query(
+    crate::common::db::query(
         "UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1",
+        r#"UPDATE credentials SET expires_at = atom_ts_add(now(), -(1)) WHERE id = $1"#,
     )
     .bind(renewed_credential)
     .execute(&pool)
@@ -470,8 +490,9 @@ async fn native_enrollment_enforces_the_pr014_contract() {
         profile_shape(&management.certificate_pem),
         profile_shape(&first_certificate)
     );
-    let expected_threshold: i64 = atom::db::query_scalar(
+    let expected_threshold: i64 = crate::common::db::query_scalar(
         "SELECT renewal_threshold_seconds FROM certificate_profiles WHERE id = $1",
+        r#"SELECT renewal_threshold_seconds FROM certificate_profiles WHERE id = $1"#,
     )
     .bind(uuid(&first, "profile_id"))
     .fetch_one(&pool)
@@ -574,17 +595,16 @@ async fn native_enrollment_enforces_the_pr014_contract() {
             ..
         })
     ));
-    let rate_count: i64 = atom::db::query_scalar(
-        "SELECT request_count FROM pki_enrollment_rate_windows WHERE scope_kind = 'entity' AND scope_id = $1 ORDER BY window_start DESC LIMIT 1",
-    )
+    let rate_count: i64 = crate::common::db::query_scalar("SELECT request_count FROM pki_enrollment_rate_windows WHERE scope_kind = 'entity' AND scope_id = $1 ORDER BY window_start DESC LIMIT 1", r#"SELECT request_count FROM pki_enrollment_rate_windows WHERE scope_kind = 'entity' AND scope_id = $1 ORDER BY window_start DESC LIMIT 1"#)
     .bind(rate_entity)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(rate_count, 1);
 
-    atom::db::query(
+    crate::common::db::query(
         "DELETE FROM pki_enrollment_rate_windows WHERE scope_kind = 'tenant' AND scope_id = $1",
+        r#"DELETE FROM pki_enrollment_rate_windows WHERE scope_kind = 'tenant' AND scope_id = $1"#,
     )
     .bind(tenant)
     .execute(&pool)
@@ -915,17 +935,22 @@ fn profile_shape(pem: &str) -> (bool, bool, bool, usize) {
 }
 
 async fn audit_count(pool: &atom::db::Database, event: &str) -> i64 {
-    atom::db::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE event = $1")
-        .bind(event)
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM audit_logs WHERE event = $1",
+        r#"SELECT COUNT(*) FROM audit_logs WHERE event = $1"#,
+    )
+    .bind(event)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn outbox_count(pool: &atom::db::Database, event: &str) -> i64 {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM event_outbox
          WHERE event = $1 AND payload->>'outcome' = 'allow'",
+        r#"SELECT COUNT(*) FROM event_outbox
+         WHERE event = $1 AND payload->>'outcome' = 'allow'"#,
     )
     .bind(event)
     .fetch_one(pool)

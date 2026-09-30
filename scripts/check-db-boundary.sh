@@ -1,64 +1,56 @@
 #!/usr/bin/env bash
 # Guards the database-backend boundary (see product-docs/development/database-backends/).
 #
-# 1. Application code never names a database driver, with two exceptions:
-#    - crate::db (src/db/) — the general-purpose query layer and translator
-#      most domains still route through.
-#    - a domain's own backend adapters, named `postgres.rs`/`sqlite.rs`
-#      (REPOSITORY-PATTERN.md) — each owns native SQL for its one backend and
-#      is never imported from outside its parent module.
-#    Everywhere else, a statement goes through one of those so it can run on
-#    PostgreSQL or SQLite.
-# 2. The SQLite baseline declares the same tables, indexes and views as the
-#    PostgreSQL baseline, so the two schemas cannot drift apart unnoticed.
+# Native driver calls belong to private domain adapters or shared DB infrastructure.
+# There is no generic query API or runtime translator. The schema checks below
+# also require paired forward migrations and matching tables/views/indexes.
 set -euo pipefail
 
 status=0
+if ! python3 - <<'BOUNDARY'
+from pathlib import Path
+import re
+import sys
 
-# --- 1. no driver types or raw sqlx queries outside src/db/ or an adapter ----
-violations="$(
-  grep -rnE 'sqlx::(query|query_as|query_scalar|postgres|sqlite|Postgres|Sqlite|PgPool|PgConnection|SqlitePool|SqliteConnection|Pool|Transaction)\b|\bPgPool\b|\bPgConnection\b|\bSqlitePool\b|::migrate!' \
-    src --include='*.rs' \
-  | grep -v '^src/db/' \
-  | grep -vE '^[^:]+/(postgres|sqlite)\.rs:' \
-  | grep -vE '^[^:]+:[0-9]+:\s*//' \
-  || true
-)"
-# Test modules may talk to a driver directly to exercise PostgreSQL-specific
-# behaviour; production code may not.
-violations="$(printf '%s\n' "${violations}" | awk -F: '
-  NF > 2 { print }
-' | while IFS= read -r line; do
-  file="${line%%:*}"
-  lineno="$(printf '%s' "${line}" | cut -d: -f2)"
-  # Skip lines inside a #[cfg(test)] module (everything after the marker).
-  marker="$(grep -n '#\[cfg(test)\]' "${file}" | head -1 | cut -d: -f1 || true)"
-  if [[ -n "${marker}" && "${lineno}" -gt "${marker}" ]]; then
-    continue
-  fi
-  printf '%s\n' "${line}"
-done)"
+bad = []
+for legacy in ("src/db/query.rs", "src/db/translate.rs"):
+    if Path(legacy).exists():
+        bad.append(f"{legacy}: runtime query compatibility layer must not return")
 
-if [[ -n "${violations}" ]]; then
-  echo "database driver types must stay inside src/db/ or a domain's postgres.rs/sqlite.rs adapter; found:" >&2
-  printf '%s\n' "${violations}" >&2
-  status=1
-fi
+raw = re.compile(r"sqlx::(?:query(?:_as|_scalar)?|postgres|sqlite|Postgres|Sqlite|PgPool|PgConnection|SqlitePool|SqliteConnection|Pool|Transaction)\b|\b(?:PgPool|PgConnection|SqlitePool|SqliteConnection)\b|::migrate!")
+legacy = re.compile(r"\b(?:crate::|atom::)?db::(?:translate|query(?:_as|_scalar)?|QueryBuilder|DbArg|ArgKind)\b")
+for path in Path("src").rglob("*.rs"):
+    source = path.read_text()
+    # Ignore test module bodies, not arbitrary cfg(test) imports earlier in a file.
+    production = re.split(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:mod\s+\w+\s*\{|(?:async\s+)?fn\s+)", source, maxsplit=1)[0]
+    infrastructure = path.is_relative_to("src/db")
+    adapter = path.name in ("postgres.rs", "sqlite.rs")
+    if not infrastructure and not adapter:
+        for imported in re.finditer(r"\buse\s+sqlx(?:::|\s+as\s+)\s*([^;]+);", production, re.S):
+            if re.search(r"\b(?:query(?:_as|_scalar)?|QueryBuilder|PgPool|PgConnection|SqlitePool|SqliteConnection|Postgres|Sqlite|Executor|Row)\b", imported[1]):
+                bad.append(f"{path}: driver/query imports belong in a native adapter")
+    if not infrastructure and re.search(r"\bpub(?:\([^)]*\))?\s+use\s+[^;]*(?:postgres|sqlite)::", production):
+        bad.append(f"{path}: backend operations must not be publicly re-exported")
+    for number, line in enumerate(production.splitlines(), 1):
+        if line.lstrip().startswith("//"):
+            continue
+        if legacy.search(line):
+            bad.append(f"{path}:{number}: generic database queries/translation are forbidden")
+        if not infrastructure and not adapter and raw.search(line):
+            bad.append(f"{path}:{number}: driver types and queries belong in a native adapter")
+        public_adapter = re.search(r"\bpub(?:\([^)]*\))?\s+mod\s+(postgres|sqlite)\s*;", line)
+        if public_adapter and not infrastructure:
+            # These modules only share canonical SQL fragments, never execute queries.
+            if str(path) != "src/authz/sql/mod.rs" or "pub(crate)" not in line:
+                bad.append(f"{path}:{number}: backend adapters must be private")
+    if path.parent == Path("src/authz/sql") and raw.search(production):
+        bad.append(f"{path}: shared SQL fragments must not execute database operations")
 
-# --- 1b. every postgres.rs/sqlite.rs adapter is private to its own domain ---
-# Rust's own privacy check is the enforcement (mod, not pub mod, so a caller
-# outside the domain fails to compile) — this just catches the exemption
-# above being handed to a module that forgot to keep them private, since that
-# would silently widen it to "anywhere in src/".
-publicized_adapters="$(
-  for adapter in $(find src -type f \( -name postgres.rs -o -name sqlite.rs \) -not -path 'src/db/*'); do
-    backend="$(basename "${adapter}" .rs)"
-    grep -lE "^pub mod ${backend};" "$(dirname "${adapter}")"/mod.rs 2>/dev/null || true
-  done
-)"
-if [[ -n "${publicized_adapters}" ]]; then
-  echo "a postgres.rs/sqlite.rs adapter is declared pub mod, widening the exemption above beyond its own domain; found:" >&2
-  printf '%s\n' "${publicized_adapters}" >&2
+if bad:
+    print("\n".join(bad), file=sys.stderr)
+    sys.exit(1)
+BOUNDARY
+then
   status=1
 fi
 

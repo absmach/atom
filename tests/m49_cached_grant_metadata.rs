@@ -59,8 +59,9 @@ fn authed(entity_id: Uuid, cache: Arc<CacheClient>, query: impl Into<String>) ->
 
 async fn active_entity(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
     )
     .bind(id)
     .bind(format!("m49-entity-{id}"))
@@ -72,21 +73,26 @@ async fn active_entity(pool: &Database) -> Uuid {
 
 async fn channel(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
-        .bind(id)
-        .bind(format!("m49-channel-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert channel");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)",
+        r#"INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)"#,
+    )
+    .bind(id)
+    .bind(format!("m49-channel-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert channel");
     id
 }
 
 async fn read_block(pool: &Database) -> Uuid {
-    let action_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-            .fetch_one(pool)
-            .await
-            .expect("read action");
+    let action_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read action");
     authz_repo::create_permission_block(
         pool,
         CreatePermissionBlock {

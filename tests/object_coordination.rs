@@ -86,13 +86,14 @@ async fn batch_is_atomic_replayable_and_native_updates_advance_snapshot_revision
         ))
         .await;
     assert_eq!(conflict.errors[0].message, "REVISION_CONFLICT");
-    assert!(
-        !atom::db::query_scalar::<bool>("SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)")
-            .bind(absent)
-            .fetch_one(&pool)
-            .await
-            .expect("exists")
-    );
+    assert!(!crate::common::db::query_scalar::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)",
+        r#"SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)"#
+    )
+    .bind(absent)
+    .fetch_one(&pool)
+    .await
+    .expect("exists"));
     // Response snapshots remain self-consistent in ordinary list and get paths.
     let read=schema.execute(request("query($id:ID!) { resource(id:$id) { attributes revision } resources(kind:\"test_record\",limit:100) { items { id attributes revision } } }",json!({"id":b}))).await;
     assert!(read.errors.is_empty(), "{:?}", read.errors);
@@ -100,8 +101,9 @@ async fn batch_is_atomic_replayable_and_native_updates_advance_snapshot_revision
         read.data.into_json().expect("JSON")["resource"]["revision"],
         2
     );
-    let audit_count: i64 = atom::db::query_scalar(
+    let audit_count: i64 = crate::common::db::query_scalar(
         "SELECT count(*) FROM audit_logs WHERE target_id=$1 AND event='entity.create'",
+        r#"SELECT count(*) FROM audit_logs WHERE target_id=$1 AND event='entity.create'"#,
     )
     .bind(a)
     .fetch_one(&pool)
@@ -161,8 +163,9 @@ async fn lease_expiry_fences_stale_workers_and_release_cannot_release_successor(
         ))
         .await;
     assert!(success.errors.is_empty(), "{:?}", success.errors);
-    atom::db::query(
+    crate::common::db::query(
         "UPDATE object_leases SET expires_at=now()-interval '1 second' WHERE object_id=$1",
+        r#"UPDATE object_leases SET expires_at=atom_ts_add(now(), -(1)) WHERE object_id=$1"#,
     )
     .bind(app)
     .execute(&pool)
@@ -198,12 +201,15 @@ async fn access_controls_and_config_management_apply_to_every_batch_target() {
     let id = Uuid::new_v4();
     commit(&schema, json!([create(id, "resource")])).await;
     let outsider = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities(id,kind,name) VALUES($1,'human',$2)")
-        .bind(outsider)
-        .bind(format!("outsider-{outsider}"))
-        .execute(&pool)
-        .await
-        .expect("human");
+    crate::common::db::query(
+        "INSERT INTO entities(id,kind,name) VALUES($1,'human',$2)",
+        r#"INSERT INTO entities(id,kind,name) VALUES($1,'human',$2)"#,
+    )
+    .bind(outsider)
+    .bind(format!("outsider-{outsider}"))
+    .execute(&pool)
+    .await
+    .expect("human");
     let forbidden = schema
         .execute(
             Request::new(COMMIT)
@@ -235,11 +241,14 @@ async fn access_controls_and_config_management_apply_to_every_batch_target() {
         )
         .await;
     assert_eq!(scoped.errors[0].message, "forbidden");
-    atom::db::query("UPDATE resources SET managed_by='config' WHERE id=$1")
-        .bind(id)
-        .execute(&pool)
-        .await
-        .expect("managed");
+    crate::common::db::query(
+        "UPDATE resources SET managed_by='config' WHERE id=$1",
+        r#"UPDATE resources SET managed_by='config' WHERE id=$1"#,
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .expect("managed");
     let managed = schema
         .execute(request(
             COMMIT,
@@ -542,9 +551,7 @@ async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
         ]),
     )
     .await;
-    let audits: Vec<String> = atom::db::query_scalar(
-        "SELECT event FROM audit_logs WHERE target_id=ANY($1) ORDER BY event",
-    )
+    let audits: Vec<String> = crate::common::db::query_scalar("SELECT event FROM audit_logs WHERE target_id=ANY($1) ORDER BY event", r#"SELECT event FROM audit_logs WHERE target_idIN (SELECT unhex(value) FROM json_each($1)) ORDER BY event"#)
     .bind(vec![app, data, absent])
     .fetch_all(&pool)
     .await
@@ -558,9 +565,7 @@ async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
             "resource.update"
         ]
     );
-    let events: Vec<String> = atom::db::query_scalar(
-        "SELECT event FROM event_outbox WHERE payload->>'target_id'=ANY($1) ORDER BY event",
-    )
+    let events: Vec<String> = crate::common::db::query_scalar("SELECT event FROM event_outbox WHERE payload->>'target_id'=ANY($1) ORDER BY event", r#"SELECT event FROM event_outbox WHERE payload->>'target_id'IN (SELECT value FROM json_each($1)) ORDER BY event"#)
     .bind(vec![app.to_string(), data.to_string(), absent.to_string()])
     .fetch_all(&pool)
     .await

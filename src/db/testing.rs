@@ -137,10 +137,11 @@ pub async fn install_rejecting_trigger(
         )],
     };
     for statement in statements {
-        super::query(&statement)
-            .execute(db)
-            .await
-            .unwrap_or_else(|e| panic!("install rejecting trigger {name}: {e}"));
+        match db {
+            Database::Postgres(pool) => sqlx::query(&statement).execute(pool).await.map(|_| ()),
+            Database::Sqlite(db) => sqlx::query(&statement).execute(&db.pool).await.map(|_| ()),
+        }
+        .unwrap_or_else(|e| panic!("install rejecting trigger {name}: {e}"));
     }
 }
 
@@ -155,9 +156,10 @@ pub async fn drop_rejecting_trigger(db: &Database, name: &str, table: &str) {
         super::DatabaseKind::Sqlite => vec![format!("DROP TRIGGER IF EXISTS {name}")],
     };
     for statement in statements {
-        super::query(&statement)
-            .execute(db)
-            .await
-            .unwrap_or_else(|e| panic!("drop rejecting trigger {name}: {e}"));
+        match db {
+            Database::Postgres(pool) => sqlx::query(&statement).execute(pool).await.map(|_| ()),
+            Database::Sqlite(db) => sqlx::query(&statement).execute(&db.pool).await.map(|_| ()),
+        }
+        .unwrap_or_else(|e| panic!("drop rejecting trigger {name}: {e}"));
     }
 }
