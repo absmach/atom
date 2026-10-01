@@ -126,6 +126,12 @@ Provider settings are read only by the adapter that uses them:
 For MinIO or SeaweedFS set `ATOM_STORAGE_S3_ENDPOINT` and, over plain HTTP,
 `ATOM_STORAGE_S3_ALLOW_HTTP=true`.
 
+In the container image, `/app/data` belongs to the `atom` user. For the
+`local` backend, mount a named volume there and set
+`ATOM_STORAGE_LOCAL_PATH=/app/data/files`. A bind mount keeps the host
+directory's owner, so `chown 1000:1000` it first; on Kubernetes, set
+`securityContext.fsGroup: 1000`.
+
 At startup Atom writes, reads back and deletes a probe object under
 `<prefix>/_probe/`; an unreachable or read-only store fails startup.
 
