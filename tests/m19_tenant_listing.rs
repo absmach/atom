@@ -34,18 +34,21 @@ fn actx(id: Uuid) -> atom::auth::AuthContext {
 
 async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("m19-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("m19-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn make_human(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')")
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')"#)
         .bind(id)
         .bind(format!("m19-ent-{id}"))
         .bind(tenant_id)
@@ -57,8 +60,9 @@ async fn make_human(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid 
 
 async fn make_channel(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)"#,
     )
     .bind(id)
     .bind(format!("m19-channel-{id}"))
@@ -70,10 +74,13 @@ async fn make_channel(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
 }
 
 async fn read_id(pool: &atom::db::Database) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("read cap")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read cap")
 }
 
 async fn make_principal_group(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
@@ -107,16 +114,15 @@ async fn read_role(pool: &atom::db::Database, tenant_id: Uuid, effect: &str) -> 
     )
     .await
     .expect("create role");
-    let block: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, tenant_id, effect) VALUES ('tenant', $1, $2) RETURNING id",
-    )
+    let block: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, tenant_id, effect) VALUES ('tenant', $1, $2) RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect) VALUES ('tenant', $1, $2) RETURNING id"#)
     .bind(tenant_id)
     .bind(effect)
     .fetch_one(pool)
     .await
     .expect("block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(read)
@@ -167,10 +173,13 @@ async fn visible_tenant_ids_with_filters(
 }
 
 async fn add_membership(pool: &atom::db::Database, tenant_id: Uuid, entity_id: Uuid, status: &str) {
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id, status)
          VALUES ($1, $2, $3)
          ON CONFLICT (tenant_id, entity_id) DO UPDATE SET status = EXCLUDED.status",
+        r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id, entity_id) DO UPDATE SET status = EXCLUDED.status"#,
     )
     .bind(tenant_id)
     .bind(entity_id)
@@ -320,12 +329,15 @@ async fn membership_does_not_list_non_active_tenant() {
             "an active tenant with active membership must be listed"
         );
 
-        atom::db::query("UPDATE tenants SET status = $2 WHERE id = $1")
-            .bind(target)
-            .bind(status)
-            .execute(&p)
-            .await
-            .expect("set tenant status");
+        crate::common::db::query(
+            "UPDATE tenants SET status = $2 WHERE id = $1",
+            r#"UPDATE tenants SET status = $2 WHERE id = $1"#,
+        )
+        .bind(target)
+        .bind(status)
+        .execute(&p)
+        .await
+        .expect("set tenant status");
 
         assert!(
             !visible_tenant_ids(&p, caller).await.contains(&target),
@@ -447,10 +459,13 @@ async fn tenant_visible_via_parent_group_role() {
 }
 
 async fn manage_id(pool: &atom::db::Database) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("manage cap")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'manage' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'manage' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("manage cap")
 }
 
 /// Insert a permission block (raw, bypassing applicability validation) and link
@@ -464,9 +479,7 @@ async fn direct_block(
     effect: &str,
     action: Uuid,
 ) {
-    let block: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ($1, $2, $3, $4) RETURNING id",
-    )
+    let block: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ($1, $2, $3, $4) RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ($1, $2, $3, $4) RETURNING id"#)
     .bind(scope_mode)
     .bind(tenant)
     .bind(object_kind)
@@ -474,15 +487,16 @@ async fn direct_block(
     .fetch_one(pool)
     .await
     .expect("block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(action)
     .execute(pool)
     .await
     .expect("block action");
-    atom::db::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+    crate::common::db::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)", r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)"#)
         .bind(tenant)
         .bind(caller)
         .bind(block)
@@ -574,15 +588,14 @@ async fn tenant_visible_via_role_object_kind_grant() {
     )
     .await
     .expect("create role");
-    let block: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ('object_kind', $1, 'tenant', 'allow') RETURNING id",
-    )
+    let block: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ('object_kind', $1, 'tenant', 'allow') RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, tenant_id, object_kind, effect) VALUES ('object_kind', $1, 'tenant', 'allow') RETURNING id"#)
     .bind(target)
     .fetch_one(&p)
     .await
     .expect("block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(read)
@@ -640,12 +653,15 @@ async fn non_active_tenant_hidden_from_scoped_listing() {
             "an active tenant with a read allow must be listed"
         );
 
-        atom::db::query("UPDATE tenants SET status = $2 WHERE id = $1")
-            .bind(target)
-            .bind(status)
-            .execute(&p)
-            .await
-            .expect("set tenant status");
+        crate::common::db::query(
+            "UPDATE tenants SET status = $2 WHERE id = $1",
+            r#"UPDATE tenants SET status = $2 WHERE id = $1"#,
+        )
+        .bind(target)
+        .bind(status)
+        .execute(&p)
+        .await
+        .expect("set tenant status");
 
         assert!(
             !visible_tenant_ids(&p, caller).await.contains(&target),
@@ -705,27 +721,21 @@ async fn tenant_visibility_is_capped_by_access_token_ceiling() {
 
     // Scoped credential whose ceiling covers only tenant_a (tenant scope mode).
     let cred_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO credentials (id, entity_id, kind, scoped) VALUES ($1, $2, 'access_token', true)",
-    )
+    crate::common::db::query("INSERT INTO credentials (id, entity_id, kind, scoped) VALUES ($1, $2, 'access_token', true)", r#"INSERT INTO credentials (id, entity_id, kind, scoped) VALUES ($1, $2, 'access_token', true)"#)
     .bind(cred_id)
     .bind(caller)
     .execute(&p)
     .await
     .expect("credential");
     let limit_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO credential_permission_limits (id, credential_id, scope_mode, tenant_id) VALUES ($1, $2, 'tenant', $3)",
-    )
+    crate::common::db::query("INSERT INTO credential_permission_limits (id, credential_id, scope_mode, tenant_id) VALUES ($1, $2, 'tenant', $3)", r#"INSERT INTO credential_permission_limits (id, credential_id, scope_mode, tenant_id) VALUES ($1, $2, 'tenant', $3)"#)
     .bind(limit_id)
     .bind(cred_id)
     .bind(tenant_a)
     .execute(&p)
     .await
     .expect("limit");
-    atom::db::query(
-        "INSERT INTO credential_permission_limit_actions (limit_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'",
-    )
+    crate::common::db::query("INSERT INTO credential_permission_limit_actions (limit_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'", r#"INSERT INTO credential_permission_limit_actions (limit_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'"#)
     .bind(limit_id)
     .execute(&p)
     .await
@@ -739,7 +749,7 @@ async fn tenant_visibility_is_capped_by_access_token_ceiling() {
     );
 
     // A conditional ceiling entry cannot satisfy the listing (fail closed).
-    atom::db::query("UPDATE credential_permission_limits SET conditions = '{\"context.mfa\": true}'::jsonb WHERE id = $1")
+    crate::common::db::query("UPDATE credential_permission_limits SET conditions = '{\"context.mfa\": true}'::jsonb WHERE id = $1", r#"UPDATE credential_permission_limits SET conditions = '{"context.mfa": true}' WHERE id = $1"#)
         .bind(limit_id)
         .execute(&p)
         .await

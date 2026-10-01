@@ -109,9 +109,9 @@ jobs:
       - name: Vendored proto matches upstream
         run: scripts/check-vendored-proto.sh
 
-      # Application code reaches the database only through crate::db, and the
-      # SQLite baseline must declare the same tables, views and indexes as the
-      # PostgreSQL one; this fails on either kind of drift before tests run.
+      # Driver access stays in native domain adapters or DB infrastructure;
+      # runtime SQL translation is forbidden. Paired migrations must declare
+      # matching tables, views and indexes before behavioral tests run.
       - name: Database boundary and schema parity
         run: scripts/check-db-boundary.sh
 
@@ -180,8 +180,8 @@ jobs:
       # needs no service: each binary gets its own fresh database file, so every
       # binary starts from the migrated baseline exactly as the PostgreSQL loop
       # above does. Redis is still shared (and flushed) for the cache-gated
-      # suites. m42_pki_pkcs11 is exercised on PostgreSQL only: it proves the
-      # HSM key backend, which is independent of the storage engine.
+      # suites. The disposable SoftHSM token also exercises native SQLite PKI
+      # persistence; the PostgreSQL database remains available for recovery.
       - name: Run tests on SQLite (each binary against a fresh database file)
         env:
           ATOM_TEST_REDIS_URL: redis://localhost:6379/0
@@ -199,7 +199,7 @@ jobs:
           for f in tests/*.rs; do
             name="$(basename "$f" .rs)"
             case "$name" in
-              m27_live_amqp_delivery|m28_amqp_mtls_local_principal|m42_pki_pkcs11) continue ;;
+              m27_live_amqp_delivery|m28_amqp_mtls_local_principal) continue ;;
             esac
             export ATOM_TEST_SQLITE_PATH="${RUNNER_TEMP}/atom-test-${name}.db"
             run_one_sqlite --test "$name"

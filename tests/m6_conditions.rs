@@ -17,11 +17,14 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn capability_id(pool: &atom::db::Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("capability")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1 LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = $1 LIMIT 1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("capability")
 }
 
 async fn tenant(pool: &atom::db::Database) -> Uuid {
@@ -43,9 +46,7 @@ async fn tenant(pool: &atom::db::Database) -> Uuid {
 
 async fn entity(pool: &atom::db::Database, kind: &str, attrs: serde_json::Value) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, status, attributes) VALUES ($1, $2, $3, 'active', $4)",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, status, attributes) VALUES ($1, $2, $3, 'active', $4)", r#"INSERT INTO entities (id, kind, name, status, attributes) VALUES ($1, $2, $3, 'active', $4)"#)
     .bind(id)
     .bind(kind)
     .bind(format!("m6-ent-{id}"))
@@ -58,9 +59,7 @@ async fn entity(pool: &atom::db::Database, kind: &str, attrs: serde_json::Value)
 
 async fn channel(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO resources (id, kind, name, tenant_id, attributes) VALUES ($1, 'channel', $2, $3, $4)",
-    )
+    crate::common::db::query("INSERT INTO resources (id, kind, name, tenant_id, attributes) VALUES ($1, 'channel', $2, $3, $4)", r#"INSERT INTO resources (id, kind, name, tenant_id, attributes) VALUES ($1, 'channel', $2, $3, $4)"#)
     .bind(id)
     .bind(format!("m6-channel-{id}"))
     .bind(tenant_id)

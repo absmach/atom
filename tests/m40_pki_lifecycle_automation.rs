@@ -82,12 +82,15 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
 
     // A tenant issuer at the exact 30-day lead boundary is surfaced early
     // enough to run the PR-003 rotation procedure.
-    atom::db::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
-        .bind(expiring_authority.id)
-        .bind(now + Duration::days(30))
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE pki_authorities SET not_after = $2 WHERE id = $1",
+        r#"UPDATE pki_authorities SET not_after = $2 WHERE id = $1"#,
+    )
+    .bind(expiring_authority.id)
+    .bind(now + Duration::days(30))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Disabling automation is a no-op and does not affect normal issuance.
     let disabled = lifecycle::sweep_once(
@@ -134,9 +137,7 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
 
     // A later profile snapshot/correction may move the timestamp but does not
     // create a second logical renewal-window notification for this certificate.
-    atom::db::query(
-        "UPDATE credentials SET metadata = jsonb_set(metadata, '{renewal_due_at}', to_jsonb($2::timestamptz)) WHERE id = $1",
-    )
+    crate::common::db::query("UPDATE credentials SET metadata = jsonb_set(metadata, '{renewal_due_at}', to_jsonb($2::timestamptz)) WHERE id = $1", r#"UPDATE credentials SET metadata = json_set(metadata, '$.renewal_due_at', json(json_quote($2))) WHERE id = $1"#)
     .bind(due.credential_id)
     .bind(now - Duration::hours(1))
     .execute(&pool)
@@ -171,16 +172,19 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
         common::pki::create_tenant(&pool, "pki-life-overdue-authority").await;
     let overdue_authority =
         common::pki::provision_tenant_issuer(&pool, &config, &root, overdue_authority_tenant).await;
-    atom::db::query("UPDATE pki_authorities SET not_after = $2 WHERE id = $1")
-        .bind(overdue_authority.id)
-        // Keep the synthetic expiry after the authority's not-before value.
-        // The test root is only backdated by one minute, so using the same
-        // minute boundary here can invert the interval by a fraction of a
-        // second when provisioning happens after `now` was captured.
-        .bind(now - Duration::seconds(1))
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE pki_authorities SET not_after = $2 WHERE id = $1",
+        r#"UPDATE pki_authorities SET not_after = $2 WHERE id = $1"#,
+    )
+    .bind(overdue_authority.id)
+    // Keep the synthetic expiry after the authority's not-before value.
+    // The test root is only backdated by one minute, so using the same
+    // minute boundary here can invert the interval by a fraction of a
+    // second when provisioning happens after `now` was captured.
+    .bind(now - Duration::seconds(1))
+    .execute(&pool)
+    .await
+    .unwrap();
     let overdue_sweep = lifecycle::sweep_once(&pool, config.pki_lifecycle, true, now)
         .await
         .unwrap();
@@ -279,12 +283,15 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     // Even a corrupt cross-tenant membership row is constrained by the SQL
     // selector scope and cannot turn a tenant-wide permission into platform
     // revocation authority.
-    atom::db::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
-        .bind(group_id)
-        .bind(entity_b)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)",
+        r#"INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)"#,
+    )
+    .bind(group_id)
+    .bind(entity_b)
+    .execute(&pool)
+    .await
+    .unwrap();
     let group_bulk = execute_bulk(
         &schema,
         tenant_operator,
@@ -373,13 +380,15 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     let c_two = issue(&pool, &config, tenant_c, entity_c, "resume-two").await;
     let mut ordered = [c_one.credential_id, c_two.credential_id];
     ordered.sort();
-    let original_metadata: Value =
-        atom::db::query_scalar("SELECT metadata FROM credentials WHERE id = $1")
-            .bind(ordered[1])
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    atom::db::query("UPDATE credentials SET metadata = metadata - 'certificate_pem' WHERE id = $1")
+    let original_metadata: Value = crate::common::db::query_scalar(
+        "SELECT metadata FROM credentials WHERE id = $1",
+        r#"SELECT metadata FROM credentials WHERE id = $1"#,
+    )
+    .bind(ordered[1])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    crate::common::db::query("UPDATE credentials SET metadata = metadata - 'certificate_pem' WHERE id = $1", r#"UPDATE credentials SET metadata = atom_json_remove(metadata, 'certificate_pem') WHERE id = $1"#)
         .bind(ordered[1])
         .execute(&pool)
         .await
@@ -398,7 +407,14 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     assert_eq!(partial["items"][1]["errorCode"], "internal");
     assert_eq!(partial["nextCursor"], ordered[0].to_string());
     let partial_snapshot = partial["snapshotAt"].as_str().unwrap().to_string();
-    let failed_observation: (String, String) = atom::db::query_as(
+    let failed_observation: (String, String) = crate::common::db::query_as(
+        r#"
+        SELECT payload->>'outcome', payload->'details'->>'error_code'
+        FROM event_outbox
+        WHERE event = 'certificate.bulk_revoke' AND payload->>'target_id' = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
         r#"
         SELECT payload->>'outcome', payload->'details'->>'error_code'
         FROM event_outbox
@@ -413,12 +429,15 @@ async fn lifecycle_automation_enforces_the_pr015_contract() {
     .unwrap();
     assert_eq!(failed_observation.0, "error");
     assert_eq!(failed_observation.1, "internal");
-    atom::db::query("UPDATE credentials SET metadata = $2 WHERE id = $1")
-        .bind(ordered[1])
-        .bind(original_metadata)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE credentials SET metadata = $2 WHERE id = $1",
+        r#"UPDATE credentials SET metadata = $2 WHERE id = $1"#,
+    )
+    .bind(ordered[1])
+    .bind(original_metadata)
+    .execute(&pool)
+    .await
+    .unwrap();
     let resumed = execute_bulk(
         &schema,
         common::admin_id(),
@@ -659,8 +678,7 @@ async fn set_profile_fallback_expiry(
     credential_id: Uuid,
     expires_at: DateTime<Utc>,
 ) {
-    atom::db::query(
-        r#"
+    crate::common::db::query(r#"
         UPDATE credentials
         SET expires_at = $2,
             metadata = jsonb_set(
@@ -669,8 +687,12 @@ async fn set_profile_fallback_expiry(
                 to_jsonb($2::timestamptz)
             )
         WHERE id = $1
-        "#,
-    )
+        "#, r#"
+        UPDATE credentials
+        SET expires_at = $2,
+            metadata = json_set(atom_json_remove(atom_json_remove(metadata, 'renewal_due_at'), 'renewal_threshold_seconds'), '$.not_after', json(json_quote($2)))
+        WHERE id = $1
+        "#)
     .bind(credential_id)
     .bind(expires_at)
     .execute(pool)
@@ -684,8 +706,7 @@ async fn set_expiry_and_renewal(
     expires_at: DateTime<Utc>,
     renewal_due_at: DateTime<Utc>,
 ) {
-    atom::db::query(
-        r#"
+    crate::common::db::query(r#"
         UPDATE credentials
         SET expires_at = $2,
             metadata = jsonb_set(
@@ -694,8 +715,12 @@ async fn set_expiry_and_renewal(
                 to_jsonb($3::timestamptz)
             )
         WHERE id = $1
-        "#,
-    )
+        "#, r#"
+        UPDATE credentials
+        SET expires_at = $2,
+            metadata = json_set(json_set(metadata, '$.not_after', json(json_quote($2))), '$.renewal_due_at', json(json_quote($3)))
+        WHERE id = $1
+        "#)
     .bind(credential_id)
     .bind(expires_at)
     .bind(renewal_due_at)
@@ -721,9 +746,7 @@ async fn remove_outbox_failure(pool: &Database) {
 }
 
 async fn marker_count(pool: &Database, subject_id: Uuid, window: &str) -> i64 {
-    atom::db::query_scalar(
-        "SELECT COUNT(*) FROM pki_lifecycle_notifications WHERE subject_id = $1 AND window_kind = $2",
-    )
+    crate::common::db::query_scalar("SELECT COUNT(*) FROM pki_lifecycle_notifications WHERE subject_id = $1 AND window_kind = $2", r#"SELECT COUNT(*) FROM pki_lifecycle_notifications WHERE subject_id = $1 AND window_kind = $2"#)
     .bind(subject_id)
     .bind(window)
     .fetch_one(pool)
@@ -732,15 +755,24 @@ async fn marker_count(pool: &Database, subject_id: Uuid, window: &str) -> i64 {
 }
 
 async fn outbox_count(pool: &Database, event: &str) -> i64 {
-    atom::db::query_scalar("SELECT COUNT(*) FROM event_outbox WHERE event = $1")
-        .bind(event)
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM event_outbox WHERE event = $1",
+        r#"SELECT COUNT(*) FROM event_outbox WHERE event = $1"#,
+    )
+    .bind(event)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn assert_certificate_event(pool: &Database, credential_id: Uuid, window: &str) {
-    let expected: (Option<Uuid>, Uuid, Option<Uuid>) = atom::db::query_as(
+    let expected: (Option<Uuid>, Uuid, Option<Uuid>) = crate::common::db::query_as(
+        r#"
+        SELECT c.issuer_id, c.entity_id, e.tenant_id
+        FROM credentials c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.id = $1
+        "#,
         r#"
         SELECT c.issuer_id, c.entity_id, e.tenant_id
         FROM credentials c
@@ -752,9 +784,7 @@ async fn assert_certificate_event(pool: &Database, credential_id: Uuid, window: 
     .fetch_one(pool)
     .await
     .unwrap();
-    let details: Value = atom::db::query_scalar(
-        "SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.expiring' AND payload->>'target_id' = $1",
-    )
+    let details: Value = crate::common::db::query_scalar("SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.expiring' AND payload->>'target_id' = $1", r#"SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.expiring' AND payload->>'target_id' = $1"#)
     .bind(credential_id.to_string())
     .fetch_one(pool)
     .await
@@ -773,9 +803,7 @@ async fn assert_certificate_event(pool: &Database, credential_id: Uuid, window: 
 }
 
 async fn assert_authority_event(pool: &Database, issuer_id: Uuid, tenant_id: Uuid) {
-    let details: Value = atom::db::query_scalar(
-        "SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.authority_expiring' AND payload->>'target_id' = $1",
-    )
+    let details: Value = crate::common::db::query_scalar("SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.authority_expiring' AND payload->>'target_id' = $1", r#"SELECT payload->'details' FROM event_outbox WHERE event = 'certificate.authority_expiring' AND payload->>'target_id' = $1"#)
     .bind(issuer_id.to_string())
     .fetch_one(pool)
     .await
@@ -788,11 +816,13 @@ async fn assert_authority_event(pool: &Database, issuer_id: Uuid, tenant_id: Uui
 }
 
 async fn grant_tenant_manage(pool: &Database, tenant_id: Uuid, actor_id: Uuid) {
-    let manage: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
-            .fetch_one(pool)
-            .await
-            .unwrap();
+    let manage: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'manage' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'manage' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
     let role = atom::authz::repo::create_role(
         pool,
         CreateRole {
@@ -850,8 +880,9 @@ async fn create_principal_group(pool: &Database, tenant_id: Uuid, members: &[Uui
     .await
     .unwrap();
     for member in members {
-        atom::db::query(
+        crate::common::db::query(
             "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)",
+            r#"INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)"#,
         )
         .bind(group.id)
         .bind(member)
@@ -901,9 +932,12 @@ fn errors_contain(errors: &[async_graphql::ServerError], needle: &str) -> bool {
 }
 
 async fn certificate_status(pool: &Database, credential_id: Uuid) -> String {
-    atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
-        .bind(credential_id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    crate::common::db::query_scalar(
+        "SELECT status FROM credentials WHERE id = $1",
+        r#"SELECT status FROM credentials WHERE id = $1"#,
+    )
+    .bind(credential_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }

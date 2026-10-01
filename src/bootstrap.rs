@@ -63,6 +63,8 @@
 //!     role_id: 55555555-5555-5555-5555-555555555555
 //! ```
 
+mod storage;
+
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -817,28 +819,14 @@ pub async fn apply_with_cache(
         .begin()
         .await
         .context("failed to begin bootstrap transaction")?;
-    crate::db::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind("atom:config-bootstrap:v1")
-        .execute(tx.exec())
+    storage::lock_bootstrap(&mut tx, "atom:config-bootstrap:v1")
         .await
         .context("failed to acquire bootstrap advisory lock")?;
-    crate::db::query(
-        r#"LOCK TABLE
-               tenants, entities, entity_emails, credentials, resources,
-               principal_groups, principal_group_hierarchy, principal_group_members,
-               object_groups, object_group_hierarchy, object_group_entities,
-               object_group_resources, actions, action_applicability,
-               action_assignment_rules, permission_blocks, permission_block_actions,
-               roles, role_permission_blocks, role_assignments, direct_policies,
-               protected_object_ids, tenant_admin_default_actions
-           IN EXCLUSIVE MODE"#,
-    )
-    .execute(tx.exec())
-    .await
-    .context("failed to acquire bootstrap write barrier")?;
+    storage::lock_configuration_tables(&mut tx)
+        .await
+        .context("failed to acquire bootstrap write barrier")?;
 
-    let mut entity_ids: Vec<Uuid> = crate::db::query_scalar("SELECT id FROM entities")
-        .fetch_all(tx.exec())
+    let mut entity_ids: Vec<Uuid> = storage::entity_ids(&mut tx)
         .await
         .context("failed to enumerate bootstrap grants-cache subjects")?;
     entity_ids.extend(cfg.entities.iter().map(|entity| entity.id));
@@ -941,16 +929,9 @@ async fn reconcile_tenant_admin_defaults(
         .map(|name| name.trim().to_string())
         .collect::<Vec<_>>();
 
-    let missing: Vec<String> = crate::db::query_scalar(
-        r#"SELECT requested.name
-           FROM unnest($1::text[]) AS requested(name)
-           WHERE NOT EXISTS (SELECT 1 FROM actions WHERE actions.name = requested.name)
-           ORDER BY requested.name"#,
-    )
-    .bind(&capabilities)
-    .fetch_all(tx.exec())
-    .await
-    .context("failed to validate tenant-admin default capabilities")?;
+    let missing: Vec<String> = storage::missing_default_actions(tx, &capabilities)
+        .await
+        .context("failed to validate tenant-admin default capabilities")?;
     if !missing.is_empty() {
         bail!(
             "unknown tenant_defaults.admin_capabilities: {}",
@@ -958,18 +939,12 @@ async fn reconcile_tenant_admin_defaults(
         );
     }
 
-    crate::db::query("DELETE FROM tenant_admin_default_actions")
-        .execute(tx.exec())
+    storage::clear_default_actions(tx)
         .await
         .context("failed to replace tenant-admin defaults")?;
-    crate::db::query(
-        r#"INSERT INTO tenant_admin_default_actions (action_id)
-           SELECT id FROM actions WHERE name = ANY($1::text[])"#,
-    )
-    .bind(&capabilities)
-    .execute(tx.exec())
-    .await
-    .context("failed to persist tenant-admin defaults")?;
+    storage::insert_default_actions(tx, &capabilities)
+        .await
+        .context("failed to persist tenant-admin defaults")?;
 
     let mut desired_capabilities = crate::tenants::repo::TENANT_ADMIN_BASE_CAPABILITIES
         .iter()
@@ -979,108 +954,49 @@ async fn reconcile_tenant_admin_defaults(
     desired_capabilities.sort();
     desired_capabilities.dedup();
 
-    let roles = crate::db::query(
-        r#"SELECT id, tenant_id
-           FROM roles
-           WHERE managed_by = 'system:tenant-admin' AND deleted_at IS NULL
-           ORDER BY id"#,
-    )
-    .fetch_all(tx.exec())
-    .await
-    .context("failed to enumerate system tenant-admin roles")?;
+    let roles = storage::admin_roles(tx)
+        .await
+        .context("failed to enumerate system tenant-admin roles")?;
 
     for role in roles {
-        let role_id: Uuid = role.try_get("id")?;
-        let tenant_id: Uuid = role.try_get("tenant_id")?;
-        let current_block_id: Option<Uuid> = crate::db::query_scalar(
-            r#"SELECT pb.id
-               FROM role_permission_blocks rpb
-               JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-               WHERE rpb.role_id = $1
-                 AND pb.managed_by = 'system:tenant-admin'
-               ORDER BY pb.id
-               LIMIT 1"#,
-        )
-        .bind(role_id)
-        .fetch_optional(tx.exec())
-        .await
-        .with_context(|| format!("failed to inspect tenant-admin role {role_id}"))?;
+        let role_id: Uuid = role.id;
+        let tenant_id: Uuid = role.tenant_id;
+        let current_block_id: Option<Uuid> = storage::admin_block(tx, role_id)
+            .await
+            .with_context(|| format!("failed to inspect tenant-admin role {role_id}"))?;
 
         let current_names: Vec<String> = match current_block_id {
-            Some(block_id) => crate::db::query_scalar(
-                r#"SELECT a.name
-                   FROM permission_block_actions pba
-                   JOIN actions a ON a.id = pba.action_id
-                   WHERE pba.permission_block_id = $1
-                   ORDER BY a.name"#,
-            )
-            .bind(block_id)
-            .fetch_all(tx.exec())
-            .await
-            .with_context(|| format!("failed to inspect tenant-admin block {block_id}"))?,
+            Some(block_id) => storage::block_action_names(tx, block_id)
+                .await
+                .with_context(|| format!("failed to inspect tenant-admin block {block_id}"))?,
             None => Vec::new(),
         };
         if current_names == desired_capabilities {
             continue;
         }
 
-        let replacement_id: Uuid = crate::db::query_scalar(
-            r#"INSERT INTO permission_blocks
-                  (tenant_id, scope_mode, effect, conditions, managed_by)
-               VALUES ($1, 'tenant', 'allow', '{}'::jsonb, 'system:tenant-admin')
-               RETURNING id"#,
-        )
-        .bind(tenant_id)
-        .fetch_one(tx.exec())
-        .await
-        .with_context(|| format!("failed to create replacement block for role {role_id}"))?;
-        crate::db::query(
-            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-               SELECT $1, id FROM actions WHERE name = ANY($2::text[])"#,
-        )
-        .bind(replacement_id)
-        .bind(&desired_capabilities)
-        .execute(tx.exec())
-        .await
-        .with_context(|| format!("failed to populate replacement block {replacement_id}"))?;
+        let replacement_id: Uuid = storage::insert_admin_block(tx, tenant_id)
+            .await
+            .with_context(|| format!("failed to create replacement block for role {role_id}"))?;
+        storage::link_admin_actions(tx, replacement_id, &desired_capabilities)
+            .await
+            .with_context(|| format!("failed to populate replacement block {replacement_id}"))?;
 
         crate::guardrails::validate_role_permission_block_links(tx, role_id, &[replacement_id])
             .await
             .map_err(|err| anyhow!("tenant-admin role {role_id}: {err}"))?;
 
-        crate::db::query(
-            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
-               VALUES ($1, $2)"#,
-        )
-        .bind(role_id)
-        .bind(replacement_id)
-        .execute(tx.exec())
-        .await
-        .with_context(|| format!("failed to link replacement block {replacement_id}"))?;
+        storage::link_admin_block(tx, role_id, replacement_id)
+            .await
+            .with_context(|| format!("failed to link replacement block {replacement_id}"))?;
 
         if let Some(block_id) = current_block_id {
-            crate::db::query(
-                "DELETE FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2",
-            )
-            .bind(role_id)
-            .bind(block_id)
-            .execute(tx.exec())
-            .await
-            .with_context(|| format!("failed to unlink old tenant-admin block {block_id}"))?;
-            crate::db::query(
-                r#"DELETE FROM permission_blocks pb
-                   WHERE pb.id = $1
-                     AND NOT EXISTS (
-                         SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM direct_policies WHERE permission_block_id = pb.id
-                     )"#,
-            )
-            .bind(block_id)
-            .execute(tx.exec())
-            .await
-            .with_context(|| format!("failed to garbage-collect old block {block_id}"))?;
+            storage::unlink_admin_block(tx, role_id, block_id)
+                .await
+                .with_context(|| format!("failed to unlink old tenant-admin block {block_id}"))?;
+            storage::purge_orphan_admin_block(tx, block_id)
+                .await
+                .with_context(|| format!("failed to garbage-collect old block {block_id}"))?;
         }
     }
 
@@ -1095,40 +1011,28 @@ async fn ensure_tenant(tx: &mut DbTransaction<'_>, tenant: &BootstrapTenant) -> 
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let result = crate::db::query(
-        r#"INSERT INTO tenants (id, name, alias, status, tags, attributes, managed_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_tenant(
+        tx,
+        tenant.id,
+        &tenant.name,
+        &alias,
+        &tenant.status,
+        &tenant.tags,
+        &attributes,
+        MANAGED_BY_CONFIG,
     )
-    .bind(tenant.id)
-    .bind(&tenant.name)
-    .bind(&alias)
-    .bind(&tenant.status)
-    .bind(&tenant.tags)
-    .bind(&attributes)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap tenant {}", tenant.id))?;
 
-    let matches: Option<bool> = crate::db::query_scalar(
-        r#"SELECT name = $2
-                  AND alias IS NOT DISTINCT FROM $3
-                  AND status = $4
-                  AND tags = $5
-                  AND attributes = $6
-                  AND deleted_at IS NULL
-           FROM tenants
-           WHERE id = $1
-           FOR UPDATE"#,
+    let matches: Option<bool> = storage::tenant_matches(
+        tx,
+        tenant.id,
+        &tenant.name,
+        &alias,
+        &tenant.status,
+        &tenant.tags,
+        &attributes,
     )
-    .bind(tenant.id)
-    .bind(&tenant.name)
-    .bind(&alias)
-    .bind(&tenant.status)
-    .bind(&tenant.tags)
-    .bind(&attributes)
-    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap tenant {}", tenant.id))?;
     if matches != Some(true) {
@@ -1138,13 +1042,10 @@ async fn ensure_tenant(tx: &mut DbTransaction<'_>, tenant: &BootstrapTenant) -> 
         );
     }
 
-    let stamped = crate::db::query("UPDATE tenants SET managed_by = $2 WHERE id = $1")
-        .bind(tenant.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    let stamped = storage::stamp_tenant(tx, tenant.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap tenant {}", tenant.id))?;
-    if stamped.rows_affected() != 1 {
+    if stamped != 1 {
         bail!(
             "bootstrap tenant {} disappeared before it could be stamped",
             tenant.id
@@ -1166,58 +1067,41 @@ async fn ensure_entity(tx: &mut DbTransaction<'_>, entity: &BootstrapEntity) -> 
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let persisted_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-            .bind(entity.id)
-            .fetch_optional(tx.exec())
-            .await
-            .with_context(|| format!("failed to inspect bootstrap entity {} tenant", entity.id))?;
+    let persisted_tenant_id: Option<Option<Uuid>> = storage::entity_tenant(tx, entity.id)
+        .await
+        .with_context(|| format!("failed to inspect bootstrap entity {} tenant", entity.id))?;
     let mut tenant_ids = vec![entity.tenant_id];
     tenant_ids.extend(persisted_tenant_id);
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids)
         .await
         .map_err(|e| anyhow!("bootstrap entity {} tenant lock: {e}", entity.id))?;
-    let result = crate::db::query(
-        r#"INSERT INTO entities (id, kind, name, alias, tenant_id, status, attributes, managed_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_entity(
+        tx,
+        entity.id,
+        &entity.kind,
+        &entity.name,
+        &alias,
+        entity.tenant_id,
+        &entity.status,
+        &attributes,
+        MANAGED_BY_CONFIG,
     )
-    .bind(entity.id)
-    .bind(&entity.kind)
-    .bind(&entity.name)
-    .bind(&alias)
-    .bind(entity.tenant_id)
-    .bind(&entity.status)
-    .bind(&attributes)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap entity {}", entity.id))?;
 
     // A re-run never overwrites the entity row. Synchronize from the persisted
     // kind/attributes rather than from the YAML so claiming an existing row
     // cannot silently change its login identity.
-    let persisted = crate::db::query(
-        r#"SELECT kind, attributes,
-                  kind = $2
-                  AND name = $3
-                  AND alias IS NOT DISTINCT FROM $4
-                  AND tenant_id IS NOT DISTINCT FROM $5
-                  AND status = $6
-                  AND attributes = $7
-                  AND deleted_at IS NULL AS matches
-           FROM entities
-           WHERE id = $1
-           FOR UPDATE"#,
+    let persisted = storage::entity_state(
+        tx,
+        entity.id,
+        &entity.kind,
+        &entity.name,
+        &alias,
+        entity.tenant_id,
+        &entity.status,
+        &attributes,
     )
-    .bind(entity.id)
-    .bind(&entity.kind)
-    .bind(&entity.name)
-    .bind(&alias)
-    .bind(entity.tenant_id)
-    .bind(&entity.status)
-    .bind(&attributes)
-    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap entity {}", entity.id))?
     .ok_or_else(|| {
@@ -1226,21 +1110,15 @@ async fn ensure_entity(tx: &mut DbTransaction<'_>, entity: &BootstrapEntity) -> 
             entity.id
         )
     })?;
-    let matches: bool = persisted
-        .try_get("matches")
-        .with_context(|| format!("failed to decode bootstrap entity {} state", entity.id))?;
+    let matches: bool = persisted.matches;
     if !matches {
         bail!(
             "bootstrap entity {} exists with different semantics",
             entity.id
         );
     }
-    let persisted_kind: EntityKind = persisted
-        .try_get("kind")
-        .with_context(|| format!("failed to decode bootstrap entity {} kind", entity.id))?;
-    let persisted_attributes: Value = persisted
-        .try_get("attributes")
-        .with_context(|| format!("failed to decode bootstrap entity {} attributes", entity.id))?;
+    let persisted_kind: EntityKind = persisted.kind.clone();
+    let persisted_attributes: Value = persisted.attributes.clone();
     identity::repo::sync_entity_email_from_attrs_in_tx(
         tx,
         entity.id,
@@ -1253,13 +1131,10 @@ async fn ensure_entity(tx: &mut DbTransaction<'_>, entity: &BootstrapEntity) -> 
     // Stamp even when the row already existed, so an entity created earlier via
     // the API becomes protected once it appears in the bootstrap file. The
     // entity and canonical email changes commit atomically.
-    let stamped = crate::db::query("UPDATE entities SET managed_by = $2 WHERE id = $1")
-        .bind(entity.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    let stamped = storage::stamp_entity(tx, entity.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap entity {}", entity.id))?;
-    if stamped.rows_affected() != 1 {
+    if stamped != 1 {
         bail!(
             "bootstrap entity {} disappeared before it could be stamped",
             entity.id
@@ -1287,25 +1162,19 @@ async fn ensure_credential(
             {
                 bail!("bootstrap password entity {} is not active", entity.id);
             }
-            let rows = crate::db::query("SELECT id, secret_hash, metadata, scoped, expires_at FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active' FOR UPDATE")
-                .bind(entity.id).bind(CredentialKind::Password).fetch_all(tx.exec()).await?;
+            let rows =
+                storage::password_credentials(tx, entity.id, CredentialKind::Password).await?;
             let matches = rows
                 .iter()
                 .filter(|row| {
-                    let hash = row
-                        .try_get::<Option<String>, _>("secret_hash")
-                        .ok()
-                        .flatten();
-                    let metadata = row.try_get::<Value, _>("metadata").ok();
-                    let scoped = row.try_get::<bool, _>("scoped").ok();
-                    let expires = row
-                        .try_get::<Option<DateTime<Utc>>, _>("expires_at")
-                        .ok()
-                        .flatten();
+                    let hash = row.secret_hash.clone();
+                    let metadata = &row.metadata;
+                    let scoped = row.scoped;
+                    let expires = row.expires_at;
                     hash.as_deref().is_some_and(|hash| {
                         identity::service::verify_secret(secret.as_bytes(), hash)
-                    }) && metadata == Some(serde_json::json!({}))
-                        && scoped == Some(false)
+                    }) && metadata == &serde_json::json!({})
+                        && !scoped
                         && expires.is_none()
                 })
                 .collect::<Vec<_>>();
@@ -1314,7 +1183,7 @@ async fn ensure_credential(
                     .await
                     .map_err(|e| anyhow!("bootstrap password for entity {}: {e}", entity.id))?
             } else if rows.len() == 1 && matches.len() == 1 {
-                matches[0].try_get("id")?
+                matches[0].id
             } else {
                 bail!(
                     "bootstrap password for entity {} does not exactly match its active credential",
@@ -1332,19 +1201,13 @@ async fn ensure_credential(
                 bail!("bootstrap shared-key entity {} is not active", entity.id);
             }
             let metadata = serde_json::json!({ "description": description });
-            let rows = crate::db::query("SELECT id, secret_hash, secret_lookup_hash, metadata, scoped, expires_at FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active' FOR UPDATE")
-                .bind(entity.id).bind(CredentialKind::SharedKey).fetch_all(tx.exec()).await?;
+            let rows =
+                storage::shared_key_credentials(tx, entity.id, CredentialKind::SharedKey).await?;
             let matches = rows
                 .iter()
                 .filter(|row| {
-                    let hash = row
-                        .try_get::<Option<String>, _>("secret_hash")
-                        .ok()
-                        .flatten();
-                    let lookup_hash = row
-                        .try_get::<Option<Vec<u8>>, _>("secret_lookup_hash")
-                        .ok()
-                        .flatten();
+                    let hash = row.secret_hash.clone();
+                    let lookup_hash = row.secret_lookup_hash.clone();
                     let lookup_matches = match lookup_hash.as_deref() {
                         Some(stored) => {
                             signing_keys.key_encryption_key.as_ref().is_some_and(|kek| {
@@ -1363,13 +1226,9 @@ async fn ensure_credential(
                     hash.as_deref()
                         .is_some_and(|hash| identity::service::verify_secret(key.as_bytes(), hash))
                         && lookup_matches
-                        && row.try_get::<Value, _>("metadata").ok() == Some(metadata.clone())
-                        && row.try_get::<bool, _>("scoped").ok() == Some(false)
-                        && row
-                            .try_get::<Option<DateTime<Utc>>, _>("expires_at")
-                            .ok()
-                            .flatten()
-                            .is_none()
+                        && row.metadata == metadata
+                        && !row.scoped
+                        && row.expires_at.is_none()
                 })
                 .collect::<Vec<_>>();
             let credential_id = if rows.is_empty() {
@@ -1387,7 +1246,7 @@ async fn ensure_credential(
                 .map_err(|e| anyhow!("bootstrap shared key for entity {}: {e}", entity.id))?
                 .credential_id
             } else if rows.len() == 1 && matches.len() == 1 {
-                matches[0].try_get("id")?
+                matches[0].id
             } else {
                 bail!("bootstrap shared key for entity {} does not exactly match its active credential", entity.id);
             };
@@ -1412,13 +1271,10 @@ async fn stamp_managed_credential_in_tx(
     tx: &mut DbTransaction<'_>,
     credential_id: Uuid,
 ) -> Result<()> {
-    let stamped = crate::db::query("UPDATE credentials SET managed_by = $2 WHERE id = $1")
-        .bind(credential_id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    let stamped = storage::stamp_credential(tx, credential_id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap credential {credential_id}"))?;
-    if stamped.rows_affected() != 1 {
+    if stamped != 1 {
         bail!("bootstrap credential {credential_id} disappeared before it could be stamped");
     }
     Ok(())
@@ -1476,46 +1332,32 @@ async fn ensure_bootstrap_access_token(
         bail!("bootstrap access-token entity {} is not active", entity.id);
     }
 
-    let inserted = crate::db::query(
-        r#"INSERT INTO credentials
-             (id, entity_id, kind, identifier, secret_hash, secret_lookup_hash,
-              scoped, expires_at, metadata, managed_by)
-           VALUES ($1, $2, $3, $4, $5, $6, false, NULL, $7, $8)
-           ON CONFLICT (id) DO NOTHING"#,
+    let inserted = storage::insert_access_token(
+        tx,
+        cred_id,
+        entity.id,
+        CredentialKind::AccessToken,
+        &identifier,
+        secret_hash,
+        secret_lookup_hash,
+        &metadata,
+        MANAGED_BY_CONFIG,
     )
-    .bind(cred_id)
-    .bind(entity.id)
-    .bind(CredentialKind::AccessToken)
-    .bind(&identifier)
-    .bind(secret_hash)
-    .bind(secret_lookup_hash)
-    .bind(&metadata)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap access token {cred_id}"))?;
 
-    let row = crate::db::query(
-        r#"SELECT entity_id, kind, status, identifier, secret_hash,
-                  secret_lookup_hash, scoped, expires_at IS NULL AS no_expiry,
-                  metadata
-           FROM credentials
-           WHERE id = $1
-           FOR UPDATE"#,
-    )
-    .bind(cred_id)
-    .fetch_one(tx.exec())
-    .await
-    .with_context(|| format!("failed to reconcile bootstrap access token {cred_id}"))?;
-    let owner: Uuid = row.try_get("entity_id")?;
-    let kind: CredentialKind = row.try_get("kind")?;
-    let status: CredentialStatus = row.try_get("status")?;
-    let persisted_identifier: Option<String> = row.try_get("identifier")?;
-    let persisted_secret_hash: Option<String> = row.try_get("secret_hash")?;
-    let persisted_lookup_hash: Option<Vec<u8>> = row.try_get("secret_lookup_hash")?;
-    let scoped: bool = row.try_get("scoped")?;
-    let no_expiry: bool = row.try_get("no_expiry")?;
-    let persisted_metadata: Value = row.try_get("metadata")?;
+    let row = storage::access_token_state(tx, cred_id)
+        .await
+        .with_context(|| format!("failed to reconcile bootstrap access token {cred_id}"))?;
+    let owner: Uuid = row.entity_id;
+    let kind: CredentialKind = row.kind;
+    let status: CredentialStatus = row.status.clone();
+    let persisted_identifier: Option<String> = row.identifier.clone();
+    let persisted_secret_hash: Option<String> = row.secret_hash.clone();
+    let persisted_lookup_hash: Option<Vec<u8>> = row.secret_lookup_hash.clone();
+    let scoped: bool = row.scoped;
+    let no_expiry: bool = row.no_expiry;
+    let persisted_metadata: Value = row.metadata.clone();
     let verifier_matches = match (
         persisted_lookup_hash.as_deref(),
         persisted_secret_hash.as_deref(),
@@ -1539,10 +1381,7 @@ async fn ensure_bootstrap_access_token(
             "bootstrap access token credential {cred_id} exists with different owner, kind, status, name, verifier, or token semantics"
         );
     }
-    crate::db::query("UPDATE credentials SET managed_by = $2 WHERE id = $1")
-        .bind(cred_id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    storage::stamp_access_token(tx, cred_id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap access token {cred_id}"))?;
     let _ = inserted;
@@ -1556,37 +1395,25 @@ async fn ensure_group(tx: &mut DbTransaction<'_>, group: &BootstrapGroup) -> Res
         .unwrap_or_else(|| serde_json::json!({}));
 
     lock_bootstrap_principal_group_tenants(tx, group).await?;
-    let result = crate::db::query(
-        r#"INSERT INTO principal_groups (id, name, tenant_id, description, attributes)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_group(
+        tx,
+        group.id,
+        &group.name,
+        group.tenant_id,
+        &group.description,
+        &attributes,
     )
-    .bind(group.id)
-    .bind(&group.name)
-    .bind(group.tenant_id)
-    .bind(&group.description)
-    .bind(&attributes)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap group {}", group.id))?;
 
-    let matches: Option<bool> = crate::db::query_scalar(
-        r#"SELECT name = $2
-                  AND tenant_id IS NOT DISTINCT FROM $3
-                  AND description IS NOT DISTINCT FROM $4
-                  AND attributes = $5
-                  AND status = 'active'
-                  AND deleted_at IS NULL
-           FROM principal_groups
-           WHERE id = $1
-           FOR UPDATE"#,
+    let matches: Option<bool> = storage::group_matches(
+        tx,
+        group.id,
+        &group.name,
+        group.tenant_id,
+        &group.description,
+        &attributes,
     )
-    .bind(group.id)
-    .bind(&group.name)
-    .bind(group.tenant_id)
-    .bind(&group.description)
-    .bind(&attributes)
-    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap group {}", group.id))?;
     if matches != Some(true) {
@@ -1599,14 +1426,10 @@ async fn ensure_group(tx: &mut DbTransaction<'_>, group: &BootstrapGroup) -> Res
     let mut desired_members = group.members.clone();
     desired_members.sort_unstable();
     desired_members.dedup();
-    if result.rows_affected() == 0 {
-        let mut persisted_members: Vec<Uuid> = crate::db::query_scalar(
-            "SELECT entity_id FROM principal_group_members WHERE group_id = $1 ORDER BY entity_id",
-        )
-        .bind(group.id)
-        .fetch_all(tx.exec())
-        .await
-        .with_context(|| format!("failed to compare bootstrap group {} members", group.id))?;
+    if result == 0 {
+        let mut persisted_members: Vec<Uuid> = storage::group_members(tx, group.id)
+            .await
+            .with_context(|| format!("failed to compare bootstrap group {} members", group.id))?;
         persisted_members.sort_unstable();
         if persisted_members != desired_members {
             bail!(
@@ -1622,13 +1445,10 @@ async fn ensure_group(tx: &mut DbTransaction<'_>, group: &BootstrapGroup) -> Res
             .await
             .map_err(|e| anyhow!("bootstrap group {} member {entity_id}: {e}", group.id))?;
     }
-    let stamped = crate::db::query("UPDATE principal_groups SET managed_by = $2 WHERE id = $1")
-        .bind(group.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    let stamped = storage::stamp_group(tx, group.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap group {}", group.id))?;
-    if stamped.rows_affected() != 1 {
+    if stamped != 1 {
         bail!(
             "bootstrap group {} disappeared before it could be stamped",
             group.id
@@ -1649,27 +1469,19 @@ async fn lock_bootstrap_principal_group_tenants(
 ) -> Result<()> {
     let mut tenant_ids = vec![group.tenant_id];
     tenant_ids.extend(
-        crate::db::query_scalar::<Option<Uuid>>(
-            "SELECT tenant_id FROM principal_groups WHERE id = $1",
-        )
-        .bind(group.id)
-        .fetch_all(tx.exec())
-        .await
-        .with_context(|| format!("failed to inspect bootstrap group {} tenant", group.id))?,
+        storage::principal_group_tenants(tx, group.id)
+            .await
+            .with_context(|| format!("failed to inspect bootstrap group {} tenant", group.id))?,
     );
     tenant_ids.extend(
-        crate::db::query_scalar::<Option<Uuid>>(
-            "SELECT tenant_id FROM entities WHERE id = ANY($1::uuid[])",
-        )
-        .bind(&group.members)
-        .fetch_all(tx.exec())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to inspect bootstrap group {} member tenants",
-                group.id
-            )
-        })?,
+        storage::member_entity_tenants(tx, &group.members)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect bootstrap group {} member tenants",
+                    group.id
+                )
+            })?,
     );
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids)
         .await
@@ -1684,60 +1496,43 @@ async fn ensure_resource(tx: &mut DbTransaction<'_>, resource: &BootstrapResourc
         .clone()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let persisted_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM resources WHERE id = $1")
-            .bind(resource.id)
-            .fetch_optional(tx.exec())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to inspect bootstrap resource {} tenant",
-                    resource.id
-                )
-            })?;
+    let persisted_tenant_id: Option<Option<Uuid>> = storage::resource_tenant(tx, resource.id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect bootstrap resource {} tenant",
+                resource.id
+            )
+        })?;
     let mut tenant_ids = vec![resource.tenant_id];
     tenant_ids.extend(persisted_tenant_id);
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids)
         .await
         .map_err(|e| anyhow!("bootstrap resource {} tenant lock: {e}", resource.id))?;
 
-    let result = crate::db::query(
-        r#"INSERT INTO resources
-               (id, kind, name, alias, tenant_id, owner_id, attributes, managed_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_resource(
+        tx,
+        resource.id,
+        &resource.kind,
+        &resource.name,
+        &alias,
+        resource.tenant_id,
+        resource.owner_id,
+        &attributes,
+        MANAGED_BY_CONFIG,
     )
-    .bind(resource.id)
-    .bind(&resource.kind)
-    .bind(&resource.name)
-    .bind(&alias)
-    .bind(resource.tenant_id)
-    .bind(resource.owner_id)
-    .bind(&attributes)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap resource {}", resource.id))?;
-    let matches: Option<bool> = crate::db::query_scalar(
-        r#"SELECT kind = $2
-                  AND name IS NOT DISTINCT FROM $3
-                  AND alias IS NOT DISTINCT FROM $4
-                  AND tenant_id IS NOT DISTINCT FROM $5
-                  AND owner_id IS NOT DISTINCT FROM $6
-                  AND attributes = $7
-                  AND deleted_at IS NULL
-           FROM resources
-           WHERE id = $1
-           FOR UPDATE"#,
+    let matches: Option<bool> = storage::resource_matches(
+        tx,
+        resource.id,
+        &resource.kind,
+        &resource.name,
+        &alias,
+        resource.tenant_id,
+        resource.owner_id,
+        &attributes,
     )
-    .bind(resource.id)
-    .bind(&resource.kind)
-    .bind(&resource.name)
-    .bind(&alias)
-    .bind(resource.tenant_id)
-    .bind(resource.owner_id)
-    .bind(&attributes)
-    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap resource {}", resource.id))?;
     if matches != Some(true) {
@@ -1746,13 +1541,10 @@ async fn ensure_resource(tx: &mut DbTransaction<'_>, resource: &BootstrapResourc
             resource.id
         );
     }
-    let stamped = crate::db::query("UPDATE resources SET managed_by = $2 WHERE id = $1")
-        .bind(resource.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    let stamped = storage::stamp_resource(tx, resource.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap resource {}", resource.id))?;
-    if stamped.rows_affected() != 1 {
+    if stamped != 1 {
         bail!(
             "bootstrap resource {} disappeared before it could be stamped",
             resource.id
@@ -1818,31 +1610,19 @@ async fn lock_bootstrap_object_group_tenants(
         .collect::<Vec<_>>();
 
     tenant_ids.extend(
-        crate::db::query_scalar::<Option<Uuid>>(
-            "SELECT tenant_id FROM groups WHERE id = ANY($1::uuid[])",
-        )
-        .bind(&group_ids)
-        .fetch_all(tx.exec())
-        .await
-        .context("failed to inspect bootstrap object-group tenants")?,
+        storage::object_group_tenants(tx, &group_ids)
+            .await
+            .context("failed to inspect bootstrap object-group tenants")?,
     );
     tenant_ids.extend(
-        crate::db::query_scalar::<Option<Uuid>>(
-            "SELECT tenant_id FROM entities WHERE id = ANY($1::uuid[])",
-        )
-        .bind(&entity_ids)
-        .fetch_all(tx.exec())
-        .await
-        .context("failed to inspect bootstrap object-group entity tenants")?,
+        storage::object_entity_tenants(tx, &entity_ids)
+            .await
+            .context("failed to inspect bootstrap object-group entity tenants")?,
     );
     tenant_ids.extend(
-        crate::db::query_scalar::<Option<Uuid>>(
-            "SELECT tenant_id FROM resources WHERE id = ANY($1::uuid[])",
-        )
-        .bind(&resource_ids)
-        .fetch_all(tx.exec())
-        .await
-        .context("failed to inspect bootstrap object-group resource tenants")?,
+        storage::object_resource_tenants(tx, &resource_ids)
+            .await
+            .context("failed to inspect bootstrap object-group resource tenants")?,
     );
 
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids)
@@ -1863,38 +1643,25 @@ async fn ensure_object_group_row(
     // The row is still transaction-private here, and delaying the stamp lets
     // the shared hierarchy validator run without mistaking bootstrap's own
     // initial link for a forbidden API mutation.
-    let result = crate::db::query(
-        r#"INSERT INTO object_groups
-               (id, name, tenant_id, description, attributes)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_object_group(
+        tx,
+        group.id,
+        &group.name,
+        group.tenant_id,
+        &group.description,
+        &attributes,
     )
-    .bind(group.id)
-    .bind(&group.name)
-    .bind(group.tenant_id)
-    .bind(&group.description)
-    .bind(&attributes)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap object group {}", group.id))?;
-    let inserted = result.rows_affected() > 0;
-    let matches: Option<bool> = crate::db::query_scalar(
-        r#"SELECT name = $2
-                  AND tenant_id IS NOT DISTINCT FROM $3
-                  AND description IS NOT DISTINCT FROM $4
-                  AND attributes = $5
-                  AND status = 'active'
-                  AND deleted_at IS NULL
-           FROM object_groups
-           WHERE id = $1
-           FOR UPDATE"#,
+    let inserted = result > 0;
+    let matches: Option<bool> = storage::object_group_matches(
+        tx,
+        group.id,
+        &group.name,
+        group.tenant_id,
+        &group.description,
+        &attributes,
     )
-    .bind(group.id)
-    .bind(&group.name)
-    .bind(group.tenant_id)
-    .bind(&group.description)
-    .bind(&attributes)
-    .fetch_optional(tx.exec())
     .await
     .with_context(|| format!("failed to compare bootstrap object group {}", group.id))?;
     if matches != Some(true) {
@@ -1926,30 +1693,22 @@ async fn ensure_object_group_links(
     desired_resources.sort_unstable();
     desired_resources.dedup();
     if !inserted {
-        let persisted_entities: Vec<Uuid> = crate::db::query_scalar(
-            "SELECT entity_id FROM object_group_entities WHERE group_id = $1 ORDER BY entity_id",
-        )
-        .bind(group.id)
-        .fetch_all(tx.exec())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to compare bootstrap object group {} entity members",
-                group.id
-            )
-        })?;
-        let persisted_resources: Vec<Uuid> = crate::db::query_scalar(
-            "SELECT resource_id FROM object_group_resources WHERE group_id = $1 ORDER BY resource_id",
-        )
-        .bind(group.id)
-        .fetch_all(tx.exec())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to compare bootstrap object group {} resource members",
-                group.id
-            )
-        })?;
+        let persisted_entities: Vec<Uuid> = storage::object_group_entities(tx, group.id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to compare bootstrap object group {} entity members",
+                    group.id
+                )
+            })?;
+        let persisted_resources: Vec<Uuid> = storage::object_group_resources(tx, group.id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to compare bootstrap object group {} resource members",
+                    group.id
+                )
+            })?;
         if persisted_entities != desired_entities || persisted_resources != desired_resources {
             bail!(
                 "bootstrap object group {} exists with different membership semantics",
@@ -1958,17 +1717,14 @@ async fn ensure_object_group_links(
         }
     }
 
-    let existing_parent: Option<Uuid> =
-        crate::db::query_scalar("SELECT parent_id FROM object_group_hierarchy WHERE child_id = $1")
-            .bind(group.id)
-            .fetch_optional(tx.exec())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to inspect bootstrap object group {} parent",
-                    group.id
-                )
-            })?;
+    let existing_parent: Option<Uuid> = storage::object_group_parent(tx, group.id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect bootstrap object group {} parent",
+                group.id
+            )
+        })?;
     if let Some(parent_id) = existing_parent {
         if group.parent != Some(parent_id) {
             bail!(
@@ -2016,13 +1772,10 @@ async fn ensure_object_group_links(
                 )
             })?;
     }
-    let stamped = crate::db::query("UPDATE object_groups SET managed_by = $2 WHERE id = $1")
-        .bind(group.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    let stamped = storage::stamp_object_group(tx, group.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap object group {}", group.id))?;
-    if stamped.rows_affected() != 1 {
+    if stamped != 1 {
         bail!(
             "bootstrap object group {} disappeared before it could be stamped",
             group.id
@@ -2040,30 +1793,16 @@ async fn validate_existing_object_group_parent_in_tx(
     if child_id == parent_id {
         bail!("bootstrap object group {child_id} has an existing self-parent relation");
     }
-    let relation = crate::db::query(
-        r#"SELECT child.tenant_id AS child_tenant_id,
-                  parent.tenant_id AS parent_tenant_id,
-                  hierarchy.tenant_id AS hierarchy_tenant_id
-           FROM object_group_hierarchy hierarchy
-           JOIN object_groups child
-             ON child.id = hierarchy.child_id AND child.deleted_at IS NULL
-           JOIN object_groups parent
-             ON parent.id = hierarchy.parent_id AND parent.deleted_at IS NULL
-           WHERE hierarchy.child_id = $1 AND hierarchy.parent_id = $2"#,
-    )
-    .bind(child_id)
-    .bind(parent_id)
-    .fetch_optional(tx.exec())
-    .await
+    let relation = storage::parent_relation(tx, child_id, parent_id).await
     .context("failed to validate existing bootstrap object-group hierarchy")?
     .ok_or_else(|| {
         anyhow!(
             "bootstrap object group {child_id} has an existing parent relation to a missing or deleted object group"
         )
     })?;
-    let child_tenant_id: Option<Uuid> = relation.try_get("child_tenant_id")?;
-    let parent_tenant_id: Option<Uuid> = relation.try_get("parent_tenant_id")?;
-    let hierarchy_tenant_id: Option<Uuid> = relation.try_get("hierarchy_tenant_id")?;
+    let child_tenant_id: Option<Uuid> = relation.child_tenant_id;
+    let parent_tenant_id: Option<Uuid> = relation.parent_tenant_id;
+    let hierarchy_tenant_id: Option<Uuid> = relation.hierarchy_tenant_id;
     if child_tenant_id != parent_tenant_id || hierarchy_tenant_id != child_tenant_id {
         bail!("bootstrap object group {child_id} has an existing cross-tenant parent relation");
     }
@@ -2073,33 +1812,15 @@ async fn validate_existing_object_group_parent_in_tx(
     crate::tenants::repo::lock_optional_active_tenant(tx, child_tenant_id)
         .await
         .map_err(|e| anyhow!("bootstrap object group {child_id} parent tenant: {e}"))?;
-    let locked: Vec<Uuid> = crate::db::query_scalar(
-        r#"SELECT id FROM object_groups
-           WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL
-           ORDER BY id FOR UPDATE"#,
-    )
-    .bind(vec![child_id, parent_id])
-    .fetch_all(tx.exec())
-    .await
-    .context("failed to lock existing bootstrap object-group hierarchy")?;
+    let locked: Vec<Uuid> = storage::lock_parent_groups(tx, &[child_id, parent_id])
+        .await
+        .context("failed to lock existing bootstrap object-group hierarchy")?;
     if locked.len() != 2 {
         bail!("bootstrap object group {child_id} parent or child is deleted");
     }
-    let creates_cycle: bool = crate::db::query_scalar(
-        r#"WITH RECURSIVE ancestors(id) AS (
-               SELECT $1::uuid
-               UNION
-               SELECT hierarchy.parent_id
-               FROM object_group_hierarchy hierarchy
-               JOIN ancestors ON hierarchy.child_id = ancestors.id
-           )
-           SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)"#,
-    )
-    .bind(parent_id)
-    .bind(child_id)
-    .fetch_one(tx.exec())
-    .await
-    .context("failed to check existing bootstrap object-group hierarchy cycle")?;
+    let creates_cycle: bool = storage::hierarchy_has_cycle(tx, parent_id, child_id)
+        .await
+        .context("failed to check existing bootstrap object-group hierarchy cycle")?;
     if creates_cycle {
         bail!("bootstrap object group {child_id} has an existing hierarchy cycle");
     }
@@ -2118,9 +1839,7 @@ async fn ensure_permission_block(
 
     let mut configured_action_ids = Vec::with_capacity(block.actions.len());
     for action_name in &block.actions {
-        let action_id: Uuid = crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-            .bind(action_name)
-            .fetch_optional(tx.exec())
+        let action_id: Uuid = storage::action_id(tx, action_name)
             .await
             .with_context(|| format!("failed to resolve action {action_name}"))?
             .ok_or_else(|| {
@@ -2151,39 +1870,28 @@ async fn ensure_permission_block(
     configured_action_ids.dedup();
     // Existing rows are idempotent only when their complete stored semantics,
     // including the action set, exactly match the normalized YAML declaration.
-    let existing = crate::db::query(
-        r#"SELECT tenant_id, scope_mode, object_kind, object_type, object_id,
-                  group_id, effect, conditions
-           FROM permission_blocks
-           WHERE id = $1"#,
-    )
-    .bind(block.id)
-    .fetch_optional(tx.exec())
-    .await
-    .with_context(|| format!("failed to inspect bootstrap permission block {}", block.id))?;
+    let existing = storage::permission_block(tx, block.id)
+        .await
+        .with_context(|| format!("failed to inspect bootstrap permission block {}", block.id))?;
 
     if let Some(row) = &existing {
-        let persisted_action_ids: Vec<Uuid> = crate::db::query_scalar(
-            "SELECT action_id FROM permission_block_actions WHERE permission_block_id = $1 ORDER BY action_id",
-        )
-        .bind(block.id)
-        .fetch_all(tx.exec())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to inspect actions for bootstrap permission block {}",
-                block.id
-            )
-        })?;
+        let persisted_action_ids: Vec<Uuid> = storage::block_actions(tx, block.id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect actions for bootstrap permission block {}",
+                    block.id
+                )
+            })?;
         let persisted = CreatePermissionBlock {
-            tenant_id: row.try_get("tenant_id")?,
-            scope_mode: row.try_get("scope_mode")?,
-            object_kind: row.try_get("object_kind")?,
-            object_type: row.try_get("object_type")?,
-            object_id: row.try_get("object_id")?,
-            group_id: row.try_get("group_id")?,
-            effect: row.try_get("effect")?,
-            conditions: row.try_get("conditions")?,
+            tenant_id: row.tenant_id,
+            scope_mode: row.scope_mode.clone(),
+            object_kind: row.object_kind.clone(),
+            object_type: row.object_type.clone(),
+            object_id: row.object_id,
+            group_id: row.group_id,
+            effect: row.effect.clone(),
+            conditions: row.conditions.clone(),
             action_ids: persisted_action_ids,
         };
         let semantics_match = persisted.tenant_id == desired.tenant_id
@@ -2211,56 +1919,35 @@ async fn ensure_permission_block(
             })?;
     }
 
-    let result = crate::db::query(
-        r#"INSERT INTO permission_blocks
-             (id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_permission_block(
+        tx,
+        block.id,
+        scope.tenant_id,
+        scope.mode.as_str(),
+        &scope.object_kind,
+        &scope.object_type,
+        scope.object_id,
+        scope.group_id,
+        &block.effect,
+        &conditions,
     )
-    .bind(block.id)
-    .bind(scope.tenant_id)
-    .bind(scope.mode.as_str())
-    .bind(&scope.object_kind)
-    .bind(&scope.object_type)
-    .bind(scope.object_id)
-    .bind(scope.group_id)
-    .bind(&block.effect)
-    .bind(&conditions)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap permission block {}", block.id))?;
-    if result.rows_affected() == 0 {
-        let matches: bool = crate::db::query_scalar(
-            r#"SELECT EXISTS (
-                 SELECT 1 FROM permission_blocks
-                 WHERE id = $1
-                   AND tenant_id IS NOT DISTINCT FROM $2
-                   AND scope_mode = $3
-                   AND object_kind IS NOT DISTINCT FROM $4
-                   AND object_type IS NOT DISTINCT FROM $5
-                   AND object_id IS NOT DISTINCT FROM $6
-                   AND group_id IS NOT DISTINCT FROM $7
-                   AND effect = $8 AND conditions = $9
-                 FOR UPDATE
-               )"#,
+    if result == 0 {
+        let matches: bool = storage::permission_block_matches(
+            tx,
+            block.id,
+            scope.tenant_id,
+            scope.mode.as_str(),
+            &scope.object_kind,
+            &scope.object_type,
+            scope.object_id,
+            scope.group_id,
+            &block.effect,
+            &conditions,
         )
-        .bind(block.id)
-        .bind(scope.tenant_id)
-        .bind(scope.mode.as_str())
-        .bind(&scope.object_kind)
-        .bind(&scope.object_type)
-        .bind(scope.object_id)
-        .bind(scope.group_id)
-        .bind(&block.effect)
-        .bind(&conditions)
-        .fetch_one(tx.exec())
         .await?;
-        let persisted_actions: Vec<Uuid> = crate::db::query_scalar(
-            "SELECT action_id FROM permission_block_actions WHERE permission_block_id = $1 ORDER BY action_id",
-        )
-        .bind(block.id)
-        .fetch_all(tx.exec())
-        .await?;
+        let persisted_actions: Vec<Uuid> = storage::stored_block_actions(tx, block.id).await?;
         if !matches || persisted_actions != configured_action_ids {
             bail!(
                 "bootstrap permission block {} exists with different semantics",
@@ -2269,21 +1956,11 @@ async fn ensure_permission_block(
         }
     }
     for action_id in &configured_action_ids {
-        crate::db::query(
-            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-               VALUES ($1, $2)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(block.id)
-        .bind(action_id)
-        .execute(tx.exec())
-        .await
-        .with_context(|| format!("failed to attach action to permission block {}", block.id))?;
+        storage::link_block_action(tx, block.id, action_id)
+            .await
+            .with_context(|| format!("failed to attach action to permission block {}", block.id))?;
     }
-    crate::db::query("UPDATE permission_blocks SET managed_by = $2 WHERE id = $1")
-        .bind(block.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    storage::stamp_permission_block(tx, block.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap permission block {}", block.id))?;
     let _ = result;
@@ -2291,29 +1968,17 @@ async fn ensure_permission_block(
 }
 
 async fn ensure_role(tx: &mut DbTransaction<'_>, role: &BootstrapRole) -> Result<()> {
-    let persisted_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
-            .bind(role.id)
-            .fetch_optional(tx.exec())
-            .await
-            .with_context(|| format!("failed to inspect bootstrap role {} tenant", role.id))?;
+    let persisted_tenant_id: Option<Option<Uuid>> = storage::role_tenant(tx, role.id)
+        .await
+        .with_context(|| format!("failed to inspect bootstrap role {} tenant", role.id))?;
     let mut tenant_ids = vec![role.tenant_id];
     tenant_ids.extend(persisted_tenant_id);
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids)
         .await
         .map_err(|e| anyhow!("bootstrap role {} tenant lock: {e}", role.id))?;
-    let result = crate::db::query(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (id) DO NOTHING"#,
-    )
-    .bind(role.id)
-    .bind(&role.name)
-    .bind(role.tenant_id)
-    .bind(&role.description)
-    .execute(tx.exec())
-    .await
-    .with_context(|| format!("failed to insert bootstrap role {}", role.id))?;
+    let result = storage::insert_role(tx, role.id, &role.name, role.tenant_id, &role.description)
+        .await
+        .with_context(|| format!("failed to insert bootstrap role {}", role.id))?;
 
     // Serialize the semantic comparison and all configured link inserts with
     // runtime role/block-link mutations. Without this canonical role lock, a
@@ -2326,58 +1991,34 @@ async fn ensure_role(tx: &mut DbTransaction<'_>, role: &BootstrapRole) -> Result
     let mut desired_block_ids = role.permission_blocks.clone();
     desired_block_ids.sort_unstable();
     desired_block_ids.dedup();
-    if result.rows_affected() == 0 {
-        let matches: bool = crate::db::query_scalar(
-            r#"SELECT EXISTS (
-                   SELECT 1 FROM roles
-                   WHERE id = $1 AND name = $2
-                     AND tenant_id IS NOT DISTINCT FROM $3
-                     AND description IS NOT DISTINCT FROM $4
-                     AND deleted_at IS NULL
-               )"#,
-        )
-        .bind(role.id)
-        .bind(&role.name)
-        .bind(role.tenant_id)
-        .bind(&role.description)
-        .fetch_one(tx.exec())
-        .await
-        .with_context(|| format!("failed to compare bootstrap role {}", role.id))?;
-        let persisted_block_ids: Vec<Uuid> = crate::db::query_scalar(
-            "SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1 ORDER BY permission_block_id",
-        )
-        .bind(role.id)
-        .fetch_all(tx.exec())
-        .await
-        .with_context(|| format!("failed to compare bootstrap role {} links", role.id))?;
+    if result == 0 {
+        let matches: bool =
+            storage::role_matches(tx, role.id, &role.name, role.tenant_id, &role.description)
+                .await
+                .with_context(|| format!("failed to compare bootstrap role {}", role.id))?;
+        let persisted_block_ids: Vec<Uuid> = storage::role_blocks(tx, role.id)
+            .await
+            .with_context(|| format!("failed to compare bootstrap role {} links", role.id))?;
         if !matches || persisted_block_ids != desired_block_ids {
             bail!("bootstrap role {} exists with different semantics", role.id);
         }
     }
 
-    let persisted_tenant_id: Option<Uuid> = crate::db::query_scalar(
-        "SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-    )
-    .bind(role.id)
-    .fetch_optional(tx.exec())
-    .await
-    .with_context(|| format!("failed to inspect bootstrap role {}", role.id))?
-    .ok_or_else(|| anyhow!("bootstrap role {} is deleted", role.id))?;
+    let persisted_tenant_id: Option<Uuid> = storage::persisted_role_tenant(tx, role.id)
+        .await
+        .with_context(|| format!("failed to inspect bootstrap role {}", role.id))?
+        .ok_or_else(|| anyhow!("bootstrap role {} is deleted", role.id))?;
 
     for block_id in &desired_block_ids {
-        let block_tenant_id: Option<Uuid> = crate::db::query_scalar(
-            "SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE",
-        )
-        .bind(block_id)
-        .fetch_optional(tx.exec())
-        .await
-        .with_context(|| format!("failed to inspect permission block {block_id}"))?
-        .ok_or_else(|| {
-            anyhow!(
-                "bootstrap role {} references unknown permission block {block_id}",
-                role.id
-            )
-        })?;
+        let block_tenant_id: Option<Uuid> = storage::block_tenant(tx, block_id)
+            .await
+            .with_context(|| format!("failed to inspect permission block {block_id}"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "bootstrap role {} references unknown permission block {block_id}",
+                    role.id
+                )
+            })?;
         if block_tenant_id != persisted_tenant_id {
             bail!(
                 "bootstrap role {} and permission block {block_id} must belong to the same tenant",
@@ -2392,26 +2033,16 @@ async fn ensure_role(tx: &mut DbTransaction<'_>, role: &BootstrapRole) -> Result
                     role.id
                 )
             })?;
-        crate::db::query(
-            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
-               VALUES ($1, $2)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(role.id)
-        .bind(block_id)
-        .execute(tx.exec())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to link permission block {block_id} to role {}",
-                role.id
-            )
-        })?;
+        storage::link_role_block(tx, role.id, block_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to link permission block {block_id} to role {}",
+                    role.id
+                )
+            })?;
     }
-    crate::db::query("UPDATE roles SET managed_by = $2 WHERE id = $1")
-        .bind(role.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    storage::stamp_role(tx, role.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap role {}", role.id))?;
     let _ = result;
@@ -2435,17 +2066,14 @@ async fn ensure_role_assignment(
         .await
         .map_err(|e| anyhow!("bootstrap role assignment {}: {e}", assignment.id))?;
 
-    let result = crate::db::query(
-        r#"INSERT INTO role_assignments (id, tenant_id, subject_kind, subject_id, role_id)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_role_assignment(
+        tx,
+        assignment.id,
+        assignment.tenant_id,
+        &assignment.subject.kind,
+        assignment.subject.id,
+        assignment.role_id,
     )
-    .bind(assignment.id)
-    .bind(assignment.tenant_id)
-    .bind(&assignment.subject.kind)
-    .bind(assignment.subject.id)
-    .bind(assignment.role_id)
-    .execute(tx.exec())
     .await
     .with_context(|| {
         format!(
@@ -2454,26 +2082,19 @@ async fn ensure_role_assignment(
         )
     })?;
 
-    let persisted = crate::db::query(
-        r#"SELECT tenant_id, subject_kind, subject_id, role_id
-           FROM role_assignments
-           WHERE id = $1
-           FOR UPDATE"#,
-    )
-    .bind(assignment.id)
-    .fetch_one(tx.exec())
-    .await
-    .with_context(|| {
-        format!(
-            "failed to inspect bootstrap role assignment {}",
-            assignment.id
-        )
-    })?;
+    let persisted = storage::role_assignment(tx, assignment.id)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect bootstrap role assignment {}",
+                assignment.id
+            )
+        })?;
     let persisted = CreateRoleAssignment {
-        tenant_id: persisted.try_get("tenant_id")?,
-        subject_kind: persisted.try_get("subject_kind")?,
-        subject_id: persisted.try_get("subject_id")?,
-        role_id: persisted.try_get("role_id")?,
+        tenant_id: persisted.tenant_id,
+        subject_kind: persisted.subject_kind.clone(),
+        subject_id: persisted.subject_id,
+        role_id: persisted.role_id,
     };
     if persisted.tenant_id != desired.tenant_id
         || persisted.subject_kind != desired.subject_kind
@@ -2493,10 +2114,7 @@ async fn ensure_role_assignment(
                 assignment.id
             )
         })?;
-    crate::db::query("UPDATE role_assignments SET managed_by = $2 WHERE id = $1")
-        .bind(assignment.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    storage::stamp_role_assignment(tx, assignment.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| {
             format!(
@@ -2517,35 +2135,21 @@ async fn ensure_capability(
     capability: &BootstrapCapability,
 ) -> Result<()> {
     let name = capability.name.trim().to_string();
-    crate::db::query(
-        r#"INSERT INTO actions (name, description, managed_by)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (name) DO NOTHING"#,
-    )
-    .bind(&name)
-    .bind(&capability.description)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
-    .await
-    .with_context(|| format!("failed to upsert bootstrap capability {name}"))?;
-    let persisted =
-        crate::db::query("SELECT id, description FROM actions WHERE name = $1 FOR UPDATE")
-            .bind(&name)
-            .fetch_one(tx.exec())
-            .await
-            .with_context(|| format!("failed to inspect bootstrap capability {name}"))?;
-    let action_id: Uuid = persisted.try_get("id")?;
-    let description: Option<String> = persisted.try_get("description")?;
+    storage::insert_action(tx, &name, &capability.description, MANAGED_BY_CONFIG)
+        .await
+        .with_context(|| format!("failed to upsert bootstrap capability {name}"))?;
+    let persisted = storage::action(tx, &name)
+        .await
+        .with_context(|| format!("failed to inspect bootstrap capability {name}"))?;
+    let action_id: Uuid = persisted.id;
+    let description: Option<String> = persisted.description.clone();
     if description != capability.description {
         bail!("bootstrap capability {name} exists with different semantics");
     }
-    let stamped = crate::db::query("UPDATE actions SET managed_by = $2 WHERE id = $1")
-        .bind(action_id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    let stamped = storage::stamp_action(tx, action_id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap capability {name}"))?;
-    if stamped.rows_affected() != 1 {
+    if stamped != 1 {
         bail!("bootstrap capability {name} disappeared before it could be stamped");
     }
 
@@ -2559,25 +2163,12 @@ async fn ensure_capability(
             )
         })
         .collect::<HashSet<_>>();
-    let persisted = crate::db::query(
-        r#"SELECT object_kind, object_type
-           FROM action_applicability
-           WHERE action_id = $1
-           ORDER BY object_kind, object_type
-           FOR UPDATE"#,
-    )
-    .bind(action_id)
-    .fetch_all(tx.exec())
-    .await
-    .with_context(|| format!("failed to inspect bootstrap applicability for {name}"))?
-    .into_iter()
-    .map(|row| {
-        Ok((
-            row.try_get::<String, _>("object_kind")?,
-            row.try_get::<Option<String>, _>("object_type")?,
-        ))
-    })
-    .collect::<Result<HashSet<_>>>()?;
+    let persisted = storage::action_applicability(tx, action_id)
+        .await
+        .with_context(|| format!("failed to inspect bootstrap applicability for {name}"))?
+        .into_iter()
+        .map(|row| Ok((row.object_kind.clone(), row.object_type.clone())))
+        .collect::<Result<HashSet<_>>>()?;
     let extras = persisted.difference(&declared).collect::<Vec<_>>();
     if !extras.is_empty() {
         bail!(
@@ -2596,21 +2187,12 @@ async fn ensure_capability(
     for app in &capability.applicability {
         ensure_capability_applicability(tx, action_id, &name, app).await?;
     }
-    let final_rows = crate::db::query(
-        "SELECT object_kind, object_type FROM action_applicability WHERE action_id = $1",
-    )
-    .bind(action_id)
-    .fetch_all(tx.exec())
-    .await
-    .with_context(|| format!("failed to verify bootstrap applicability for {name}"))?
-    .into_iter()
-    .map(|row| {
-        Ok((
-            row.try_get::<String, _>("object_kind")?,
-            row.try_get::<Option<String>, _>("object_type")?,
-        ))
-    })
-    .collect::<Result<HashSet<_>>>()?;
+    let final_rows = storage::final_action_applicability(tx, action_id)
+        .await
+        .with_context(|| format!("failed to verify bootstrap applicability for {name}"))?
+        .into_iter()
+        .map(|row| Ok((row.object_kind.clone(), row.object_type.clone())))
+        .collect::<Result<HashSet<_>>>()?;
     if final_rows != declared {
         bail!("bootstrap capability {name} applicability reconciliation was incomplete");
     }
@@ -2626,33 +2208,25 @@ async fn ensure_capability_applicability(
     // Two-step upsert: the unique index on this table is functional
     // (`COALESCE(object_type, '')`), which makes ON CONFLICT target awkward.
     // Insert-then-update is simpler and equally atomic per row.
-    crate::db::query(
-        r#"INSERT INTO action_applicability (action_id, object_kind, object_type, managed_by)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT DO NOTHING"#,
+    storage::insert_applicability(
+        tx,
+        action_id,
+        app.object_kind.as_str(),
+        &app.object_type,
+        MANAGED_BY_CONFIG,
     )
-    .bind(action_id)
-    .bind(app.object_kind.as_str())
-    .bind(&app.object_type)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
     .await
     .with_context(|| {
         format!("failed to insert bootstrap applicability for capability {action_name}")
     })?;
 
-    crate::db::query(
-        r#"UPDATE action_applicability
-              SET managed_by = $4
-            WHERE action_id = $1
-              AND object_kind = $2
-              AND object_type IS NOT DISTINCT FROM $3"#,
+    storage::stamp_applicability(
+        tx,
+        action_id,
+        app.object_kind.as_str(),
+        &app.object_type,
+        MANAGED_BY_CONFIG,
     )
-    .bind(action_id)
-    .bind(app.object_kind.as_str())
-    .bind(&app.object_type)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
     .await
     .with_context(|| {
         format!("failed to stamp bootstrap applicability for capability {action_name}")
@@ -2692,22 +2266,17 @@ async fn ensure_action_assignment_rule(
     // The natural key is backed by a functional unique index. A conflicting
     // uncommitted insert blocks this statement; after it resolves, the locked
     // re-read below observes and validates the winning row.
-    let inserted = crate::db::query(
-        r#"INSERT INTO action_assignment_rules
-               (tenant_id, entity_kind, action_name, object_kind, object_type,
-                decision, is_absolute, managed_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT DO NOTHING"#,
+    let inserted = storage::insert_assignment_rule(
+        tx,
+        normalized.tenant_id,
+        &normalized.entity_kind,
+        &normalized.action_name,
+        normalized.object_kind,
+        &normalized.object_type,
+        normalized.decision,
+        normalized.is_absolute,
+        MANAGED_BY_CONFIG,
     )
-    .bind(normalized.tenant_id)
-    .bind(&normalized.entity_kind)
-    .bind(&normalized.action_name)
-    .bind(normalized.object_kind)
-    .bind(&normalized.object_type)
-    .bind(normalized.decision)
-    .bind(normalized.is_absolute)
-    .bind(MANAGED_BY_CONFIG)
-    .execute(tx.exec())
     .await
     .with_context(|| {
         format!(
@@ -2716,23 +2285,14 @@ async fn ensure_action_assignment_rule(
         )
     })?;
 
-    let persisted = crate::db::query(
-        r#"SELECT id, tenant_id, entity_kind, action_name, object_kind,
-                  object_type, decision, is_absolute
-           FROM action_assignment_rules
-           WHERE tenant_id IS NOT DISTINCT FROM $1
-             AND entity_kind = $2
-             AND action_name = $3
-             AND object_kind = $4
-             AND object_type IS NOT DISTINCT FROM $5
-           FOR UPDATE"#,
+    let persisted = storage::assignment_rule(
+        tx,
+        normalized.tenant_id,
+        &normalized.entity_kind,
+        &normalized.action_name,
+        normalized.object_kind,
+        &normalized.object_type,
     )
-    .bind(normalized.tenant_id)
-    .bind(&normalized.entity_kind)
-    .bind(&normalized.action_name)
-    .bind(normalized.object_kind)
-    .bind(&normalized.object_type)
-    .fetch_optional(tx.exec())
     .await
     .with_context(|| {
         format!(
@@ -2746,14 +2306,14 @@ async fn ensure_action_assignment_rule(
             normalized.action_name
         )
     })?;
-    let id: Uuid = persisted.try_get("id")?;
-    let tenant_id: Option<Uuid> = persisted.try_get("tenant_id")?;
-    let entity_kind: EntityKind = persisted.try_get("entity_kind")?;
-    let action_name: String = persisted.try_get("action_name")?;
-    let object_kind: ObjectKind = persisted.try_get("object_kind")?;
-    let object_type: Option<String> = persisted.try_get("object_type")?;
-    let decision: ActionAssignmentDecision = persisted.try_get("decision")?;
-    let is_absolute: bool = persisted.try_get("is_absolute")?;
+    let id: Uuid = persisted.id;
+    let tenant_id: Option<Uuid> = persisted.tenant_id;
+    let entity_kind: EntityKind = persisted.entity_kind.clone();
+    let action_name: String = persisted.action_name.clone();
+    let object_kind: ObjectKind = persisted.object_kind;
+    let object_type: Option<String> = persisted.object_type.clone();
+    let decision: ActionAssignmentDecision = persisted.decision;
+    let is_absolute: bool = persisted.is_absolute;
     if tenant_id != normalized.tenant_id
         || entity_kind != normalized.entity_kind
         || action_name != normalized.action_name
@@ -2768,19 +2328,15 @@ async fn ensure_action_assignment_rule(
         );
     }
 
-    let stamped =
-        crate::db::query("UPDATE action_assignment_rules SET managed_by = $2 WHERE id = $1")
-            .bind(id)
-            .bind(MANAGED_BY_CONFIG)
-            .execute(tx.exec())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to stamp bootstrap assignment rule for action {}",
-                    normalized.action_name
-                )
-            })?;
-    if stamped.rows_affected() != 1 {
+    let stamped = storage::stamp_assignment_rule(tx, id, MANAGED_BY_CONFIG)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to stamp bootstrap assignment rule for action {}",
+                normalized.action_name
+            )
+        })?;
+    if stamped != 1 {
         bail!(
             "bootstrap action_assignment_rule for {} disappeared before it could be stamped",
             normalized.action_name
@@ -2810,35 +2366,25 @@ async fn ensure_direct_policy(
         .await
         .map_err(|e| anyhow!("bootstrap direct policy {}: {e}", policy.id))?;
 
-    let result = crate::db::query(
-        r#"INSERT INTO direct_policies (id, tenant_id, subject_kind, subject_id, permission_block_id)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (id) DO NOTHING"#,
+    let result = storage::insert_direct_policy(
+        tx,
+        policy.id,
+        policy.tenant_id,
+        &policy.subject.kind,
+        policy.subject.id,
+        policy.permission_block_id,
     )
-    .bind(policy.id)
-    .bind(policy.tenant_id)
-    .bind(&policy.subject.kind)
-    .bind(policy.subject.id)
-    .bind(policy.permission_block_id)
-    .execute(tx.exec())
     .await
     .with_context(|| format!("failed to insert bootstrap direct policy {}", policy.id))?;
 
-    let persisted = crate::db::query(
-        r#"SELECT tenant_id, subject_kind, subject_id, permission_block_id
-           FROM direct_policies
-           WHERE id = $1
-           FOR UPDATE"#,
-    )
-    .bind(policy.id)
-    .fetch_one(tx.exec())
-    .await
-    .with_context(|| format!("failed to inspect bootstrap direct policy {}", policy.id))?;
+    let persisted = storage::direct_policy(tx, policy.id)
+        .await
+        .with_context(|| format!("failed to inspect bootstrap direct policy {}", policy.id))?;
     let persisted = CreateDirectPolicy {
-        tenant_id: persisted.try_get("tenant_id")?,
-        subject_kind: persisted.try_get("subject_kind")?,
-        subject_id: persisted.try_get("subject_id")?,
-        permission_block_id: persisted.try_get("permission_block_id")?,
+        tenant_id: persisted.tenant_id,
+        subject_kind: persisted.subject_kind.clone(),
+        subject_id: persisted.subject_id,
+        permission_block_id: persisted.permission_block_id,
     };
     if persisted.tenant_id != desired.tenant_id
         || persisted.subject_kind != desired.subject_kind
@@ -2866,16 +2412,116 @@ async fn ensure_direct_policy(
                 policy.id
             )
         })?;
-    crate::db::query("UPDATE direct_policies SET managed_by = $2 WHERE id = $1")
-        .bind(policy.id)
-        .bind(MANAGED_BY_CONFIG)
-        .execute(tx.exec())
+    storage::stamp_direct_policy(tx, policy.id, MANAGED_BY_CONFIG)
         .await
         .with_context(|| format!("failed to stamp bootstrap direct policy {}", policy.id))?;
     let _ = result;
     Ok(())
 }
 
+#[derive(sqlx::FromRow)]
+struct AdminRoleState {
+    id: Uuid,
+    tenant_id: Uuid,
+}
+
+#[derive(sqlx::FromRow)]
+struct EntityState {
+    kind: EntityKind,
+    attributes: Value,
+    matches: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct PasswordState {
+    id: Uuid,
+    secret_hash: Option<String>,
+    metadata: Value,
+    scoped: bool,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SharedKeyState {
+    id: Uuid,
+    secret_hash: Option<String>,
+    secret_lookup_hash: Option<Vec<u8>>,
+    metadata: Value,
+    scoped: bool,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(sqlx::FromRow)]
+struct AccessTokenState {
+    entity_id: Uuid,
+    kind: CredentialKind,
+    status: CredentialStatus,
+    identifier: Option<String>,
+    secret_hash: Option<String>,
+    secret_lookup_hash: Option<Vec<u8>>,
+    scoped: bool,
+    no_expiry: bool,
+    metadata: Value,
+}
+
+#[derive(sqlx::FromRow)]
+struct ParentRelation {
+    child_tenant_id: Option<Uuid>,
+    parent_tenant_id: Option<Uuid>,
+    hierarchy_tenant_id: Option<Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PermissionBlockState {
+    tenant_id: Option<Uuid>,
+    scope_mode: String,
+    object_kind: Option<String>,
+    object_type: Option<String>,
+    object_id: Option<Uuid>,
+    group_id: Option<Uuid>,
+    effect: Effect,
+    conditions: Value,
+}
+
+#[derive(sqlx::FromRow)]
+struct RoleAssignmentState {
+    tenant_id: Option<Uuid>,
+    subject_kind: SubjectKind,
+    subject_id: Uuid,
+    role_id: Uuid,
+}
+
+#[derive(sqlx::FromRow)]
+struct ActionState {
+    id: Uuid,
+    description: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ApplicabilityState {
+    object_kind: String,
+    object_type: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct AssignmentRuleState {
+    id: Uuid,
+    tenant_id: Option<Uuid>,
+    entity_kind: EntityKind,
+    action_name: String,
+    object_kind: ObjectKind,
+    object_type: Option<String>,
+    decision: ActionAssignmentDecision,
+    is_absolute: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct DirectPolicyState {
+    tenant_id: Option<Uuid>,
+    subject_kind: SubjectKind,
+    subject_id: Uuid,
+    permission_block_id: Uuid,
+}
 #[cfg(test)]
 mod tests {
     use super::*;

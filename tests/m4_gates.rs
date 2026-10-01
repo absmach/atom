@@ -29,28 +29,32 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn manage_capability_id(pool: &atom::db::Database) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("manage cap")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'manage' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'manage' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("manage cap")
 }
 
 async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("gate-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("gate-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn make_human(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')"#)
     .bind(id)
     .bind(format!("gate-ent-{id}"))
     .bind(tenant_id)
@@ -133,41 +137,60 @@ async fn role_with_manage_block_cond(
 /// rows go before the groups they reference; role/block links are removed by the
 /// role cascade. Each statement is independent so a residual FK can't abort the rest.
 async fn cleanup(pool: &atom::db::Database, tenant_id: Uuid) {
-    let _ = atom::db::query("DELETE FROM role_assignments WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await;
-    let _ = atom::db::query("DELETE FROM direct_policies WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await;
-    let _ = atom::db::query(
-        "DELETE FROM principal_group_members pgm USING principal_groups g \
-         WHERE pgm.group_id = g.id AND g.tenant_id = $1",
+    let _ = crate::common::db::query(
+        "DELETE FROM role_assignments WHERE tenant_id = $1",
+        r#"DELETE FROM role_assignments WHERE tenant_id = $1"#,
     )
     .bind(tenant_id)
     .execute(pool)
     .await;
-    let _ = atom::db::query("DELETE FROM principal_group_hierarchy WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await;
-    let _ = atom::db::query("DELETE FROM principal_groups WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await;
-    let _ = atom::db::query("DELETE FROM roles WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await;
-    let _ = atom::db::query("DELETE FROM entities WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await;
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM direct_policies WHERE tenant_id = $1",
+        r#"DELETE FROM direct_policies WHERE tenant_id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await;
+    let _ = crate::common::db::query("DELETE FROM principal_group_members pgm USING principal_groups g \
+         WHERE pgm.group_id = g.id AND g.tenant_id = $1", r#"DELETE FROM principal_group_members AS pgm WHERE EXISTS (SELECT 1 FROM principal_groups g WHERE pgm.group_id = g.id AND g.tenant_id = $1)"#)
+    .bind(tenant_id)
+    .execute(pool)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM principal_group_hierarchy WHERE tenant_id = $1",
+        r#"DELETE FROM principal_group_hierarchy WHERE tenant_id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM principal_groups WHERE tenant_id = $1",
+        r#"DELETE FROM principal_groups WHERE tenant_id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM roles WHERE tenant_id = $1",
+        r#"DELETE FROM roles WHERE tenant_id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE tenant_id = $1",
+        r#"DELETE FROM entities WHERE tenant_id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await;
 }
 
 /// A role assigned to a *parent* principal group must satisfy a gate for a
@@ -359,8 +382,9 @@ async fn object_gate_honours_assignment_tenant_boundary() {
 
     // Object: a channel in owner_tenant.
     let object_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)"#,
     )
     .bind(object_id)
     .bind(format!("gate-obj-{object_id}"))
@@ -369,12 +393,16 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     .await
     .expect("insert resource");
 
-    let read_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-            .fetch_one(&p)
-            .await
-            .expect("read cap");
-    let block_id: Uuid = atom::db::query_scalar(
+    let read_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(&p)
+    .await
+    .expect("read cap");
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
+           VALUES ('object', $1, 'allow', '{}') RETURNING id"#,
         r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
            VALUES ('object', $1, 'allow', '{}') RETURNING id"#,
     )
@@ -382,8 +410,9 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     .fetch_one(&p)
     .await
     .expect("insert object block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(read_id)
@@ -391,7 +420,9 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     .await
     .expect("block action");
     // Assignment bounded to other_tenant — not the object's owner.
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -410,12 +441,15 @@ async fn object_gate_honours_assignment_tenant_boundary() {
     );
 
     // Control: rebind the assignment to the object's owning tenant → now valid.
-    atom::db::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
-        .bind(owner_tenant)
-        .bind(block_id)
-        .execute(&p)
-        .await
-        .expect("rebind policy");
+    crate::common::db::query(
+        "UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2",
+        r#"UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2"#,
+    )
+    .bind(owner_tenant)
+    .bind(block_id)
+    .execute(&p)
+    .await
+    .expect("rebind policy");
     assert!(
         has_capability_in_scope(&p, &actx(actor), "read", Scope::Object(object_id))
             .await
@@ -423,10 +457,13 @@ async fn object_gate_honours_assignment_tenant_boundary() {
         "an object grant bounded to the object's tenant must satisfy the gate"
     );
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
-        .bind(object_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = $1",
+        r#"DELETE FROM resources WHERE id = $1"#,
+    )
+    .bind(object_id)
+    .execute(&p)
+    .await;
     cleanup(&p, owner_tenant).await;
     cleanup(&p, other_tenant).await;
 }
@@ -443,8 +480,9 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     let tenant_id = make_tenant(&p).await;
     let actor = make_human(&p, tenant_id).await;
     let object_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)"#,
     )
     .bind(object_id)
     .bind(format!("gate-obj-{object_id}"))
@@ -452,14 +490,18 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     .execute(&p)
     .await
     .expect("insert resource");
-    let read_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-            .fetch_one(&p)
-            .await
-            .expect("read cap");
+    let read_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(&p)
+    .await
+    .expect("read cap");
 
     // Tenant-wide read allow.
-    let allow_block: Uuid = atom::db::query_scalar(
+    let allow_block: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions)
+           VALUES ('tenant', $1, 'allow', '{}') RETURNING id"#,
         r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions)
            VALUES ('tenant', $1, 'allow', '{}') RETURNING id"#,
     )
@@ -468,7 +510,9 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     .await
     .expect("allow block");
     // Exact-object read deny.
-    let deny_block: Uuid = atom::db::query_scalar(
+    let deny_block: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
+           VALUES ('object', $1, 'deny', '{}') RETURNING id"#,
         r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions)
            VALUES ('object', $1, 'deny', '{}') RETURNING id"#,
     )
@@ -477,18 +521,15 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     .await
     .expect("deny block");
     for block in [allow_block, deny_block] {
-        atom::db::query(
-            "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
-        )
+        crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#)
         .bind(block)
         .bind(read_id)
         .execute(&p)
         .await
         .expect("block action");
-        atom::db::query(
-            r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
-               VALUES ($1, 'entity', $2, $3)"#,
-        )
+        crate::common::db::query(r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+               VALUES ($1, 'entity', $2, $3)"#, r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+               VALUES ($1, 'entity', $2, $3)"#)
         .bind(tenant_id)
         .bind(actor)
         .bind(block)
@@ -505,11 +546,14 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
     );
 
     // Control: drop the object deny; the tenant-wide allow alone grants read.
-    atom::db::query("DELETE FROM direct_policies WHERE permission_block_id = $1")
-        .bind(deny_block)
-        .execute(&p)
-        .await
-        .expect("drop deny policy");
+    crate::common::db::query(
+        "DELETE FROM direct_policies WHERE permission_block_id = $1",
+        r#"DELETE FROM direct_policies WHERE permission_block_id = $1"#,
+    )
+    .bind(deny_block)
+    .execute(&p)
+    .await
+    .expect("drop deny policy");
     assert!(
         require_read_access(&p, &actx(actor), Some(tenant_id), object_id)
             .await
@@ -517,10 +561,13 @@ async fn object_deny_overrides_tenant_allow_in_read_gate() {
         "the tenant-wide read allow alone must satisfy the read gate"
     );
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
-        .bind(object_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = $1",
+        r#"DELETE FROM resources WHERE id = $1"#,
+    )
+    .bind(object_id)
+    .execute(&p)
+    .await;
     cleanup(&p, tenant_id).await;
 }
 

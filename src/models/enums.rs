@@ -630,9 +630,17 @@ mod contract_tests {
             managed_by["bootstrapReconciledMarkers"],
             serde_json::json!(["system:tenant-admin"])
         );
-        let tenant_repo = include_str!("../tenants/repo.rs");
-        let bootstrap = include_str!("../bootstrap.rs");
-        let managed_by_guard = include_str!("../managed_by.rs");
+        let tenant_repo = concat!(
+            include_str!("../tenants/repo.rs"),
+            "\n",
+            include_str!("../tenants/repo/storage/postgres.rs")
+        );
+        let bootstrap = concat!(
+            include_str!("../bootstrap.rs"),
+            "\n",
+            include_str!("../bootstrap/storage/postgres.rs")
+        );
+        let managed_by_guard = include_str!("../managed_by/mod.rs");
         let tenant_admin_migration = include_str!("../../migrations/001_initial.sql");
         assert!(tenant_repo.contains("'system:tenant-admin'"));
         assert!(bootstrap.contains("managed_by = 'system:tenant-admin'"));
@@ -1016,7 +1024,7 @@ mod contract_tests {
         {
             assert!(profile_sql.contains(&format!("'{value}'")));
         }
-        let profile_runtime = include_str!("../certs/profile.rs");
+        let profile_runtime = include_str!("../certs/profile/mod.rs");
         for value in contract_strings(&profile["keyUsage"])
             .into_iter()
             .chain(contract_strings(&profile["extendedKeyUsage"]))
@@ -1146,22 +1154,43 @@ mod contract_tests {
             true
         );
 
-        let access_tokens = include_str!("../identity/access_tokens.rs");
+        let access_tokens_source = [
+            include_str!("../identity/access_tokens.rs"),
+            include_str!("../identity/access_tokens/repository/postgres.rs"),
+        ]
+        .concat();
+        let access_tokens = access_tokens_source.as_str();
         assert!(access_tokens
             .contains("serde_json::json!({ \"name\": &name, \"description\": &description })"));
         assert!(access_tokens.contains("metadata->>'name'"));
         assert!(access_tokens.contains("metadata->>'description'"));
-        let bootstrap = include_str!("../bootstrap.rs");
+        let bootstrap = concat!(
+            include_str!("../bootstrap.rs"),
+            "\n",
+            include_str!("../bootstrap/storage/postgres.rs")
+        );
         assert!(bootstrap
             .contains("serde_json::json!({ \"name\": name, \"description\": description })"));
         assert!(bootstrap.contains("serde_json::json!({ \"description\": description })"));
-        let identity_service = include_str!("../identity/service.rs");
+        let identity_service = concat!(
+            include_str!("../identity/service.rs"),
+            "\n",
+            include_str!("../identity/service/storage/postgres.rs")
+        );
         assert!(
             identity_service.contains("serde_json::json!({ \"description\": req.description })")
         );
 
-        let tenant_repo = include_str!("../tenants/repo.rs");
-        let identity_repo = include_str!("../identity/repo.rs");
+        let tenant_repo = concat!(
+            include_str!("../tenants/repo.rs"),
+            "\n",
+            include_str!("../tenants/repo/storage/postgres.rs")
+        );
+        let identity_repo = concat!(
+            include_str!("../identity/repo.rs"),
+            "\n",
+            include_str!("../identity/repo/storage/postgres.rs")
+        );
         assert!(tenant_repo.contains("'revocation_reason', 'tenant_deleted'"));
         assert!(identity_repo.contains("'revocation_reason', 'entity_deleted'"));
         assert!(identity_service.contains("'revocation_reason', 'manual'"));
@@ -1389,11 +1418,19 @@ callouts:
         let sources = [
             include_str!("../config.rs"),
             include_str!("../callout/config.rs"),
-            include_str!("../identity/service.rs"),
+            concat!(
+                include_str!("../identity/service.rs"),
+                "\n",
+                include_str!("../identity/service/storage/postgres.rs")
+            ),
             include_str!("../cache/mod.rs"),
             include_str!("../grpc.rs"),
             include_str!("../mail.rs"),
-            include_str!("../tenants/repo.rs"),
+            concat!(
+                include_str!("../tenants/repo.rs"),
+                "\n",
+                include_str!("../tenants/repo/storage/postgres.rs")
+            ),
             include_str!("../authz/engine.rs"),
         ];
         let runtime_names = sources
@@ -1728,7 +1765,11 @@ callouts:
         assert!(config_source.contains("ATOM_PKI_ENROLLMENT_REQUEST_BODY_TIMEOUT_SECS was renamed to ATOM_PKI_ENROLLMENT_REQUEST_TIMEOUT_SECS"));
         assert!(config_source.contains("ATOM_BROKER_AUTH_ENABLED=true requires gRPC mTLS"));
 
-        let password_source = include_str!("../identity/service.rs");
+        let password_source = concat!(
+            include_str!("../identity/service.rs"),
+            "\n",
+            include_str!("../identity/service/storage/postgres.rs")
+        );
         assert!(password_source.contains("const DEFAULT_MIN_PASSWORD_CHARS: usize = 12;"));
         assert!(password_source.contains("std::env::var(\"ATOM_MIN_PASSWORD_CHARS\")"));
         assert_eq!(artifact["effectiveDefaults"]["ATOM_MIN_PASSWORD_CHARS"], 12);
@@ -1972,7 +2013,11 @@ callouts:
         assert!(!delete_resolver.contains("auth.entity_id == id"));
         assert!(!delete_resolver.contains("auth.entity_id != id"));
 
-        let identity_service = include_str!("../identity/service.rs");
+        let identity_service = concat!(
+            include_str!("../identity/service.rs"),
+            "\n",
+            include_str!("../identity/service/storage/postgres.rs")
+        );
         let update_service =
             top_level_async_function_section(identity_service, "update_entity_authorized");
         assert!(update_service.contains("self_profile::try_update"));
@@ -2002,30 +2047,12 @@ callouts:
         assert!(!delete_service.contains("auth.entity_id == id"));
         assert!(!delete_service.contains("auth.entity_id != id"));
 
-        let identity_repo = include_str!("../identity/repo.rs");
+        let identity_repo = concat!(
+            include_str!("../identity/repo.rs"),
+            "\n",
+            include_str!("../identity/repo/storage/postgres.rs")
+        );
         assert!(identity_repo.contains("expected_tenant_id.is_some_and"));
         assert!(identity_repo.contains("entity tenant changed after authorization"));
     }
 }
-
-crate::impl_db_enum_arg!(
-    EntityKind,
-    EntityStatus,
-    CredentialKind,
-    CredentialStatus,
-    SubjectKind,
-    GrantKind,
-    ScopeKind,
-    ObjectKind,
-    ActionAssignmentDecision,
-    Effect,
-    AuditOutcome,
-    TenantStatus,
-    DeletedFilter,
-    InvitationState,
-    SortDir,
-    EntityOrderField,
-    ResourceOrderField,
-    GroupOrderField,
-    TenantOrderField,
-);

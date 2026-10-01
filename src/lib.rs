@@ -41,3 +41,9 @@ pub mod schema;
 pub mod shutdown;
 pub mod state;
 pub mod tenants;
+
+#[cfg(test)]
+extern crate self as atom;
+#[cfg(test)]
+#[path = "../tests/common/db.rs"]
+pub(crate) mod test_db;

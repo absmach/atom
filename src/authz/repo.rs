@@ -1,3 +1,10 @@
+//! Authorization domain operations and shared mutation orchestration.
+//!
+//! The focused repositories in `storage` select native PostgreSQL/SQLite SQL.
+//! Validation, grant semantics, lock ordering, cache keys, and transaction/event
+//! ownership remain here so both backends follow the same business rules.
+
+mod storage;
 use crate::db::DbExecutor;
 use std::collections::{HashMap, HashSet};
 
@@ -60,115 +67,23 @@ async fn authorize_flat_candidate_query(
     object_kind: &str,
     actions: &[&str],
     filters: Value,
-    candidate_sql: &str,
+    candidate: FlatCandidate,
     limit: i64,
     offset: i64,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
-    let action_names = actions
-        .iter()
-        .map(|action| (*action).to_string())
-        .collect::<Vec<_>>();
-    let sql = format!(
-        r#"WITH candidates AS ({candidate_sql}),
-           grants AS (
-               SELECT * FROM subject_effective_grants($1)
-           ),
-           {ceiling},
-           caps AS (
-               SELECT a.id
-               FROM actions a
-               JOIN action_applicability aa ON aa.action_id = a.id
-               WHERE a.name = ANY($2::text[])
-                 AND aa.object_kind = $3
-                 AND aa.object_type IS NULL
-           ),
-           authorized AS (
-               SELECT candidate.id, candidate.ordinality
-               FROM candidates candidate
-               WHERE candidate.tenant_id IS NULL
-                  OR EXISTS (
-                       SELECT 1 FROM tenants tenant
-                       WHERE tenant.id = candidate.tenant_id
-                         AND tenant.status = 'active'
-                         AND tenant.deleted_at IS NULL
-                  )
-               INTERSECT
-               SELECT candidate.id, candidate.ordinality
-               FROM candidates candidate
-               WHERE EXISTS (
-                   SELECT 1
-                   FROM caps cap
-                   WHERE EXISTS (
-                       SELECT 1 FROM grants effective_grant
-                       WHERE effective_grant.capability_id = cap.id
-                         AND effective_grant.effect = 'allow'
-                         AND effective_grant.conditions = '{{}}'::jsonb
-                         AND (effective_grant.tenant_boundary IS NULL OR effective_grant.tenant_boundary = candidate.tenant_id)
-                         AND grant_scope_matches(
-                               effective_grant.scope_kind, effective_grant.scope_ref, $3, $3,
-                               candidate.id, candidate.tenant_id,
-                               '{{}}'::uuid[], '{{}}'::uuid[])
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM grants effective_grant
-                       WHERE effective_grant.capability_id = cap.id
-                         AND effective_grant.effect = 'deny'
-                         AND (effective_grant.tenant_boundary IS NULL OR effective_grant.tenant_boundary = candidate.tenant_id)
-                         AND grant_scope_matches(
-                               effective_grant.scope_kind, effective_grant.scope_ref, $3, $3,
-                               candidate.id, candidate.tenant_id,
-                               '{{}}'::uuid[], '{{}}'::uuid[])
-                   )
-                   AND ($4::uuid IS NULL OR EXISTS (
-                       SELECT 1 FROM ceiling token_scope
-                       WHERE token_scope.action_id = cap.id
-                         AND (token_scope.tenant_id IS NULL OR token_scope.tenant_id = candidate.tenant_id)
-                         AND grant_scope_matches(
-                               token_scope.scope_kind, token_scope.scope_ref, $3, $3,
-                               candidate.id, candidate.tenant_id,
-                               '{{}}'::uuid[], '{{}}'::uuid[])
-                   ))
-               )
-           ),
-           totals AS (SELECT count(*)::bigint AS total FROM authorized),
-           page AS (
-               SELECT id FROM authorized ORDER BY ordinality LIMIT $6 OFFSET $7
-           )
-           SELECT page.id, totals.total
-           FROM totals
-           LEFT JOIN LATERAL (SELECT id FROM page) page ON TRUE"#,
-        ceiling = ceiling_cte("$4")
-    );
-    let rows = crate::db::query(&sql)
-        .bind(subject_id)
-        .bind(action_names)
-        .bind(object_kind)
-        .bind(ceiling_id)
-        .bind(filters)
-        .bind(limit.clamp(1, 100))
-        .bind(offset.max(0))
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
-    let total = rows
-        .first()
-        .map(|row| row.try_get::<i64, _>("total").map_err(db_err))
-        .transpose()?
-        .unwrap_or(0);
-    let ids = rows
-        .into_iter()
-        .filter_map(|row| row.try_get::<Option<Uuid>, _>("id").ok().flatten())
-        .collect();
-    Ok(AuthorizedObjectIdsResponse { ids, total })
+    storage::visibility::authorize_flat_candidate_query(
+        pool,
+        subject_id,
+        ceiling_id,
+        object_kind,
+        actions,
+        filters,
+        candidate,
+        limit,
+        offset,
+    )
+    .await
 }
-
-const API_ENDPOINT_CANDIDATES: &str = r#"
-    SELECT id, tenant_id,
-           row_number() OVER (ORDER BY tenant_id NULLS FIRST, key, id) AS ordinality
-    FROM api_endpoints
-    WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
-           OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
-      AND (NULLIF($5->>'status', '') IS NULL OR status = ($5->>'status'))"#;
 
 pub async fn list_api_endpoints_authorized(
     pool: &Database,
@@ -189,7 +104,7 @@ pub async fn list_api_endpoints_authorized(
         "api_endpoint",
         &["read", "manage"],
         serde_json::json!({"tenant_id": params.tenant_id, "status": params.status}),
-        API_ENDPOINT_CANDIDATES,
+        FlatCandidate::Endpoints,
         params.limit,
         params.offset,
     )
@@ -197,19 +112,9 @@ pub async fn list_api_endpoints_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        crate::db::query_as::<ApiEndpoint>(
-            r#"SELECT id, tenant_id, key, name, description, method, path,
-                      operation_kind, graphql, auth_mode, service_entity_id,
-                      variables_mapping, request_schema, response_mapping, status,
-                      created_by, updated_by, created_at, updated_at
-               FROM api_endpoints
-               WHERE id = ANY($1::uuid[])
-               ORDER BY array_position($1::uuid[], id)"#,
-        )
-        .bind(&authorized.ids)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?
+        storage::visibility::selected_endpoints(pool, &authorized.ids)
+            .await
+            .map_err(db_err)?
     };
     Ok(ApiEndpointList {
         items,
@@ -218,55 +123,6 @@ pub async fn list_api_endpoints_authorized(
 }
 
 // ─── Resources ────────────────────────────────────────────────────────────────
-
-fn authorized_entity_order_by(order: EntityOrderField, dir: SortDir) -> &'static str {
-    match (order, dir) {
-        (EntityOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
-        (EntityOrderField::CreatedAt, SortDir::Desc) => "created_at DESC, id ASC",
-        (EntityOrderField::UpdatedAt, SortDir::Asc) => "updated_at ASC, id ASC",
-        (EntityOrderField::UpdatedAt, SortDir::Desc) => "updated_at DESC NULLS LAST, id ASC",
-        (EntityOrderField::Name, SortDir::Asc) => "lower(name) ASC, id ASC",
-        (EntityOrderField::Name, SortDir::Desc) => "lower(name) DESC, id ASC",
-        (EntityOrderField::Username, SortDir::Asc) => "lower(name) ASC, id ASC",
-        (EntityOrderField::Username, SortDir::Desc) => "lower(name) DESC, id ASC",
-        (EntityOrderField::FirstName, SortDir::Asc) => "lower(name) ASC, id ASC",
-        (EntityOrderField::FirstName, SortDir::Desc) => "lower(name) DESC, id ASC",
-        (EntityOrderField::LastName, SortDir::Asc) => "lower(name) ASC, id ASC",
-        (EntityOrderField::LastName, SortDir::Desc) => "lower(name) DESC, id ASC",
-        (EntityOrderField::Email, SortDir::Asc) => "lower(name) ASC, id ASC",
-        (EntityOrderField::Email, SortDir::Desc) => "lower(name) DESC, id ASC",
-        (EntityOrderField::Kind, SortDir::Asc) => "sub_kind ASC, id ASC",
-        (EntityOrderField::Kind, SortDir::Desc) => "sub_kind DESC, id ASC",
-        (EntityOrderField::Status, SortDir::Asc) => "status ASC, id ASC",
-        (EntityOrderField::Status, SortDir::Desc) => "status DESC, id ASC",
-    }
-}
-
-fn authorized_resource_order_by(order: ResourceOrderField, dir: SortDir) -> &'static str {
-    match (order, dir) {
-        (ResourceOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
-        (ResourceOrderField::CreatedAt, SortDir::Desc) => "created_at DESC, id ASC",
-        (ResourceOrderField::UpdatedAt, SortDir::Asc) => "updated_at ASC, id ASC",
-        (ResourceOrderField::UpdatedAt, SortDir::Desc) => "updated_at DESC NULLS LAST, id ASC",
-        (ResourceOrderField::Name, SortDir::Asc) => "lower(name) ASC, id ASC",
-        (ResourceOrderField::Name, SortDir::Desc) => "lower(name) DESC NULLS LAST, id ASC",
-        (ResourceOrderField::Kind, SortDir::Asc) => "sub_kind ASC, id ASC",
-        (ResourceOrderField::Kind, SortDir::Desc) => "sub_kind DESC, id ASC",
-    }
-}
-
-fn authorized_group_order_by(order: GroupOrderField, dir: SortDir) -> &'static str {
-    match (order, dir) {
-        (GroupOrderField::CreatedAt, SortDir::Asc) => "created_at ASC, id ASC",
-        (GroupOrderField::CreatedAt, SortDir::Desc) => "created_at DESC, id ASC",
-        (GroupOrderField::UpdatedAt, SortDir::Asc) => "updated_at ASC, id ASC",
-        (GroupOrderField::UpdatedAt, SortDir::Desc) => "updated_at DESC NULLS LAST, id ASC",
-        (GroupOrderField::Name, SortDir::Asc) => "lower(name) ASC, id ASC",
-        (GroupOrderField::Name, SortDir::Desc) => "lower(name) DESC, id ASC",
-        (GroupOrderField::Status, SortDir::Asc) => "status ASC, id ASC",
-        (GroupOrderField::Status, SortDir::Desc) => "status DESC, id ASC",
-    }
-}
 
 // The resource repository — create/get/list/list_by_ids and the
 // update/delete/restore/purge mutations — moved to `authz::resources` (the
@@ -281,16 +137,7 @@ async fn fetch_resource<'e, E>(executor: E, id: Uuid) -> Result<Resource, AppErr
 where
     E: crate::db::IntoTarget<'e>,
 {
-    crate::db::query_as::<Resource>(
-        "SELECT id, kind, name, alias, tenant_id, owner_id, attributes, deleted_at, deleted_by, created_at, updated_at, managed_by, revision FROM resources WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_one(executor)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("resource {id} not found")),
-        other => AppError::Database(other),
-    })
+    storage::objects::fetch_resource(executor, id).await
 }
 
 /// Canonical cleanup of the authorization rows that reference a set of
@@ -318,25 +165,7 @@ pub(crate) async fn purge_authz_references_for_ids(
     tx: &mut DbTransaction<'_>,
     ids: &[Uuid],
 ) -> Result<(), AppError> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    crate::db::query("DELETE FROM permission_blocks WHERE object_id = ANY($1)")
-        .bind(ids)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-    crate::db::query("DELETE FROM direct_policies WHERE subject_id = ANY($1)")
-        .bind(ids)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-    crate::db::query("DELETE FROM role_assignments WHERE subject_id = ANY($1)")
-        .bind(ids)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-    Ok(())
+    storage::blocks::purge_authz_references_for_ids(tx, ids).await
 }
 
 /// The UUIDs an alias path resolves to.
@@ -367,29 +196,17 @@ pub async fn resolve_alias(
         .filter(|alias| !alias.is_empty());
     let tenant_id = match (tenant_id, tenant_alias, global) {
         (Some(id), None, false) => {
-            let id = crate::db::query_scalar::<Uuid>(
-                r#"SELECT id FROM tenants
-                   WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::not_found(format!("active tenant {id} not found")))?;
+            let id = storage::objects::active_tenant_optional(pool, &id)
+                .await
+                .map_err(db_err)?
+                .ok_or_else(|| AppError::not_found(format!("active tenant {id} not found")))?;
             Some(id)
         }
         (None, Some(alias), false) => {
-            let id = crate::db::query_scalar::<Uuid>(
-                r#"SELECT id FROM tenants
-                   WHERE lower(alias) = lower($1)
-                     AND status = 'active'
-                     AND deleted_at IS NULL"#,
-            )
-            .bind(alias)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::not_found(format!("tenant alias '{alias}' not found")))?;
+            let id = storage::objects::tenant_by_alias_optional(pool, alias)
+                .await
+                .map_err(db_err)?
+                .ok_or_else(|| AppError::not_found(format!("tenant alias '{alias}' not found")))?;
             Some(id)
         }
         (None, None, true) => None,
@@ -405,27 +222,8 @@ pub async fn resolve_alias(
         return Err(AppError::bad_request("object_alias must not be empty"));
     }
 
-    let sql = match class {
-        AliasObjectClass::Entity => {
-            "SELECT id FROM entities \
-             WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
-               AND lower(alias) = $2 \
-               AND deleted_at IS NULL"
-        }
-        AliasObjectClass::Resource => {
-            "SELECT id FROM resources \
-             WHERE tenant_id IS NOT DISTINCT FROM $1::uuid \
-               AND lower(alias) = $2 \
-               AND deleted_at IS NULL"
-        }
-    };
-
-    let object_id = crate::db::query_scalar::<Uuid>(sql)
-        .bind(tenant_id)
-        .bind(&object_alias)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_err)?
+    let object_id = storage::objects::alias_object_id(pool, tenant_id, class, &object_alias)
+        .await?
         .ok_or_else(|| {
             let scope = tenant_id
                 .map(|id| format!("tenant {id}"))
@@ -443,17 +241,7 @@ pub async fn get_resource_object_groups(
     pool: &Database,
     resource_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
-    crate::db::query_scalar(
-        r#"SELECT grp.group_id
-           FROM group_resource_parents grp
-           JOIN object_groups g ON g.id = grp.group_id AND g.deleted_at IS NULL
-           WHERE grp.resource_id = $1
-           ORDER BY grp.created_at, grp.group_id"#,
-    )
-    .bind(resource_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    storage::objects::get_resource_object_groups(pool, resource_id).await
 }
 
 pub async fn add_resource_to_object_group(
@@ -587,38 +375,27 @@ async fn add_resource_to_object_group_in_tx_impl(
     group_id: Uuid,
     enforce_api_ownership: bool,
 ) -> Result<bool, AppError> {
-    let resource_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(resource_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let resource_tenant_id: Option<Option<Uuid>> =
+        storage::objects::resource_tenant_optional(tx, &resource_id)
+            .await
+            .map_err(db_err)?;
     let Some(resource_tenant_id) = resource_tenant_id else {
         return Err(AppError::bad_request(
             "resource parent group reference is invalid",
         ));
     };
     crate::tenants::repo::lock_optional_active_tenant(tx, resource_tenant_id).await?;
-    let row = crate::db::query(
-        r#"SELECT r.tenant_id AS resource_tenant_id, g.tenant_id AS group_tenant_id
-           FROM resources r
-           CROSS JOIN object_groups g
-           WHERE r.id = $1 AND g.id = $2
-             AND r.tenant_id IS NOT DISTINCT FROM $3
-             AND r.deleted_at IS NULL
-             AND g.deleted_at IS NULL
-           FOR UPDATE OF r, g"#,
+    let row = storage::objects::resource_group_boundary_optional(
+        tx,
+        &resource_id,
+        &group_id,
+        &resource_tenant_id,
     )
-    .bind(resource_id)
-    .bind(group_id)
-    .bind(resource_tenant_id)
-    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?
     .ok_or_else(|| AppError::bad_request("resource parent group reference is invalid"))?;
-    let resource_tenant_id: Option<Uuid> = row.try_get("resource_tenant_id").map_err(db_err)?;
-    let group_tenant_id: Option<Uuid> = row.try_get("group_tenant_id").map_err(db_err)?;
+    let resource_tenant_id: Option<Uuid> = row.resource_tenant_id;
+    let group_tenant_id: Option<Uuid> = row.group_tenant_id;
     let Some(tenant_id) = resource_tenant_id else {
         return Err(AppError::bad_request(
             "platform resource cannot be placed in a group",
@@ -634,18 +411,11 @@ async fn add_resource_to_object_group_in_tx_impl(
     }
     // Additive: membership is a set, so re-adding an existing membership is an
     // idempotent no-op rather than a silent move between groups.
-    let result = crate::db::query(
-        r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (group_id, resource_id) DO NOTHING"#,
-    )
-    .bind(group_id)
-    .bind(resource_id)
-    .bind(tenant_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    Ok(result.rows_affected() > 0)
+    let result =
+        storage::objects::insert_resource_membership(tx, &group_id, &resource_id, &tenant_id)
+            .await
+            .map_err(db_err)?;
+    Ok(result > 0)
 }
 
 /// `group_id = Some(..)` removes one membership; `None` removes them all. The
@@ -656,46 +426,29 @@ async fn delete_resource_object_groups_in_tx(
     resource_id: Uuid,
     group_id: Option<Uuid>,
 ) -> Result<u64, AppError> {
-    let tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "SELECT tenant_id FROM resources WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(resource_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> =
+        storage::objects::resource_tenant_optional(tx, &resource_id)
+            .await
+            .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!(
             "resource {resource_id} not found"
         )));
     };
     crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
-    let locked: Option<Uuid> = crate::db::query_scalar(
-        r#"SELECT id FROM resources
-           WHERE id = $1
-             AND tenant_id IS NOT DISTINCT FROM $2
-             AND deleted_at IS NULL
-           FOR UPDATE"#,
-    )
-    .bind(resource_id)
-    .bind(tenant_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let locked: Option<Uuid> =
+        storage::objects::lock_resource_optional(tx, &resource_id, &tenant_id)
+            .await
+            .map_err(db_err)?;
     if locked.is_none() {
         return Err(AppError::not_found(format!(
             "resource {resource_id} not found"
         )));
     }
-    let mut affected_group_ids: Vec<Uuid> = crate::db::query_scalar(
-        r#"SELECT group_id FROM object_group_resources
-           WHERE resource_id = $1 AND ($2::uuid IS NULL OR group_id = $2)
-           ORDER BY group_id"#,
-    )
-    .bind(resource_id)
-    .bind(group_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let mut affected_group_ids: Vec<Uuid> =
+        storage::objects::resource_membership_groups(tx, &resource_id, &group_id)
+            .await
+            .map_err(db_err)?;
     affected_group_ids.dedup();
     // A clear-all is one atomic ownership decision: if any membership belongs
     // to a config-managed group, none of the API-managed memberships are
@@ -704,16 +457,9 @@ async fn delete_resource_object_groups_in_tx(
         crate::managed_by::ensure_not_config_managed_in_tx(tx, "object_groups", affected_group_id)
             .await?;
     }
-    let deleted = crate::db::query(
-        r#"DELETE FROM object_group_resources
-           WHERE resource_id = $1 AND ($2::uuid IS NULL OR group_id = $2)"#,
-    )
-    .bind(resource_id)
-    .bind(group_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?
-    .rows_affected();
+    let deleted = storage::objects::remove_resource_memberships(tx, &resource_id, &group_id)
+        .await
+        .map_err(db_err)?;
     Ok(deleted)
 }
 
@@ -773,49 +519,7 @@ pub async fn load_credential_ceiling(
     pool: &Database,
     credential_id: Uuid,
 ) -> Result<CredentialCeiling, AppError> {
-    let rows = crate::db::query(
-        r#"SELECT l.id        AS limit_id,
-                  s.scope_kind AS scope_kind,
-                  s.scope_ref  AS scope_ref,
-                  l.tenant_id  AS tenant_id,
-                  l.conditions AS conditions,
-                  la.action_id AS action_id
-           FROM credential_permission_limits l
-           JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
-           JOIN credential_permission_limit_actions la ON la.limit_id = l.id
-           WHERE l.credential_id = $1"#,
-    )
-    .bind(credential_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let entries = rows
-        .into_iter()
-        .map(|row| {
-            let limit_id: Uuid = row.try_get("limit_id").map_err(db_err)?;
-            Ok(EffectiveGrant {
-                assignment_id: limit_id,
-                block_id: limit_id,
-                role_id: None,
-                role_name: None,
-                via: "access_token_ceiling".to_string(),
-                // Honor the row's tenant restriction the same way an assignment
-                // tenant boundary does. `object_kind`/`object_type` ceilings can
-                // carry a `tenant_id` that the scope_ref alone does not encode; a
-                // NULL tenant_id (platform/object modes, or a tenant-agnostic kind)
-                // leaves the entry unrestricted, matching `match_grant`.
-                tenant_boundary: row.try_get("tenant_id").map_err(db_err)?,
-                scope_kind: row.try_get("scope_kind").map_err(db_err)?,
-                scope_ref: row.try_get("scope_ref").map_err(db_err)?,
-                capability_id: row.try_get("action_id").map_err(db_err)?,
-                effect: Effect::Allow,
-                conditions: row.try_get("conditions").map_err(db_err)?,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
-
-    Ok(CredentialCeiling { entries })
+    storage::visibility::load_credential_ceiling(pool, credential_id).await
 }
 
 pub async fn create_role_with_audit(
@@ -827,18 +531,10 @@ pub async fn create_role_with_audit(
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
-    let role = crate::db::query_as::<Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.tenant_id)
-    .bind(req.description)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let role =
+        storage::roles::insert_role(&mut tx, &id, &req.name, &req.tenant_id, &req.description)
+            .await
+            .map_err(db_err)?;
 
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
@@ -923,18 +619,10 @@ pub async fn create_role_with_assignments(
     for member_id in locked_member_ids {
         lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
     }
-    let role = crate::db::query_as::<Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.tenant_id)
-    .bind(req.description)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let role =
+        storage::roles::insert_role(&mut tx, &id, &req.name, &req.tenant_id, &req.description)
+            .await
+            .map_err(db_err)?;
 
     for capability_id in capability_ids {
         insert_role_capability_as_permission_block(
@@ -959,37 +647,19 @@ pub async fn create_role_with_assignments(
     }
 
     for member_id in member_entity_ids {
-        crate::db::query(
-            r#"INSERT INTO role_assignments
-                 (tenant_id, subject_kind, subject_id, role_id)
-               VALUES ($1, 'entity', $2, $3)"#,
+        storage::assignments::insert_entity_role_assignment(
+            &mut tx,
+            &req.tenant_id,
+            member_id,
+            &role.id,
         )
-        .bind(req.tenant_id)
-        .bind(member_id)
-        .bind(role.id)
-        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
         if let Some(tenant_id) = req.tenant_id {
-            crate::db::query(
-                r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
-                   SELECT $1, $2, 'active'
-                   WHERE EXISTS (
-                       SELECT 1 FROM entities
-                       WHERE id = $2
-                         AND kind = 'human'
-                         AND status = 'active'
-                         AND deleted_at IS NULL
-                   )
-                   ON CONFLICT (tenant_id, entity_id)
-                   DO UPDATE SET status = 'active'"#,
-            )
-            .bind(tenant_id)
-            .bind(member_id)
-            .execute(tx.exec())
-            .await
-            .map_err(db_err)?;
+            storage::objects::activate_human_membership(&mut tx, &tenant_id, member_id)
+                .await
+                .map_err(db_err)?;
         }
     }
 
@@ -1018,55 +688,29 @@ pub async fn create_role_with_permission_blocks(
     for member_id in locked_member_ids {
         lock_live_subject(&mut tx, req.tenant_id, &SubjectKind::Entity, member_id).await?;
     }
-    let role = crate::db::query_as::<Role>(
-        r#"INSERT INTO roles (id, name, tenant_id, description)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.tenant_id)
-    .bind(req.description)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let role =
+        storage::roles::insert_role(&mut tx, &id, &req.name, &req.tenant_id, &req.description)
+            .await
+            .map_err(db_err)?;
 
     for block in permission_blocks {
         insert_role_permission_block(&mut tx, role.id, block).await?;
     }
 
     for member_id in member_entity_ids {
-        crate::db::query(
-            r#"INSERT INTO role_assignments
-                 (tenant_id, subject_kind, subject_id, role_id)
-               VALUES ($1, 'entity', $2, $3)"#,
+        storage::assignments::insert_entity_role_assignment(
+            &mut tx,
+            &req.tenant_id,
+            member_id,
+            &role.id,
         )
-        .bind(req.tenant_id)
-        .bind(member_id)
-        .bind(role.id)
-        .execute(tx.exec())
         .await
         .map_err(db_err)?;
 
         if let Some(tenant_id) = req.tenant_id {
-            crate::db::query(
-                r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
-                   SELECT $1, $2, 'active'
-                   WHERE EXISTS (
-                       SELECT 1 FROM entities
-                       WHERE id = $2
-                         AND kind = 'human'
-                         AND status = 'active'
-                         AND deleted_at IS NULL
-                   )
-                   ON CONFLICT (tenant_id, entity_id)
-                   DO UPDATE SET status = 'active'"#,
-            )
-            .bind(tenant_id)
-            .bind(member_id)
-            .execute(tx.exec())
-            .await
-            .map_err(db_err)?;
+            storage::objects::activate_human_membership(&mut tx, &tenant_id, member_id)
+                .await
+                .map_err(db_err)?;
         }
     }
 
@@ -1090,12 +734,7 @@ async fn read_live_role_tenant_id(
     tx: &mut DbTransaction<'_>,
     role_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
-        .bind(role_id)
-        .fetch_optional(tx.exec())
-        .await
-        .map_err(db_err)?
-        .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))
+    storage::roles::read_live_role_tenant_id(tx, role_id).await
 }
 
 async fn lock_live_role_row(
@@ -1103,22 +742,7 @@ async fn lock_live_role_row(
     role_id: Uuid,
     expected_tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let locked: Option<Uuid> = crate::db::query_scalar(
-        r#"SELECT id FROM roles
-           WHERE id = $1
-             AND tenant_id IS NOT DISTINCT FROM $2
-             AND deleted_at IS NULL
-           FOR UPDATE"#,
-    )
-    .bind(role_id)
-    .bind(expected_tenant_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if locked.is_none() {
-        return Err(AppError::not_found(format!("role {role_id} not found")));
-    }
-    Ok(())
+    storage::roles::lock_live_role_row(tx, role_id, expected_tenant_id).await
 }
 
 pub async fn replace_role_permission_block_links(
@@ -1183,30 +807,20 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
     role_id: Uuid,
     permission_block_ids: &[Uuid],
 ) -> Result<Option<Uuid>, AppError> {
-    let role_tenant_id: Option<Uuid> =
-        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
-            .bind(role_id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))?;
+    let role_tenant_id: Option<Uuid> = storage::roles::live_role_tenant_optional(tx, &role_id)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| AppError::not_found(format!("role {role_id} not found")))?;
 
     let mut unique_block_ids = permission_block_ids.to_vec();
     unique_block_ids.sort_unstable();
     unique_block_ids.dedup();
 
     if !unique_block_ids.is_empty() {
-        let count: i64 = crate::db::query_scalar(
-            r#"SELECT COUNT(*)
-               FROM permission_blocks
-               WHERE id = ANY($1::uuid[])
-                 AND tenant_id IS NOT DISTINCT FROM $2"#,
-        )
-        .bind(&unique_block_ids)
-        .bind(role_tenant_id)
-        .fetch_one(tx.exec())
-        .await
-        .map_err(db_err)?;
+        let count: i64 =
+            storage::blocks::count_tenant_blocks(tx, &unique_block_ids, &role_tenant_id)
+                .await
+                .map_err(db_err)?;
         if count != unique_block_ids.len() as i64 {
             return Err(AppError::bad_request(
                 "role permission blocks must exist and belong to the same tenant as the role",
@@ -1221,23 +835,14 @@ pub(crate) async fn replace_role_permission_block_links_in_tx(
     // Runs on this transaction's own connection — borrowing a second one from
     // the pool here would deadlock a saturated pool.
     crate::guardrails::validate_role_permission_block_links(tx, role_id, &unique_block_ids).await?;
-    crate::db::query("DELETE FROM role_permission_blocks WHERE role_id = $1")
-        .bind(role_id)
-        .execute(tx.exec())
+    storage::roles::remove_role_links(tx, &role_id)
         .await
         .map_err(db_err)?;
 
     for permission_block_id in &unique_block_ids {
-        crate::db::query(
-            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
-               VALUES ($1, $2)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(role_id)
-        .bind(permission_block_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+        storage::blocks::link_role_block(tx, &role_id, permission_block_id)
+            .await
+            .map_err(db_err)?;
     }
 
     crate::audit::observe_in_tx(
@@ -1263,45 +868,27 @@ async fn insert_role_permission_block(
 ) -> Result<Uuid, AppError> {
     let (scope_mode, tenant_id, object_kind, object_type, object_id, group_id) =
         permission_block_scope_columns(block);
-    let block_id: Uuid = crate::db::query_scalar(
-        r#"INSERT INTO permission_blocks
-             (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect, conditions)
-           VALUES ($1, $2, $3, $4, $5, $6, 'allow', '{}'::jsonb)
-           RETURNING id"#,
+    let block_id: Uuid = storage::blocks::insert_allow_block(
+        tx,
+        scope_mode,
+        &tenant_id,
+        &object_kind,
+        &object_type,
+        &object_id,
+        &group_id,
     )
-    .bind(scope_mode)
-    .bind(tenant_id)
-    .bind(object_kind)
-    .bind(object_type)
-    .bind(object_id)
-    .bind(group_id)
-    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
     for capability_id in &block.capability_ids {
-        crate::db::query(
-            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-               VALUES ($1, $2)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(block_id)
-        .bind(capability_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+        storage::blocks::link_block_action(tx, &block_id, capability_id)
+            .await
+            .map_err(db_err)?;
     }
 
-    crate::db::query(
-        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING"#,
-    )
-    .bind(role_id)
-    .bind(block_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::blocks::link_role_block(tx, &role_id, &block_id)
+        .await
+        .map_err(db_err)?;
 
     Ok(block_id)
 }
@@ -1315,25 +902,7 @@ async fn delete_orphaned_blocks(
     tx: &mut DbTransaction<'_>,
     block_ids: &[Uuid],
 ) -> Result<(), AppError> {
-    if block_ids.is_empty() {
-        return Ok(());
-    }
-    crate::db::query(
-        r#"DELETE FROM permission_blocks pb
-           WHERE pb.id = ANY($1)
-             AND pb.managed_by IS DISTINCT FROM 'config'
-             AND NOT EXISTS (
-                 SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
-             )
-             AND NOT EXISTS (
-                 SELECT 1 FROM direct_policies WHERE permission_block_id = pb.id
-             )"#,
-    )
-    .bind(block_ids)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    Ok(())
+    storage::blocks::delete_orphaned_blocks(tx, block_ids).await
 }
 
 /// Detach `block_ids` from `role_id`, then garbage-collect any that are now
@@ -1348,26 +917,15 @@ async fn unlink_role_blocks_and_gc(
     if block_ids.is_empty() {
         return Ok(());
     }
-    crate::db::query(
-        "DELETE FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = ANY($2)",
-    )
-    .bind(role_id)
-    .bind(block_ids)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::blocks::unlink_role_blocks(tx, &role_id, block_ids)
+        .await
+        .map_err(db_err)?;
     delete_orphaned_blocks(tx, block_ids).await
 }
 
 /// Block ids currently linked to `role_id`.
 async fn role_block_ids(tx: &mut DbTransaction<'_>, role_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    crate::db::query_scalar(
-        "SELECT permission_block_id FROM role_permission_blocks WHERE role_id = $1",
-    )
-    .bind(role_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)
+    storage::blocks::role_block_ids(tx, role_id).await
 }
 
 type PermissionBlockScopeColumns<'a> = (
@@ -1454,39 +1012,23 @@ async fn insert_role_capability_as_permission_block(
     capability_id: Uuid,
 ) -> Result<Uuid, AppError> {
     let block = permission_block_from_legacy_scope(tenant_id, scope_kind, scope_ref)?;
-    let block_id: Uuid = crate::db::query_scalar(
-        r#"INSERT INTO permission_blocks
-             (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect, conditions)
-           VALUES ($1, $2, $3, $4, $5, $6, 'allow', '{}'::jsonb)
-           RETURNING id"#,
+    let block_id: Uuid = storage::blocks::insert_legacy_allow_block(
+        tx,
+        block.scope_mode,
+        &block.tenant_id,
+        &block.object_kind,
+        &block.object_type,
+        &block.object_id,
+        &block.group_id,
     )
-    .bind(block.scope_mode)
-    .bind(block.tenant_id)
-    .bind(block.object_kind)
-    .bind(block.object_type)
-    .bind(block.object_id)
-    .bind(block.group_id)
-    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
-    crate::db::query(
-        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-           VALUES ($1, $2)"#,
-    )
-    .bind(block_id)
-    .bind(capability_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    crate::db::query(
-        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
-           VALUES ($1, $2)"#,
-    )
-    .bind(role_id)
-    .bind(block_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::blocks::insert_block_action(tx, &block_id, &capability_id)
+        .await
+        .map_err(db_err)?;
+    storage::blocks::insert_role_block(tx, &role_id, &block_id)
+        .await
+        .map_err(db_err)?;
     Ok(block_id)
 }
 
@@ -1495,61 +1037,7 @@ async fn copy_role_permission_blocks(
     target_role_id: Uuid,
     source_role_id: Uuid,
 ) -> Result<(), AppError> {
-    let rows = crate::db::query(
-        r#"SELECT pb.id, pb.tenant_id, pb.scope_mode, pb.object_kind, pb.object_type,
-                  pb.object_id, pb.group_id, pb.effect, pb.conditions
-           FROM role_permission_blocks rpb
-           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-           JOIN roles r ON r.id = rpb.role_id AND r.deleted_at IS NULL
-           WHERE rpb.role_id = $1"#,
-    )
-    .bind(source_role_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
-
-    for row in rows {
-        let source_block_id: Uuid = row.try_get("id").map_err(db_err)?;
-        let copied_block_id: Uuid = crate::db::query_scalar(
-            r#"INSERT INTO permission_blocks
-                 (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-               RETURNING id"#,
-        )
-        .bind(row.try_get::<Option<Uuid>, _>("tenant_id").map_err(db_err)?)
-        .bind(row.try_get::<String, _>("scope_mode").map_err(db_err)?)
-        .bind(row.try_get::<Option<String>, _>("object_kind").map_err(db_err)?)
-        .bind(row.try_get::<Option<String>, _>("object_type").map_err(db_err)?)
-        .bind(row.try_get::<Option<Uuid>, _>("object_id").map_err(db_err)?)
-        .bind(row.try_get::<Option<Uuid>, _>("group_id").map_err(db_err)?)
-        .bind(row.try_get::<String, _>("effect").map_err(db_err)?)
-        .bind(row.try_get::<Value, _>("conditions").map_err(db_err)?)
-        .fetch_one(tx.exec())
-        .await
-        .map_err(db_err)?;
-        crate::db::query(
-            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-               SELECT $1, action_id
-               FROM permission_block_actions
-               WHERE permission_block_id = $2"#,
-        )
-        .bind(copied_block_id)
-        .bind(source_block_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-        crate::db::query(
-            r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
-               VALUES ($1, $2)"#,
-        )
-        .bind(target_role_id)
-        .bind(copied_block_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-    }
-
-    Ok(())
+    storage::blocks::copy_role_permission_blocks(tx, target_role_id, source_role_id).await
 }
 
 struct PermissionBlockInsert {
@@ -1766,76 +1254,21 @@ pub async fn list_role_permission_blocks(
     pool: &Database,
     role_id: Uuid,
 ) -> Result<Vec<RolePermissionBlock>, AppError> {
-    crate::db::query_as::<RolePermissionBlock>(
-        r#"SELECT pb.id,
-                  rpb.role_id,
-                  CASE
-                    WHEN pb.scope_mode = 'group_direct_objects' THEN 'object_group_type'
-                    WHEN pb.scope_mode = 'group_descendant_objects' THEN 'object_group_tree_type'
-                    WHEN pb.scope_mode = 'group_child_groups' THEN 'object_group_child_kind'
-                    WHEN pb.scope_mode = 'group_descendant_groups' THEN 'object_group_descendant_kind'
-                    ELSE pb.scope_mode
-                  END AS applies_to,
-                  pb.object_id,
-                  pb.object_kind,
-                  pb.object_type,
-                  pb.tenant_id,
-                  pb.group_id,
-                  pb.created_at,
-                  pb.updated_at
-           FROM role_permission_blocks rpb
-           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-           WHERE rpb.role_id = $1
-           ORDER BY pb.created_at, pb.id"#,
-    )
-    .bind(role_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    storage::blocks::list_role_permission_blocks(pool, role_id).await
 }
 
 pub async fn list_permission_blocks_for_role(
     pool: &Database,
     role_id: Uuid,
 ) -> Result<Vec<PermissionBlock>, AppError> {
-    crate::db::query_as::<PermissionBlock>(
-        r#"SELECT pb.id,
-                  pb.tenant_id,
-                  pb.scope_mode,
-                  pb.object_kind,
-                  pb.object_type,
-                  pb.object_id,
-                  pb.group_id,
-                  pb.effect,
-                  pb.conditions,
-                  pb.created_at,
-                  pb.updated_at
-           FROM role_permission_blocks rpb
-           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
-           WHERE rpb.role_id = $1
-           ORDER BY pb.created_at, pb.id"#,
-    )
-    .bind(role_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    storage::blocks::list_permission_blocks_for_role(pool, role_id).await
 }
 
 pub async fn role_permission_block_capabilities(
     pool: &Database,
     block_id: Uuid,
 ) -> Result<Vec<Capability>, AppError> {
-    crate::db::query_as::<Capability>(
-        r#"SELECT c.id, c.name, c.description, c.created_at, c.updated_at
-           FROM actions c
-           JOIN permission_block_actions pba ON pba.action_id = c.id
-           WHERE pba.permission_block_id = $1
-           ORDER BY c.name"#,
-    )
-    .bind(block_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    storage::blocks::role_permission_block_capabilities(pool, block_id).await
 }
 
 pub async fn permission_block_capabilities(
@@ -1855,57 +1288,14 @@ async fn fetch_permission_block<'e, E>(executor: E, id: Uuid) -> Result<Permissi
 where
     E: crate::db::IntoTarget<'e>,
 {
-    crate::db::query_as::<PermissionBlock>(
-        r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
-                  effect, conditions, created_at, updated_at
-           FROM permission_blocks
-           WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_one(executor)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("permission block {id} not found")),
-        other => AppError::Database(other),
-    })
+    storage::blocks::fetch_permission_block(executor, id).await
 }
 
 pub async fn list_permission_blocks(
     pool: &Database,
     params: ListPermissionBlocks,
 ) -> Result<PermissionBlockList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-    let items = crate::db::query_as::<PermissionBlock>(
-        r#"SELECT id, tenant_id, scope_mode, object_kind, object_type, object_id, group_id,
-                  effect, conditions, created_at, updated_at, managed_by
-           FROM permission_blocks
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR scope_mode = $2)
-           ORDER BY created_at DESC
-           LIMIT $3 OFFSET $4"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.scope_mode.clone())
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let total = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM permission_blocks
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR scope_mode = $2)"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.scope_mode)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(PermissionBlockList { items, total })
+    storage::blocks::list_permission_blocks(pool, params).await
 }
 
 /// Normalize and validate ABAC conditions for storage. `null` becomes `{}`;
@@ -1938,35 +1328,24 @@ pub async fn create_permission_block_with_audit(
     let conditions = normalize_conditions(req.conditions)?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     crate::tenants::repo::lock_optional_active_tenant(&mut tx, req.tenant_id).await?;
-    let id: Uuid = crate::db::query_scalar(
-        r#"INSERT INTO permission_blocks
-             (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           RETURNING id"#,
+    let id: Uuid = storage::blocks::insert_permission_block(
+        &mut tx,
+        &req.tenant_id,
+        &req.scope_mode,
+        &req.object_kind.as_deref(),
+        &req.object_type.as_deref(),
+        &req.object_id,
+        &req.group_id,
+        &req.effect,
+        &conditions,
     )
-    .bind(req.tenant_id)
-    .bind(&req.scope_mode)
-    .bind(req.object_kind.as_deref())
-    .bind(req.object_type.as_deref())
-    .bind(req.object_id)
-    .bind(req.group_id)
-    .bind(req.effect)
-    .bind(conditions)
-    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
     for action_id in req.action_ids {
-        crate::db::query(
-            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-               VALUES ($1, $2)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(id)
-        .bind(action_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+        storage::blocks::link_block_action(&mut tx, &id, &action_id)
+            .await
+            .map_err(db_err)?;
     }
     let block = fetch_permission_block(&mut tx, id).await?;
     crate::audit::commit_with_observation(
@@ -2006,12 +1385,9 @@ pub async fn delete_permission_block_with_audit(
     // the referenced block row, which conflicts with FOR UPDATE, so no link can
     // slip in between the reference check and the delete.
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> = storage::blocks::block_tenant_optional(&mut tx, &id)
+        .await
+        .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!(
             "permission block {id} not found"
@@ -2019,22 +1395,15 @@ pub async fn delete_permission_block_with_audit(
     };
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "permission_blocks", id).await?;
-    let referenced: bool = crate::db::query_scalar(
-        r#"SELECT EXISTS (SELECT 1 FROM role_permission_blocks WHERE permission_block_id = $1)
-              OR EXISTS (SELECT 1 FROM direct_policies WHERE permission_block_id = $1)"#,
-    )
-    .bind(id)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let referenced: bool = storage::blocks::block_is_referenced(&mut tx, &id)
+        .await
+        .map_err(db_err)?;
     if referenced {
         return Err(AppError::bad_request(
             "permission block is still linked to a role or direct policy; unlink it first",
         ));
     }
-    crate::db::query("DELETE FROM permission_blocks WHERE id = $1")
-        .bind(id)
-        .execute(tx.exec())
+    storage::blocks::remove_block(&mut tx, &id)
         .await
         .map_err(db_err)?;
     crate::audit::commit_with_observation(
@@ -2164,14 +1533,11 @@ async fn validate_object_group_boundary(
 ) -> Result<(), AppError> {
     let group_id =
         group_id.ok_or_else(|| AppError::bad_request("object group scope requires groupId"))?;
-    let group_tenant_id: Option<Uuid> = crate::db::query_scalar(
-        "SELECT tenant_id FROM object_groups WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(group_id)
-    .fetch_optional(connection)
-    .await
-    .map_err(db_err)?
-    .ok_or_else(|| AppError::bad_request("object group scope references unknown group"))?;
+    let group_tenant_id: Option<Uuid> =
+        storage::objects::object_group_tenant_optional(connection, &group_id)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::bad_request("object group scope references unknown group"))?;
     if tenant_id.is_some() && group_tenant_id != tenant_id {
         return Err(AppError::bad_request(
             "object group scope must reference a group in the same tenant",
@@ -2181,99 +1547,13 @@ async fn validate_object_group_boundary(
 }
 
 pub async fn get_role(pool: &Database, id: Uuid) -> Result<Role, AppError> {
-    crate::db::query_as::<Role>(
-        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at
-           FROM roles WHERE id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("role {id} not found")),
-        other => AppError::Database(other),
-    })
+    storage::roles::get_role(pool, id).await
 }
 
-pub async fn list_roles(pool: &Database, params: ListRoles) -> Result<RoleList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-    let q = search_pattern(params.q);
-    let derived_kind = params
-        .derived_kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|kind| !kind.is_empty())
-        .map(str::to_ascii_lowercase);
-    let deleted = params.deleted.as_str();
-
-    if let Some(kind) = derived_kind.as_deref() {
-        match kind {
-            "simple" | "composite" | "empty" => {}
-            _ => {
-                return Err(AppError::bad_request(
-                    "derivedKind must be simple, composite, or empty",
-                ));
-            }
-        }
-    }
-
-    let items = crate::db::query_as::<Role>(
-        r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by, created_at, updated_at, managed_by
-           FROM roles
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
-             AND (
-               $3::text IS NULL
-               OR ($3 = 'simple' AND EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ))
-               OR ($3 = 'composite' AND FALSE)
-               OR ($3 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ))
-             )
-             AND ($6::text = 'all'
-                  OR ($6::text = 'live' AND deleted_at IS NULL)
-                  OR ($6::text = 'deleted' AND deleted_at IS NOT NULL))
-           ORDER BY name LIMIT $4 OFFSET $5"#,
-    )
-    .bind(params.tenant_id)
-    .bind(q.clone())
-    .bind(derived_kind.clone())
-    .bind(limit)
-    .bind(offset)
-    .bind(deleted)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let total: i64 = crate::db::query_scalar(
-        r#"SELECT COUNT(*) FROM roles
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR name ILIKE $2 OR description ILIKE $2)
-             AND (
-               $3::text IS NULL
-               OR ($3 = 'simple' AND EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ))
-               OR ($3 = 'composite' AND FALSE)
-               OR ($3 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ))
-             )
-             AND ($4::text = 'all'
-                  OR ($4::text = 'live' AND deleted_at IS NULL)
-                  OR ($4::text = 'deleted' AND deleted_at IS NOT NULL))"#,
-    )
-    .bind(params.tenant_id)
-    .bind(q)
-    .bind(derived_kind)
-    .bind(deleted)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(RoleList { items, total })
+pub async fn list_roles(pool: &Database, mut params: ListRoles) -> Result<RoleList, AppError> {
+    params.q = search_pattern(params.q);
+    params.derived_kind = normalize_derived_kind(params.derived_kind)?;
+    storage::roles::list_roles(pool, params).await
 }
 
 pub async fn list_roles_authorized(
@@ -2296,26 +1576,7 @@ pub async fn list_roles_authorized(
             "derivedKind must be simple, composite, or empty",
         ));
     }
-    const CANDIDATES: &str = r#"SELECT id, tenant_id,
-                  row_number() OVER (ORDER BY name, id) AS ordinality
-           FROM roles
-           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
-                  OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
-             AND (NULLIF($5->>'q', '') IS NULL
-                  OR name ILIKE ($5->>'q') OR description ILIKE ($5->>'q'))
-             AND (
-               NULLIF($5->>'derived_kind', '') IS NULL
-               OR ($5->>'derived_kind' = 'simple' AND EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ))
-               OR ($5->>'derived_kind' = 'composite' AND FALSE)
-               OR ($5->>'derived_kind' = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = roles.id
-                  ))
-             )
-             AND ($5->>'deleted' = 'all'
-                  OR ($5->>'deleted' = 'live' AND deleted_at IS NULL)
-                  OR ($5->>'deleted' = 'deleted' AND deleted_at IS NOT NULL))"#;
+
     let authorized = authorize_flat_candidate_query(
         pool,
         auth.entity_id,
@@ -2328,7 +1589,7 @@ pub async fn list_roles_authorized(
             "derived_kind": derived_kind,
             "deleted": params.deleted.as_str(),
         }),
-        CANDIDATES,
+        FlatCandidate::Roles,
         params.limit,
         params.offset,
     )
@@ -2336,17 +1597,9 @@ pub async fn list_roles_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        crate::db::query_as::<Role>(
-            r#"SELECT id, name, tenant_id, description, deleted_at, deleted_by,
-                      created_at, updated_at, managed_by
-               FROM roles
-               WHERE id = ANY($1::uuid[])
-               ORDER BY array_position($1::uuid[], id)"#,
-        )
-        .bind(&authorized.ids)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?
+        storage::visibility::selected_roles(pool, &authorized.ids)
+            .await
+            .map_err(db_err)?
     };
     Ok(RoleList {
         items,
@@ -2358,28 +1611,7 @@ pub async fn role_derived_kind(
     pool: &Database,
     role_id: Uuid,
 ) -> Result<RoleDerivedKind, AppError> {
-    let row = crate::db::query(
-        r#"SELECT
-              EXISTS (SELECT 1 FROM role_permission_blocks WHERE role_id = $1) AS has_permission_blocks,
-              FALSE AS has_children"#,
-    )
-    .bind(role_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-    let has_permission_blocks: bool = row.try_get("has_permission_blocks").map_err(db_err)?;
-    let has_children: bool = row.try_get("has_children").map_err(db_err)?;
-    let has_simple_permissions = has_permission_blocks;
-    Ok(match (has_simple_permissions, has_children) {
-        (true, false) => RoleDerivedKind::Simple,
-        (false, true) => RoleDerivedKind::Composite,
-        (false, false) => RoleDerivedKind::Empty,
-        (true, true) => {
-            return Err(AppError::bad_request(
-                "role cannot have both permissions and child roles",
-            ))
-        }
-    })
+    storage::roles::role_derived_kind(pool, role_id).await
 }
 
 async fn ensure_entities_exist(pool: &Database, entity_ids: &[Uuid]) -> Result<(), AppError> {
@@ -2389,12 +1621,9 @@ async fn ensure_entities_exist(pool: &Database, entity_ids: &[Uuid]) -> Result<(
     let mut unique_entity_ids = entity_ids.to_vec();
     unique_entity_ids.sort_unstable();
     unique_entity_ids.dedup();
-    let count: i64 =
-        crate::db::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1::uuid[])")
-            .bind(&unique_entity_ids)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
+    let count: i64 = storage::objects::count_entities(pool, &unique_entity_ids)
+        .await
+        .map_err(db_err)?;
     if count != unique_entity_ids.len() as i64 {
         return Err(AppError::bad_request("invalid member reference"));
     }
@@ -2417,27 +1646,19 @@ async fn validate_composite_children(
         return Err(AppError::bad_request("role cannot include itself"));
     }
 
-    let rows = crate::db::query(
-        r#"SELECT r.id, r.tenant_id,
-                  EXISTS (SELECT 1 FROM effective_role_actions() rc WHERE rc.role_id = r.id) AS has_capabilities,
-                  FALSE AS has_children
-           FROM roles r
-           WHERE r.id = ANY($1::uuid[]) AND r.deleted_at IS NULL"#,
-    )
-    .bind(&unique_child_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    let rows = storage::roles::composite_role_candidates(pool, &unique_child_ids)
+        .await
+        .map_err(db_err)?;
 
     if rows.len() != unique_child_ids.len() {
         return Err(AppError::bad_request("invalid child role reference"));
     }
 
     for row in rows {
-        let child_id: Uuid = row.try_get("id").map_err(db_err)?;
-        let tenant_id: Option<Uuid> = row.try_get("tenant_id").map_err(db_err)?;
-        let has_capabilities: bool = row.try_get("has_capabilities").map_err(db_err)?;
-        let has_children: bool = row.try_get("has_children").map_err(db_err)?;
+        let child_id: Uuid = row.id;
+        let tenant_id: Option<Uuid> = row.tenant_id;
+        let has_capabilities: bool = row.has_capabilities;
+        let has_children: bool = row.has_children;
         if tenant_id != parent_tenant_id {
             return Err(AppError::bad_request(
                 "parent and child roles must belong to the same tenant",
@@ -2540,9 +1761,7 @@ async fn validate_role_scope(
                 | ScopeKind::Object => {}
             }
             let group_tenant_id: Option<Uuid> =
-                crate::db::query_scalar("SELECT tenant_id FROM groups WHERE id = $1")
-                    .bind(group_id)
-                    .fetch_optional(pool)
+                storage::objects::group_tenant_optional(pool, &group_id)
                     .await
                     .map_err(db_err)?
                     .ok_or_else(|| AppError::bad_request("group scope references unknown group"))?;
@@ -2671,16 +1890,14 @@ async fn validate_capabilities_against_target_on_connection(
     unique_capability_ids.sort_unstable();
     unique_capability_ids.dedup();
 
-    let rows = crate::db::query("SELECT id, name FROM actions WHERE id = ANY($1::uuid[])")
-        .bind(&unique_capability_ids)
-        .fetch_all(&mut *connection)
+    let rows = storage::actions::action_identities(connection, &unique_capability_ids)
         .await
         .map_err(db_err)?;
     let capability_names = rows
         .into_iter()
         .map(|row| {
-            let id: Uuid = row.try_get("id").map_err(db_err)?;
-            let name: String = row.try_get("name").map_err(db_err)?;
+            let id: Uuid = row.id;
+            let name: String = row.name.clone();
             Ok((id, name))
         })
         .collect::<Result<HashMap<Uuid, String>, AppError>>()?;
@@ -2700,28 +1917,17 @@ async fn validate_capabilities_against_target_on_connection(
         return Ok(());
     };
 
-    let invalid_rows = crate::db::query(
-        r#"SELECT c.name
-           FROM actions c
-           WHERE c.id = ANY($1::uuid[])
-             AND NOT EXISTS (
-               SELECT 1
-               FROM action_applicability ca
-               WHERE ca.action_id = c.id
-                 AND ca.object_kind = $2
-                 AND ($3::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $3)
-             )
-           ORDER BY c.name"#,
+    let invalid_rows = storage::actions::inapplicable_actions(
+        connection,
+        &unique_capability_ids,
+        &target.object_kind,
+        &target.object_type,
     )
-    .bind(&unique_capability_ids)
-    .bind(&target.object_kind)
-    .bind(&target.object_type)
-    .fetch_all(&mut *connection)
     .await
     .map_err(db_err)?;
 
     if let Some(row) = invalid_rows.first() {
-        let name: String = row.try_get("name").map_err(db_err)?;
+        let name = row;
         return Err(AppError::bad_request(format!(
             "capability {name} is not applicable to {}",
             target.label()
@@ -2798,35 +2004,20 @@ pub(crate) async fn update_role_in_tx(
     id: Uuid,
     req: UpdateRole,
 ) -> Result<Role, AppError> {
-    let tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> = storage::roles::live_role_tenant_optional(tx, &id)
+        .await
+        .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("role {id} not found")));
     };
     crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
-    let role = crate::db::query_as::<Role>(
-        r#"UPDATE roles
-           SET name        = COALESCE($2, name),
-               description = COALESCE($3, description),
-               updated_at  = now()
-           WHERE id = $1 AND deleted_at IS NULL
-           RETURNING id, name, tenant_id, description, deleted_at, deleted_by,
-                     created_at, updated_at, managed_by"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.description)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("role {id} not found")),
-        other => AppError::Database(other),
-    })?;
+    let role = storage::roles::update_role_fields(tx, &id, &req.name, &req.description)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::not_found(format!("role {id} not found")),
+            other => AppError::Database(other),
+        })?;
     crate::audit::observe_in_tx(
         tx,
         events_enabled,
@@ -2883,37 +2074,24 @@ pub(crate) async fn delete_role_in_tx(
     id: Uuid,
     deleted_by: Option<Uuid>,
 ) -> Result<Option<Uuid>, AppError> {
-    let tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> = storage::roles::live_role_tenant_optional(tx, &id)
+        .await
+        .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!("role {id} not found")));
     };
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
-    let live: bool = crate::db::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM roles WHERE id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(id)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let live: bool = storage::roles::role_is_live(tx, &id)
+        .await
+        .map_err(db_err)?;
     if !live {
         return Err(AppError::not_found(format!("role {id} not found")));
     }
-    let result = crate::db::query(
-        "UPDATE roles SET deleted_at = now(), deleted_by = $2
-         WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .bind(deleted_by)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+    let result = storage::roles::tombstone_role(tx, &id, &deleted_by)
+        .await
+        .map_err(db_err)?;
+    if result == 0 {
         return Err(AppError::not_found(format!("role {id} not found")));
     }
     let meta = crate::audit::AuditMeta {
@@ -2979,13 +2157,10 @@ pub(crate) async fn restore_role_in_tx(
     restored_by: Option<Uuid>,
 ) -> Result<(), AppError> {
     let _ = restored_by;
-    let expected_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NOT NULL",
-    )
-    .bind(id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let expected_tenant_id: Option<Option<Uuid>> =
+        storage::roles::deleted_role_tenant_optional(tx, &id)
+            .await
+            .map_err(db_err)?;
     let Some(expected_tenant_id) = expected_tenant_id else {
         return Err(AppError::not_found(format!(
             "no soft-deleted role {id} to restore"
@@ -2993,19 +2168,10 @@ pub(crate) async fn restore_role_in_tx(
     };
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &[expected_tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", id).await?;
-    let tenant_info: Option<(Option<Uuid>, bool)> = crate::db::query_as(
-        "SELECT r.tenant_id, (t.deleted_at IS NOT NULL)
-         FROM roles r
-         LEFT JOIN tenants t ON t.id = r.tenant_id
-         WHERE r.id = $1
-           AND r.tenant_id IS NOT DISTINCT FROM $2
-           AND r.deleted_at IS NOT NULL",
-    )
-    .bind(id)
-    .bind(expected_tenant_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let tenant_info: Option<(Option<Uuid>, bool)> =
+        storage::roles::lock_deleted_role_tenant_optional(tx, &id, &expected_tenant_id)
+            .await
+            .map_err(db_err)?;
     let (tenant_id, _is_tenant_deleted) = match tenant_info {
         None => {
             return Err(AppError::not_found(format!(
@@ -3020,14 +2186,9 @@ pub(crate) async fn restore_role_in_tx(
         Some((t_id, false)) => (t_id, false),
     };
 
-    crate::db::query(
-        "UPDATE roles SET deleted_at = NULL, deleted_by = NULL
-         WHERE id = $1 AND deleted_at IS NOT NULL",
-    )
-    .bind(id)
-    .execute(tx.exec())
-    .await
-    .map_err(restore_conflict)?;
+    storage::roles::restore_role_fields(tx, &id)
+        .await
+        .map_err(restore_conflict)?;
 
     let meta = crate::audit::AuditMeta {
         actor_entity_id: actor_id,
@@ -3056,12 +2217,9 @@ pub async fn purge_role_with_audit(
 ) -> Result<Option<Uuid>, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
 
-    let tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let tenant_id: Option<Option<Uuid>> = storage::roles::role_tenant_optional(&mut tx, &id)
+        .await
+        .map_err(db_err)?;
     let Some(expected_tenant_id) = tenant_id else {
         return Err(AppError::not_found(format!(
             "no soft-deleted role {id} to purge"
@@ -3070,40 +2228,21 @@ pub async fn purge_role_with_audit(
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[expected_tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "roles", id).await?;
 
-    let candidate_block_ids: Vec<Uuid> = crate::db::query_scalar(
-        "SELECT DISTINCT permission_block_id FROM role_permission_blocks WHERE role_id = $1",
-    )
-    .bind(id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let candidate_block_ids: Vec<Uuid> = storage::blocks::role_linked_blocks(&mut tx, &id)
+        .await
+        .map_err(db_err)?;
 
-    let purged_tenant_id: Option<Option<Uuid>> = crate::db::query_scalar(
-        "DELETE FROM roles WHERE id = $1 AND deleted_at IS NOT NULL RETURNING tenant_id",
-    )
-    .bind(id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let purged_tenant_id: Option<Option<Uuid>> =
+        storage::roles::purge_deleted_role_optional(&mut tx, &id)
+            .await
+            .map_err(db_err)?;
     let tenant_id = purged_tenant_id
         .ok_or_else(|| AppError::not_found(format!("no soft-deleted role {id} to purge")))?;
 
     if !candidate_block_ids.is_empty() {
-        crate::db::query(
-            r#"DELETE FROM permission_blocks pb
-               WHERE pb.id = ANY($1)
-                 AND pb.managed_by IS DISTINCT FROM 'config'
-                 AND NOT EXISTS (
-                     SELECT 1 FROM role_permission_blocks WHERE permission_block_id = pb.id
-                 )
-                 AND NOT EXISTS (
-                     SELECT 1 FROM direct_policies WHERE permission_block_id = pb.id
-                 )"#,
-        )
-        .bind(&candidate_block_ids)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+        storage::blocks::purge_orphaned_blocks(&mut tx, &candidate_block_ids)
+            .await
+            .map_err(db_err)?;
     }
 
     purge_authz_references_for_ids(&mut tx, &[id]).await?;
@@ -3210,17 +2349,9 @@ pub async fn remove_role_capability(
     // Blocks this role links that grant `cap_id`. Unlink them from this role and
     // GC any now-orphaned; blocks the same `cap_id` reaches through other roles
     // are untouched.
-    let block_ids: Vec<Uuid> = crate::db::query_scalar(
-        r#"SELECT rpb.permission_block_id
-           FROM role_permission_blocks rpb
-           JOIN permission_block_actions pba ON pba.permission_block_id = rpb.permission_block_id
-           WHERE rpb.role_id = $1 AND pba.action_id = $2"#,
-    )
-    .bind(role_id)
-    .bind(cap_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let block_ids: Vec<Uuid> = storage::blocks::role_blocks_for_action(&mut tx, &role_id, &cap_id)
+        .await
+        .map_err(db_err)?;
     unlink_role_blocks_and_gc(&mut tx, role_id, &block_ids).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
@@ -3243,17 +2374,9 @@ pub async fn create_capability_with_audit(
 ) -> Result<Capability, AppError> {
     let id = Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let capability = crate::db::query_as::<Capability>(
-        r#"INSERT INTO actions (id, name, description)
-           VALUES ($1, $2, $3)
-           RETURNING id, name, description, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.description)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let capability = storage::actions::insert_action(&mut tx, &id, &req.name, &req.description)
+        .await
+        .map_err(db_err)?;
 
     let applicability = req.applicability.unwrap_or_default();
     if !applicability.is_empty() {
@@ -3276,83 +2399,21 @@ pub async fn create_capability_with_audit(
 }
 
 pub async fn get_capability(pool: &Database, id: Uuid) -> Result<Capability, AppError> {
-    crate::db::query_as::<Capability>(
-        "SELECT id, name, description, created_at, updated_at, managed_by FROM actions WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("capability {id} not found")),
-        other => AppError::Database(other),
-    })
+    storage::actions::get_capability(pool, id).await
 }
 
 pub async fn list_capabilities(
     pool: &Database,
     params: ListCapabilities,
 ) -> Result<crate::models::capability::CapabilityList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-
-    let items = crate::db::query_as::<Capability>(
-        r#"SELECT id, name, description, created_at, updated_at, managed_by FROM actions c
-           WHERE (
-               $1::text IS NULL
-               OR EXISTS (
-                   SELECT 1
-                   FROM action_applicability ca
-                   WHERE ca.action_id = c.id
-                     AND ca.object_kind = $1
-                     AND ($2::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $2)
-               )
-           )
-           ORDER BY name LIMIT $3 OFFSET $4"#,
-    )
-    .bind(&params.object_kind)
-    .bind(&params.object_type)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let total: i64 = crate::db::query_scalar(
-        r#"SELECT COUNT(*) FROM actions c
-           WHERE (
-               $1::text IS NULL
-               OR EXISTS (
-                   SELECT 1
-                   FROM action_applicability ca
-                   WHERE ca.action_id = c.id
-                     AND ca.object_kind = $1
-                     AND ($2::text IS NULL OR ca.object_type IS NULL OR ca.object_type = $2)
-               )
-           )"#,
-    )
-    .bind(&params.object_kind)
-    .bind(&params.object_type)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(crate::models::capability::CapabilityList { items, total })
+    storage::objects::list_capabilities(pool, params).await
 }
 
 pub async fn capability_applicability(
     pool: &Database,
     capability_id: Uuid,
 ) -> Result<Vec<CapabilityApplicability>, AppError> {
-    crate::db::query_as::<CapabilityApplicability>(
-        r#"SELECT object_kind, object_type, managed_by
-           FROM action_applicability
-           WHERE action_id = $1
-           ORDER BY object_kind, object_type NULLS FIRST"#,
-    )
-    .bind(capability_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    storage::actions::capability_applicability(pool, capability_id).await
 }
 
 pub async fn list_capability_applicability(
@@ -3363,139 +2424,29 @@ pub async fn list_capability_applicability(
     limit: i64,
     offset: i64,
 ) -> Result<CapabilityApplicabilityList, AppError> {
-    let limit = limit.clamp(1, 100);
-    let offset = offset.max(0);
-    let action_name = action_name
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let object_kind = object_kind
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let object_type = object_type
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let action_pattern = action_name.as_ref().map(|value| format!("%{value}%"));
-
-    let items = crate::db::query_as::<CapabilityApplicabilityEntry>(
-        r#"SELECT c.id AS capability_id,
-                  c.name AS capability_name,
-                  c.description,
-                  ca.object_kind,
-                  ca.object_type,
-                  ca.created_at,
-                  ca.managed_by
-           FROM action_applicability ca
-           JOIN actions c ON c.id = ca.action_id
-           WHERE ($3::text IS NULL OR c.name ILIKE $3)
-             AND ($4::text IS NULL OR ca.object_kind = $4)
-             AND ($5::text IS NULL OR ca.object_type = $5)
-           ORDER BY c.name, ca.object_kind, ca.object_type NULLS FIRST
-           LIMIT $1 OFFSET $2"#,
+    storage::actions::list_capability_applicability(
+        pool,
+        action_name,
+        object_kind,
+        object_type,
+        limit,
+        offset,
     )
-    .bind(limit)
-    .bind(offset)
-    .bind(&action_pattern)
-    .bind(&object_kind)
-    .bind(&object_type)
-    .fetch_all(pool)
     .await
-    .map_err(db_err)?;
-
-    let total = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM action_applicability ca
-           JOIN actions c ON c.id = ca.action_id
-           WHERE ($1::text IS NULL OR c.name ILIKE $1)
-             AND ($2::text IS NULL OR ca.object_kind = $2)
-             AND ($3::text IS NULL OR ca.object_type = $3)"#,
-    )
-    .bind(&action_pattern)
-    .bind(&object_kind)
-    .bind(&object_type)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(CapabilityApplicabilityList { items, total })
 }
 
 pub async fn get_action_assignment_rule(
     pool: &Database,
     id: Uuid,
 ) -> Result<ActionAssignmentRule, AppError> {
-    crate::db::query_as::<ActionAssignmentRule>(
-        r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                  decision, is_absolute, created_at, managed_by
-           FROM action_assignment_rules
-           WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => {
-            AppError::not_found(format!("action assignment rule {id} not found"))
-        }
-        other => AppError::Database(other),
-    })
+    storage::actions::get_action_assignment_rule(pool, id).await
 }
 
 pub async fn list_action_assignment_rules(
     pool: &Database,
     params: ListActionAssignmentRules,
 ) -> Result<ActionAssignmentRuleList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-    let action_name = normalize_optional_text(params.action_name);
-    let action_pattern = action_name.as_ref().map(|value| format!("%{value}%"));
-    let object_type = normalize_optional_text(params.object_type);
-
-    let items = crate::db::query_as::<ActionAssignmentRule>(
-        r#"SELECT id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                  decision, is_absolute, created_at, managed_by
-           FROM action_assignment_rules
-           WHERE tenant_id IS NOT DISTINCT FROM $3
-             AND ($4::text IS NULL OR entity_kind = $4)
-             AND ($5::text IS NULL OR action_name ILIKE $5)
-             AND ($6::text IS NULL OR object_kind = $6)
-             AND ($7::text IS NULL OR object_type = $7)
-             AND ($8::text IS NULL OR decision = $8)
-           ORDER BY entity_kind, action_name, object_kind, object_type NULLS FIRST, decision
-           LIMIT $1 OFFSET $2"#,
-    )
-    .bind(limit)
-    .bind(offset)
-    .bind(params.tenant_id)
-    .bind(&params.entity_kind)
-    .bind(&action_pattern)
-    .bind(params.object_kind)
-    .bind(&object_type)
-    .bind(params.decision)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let total = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM action_assignment_rules
-           WHERE tenant_id IS NOT DISTINCT FROM $1
-             AND ($2::text IS NULL OR entity_kind = $2)
-             AND ($3::text IS NULL OR action_name ILIKE $3)
-             AND ($4::text IS NULL OR object_kind = $4)
-             AND ($5::text IS NULL OR object_type = $5)
-             AND ($6::text IS NULL OR decision = $6)"#,
-    )
-    .bind(params.tenant_id)
-    .bind(&params.entity_kind)
-    .bind(&action_pattern)
-    .bind(params.object_kind)
-    .bind(&object_type)
-    .bind(params.decision)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(ActionAssignmentRuleList { items, total })
+    storage::actions::list_action_assignment_rules(pool, params).await
 }
 
 pub async fn create_action_assignment_rule(
@@ -3518,23 +2469,14 @@ pub async fn create_action_assignment_rule_with_audit(
     let action_name = req.action_name.clone();
     let object_type = req.object_type.clone();
 
-    let duplicate: bool = crate::db::query_scalar(
-        r#"SELECT EXISTS (
-             SELECT 1
-             FROM action_assignment_rules
-             WHERE tenant_id IS NOT DISTINCT FROM $1
-               AND entity_kind = $2
-               AND action_name = $3
-               AND object_kind = $4
-               AND object_type IS NOT DISTINCT FROM $5
-           )"#,
+    let duplicate: bool = storage::actions::assignment_rule_exists(
+        pool,
+        &req.tenant_id,
+        &req.entity_kind,
+        &action_name,
+        &req.object_kind,
+        &object_type,
     )
-    .bind(req.tenant_id)
-    .bind(&req.entity_kind)
-    .bind(&action_name)
-    .bind(req.object_kind)
-    .bind(&object_type)
-    .fetch_one(pool)
     .await
     .map_err(db_err)?;
     if duplicate {
@@ -3542,21 +2484,16 @@ pub async fn create_action_assignment_rule_with_audit(
     }
 
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let rule = crate::db::query_as::<ActionAssignmentRule>(
-        r#"INSERT INTO action_assignment_rules
-             (tenant_id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                     decision, is_absolute, created_at"#,
+    let rule = storage::actions::insert_assignment_rule(
+        &mut tx,
+        &req.tenant_id,
+        &req.entity_kind,
+        &action_name,
+        &req.object_kind,
+        &object_type,
+        &req.decision,
+        &req.is_absolute,
     )
-    .bind(req.tenant_id)
-    .bind(req.entity_kind)
-    .bind(action_name)
-    .bind(req.object_kind)
-    .bind(object_type)
-    .bind(req.decision)
-    .bind(req.is_absolute)
-    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
     let event = crate::audit::AuditEvent {
@@ -3615,12 +2552,9 @@ pub(crate) async fn validate_and_normalize_action_assignment_rule_on_connection(
     req.object_type = normalize_optional_text(req.object_type);
     validate_rule_object_type(req.object_kind, req.object_type.as_deref())?;
 
-    let action_exists: bool =
-        crate::db::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE name = $1)")
-            .bind(&req.action_name)
-            .fetch_one(connection)
-            .await
-            .map_err(db_err)?;
+    let action_exists: bool = storage::actions::action_exists_by_name(connection, &req.action_name)
+        .await
+        .map_err(db_err)?;
     if !action_exists {
         return Err(AppError::bad_request(format!(
             "actionName references unknown action {}",
@@ -3647,9 +2581,7 @@ pub async fn delete_action_assignment_rule_with_audit(
 ) -> Result<ActionAssignmentRule, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM action_assignment_rules WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
+        storage::actions::assignment_rule_tenant_optional(&mut tx, &id)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -3660,21 +2592,14 @@ pub async fn delete_action_assignment_rule_with_audit(
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "action_assignment_rules", id)
         .await?;
-    let rule = crate::db::query_as::<ActionAssignmentRule>(
-        r#"DELETE FROM action_assignment_rules
-           WHERE id = $1
-           RETURNING id, tenant_id, entity_kind, action_name, object_kind, object_type,
-                     decision, is_absolute, created_at"#,
-    )
-    .bind(id)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => {
-            AppError::not_found(format!("action assignment rule {id} not found"))
-        }
-        other => AppError::Database(other),
-    })?;
+    let rule = storage::actions::remove_assignment_rule(&mut tx, &id)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => {
+                AppError::not_found(format!("action assignment rule {id} not found"))
+            }
+            other => AppError::Database(other),
+        })?;
     let event = crate::audit::AuditEvent {
         actor_entity_id: actor_id,
         tenant_id: rule.tenant_id,
@@ -3702,28 +2627,20 @@ async fn ensure_not_config_managed_applicability_in_tx(
     object_kind: &str,
     object_type: Option<&str>,
 ) -> Result<(), AppError> {
-    let action_locked: Option<Uuid> =
-        crate::db::query_scalar("SELECT id FROM actions WHERE id = $1 FOR UPDATE")
-            .bind(capability_id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let action_locked: Option<Uuid> = storage::actions::lock_action_optional(tx, &capability_id)
+        .await
+        .map_err(db_err)?;
     if action_locked.is_none() {
         return Err(AppError::not_found(format!(
             "capability {capability_id} not found"
         )));
     }
-    let managed_by: Option<Option<String>> = crate::db::query_scalar(
-        r#"SELECT managed_by FROM action_applicability
-           WHERE action_id = $1
-             AND object_kind = $2
-             AND object_type IS NOT DISTINCT FROM $3
-           FOR UPDATE"#,
+    let managed_by: Option<Option<String>> = storage::actions::applicability_ownership_optional(
+        tx,
+        &capability_id,
+        object_kind,
+        &object_type,
     )
-    .bind(capability_id)
-    .bind(object_kind)
-    .bind(object_type)
-    .fetch_optional(tx.exec())
     .await
     .map_err(db_err)?;
     match managed_by {
@@ -3762,52 +2679,26 @@ pub async fn add_capability_applicability_with_audit(
 ) -> Result<CapabilityApplicabilityEntry, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
-    let exists =
-        crate::db::query_scalar::<bool>("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
-            .bind(capability_id)
-            .fetch_one(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let exists = storage::actions::action_exists(&mut tx, &capability_id)
+        .await
+        .map_err(db_err)?;
     if !exists {
         return Err(AppError::not_found(format!(
             "capability {capability_id} not found"
         )));
     }
 
-    let insert = crate::db::query(
-        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
-           VALUES ($1, $2, $3)
-           ON CONFLICT DO NOTHING"#,
-    )
-    .bind(capability_id)
-    .bind(&object_kind)
-    .bind(&object_type)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let insert =
+        storage::actions::insert_applicability(&mut tx, &capability_id, &object_kind, &object_type)
+            .await
+            .map_err(db_err)?;
 
-    let entry = crate::db::query_as::<CapabilityApplicabilityEntry>(
-        r#"SELECT c.id AS capability_id,
-                  c.name AS capability_name,
-                  c.description,
-                  ca.object_kind,
-                  ca.object_type,
-                  ca.created_at,
-                  ca.managed_by
-           FROM action_applicability ca
-           JOIN actions c ON c.id = ca.action_id
-           WHERE ca.action_id = $1
-             AND ca.object_kind = $2
-             AND ca.object_type IS NOT DISTINCT FROM $3"#,
-    )
-    .bind(capability_id)
-    .bind(&object_kind)
-    .bind(&object_type)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let entry =
+        storage::actions::applicability_entry(&mut tx, &capability_id, &object_kind, &object_type)
+            .await
+            .map_err(db_err)?;
 
-    if insert.rows_affected() == 0 {
+    if insert == 0 {
         tx.commit().await.map_err(db_err)?;
     } else {
         crate::audit::commit_with_observation(
@@ -3860,20 +2751,12 @@ pub async fn remove_capability_applicability_with_audit(
         object_type.as_deref(),
     )
     .await?;
-    let result = crate::db::query(
-        r#"DELETE FROM action_applicability
-           WHERE action_id = $1
-             AND object_kind = $2
-             AND object_type IS NOT DISTINCT FROM $3"#,
-    )
-    .bind(capability_id)
-    .bind(&object_kind)
-    .bind(&object_type)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let result =
+        storage::actions::remove_applicability(&mut tx, &capability_id, &object_kind, &object_type)
+            .await
+            .map_err(db_err)?;
 
-    if result.rows_affected() == 0 {
+    if result == 0 {
         return Err(AppError::not_found(
             "capability applicability row not found",
         ));
@@ -3933,23 +2816,12 @@ pub async fn update_capability_with_audit(
 ) -> Result<Capability, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "actions", id).await?;
-    let updated = crate::db::query_as::<Capability>(
-        r#"UPDATE actions
-           SET name          = COALESCE($2, name),
-               description   = COALESCE($3, description),
-               updated_at    = now()
-           WHERE id = $1
-           RETURNING id, name, description, created_at, updated_at"#,
-    )
-    .bind(id)
-    .bind(req.name)
-    .bind(req.description)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("capability {id} not found")),
-        other => AppError::Database(other),
-    })?;
+    let updated = storage::actions::update_action_fields(&mut tx, &id, &req.name, &req.description)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::not_found(format!("capability {id} not found")),
+            other => AppError::Database(other),
+        })?;
 
     if let Some(applicability) = req.applicability {
         replace_capability_applicability_in_tx(&mut tx, id, &applicability).await?;
@@ -3978,14 +2850,9 @@ async fn replace_capability_applicability_in_tx(
 ) -> Result<(), AppError> {
     // Refuse to blow away applicability rows that were declared in the
     // bootstrap config, even when the parent capability itself is API-managed.
-    let has_managed: bool = crate::db::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM action_applicability
-                        WHERE action_id = $1 AND managed_by = 'config')",
-    )
-    .bind(capability_id)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let has_managed: bool = storage::actions::action_has_config_applicability(tx, &capability_id)
+        .await
+        .map_err(db_err)?;
     if has_managed {
         return Err(AppError::conflict(
             "capability has applicability rows managed by the bootstrap config file; \
@@ -3993,9 +2860,7 @@ async fn replace_capability_applicability_in_tx(
         ));
     }
 
-    crate::db::query("DELETE FROM action_applicability WHERE action_id = $1")
-        .bind(capability_id)
-        .execute(tx.exec())
+    storage::actions::clear_applicability(tx, &capability_id)
         .await
         .map_err(db_err)?;
 
@@ -4004,15 +2869,12 @@ async fn replace_capability_applicability_in_tx(
         if !seen.insert((item.object_kind.as_str(), item.object_type.as_deref())) {
             continue;
         }
-        crate::db::query(
-            r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
-               VALUES ($1, $2, $3)
-               ON CONFLICT DO NOTHING"#,
+        storage::actions::insert_applicability(
+            tx,
+            &capability_id,
+            &item.object_kind,
+            &item.object_type,
         )
-        .bind(capability_id)
-        .bind(&item.object_kind)
-        .bind(&item.object_type)
-        .execute(tx.exec())
         .await
         .map_err(db_err)?;
     }
@@ -4036,29 +2898,18 @@ pub async fn delete_capability_with_audit(
     // concurrent bootstrap cannot add and stamp a declarative block link after
     // our check but before the cascading delete.
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "actions", id).await?;
-    let config_owned_link: bool = crate::db::query_scalar(
-        r#"SELECT EXISTS (
-               SELECT 1
-               FROM permission_block_actions pba
-               JOIN permission_blocks pb ON pb.id = pba.permission_block_id
-               WHERE pba.action_id = $1 AND pb.managed_by = 'config'
-           )"#,
-    )
-    .bind(id)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let config_owned_link: bool = storage::actions::action_has_config_links(&mut tx, &id)
+        .await
+        .map_err(db_err)?;
     if config_owned_link {
         return Err(AppError::conflict(
             "capability is linked to a permission block managed by the bootstrap config file and cannot be deleted via the API",
         ));
     }
-    let result = crate::db::query("DELETE FROM actions WHERE id = $1")
-        .bind(id)
-        .execute(tx.exec())
+    let result = storage::actions::remove_action(&mut tx, &id)
         .await
         .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+    if result == 0 {
         return Err(AppError::not_found(format!("capability {id} not found")));
     }
     crate::audit::commit_with_observation(
@@ -4094,30 +2945,7 @@ async fn read_live_subject_tenant_id(
     subject_kind: &SubjectKind,
     subject_id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
-    let subject_tenant_id: Option<Option<Uuid>> = match subject_kind {
-        SubjectKind::Entity => crate::db::query_scalar(
-            r#"SELECT tenant_id FROM entities
-                   WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
-        )
-        .bind(subject_id)
-        .fetch_optional(tx.exec())
-        .await
-        .map_err(db_err)?,
-        SubjectKind::Group => crate::db::query_scalar(
-            r#"SELECT tenant_id FROM principal_groups
-                   WHERE id = $1 AND status = 'active' AND deleted_at IS NULL"#,
-        )
-        .bind(subject_id)
-        .fetch_optional(tx.exec())
-        .await
-        .map_err(db_err)?,
-    };
-    let Some(subject_tenant_id) = subject_tenant_id else {
-        return Err(AppError::bad_request(
-            "assignment references a deleted, disabled, or unknown subject",
-        ));
-    };
-    Ok(subject_tenant_id)
+    storage::assignments::read_live_subject_tenant_id(tx, subject_kind, subject_id).await
 }
 
 async fn lock_active_tenant_ids<const N: usize>(
@@ -4139,30 +2967,8 @@ async fn lock_live_subject_row(
     subject_id: Uuid,
     expected_tenant_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let table = match subject_kind {
-        SubjectKind::Entity => "entities",
-        SubjectKind::Group => "principal_groups",
-    };
-    let sql = format!(
-        r#"SELECT id FROM {table}
-           WHERE id = $1
-             AND tenant_id IS NOT DISTINCT FROM $2
-             AND status = 'active'
-             AND deleted_at IS NULL
-           FOR UPDATE"#
-    );
-    let locked: Option<Uuid> = crate::db::query_scalar(&sql)
-        .bind(subject_id)
-        .bind(expected_tenant_id)
-        .fetch_optional(tx.exec())
+    storage::assignments::lock_live_subject_row(tx, subject_kind, subject_id, expected_tenant_id)
         .await
-        .map_err(db_err)?;
-    if locked.is_none() {
-        return Err(AppError::bad_request(
-            "assignment subject changed during validation",
-        ));
-    }
-    Ok(())
 }
 
 /// Prepare a role-assignment mutation under the canonical lock order.
@@ -4249,17 +3055,14 @@ pub async fn create_policy(
                     "role assignment supports only allow effect without conditions; use direct policy for deny or conditional grants",
                 ));
             }
-            crate::db::query(
-                r#"INSERT INTO role_assignments
-                     (id, tenant_id, subject_kind, subject_id, role_id)
-                   VALUES ($1, $2, $3, $4, $5)"#,
+            storage::assignments::insert_policy_role_assignment(
+                &mut tx,
+                &id,
+                &req.tenant_id,
+                &req.subject_kind,
+                &req.subject_id,
+                &req.grant_id,
             )
-            .bind(id)
-            .bind(req.tenant_id)
-            .bind(req.subject_kind)
-            .bind(req.subject_id)
-            .bind(req.grant_id)
-            .execute(tx.exec())
             .await
             .map_err(db_err)?;
         }
@@ -4269,43 +3072,30 @@ pub async fn create_policy(
                 &req.scope_kind,
                 req.scope_ref.as_deref(),
             )?;
-            let permission_block_id: Uuid = crate::db::query_scalar(
-                r#"INSERT INTO permission_blocks
-                     (tenant_id, scope_mode, object_kind, object_type, object_id, group_id, effect, conditions)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                   RETURNING id"#,
+            let permission_block_id: Uuid = storage::blocks::insert_legacy_permission_block(
+                &mut tx,
+                &block.tenant_id,
+                block.scope_mode,
+                &block.object_kind,
+                &block.object_type,
+                &block.object_id,
+                &block.group_id,
+                &req.effect,
+                &conditions,
             )
-            .bind(block.tenant_id)
-            .bind(block.scope_mode)
-            .bind(block.object_kind)
-            .bind(block.object_type)
-            .bind(block.object_id)
-            .bind(block.group_id)
-            .bind(req.effect)
-            .bind(conditions)
-            .fetch_one(tx.exec())
             .await
             .map_err(db_err)?;
-            crate::db::query(
-                r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
-                   VALUES ($1, $2)"#,
+            storage::blocks::insert_block_action(&mut tx, &permission_block_id, &req.grant_id)
+                .await
+                .map_err(db_err)?;
+            storage::assignments::insert_policy_direct_assignment(
+                &mut tx,
+                &id,
+                &req.tenant_id,
+                &req.subject_kind,
+                &req.subject_id,
+                &permission_block_id,
             )
-            .bind(permission_block_id)
-            .bind(req.grant_id)
-            .execute(tx.exec())
-            .await
-            .map_err(db_err)?;
-            crate::db::query(
-                r#"INSERT INTO direct_policies
-                     (id, tenant_id, subject_kind, subject_id, permission_block_id)
-                   VALUES ($1, $2, $3, $4, $5)"#,
-            )
-            .bind(id)
-            .bind(req.tenant_id)
-            .bind(req.subject_kind)
-            .bind(req.subject_id)
-            .bind(permission_block_id)
-            .execute(tx.exec())
             .await
             .map_err(db_err)?;
         }
@@ -4325,40 +3115,11 @@ async fn sync_tenant_membership_for_policy(
     tenant_id: Uuid,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
-    crate::db::query(
-        r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
-           SELECT $1, $2, 'active'
-           WHERE EXISTS (
-               SELECT 1 FROM entities
-               WHERE id = $2
-                 AND kind = 'human'
-                 AND status = 'active'
-                 AND deleted_at IS NULL
-           )
-           ON CONFLICT (tenant_id, entity_id)
-           DO UPDATE SET status = 'active'"#,
-    )
-    .bind(tenant_id)
-    .bind(entity_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-
-    Ok(())
+    storage::assignments::sync_tenant_membership_for_policy(tx, tenant_id, entity_id).await
 }
 
 pub async fn get_policy(pool: &Database, id: Uuid) -> Result<PolicyBinding, AppError> {
-    crate::db::query_as::<PolicyBinding>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, grant_kind, grant_id, scope_kind, scope_ref, effect, conditions, created_at
-           FROM effective_access_edges() WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("policy {id} not found")),
-        other => AppError::Database(other),
-    })
+    storage::assignments::get_policy(pool, id).await
 }
 
 pub async fn create_role_assignment_with_audit(
@@ -4407,17 +3168,13 @@ pub(crate) async fn create_role_assignment_in_tx(
     // Validation must run on `tx` for that to hold at all — the pool variant
     // would neither see the locked state nor respect the locks.
     validate_role_assignment_in_tx(tx, &req).await?;
-    let assignment = crate::db::query_as::<RoleAssignment>(
-        r#"INSERT INTO role_assignments
-             (tenant_id, subject_kind, subject_id, role_id)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, tenant_id, subject_kind, subject_id, role_id, created_at"#,
+    let assignment = storage::assignments::insert_role_assignment(
+        tx,
+        &req.tenant_id,
+        &req.subject_kind,
+        &req.subject_id,
+        &req.role_id,
     )
-    .bind(req.tenant_id)
-    .bind(req.subject_kind)
-    .bind(req.subject_id)
-    .bind(req.role_id)
-    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -4449,26 +3206,15 @@ pub(crate) async fn create_role_assignment_if_missing_in_tx(
 ) -> Result<bool, AppError> {
     prepare_role_assignment_in_tx(tx, req).await?;
     validate_role_assignment_in_tx(tx, req).await?;
-    let inserted = crate::db::query(
-        r#"INSERT INTO role_assignments
-             (tenant_id, subject_kind, subject_id, role_id)
-           SELECT $1, $2, $3, $4
-           WHERE NOT EXISTS (
-               SELECT 1 FROM role_assignments
-               WHERE tenant_id IS NOT DISTINCT FROM $1
-                 AND subject_kind = $2
-                 AND subject_id = $3
-                 AND role_id = $4
-           )"#,
+    let inserted = storage::assignments::insert_missing_role_assignment(
+        tx,
+        &req.tenant_id,
+        &req.subject_kind.clone(),
+        &req.subject_id,
+        &req.role_id,
     )
-    .bind(req.tenant_id)
-    .bind(req.subject_kind.clone())
-    .bind(req.subject_id)
-    .bind(req.role_id)
-    .execute(tx.exec())
     .await
-    .map_err(db_err)?
-    .rows_affected();
+    .map_err(db_err)?;
     Ok(inserted > 0)
 }
 
@@ -4484,55 +3230,7 @@ pub async fn list_role_assignments(
     pool: &Database,
     params: ListRoleAssignments,
 ) -> Result<RoleAssignmentList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-    let items = crate::db::query_as::<RoleAssignment>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at, managed_by
-           FROM role_assignments
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR subject_kind = $2)
-             AND ($3::uuid IS NULL OR subject_id = $3)
-             AND ($4::uuid IS NULL OR role_id = $4)
-             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)
-             AND (
-               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = role_assignments.subject_id AND se.deleted_at IS NULL))
-               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = role_assignments.subject_id AND sg.deleted_at IS NULL))
-             )
-           ORDER BY created_at DESC
-           LIMIT $5 OFFSET $6"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind.clone())
-    .bind(params.subject_id)
-    .bind(params.role_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let total = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM role_assignments
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR subject_kind = $2)
-             AND ($3::uuid IS NULL OR subject_id = $3)
-             AND ($4::uuid IS NULL OR role_id = $4)
-             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)
-             AND (
-               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = role_assignments.subject_id AND se.deleted_at IS NULL))
-               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = role_assignments.subject_id AND sg.deleted_at IS NULL))
-             )"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind)
-    .bind(params.subject_id)
-    .bind(params.role_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(RoleAssignmentList { items, total })
+    storage::assignments::list_role_assignments(pool, params).await
 }
 
 pub async fn list_role_assignments_authorized(
@@ -4540,22 +3238,6 @@ pub async fn list_role_assignments_authorized(
     auth: &crate::auth::AuthContext,
     params: ListRoleAssignments,
 ) -> Result<RoleAssignmentList, AppError> {
-    const CANDIDATES: &str = r#"SELECT id, tenant_id,
-                  row_number() OVER (ORDER BY created_at DESC, id) AS ordinality
-           FROM role_assignments
-           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
-                  OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
-             AND (NULLIF($5->>'subject_kind', '') IS NULL
-                  OR subject_kind = ($5->>'subject_kind'))
-             AND (NULLIF($5->>'subject_id', '')::uuid IS NULL
-                  OR subject_id = NULLIF($5->>'subject_id', '')::uuid)
-             AND (NULLIF($5->>'role_id', '')::uuid IS NULL
-                  OR role_id = NULLIF($5->>'role_id', '')::uuid)
-             AND EXISTS (SELECT 1 FROM roles r WHERE r.id = role_assignments.role_id AND r.deleted_at IS NULL)
-             AND (
-               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = role_assignments.subject_id AND se.deleted_at IS NULL))
-               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = role_assignments.subject_id AND sg.deleted_at IS NULL))
-             )"#;
     let authorized = authorize_flat_candidate_query(
         pool,
         auth.entity_id,
@@ -4568,7 +3250,7 @@ pub async fn list_role_assignments_authorized(
             "subject_id": params.subject_id,
             "role_id": params.role_id,
         }),
-        CANDIDATES,
+        FlatCandidate::Assignments,
         params.limit,
         params.offset,
     )
@@ -4576,16 +3258,9 @@ pub async fn list_role_assignments_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        crate::db::query_as::<RoleAssignment>(
-            r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at, managed_by
-               FROM role_assignments
-               WHERE id = ANY($1::uuid[])
-               ORDER BY array_position($1::uuid[], id)"#,
-        )
-        .bind(&authorized.ids)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?
+        storage::visibility::selected_role_assignments(pool, &authorized.ids)
+            .await
+            .map_err(db_err)?
     };
     Ok(RoleAssignmentList {
         items,
@@ -4594,18 +3269,7 @@ pub async fn list_role_assignments_authorized(
 }
 
 pub async fn get_role_assignment(pool: &Database, id: Uuid) -> Result<RoleAssignment, AppError> {
-    crate::db::query_as::<RoleAssignment>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, role_id, created_at
-           FROM role_assignments
-           WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("role assignment {id} not found")),
-        other => AppError::Database(other),
-    })
+    storage::assignments::get_role_assignment(pool, id).await
 }
 
 pub async fn delete_role_assignment(pool: &Database, id: Uuid) -> Result<(), AppError> {
@@ -4646,9 +3310,7 @@ pub(crate) async fn delete_role_assignment_in_tx(
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
     let tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
+        storage::assignments::role_assignment_tenant_optional(tx, &id)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = tenant_id else {
@@ -4660,12 +3322,10 @@ pub(crate) async fn delete_role_assignment_in_tx(
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "role_assignments", id).await?;
     // A role assignment is a 'policy' protected object; the policy-object cleanup trigger
     // sweeps the permission blocks targeting it when this row is deleted.
-    let result = crate::db::query("DELETE FROM role_assignments WHERE id = $1")
-        .bind(id)
-        .execute(tx.exec())
+    let result = storage::assignments::remove_role_assignment(tx, &id)
         .await
         .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+    if result == 0 {
         return Err(AppError::not_found(format!(
             "role assignment {id} not found"
         )));
@@ -4718,9 +3378,7 @@ pub(crate) async fn create_direct_policy_in_tx(
     validate_direct_policy_in_tx(tx, &req).await?;
     crate::guardrails::validate_direct_policy(tx, &req).await?;
     let block_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1 FOR UPDATE")
-            .bind(req.permission_block_id)
-            .fetch_optional(tx.exec())
+        storage::blocks::lock_block_tenant_optional(tx, &req.permission_block_id)
             .await
             .map_err(db_err)?;
     if block_tenant_id != Some(req.tenant_id) {
@@ -4728,17 +3386,13 @@ pub(crate) async fn create_direct_policy_in_tx(
             "direct policy references a missing or cross-tenant permission block",
         ));
     }
-    let policy = crate::db::query_as::<DirectPolicy>(
-        r#"INSERT INTO direct_policies
-             (tenant_id, subject_kind, subject_id, permission_block_id)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, tenant_id, subject_kind, subject_id, permission_block_id, created_at"#,
+    let policy = storage::assignments::insert_direct_policy(
+        tx,
+        &req.tenant_id,
+        &req.subject_kind,
+        &req.subject_id,
+        &req.permission_block_id,
     )
-    .bind(req.tenant_id)
-    .bind(req.subject_kind)
-    .bind(req.subject_id)
-    .bind(req.permission_block_id)
-    .fetch_one(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -4760,95 +3414,6 @@ pub async fn create_direct_policy(
 ) -> Result<DirectPolicy, AppError> {
     create_direct_policy_with_audit(pool, false, None, req).await
 }
-
-/// Resolves the object's own object groups and every ancestor of those
-/// groups, carrying `(object_kind, object_type)` in the shape a permission
-/// block records it, so a block's declared scope can be compared the way the
-/// PDP compares it (`grant_scope_matches`, migration 001).
-///
-/// Anchored at the object and walks *upward*, so cost is bounded by tree
-/// depth, not block count. The membership joins return every matching row —
-/// an object in several groups must produce a match for each.
-const DIRECT_POLICY_OBJECT_CTE: &str = r#"WITH RECURSIVE object_parent_groups(group_id, object_kind, object_type) AS (
-             SELECT oge.group_id, 'entity'::text, 'entity:' || e.kind
-             FROM object_group_entities oge
-             JOIN entities e ON e.id = oge.entity_id
-             WHERE oge.entity_id = $5::uuid AND e.deleted_at IS NULL
-             UNION ALL
-             SELECT ogr.group_id, 'resource'::text, 'resource:' || r.kind
-             FROM object_group_resources ogr
-             JOIN resources r ON r.id = ogr.resource_id
-             WHERE ogr.resource_id = $5::uuid AND r.deleted_at IS NULL
-             UNION ALL
-             SELECT ogh.parent_id, 'group'::text, 'group:object'
-             FROM object_group_hierarchy ogh
-             JOIN object_groups og ON og.id = ogh.child_id
-             WHERE ogh.child_id = $5::uuid AND og.deleted_at IS NULL
-           ),
-           object_ancestor_groups(group_id, object_kind, object_type) AS (
-             SELECT ogh.parent_id, opg.object_kind, opg.object_type
-             FROM object_parent_groups opg
-             JOIN object_group_hierarchy ogh ON ogh.child_id = opg.group_id
-             UNION ALL
-             SELECT ogh.parent_id, oag.object_kind, oag.object_type
-             FROM object_ancestor_groups oag
-             JOIN object_group_hierarchy ogh ON ogh.child_id = oag.group_id
-           )"#;
-
-/// The reverse-lookup predicate: does this policy's permission block name the
-/// object in `$5`, narrowed by the optional `$6` / `$7` co-filters?
-///
-/// Only scope modes that name a specific object, or a group object directly /
-/// through a group hierarchy, are considered. A `group_descendant_objects` block
-/// matches through *strict* ancestors of the object's own group, mirroring the
-/// PDP: an object directly in the block's group is the `group_direct_objects`
-/// case, not the descendant case.
-const DIRECT_POLICY_OBJECT_PREDICATE: &str = r#"($5::uuid IS NULL OR EXISTS (
-               SELECT 1 FROM permission_blocks pb
-               WHERE pb.id = direct_policies.permission_block_id
-                 AND ($6::text IS NULL OR pb.object_kind IS NULL OR pb.object_kind = $6)
-                 AND ($7::text IS NULL OR pb.object_type IS NULL OR pb.object_type = $7)
-                 AND (
-                   (pb.scope_mode = 'object' AND pb.object_id = $5)
-                   OR (pb.scope_mode = 'group'
-                       AND pb.group_id = $5
-                       AND ($6::text IS NULL OR $6 = 'group')
-                       AND ($7::text IS NULL OR $7 = 'group:object')
-                       AND EXISTS (
-                         SELECT 1 FROM object_groups og
-                         WHERE og.id = $5
-                           AND og.deleted_at IS NULL))
-                   OR (pb.scope_mode = 'group_direct_objects' AND EXISTS (
-                         SELECT 1 FROM object_parent_groups opg
-                         WHERE opg.group_id = pb.group_id
-                           AND opg.object_kind = pb.object_kind
-                           AND opg.object_type = pb.object_type))
-                   OR (pb.scope_mode = 'group_descendant_objects' AND EXISTS (
-                         SELECT 1 FROM object_ancestor_groups oag
-                         WHERE oag.group_id = pb.group_id
-                           AND oag.object_kind = pb.object_kind
-                           AND oag.object_type = pb.object_type))
-                   OR (pb.scope_mode = 'group_child_groups'
-                       AND ($6::text IS NULL OR $6 = 'group')
-                       AND ($7::text IS NULL OR $7 = 'group:object')
-                       AND EXISTS (
-                         SELECT 1 FROM object_parent_groups opg
-                         WHERE opg.group_id = pb.group_id
-                           AND opg.object_kind = 'group'))
-                   OR (pb.scope_mode = 'group_descendant_groups'
-                       AND ($6::text IS NULL OR $6 = 'group')
-                       AND ($7::text IS NULL OR $7 = 'group:object')
-                       AND (
-                         EXISTS (
-                           SELECT 1 FROM object_parent_groups opg
-                           WHERE opg.group_id = pb.group_id
-                             AND opg.object_kind = 'group')
-                         OR EXISTS (
-                           SELECT 1 FROM object_ancestor_groups oag
-                           WHERE oag.group_id = pb.group_id
-                             AND oag.object_kind = 'group')))
-                 )
-             ))"#;
 
 /// `object_kind` / `object_type` only make sense alongside `object_id`: the
 /// reverse-lookup predicate is inert without it, so accepting them on their own
@@ -4894,73 +3459,15 @@ fn validate_direct_policy_object_filter(
 /// this as "everyone who can access X" will under-report.
 pub async fn list_direct_policies(
     pool: &Database,
-    params: ListDirectPolicies,
+    mut params: ListDirectPolicies,
 ) -> Result<DirectPolicyList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-    let object_type = normalize_optional_text(params.object_type);
+    params.object_type = normalize_optional_text(params.object_type);
     validate_direct_policy_object_filter(
         params.object_id,
         params.object_kind,
-        object_type.as_deref(),
+        params.object_type.as_deref(),
     )?;
-    let items_sql = format!(
-        r#"{DIRECT_POLICY_OBJECT_CTE}
-           SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at, managed_by
-           FROM direct_policies
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR subject_kind = $2)
-             AND ($3::uuid IS NULL OR subject_id = $3)
-             AND ($4::uuid IS NULL OR permission_block_id = $4)
-             AND (
-               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
-               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
-             )
-             AND {DIRECT_POLICY_OBJECT_PREDICATE}
-           ORDER BY created_at DESC
-           LIMIT $8 OFFSET $9"#
-    );
-    let items = crate::db::query_as::<DirectPolicy>(&items_sql)
-        .bind(params.tenant_id)
-        .bind(params.subject_kind.clone())
-        .bind(params.subject_id)
-        .bind(params.permission_block_id)
-        .bind(params.object_id)
-        .bind(params.object_kind)
-        .bind(&object_type)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
-
-    let total_sql = format!(
-        r#"{DIRECT_POLICY_OBJECT_CTE}
-           SELECT COUNT(*)
-           FROM direct_policies
-           WHERE ($1::uuid IS NULL OR tenant_id = $1)
-             AND ($2::text IS NULL OR subject_kind = $2)
-             AND ($3::uuid IS NULL OR subject_id = $3)
-             AND ($4::uuid IS NULL OR permission_block_id = $4)
-             AND (
-               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
-               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
-             )
-             AND {DIRECT_POLICY_OBJECT_PREDICATE}"#
-    );
-    let total = crate::db::query_scalar(&total_sql)
-        .bind(params.tenant_id)
-        .bind(params.subject_kind)
-        .bind(params.subject_id)
-        .bind(params.permission_block_id)
-        .bind(params.object_id)
-        .bind(params.object_kind)
-        .bind(&object_type)
-        .fetch_one(pool)
-        .await
-        .map_err(db_err)?;
-
-    Ok(DirectPolicyList { items, total })
+    storage::assignments::list_direct_policies(pool, params).await
 }
 
 pub async fn list_direct_policies_authorized(
@@ -4974,37 +3481,6 @@ pub async fn list_direct_policies_authorized(
         params.object_kind,
         object_type.as_deref(),
     )?;
-    let object_cte =
-        DIRECT_POLICY_OBJECT_CTE.replace("$5::uuid", "NULLIF($5->>'object_id', '')::uuid");
-    let object_predicate = DIRECT_POLICY_OBJECT_PREDICATE
-        .replace("$5::uuid", "__OBJECT_ID__")
-        .replace("$5", "__OBJECT_ID__")
-        .replace("$6::text", "__OBJECT_KIND__")
-        .replace("$6", "__OBJECT_KIND__")
-        .replace("$7::text", "__OBJECT_TYPE__")
-        .replace("$7", "__OBJECT_TYPE__")
-        .replace("__OBJECT_ID__", "NULLIF($5->>'object_id', '')::uuid")
-        .replace("__OBJECT_KIND__", "NULLIF($5->>'object_kind', '')")
-        .replace("__OBJECT_TYPE__", "NULLIF($5->>'object_type', '')");
-    let candidates_sql = format!(
-        r#"{object_cte}
-           SELECT id, tenant_id,
-                  row_number() OVER (ORDER BY created_at DESC, id) AS ordinality
-           FROM direct_policies
-           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL
-                  OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
-             AND (NULLIF($5->>'subject_kind', '') IS NULL
-                  OR subject_kind = ($5->>'subject_kind'))
-             AND (NULLIF($5->>'subject_id', '')::uuid IS NULL
-                  OR subject_id = NULLIF($5->>'subject_id', '')::uuid)
-             AND (NULLIF($5->>'permission_block_id', '')::uuid IS NULL
-                  OR permission_block_id = NULLIF($5->>'permission_block_id', '')::uuid)
-             AND (
-               (subject_kind = 'entity' AND EXISTS (SELECT 1 FROM entities se WHERE se.id = direct_policies.subject_id AND se.deleted_at IS NULL))
-               OR (subject_kind = 'group' AND EXISTS (SELECT 1 FROM principal_groups sg WHERE sg.id = direct_policies.subject_id AND sg.deleted_at IS NULL))
-             )
-             AND {object_predicate}"#
-    );
     let authorized = authorize_flat_candidate_query(
         pool,
         auth.entity_id,
@@ -5020,7 +3496,7 @@ pub async fn list_direct_policies_authorized(
             "object_kind": params.object_kind,
             "object_type": object_type,
         }),
-        &candidates_sql,
+        FlatCandidate::DirectPolicies,
         params.limit,
         params.offset,
     )
@@ -5028,17 +3504,9 @@ pub async fn list_direct_policies_authorized(
     let items = if authorized.ids.is_empty() {
         Vec::new()
     } else {
-        crate::db::query_as::<DirectPolicy>(
-            r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id,
-                      created_at, managed_by
-               FROM direct_policies
-               WHERE id = ANY($1::uuid[])
-               ORDER BY array_position($1::uuid[], id)"#,
-        )
-        .bind(&authorized.ids)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?
+        storage::visibility::selected_direct_policies(pool, &authorized.ids)
+            .await
+            .map_err(db_err)?
     };
     Ok(DirectPolicyList {
         items,
@@ -5047,18 +3515,7 @@ pub async fn list_direct_policies_authorized(
 }
 
 pub async fn get_direct_policy(pool: &Database, id: Uuid) -> Result<DirectPolicy, AppError> {
-    crate::db::query_as::<DirectPolicy>(
-        r#"SELECT id, tenant_id, subject_kind, subject_id, permission_block_id, created_at
-           FROM direct_policies
-           WHERE id = $1"#,
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found(format!("direct policy {id} not found")),
-        other => AppError::Database(other),
-    })
+    storage::assignments::get_direct_policy(pool, id).await
 }
 
 pub async fn delete_direct_policy_with_audit(
@@ -5094,9 +3551,7 @@ pub(crate) async fn delete_direct_policy_in_tx(
     id: Uuid,
 ) -> Result<Option<Uuid>, AppError> {
     let policy_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
+        storage::assignments::direct_policy_tenant_optional(tx, &id)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = policy_tenant_id else {
@@ -5104,13 +3559,9 @@ pub(crate) async fn delete_direct_policy_in_tx(
     };
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "direct_policies", id).await?;
-    let block_id: Option<Uuid> = crate::db::query_scalar(
-        "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
-    )
-    .bind(id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let block_id: Option<Uuid> = storage::assignments::remove_direct_policy_optional(tx, &id)
+        .await
+        .map_err(db_err)?;
     let Some(block_id) = block_id else {
         return Err(AppError::not_found(format!("direct policy {id} not found")));
     };
@@ -5139,13 +3590,10 @@ pub(crate) async fn validate_role_assignment_in_tx(
     tx: &mut DbTransaction<'_>,
     req: &CreateRoleAssignment,
 ) -> Result<(), AppError> {
-    let role_tenant_id: Option<Uuid> =
-        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1 AND deleted_at IS NULL")
-            .bind(req.role_id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::bad_request("role assignment references unknown role"))?;
+    let role_tenant_id: Option<Uuid> = storage::roles::live_role_tenant_optional(tx, &req.role_id)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| AppError::bad_request("role assignment references unknown role"))?;
     if role_tenant_id != req.tenant_id {
         return Err(AppError::bad_request(
             "role assignment tenantId must match role tenantId",
@@ -5167,9 +3615,7 @@ pub(crate) async fn validate_direct_policy_in_tx(
     req: &CreateDirectPolicy,
 ) -> Result<(), AppError> {
     let block_tenant_id: Option<Uuid> =
-        crate::db::query_scalar("SELECT tenant_id FROM permission_blocks WHERE id = $1")
-            .bind(req.permission_block_id)
-            .fetch_optional(tx.exec())
+        storage::blocks::block_tenant_optional(tx, &req.permission_block_id)
             .await
             .map_err(db_err)?
             .ok_or_else(|| {
@@ -5191,26 +3637,16 @@ async fn validate_subject_boundary_in_tx(
 ) -> Result<(), AppError> {
     match subject_kind {
         SubjectKind::Entity => {
-            let entity_tenant_id: Option<Uuid> = crate::db::query_scalar(
-                "SELECT tenant_id FROM entities WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(subject_id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
+            let entity_tenant_id: Option<Uuid> =
+                storage::assignments::live_entity_tenant_optional(tx, &subject_id)
+                    .await
+                    .map_err(db_err)?
+                    .ok_or_else(|| AppError::bad_request("assignment references unknown entity"))?;
             if let Some(tenant_id) = tenant_id {
-                let member: bool = crate::db::query_scalar(
-                    r#"SELECT EXISTS (
-                         SELECT 1 FROM tenant_memberships
-                         WHERE tenant_id = $1 AND entity_id = $2 AND status = 'active'
-                       )"#,
-                )
-                .bind(tenant_id)
-                .bind(subject_id)
-                .fetch_one(tx.exec())
-                .await
-                .map_err(db_err)?;
+                let member: bool =
+                    storage::assignments::active_membership(tx, &tenant_id, &subject_id)
+                        .await
+                        .map_err(db_err)?;
                 if entity_tenant_id != Some(tenant_id) && !member {
                     return Err(AppError::bad_request(
                         "tenant assignment subject entity must belong to the tenant",
@@ -5223,16 +3659,13 @@ async fn validate_subject_boundary_in_tx(
             }
         }
         SubjectKind::Group => {
-            let group_tenant_id: Option<Uuid> = crate::db::query_scalar(
-                "SELECT tenant_id FROM principal_groups WHERE id = $1 AND deleted_at IS NULL",
-            )
-            .bind(subject_id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| {
-                AppError::bad_request("assignment references unknown principal group")
-            })?;
+            let group_tenant_id: Option<Uuid> =
+                storage::assignments::live_principal_group_tenant_optional(tx, &subject_id)
+                    .await
+                    .map_err(db_err)?
+                    .ok_or_else(|| {
+                        AppError::bad_request("assignment references unknown principal group")
+                    })?;
             if group_tenant_id != tenant_id {
                 return Err(AppError::bad_request(
                     "assignment subject principal group must be in the same tenant",
@@ -5245,162 +3678,25 @@ async fn validate_subject_boundary_in_tx(
 
 pub async fn subject_role_assignments(
     pool: &Database,
-    params: SubjectRoleAssignmentsQuery,
+    mut params: SubjectRoleAssignmentsQuery,
 ) -> Result<SubjectRoleAssignmentList, AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-    let q = search_pattern(params.q);
-    let derived_kind = params
-        .derived_kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|kind| !kind.is_empty())
-        .map(str::to_ascii_lowercase);
-
-    if let Some(kind) = derived_kind.as_deref() {
-        match kind {
-            "simple" | "composite" | "empty" => {}
-            _ => {
-                return Err(AppError::bad_request(
-                    "derivedKind must be simple, composite, or empty",
-                ));
-            }
-        }
-    }
-
-    let rows = crate::db::query(
-        r#"SELECT
-             pb.id AS policy_id,
-             pb.tenant_id AS policy_tenant_id,
-             pb.subject_kind,
-             pb.subject_id,
-             pb.grant_kind,
-             pb.grant_id,
-             pb.scope_kind AS policy_scope_kind,
-             pb.scope_ref AS policy_scope_ref,
-             pb.effect,
-             pb.conditions,
-             pb.created_at AS policy_created_at,
-             r.id AS role_id,
-             r.name AS role_name,
-             r.tenant_id AS role_tenant_id,
-             r.description AS role_description,
-             r.created_at AS role_created_at,
-             r.updated_at AS role_updated_at
-           FROM effective_access_edges() pb
-           JOIN roles r ON pb.grant_kind = 'role' AND pb.grant_id = r.id
-           WHERE ($1::uuid IS NULL OR pb.tenant_id = $1)
-             AND pb.subject_kind = $2
-             AND pb.subject_id = $3
-             AND ($4::text IS NULL OR r.name ILIKE $4 OR r.description ILIKE $4)
-             AND (
-               $5::text IS NULL
-               OR ($5 = 'simple' AND EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
-                  ))
-               OR ($5 = 'composite' AND FALSE)
-               OR ($5 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
-                  ))
-             )
-           ORDER BY pb.created_at DESC
-           LIMIT $6 OFFSET $7"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind.clone())
-    .bind(params.subject_id)
-    .bind(q.clone())
-    .bind(derived_kind.clone())
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let items = rows
-        .into_iter()
-        .map(|row| {
-            Ok(SubjectRoleAssignment {
-                policy: PolicyBinding {
-                    id: row.try_get("policy_id").map_err(db_err)?,
-                    tenant_id: row.try_get("policy_tenant_id").map_err(db_err)?,
-                    subject_kind: row.try_get("subject_kind").map_err(db_err)?,
-                    subject_id: row.try_get("subject_id").map_err(db_err)?,
-                    grant_kind: row.try_get("grant_kind").map_err(db_err)?,
-                    grant_id: row.try_get("grant_id").map_err(db_err)?,
-                    scope_kind: row.try_get("policy_scope_kind").map_err(db_err)?,
-                    scope_ref: row.try_get("policy_scope_ref").map_err(db_err)?,
-                    effect: row.try_get("effect").map_err(db_err)?,
-                    conditions: row.try_get("conditions").map_err(db_err)?,
-                    created_at: row.try_get("policy_created_at").map_err(db_err)?,
-                },
-                role: Role {
-                    id: row.try_get("role_id").map_err(db_err)?,
-                    name: row.try_get("role_name").map_err(db_err)?,
-                    tenant_id: row.try_get("role_tenant_id").map_err(db_err)?,
-                    description: row.try_get("role_description").map_err(db_err)?,
-                    deleted_at: None,
-                    deleted_by: None,
-                    created_at: row.try_get("role_created_at").map_err(db_err)?,
-                    updated_at: row.try_get("role_updated_at").map_err(db_err)?,
-                    // Explain view; only surfaces role identity, not lifecycle
-                    // metadata. Leave managed_by unset — the UI reads it via
-                    // list_roles / get_role, not this SELECT.
-                    managed_by: None,
-                },
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
-
-    let total: i64 = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM effective_access_edges() pb
-           JOIN roles r ON pb.grant_kind = 'role' AND pb.grant_id = r.id
-           WHERE ($1::uuid IS NULL OR pb.tenant_id = $1)
-             AND pb.subject_kind = $2
-             AND pb.subject_id = $3
-             AND ($4::text IS NULL OR r.name ILIKE $4 OR r.description ILIKE $4)
-             AND (
-               $5::text IS NULL
-               OR ($5 = 'simple' AND EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
-                  ))
-               OR ($5 = 'composite' AND FALSE)
-               OR ($5 = 'empty' AND NOT EXISTS (
-                    SELECT 1 FROM role_permission_blocks WHERE role_id = r.id
-                  ))
-             )"#,
-    )
-    .bind(params.tenant_id)
-    .bind(params.subject_kind)
-    .bind(params.subject_id)
-    .bind(q)
-    .bind(derived_kind)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(SubjectRoleAssignmentList { items, total })
+    params.q = search_pattern(params.q);
+    params.derived_kind = normalize_derived_kind(params.derived_kind)?;
+    storage::assignments::subject_role_assignments(pool, params).await
 }
 
 pub async fn delete_policy(pool: &Database, id: Uuid) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let direct_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM direct_policies WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
+        storage::assignments::direct_policy_tenant_optional(&mut tx, &id)
             .await
             .map_err(db_err)?;
     if let Some(tenant_id) = direct_tenant_id {
         crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
         crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "direct_policies", id).await?;
-        let block_id: Uuid = crate::db::query_scalar(
-            "DELETE FROM direct_policies WHERE id = $1 RETURNING permission_block_id",
-        )
-        .bind(id)
-        .fetch_one(tx.exec())
-        .await
-        .map_err(db_err)?;
+        let block_id: Uuid = storage::assignments::remove_direct_policy(&mut tx, &id)
+            .await
+            .map_err(db_err)?;
         // The block is shared: GC it only if removing this policy left it
         // unreferenced. A block still linked to a role or another policy stays.
         // Blocks targeting this policy as an object are swept by the policy-object cleanup
@@ -5411,9 +3707,7 @@ pub async fn delete_policy(pool: &Database, id: Uuid) -> Result<(), AppError> {
     }
 
     let assignment_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM role_assignments WHERE id = $1")
-            .bind(id)
-            .fetch_optional(tx.exec())
+        storage::assignments::role_assignment_tenant_optional(&mut tx, &id)
             .await
             .map_err(db_err)?;
     let Some(tenant_id) = assignment_tenant_id else {
@@ -5421,12 +3715,10 @@ pub async fn delete_policy(pool: &Database, id: Uuid) -> Result<(), AppError> {
     };
     crate::tenants::repo::lock_tenant_rows_in_order(&mut tx, &[tenant_id]).await?;
     crate::managed_by::ensure_not_config_managed_in_tx(&mut tx, "role_assignments", id).await?;
-    let result = crate::db::query("DELETE FROM role_assignments WHERE id = $1")
-        .bind(id)
-        .execute(tx.exec())
+    let result = storage::assignments::remove_role_assignment(&mut tx, &id)
         .await
         .map_err(db_err)?;
-    debug_assert_eq!(result.rows_affected(), 1);
+    debug_assert_eq!(result, 1);
     tx.commit().await.map_err(db_err)?;
     Ok(())
 }
@@ -5442,30 +3734,6 @@ pub async fn object_tenant_id_by_id(
         .await?
         .filter(|object| object.live)
         .map(|object| object.tenant_id))
-}
-
-/// SQL CTE selecting the unconditional ceiling entries of the caller's scoped
-/// access token (empty result when the bound credential id is NULL / the token
-/// is unscoped). Conditional entries are excluded: like the coarse gates, a
-/// listing has no per-request context to evaluate them, so they fail closed
-/// here and per-object authzCheck remains the path that can honour them.
-///
-/// Single source for every ceiling-aware listing (entity/resource/group and
-/// tenant visibility) — splice via [`ceiling_cte`] so the fail-closed rule
-/// cannot drift between readers.
-const CEILING_CTE: &str = r#"ceiling AS (
-                   SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id
-                   FROM credential_permission_limits l
-                   JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
-                   JOIN credential_permission_limit_actions la ON la.limit_id = l.id
-                   WHERE l.credential_id = __CEILING_PARAM__::uuid
-                     AND l.conditions = '{}'::jsonb
-               )"#;
-
-/// Render [`CEILING_CTE`] with the bind position that carries the scoped
-/// token's credential id (e.g. `"$12"`).
-pub(crate) fn ceiling_cte(param: &str) -> String {
-    CEILING_CTE.replace("__CEILING_PARAM__", param)
 }
 
 /// Ceiling-aware listing entry point for request-path callers. The scoped-token
@@ -5516,33 +3784,11 @@ async fn authorized_flat_object_ids(
     }
     let q = search_pattern(params.q);
     let id = search_pattern(params.id);
-    const ROLE_CANDIDATES: &str = r#"SELECT id, tenant_id,
-               row_number() OVER (ORDER BY name, id) AS ordinality
-           FROM roles
-           WHERE deleted_at IS NULL
-             AND (NULLIF($5->>'tenant_id', '')::uuid IS NULL OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
-             AND (NULLIF($5->>'q', '') IS NULL OR name ILIKE ($5->>'q') OR description ILIKE ($5->>'q'))
-             AND (NULLIF($5->>'id', '') IS NULL OR id::text ILIKE ($5->>'id'))"#;
-    const POLICY_CANDIDATES: &str = r#"SELECT id, tenant_id,
-               row_number() OVER (ORDER BY created_at DESC, id) AS ordinality
-           FROM (
-               SELECT id, tenant_id, created_at FROM direct_policies
-               UNION ALL
-               SELECT id, tenant_id, created_at FROM role_assignments
-           ) policies
-           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
-             AND (NULLIF($5->>'q', '') IS NULL OR id::text ILIKE ($5->>'q'))
-             AND (NULLIF($5->>'id', '') IS NULL OR id::text ILIKE ($5->>'id'))"#;
-    const ENDPOINT_CANDIDATES: &str = r#"SELECT id, tenant_id,
-               row_number() OVER (ORDER BY tenant_id NULLS FIRST, key, id) AS ordinality
-           FROM api_endpoints
-           WHERE (NULLIF($5->>'tenant_id', '')::uuid IS NULL OR tenant_id = NULLIF($5->>'tenant_id', '')::uuid)
-             AND (NULLIF($5->>'q', '') IS NULL OR name ILIKE ($5->>'q') OR key ILIKE ($5->>'q'))
-             AND (NULLIF($5->>'id', '') IS NULL OR id::text ILIKE ($5->>'id'))"#;
+
     let candidate_sql = match params.object_kind.as_str() {
-        "role" => ROLE_CANDIDATES,
-        "policy" => POLICY_CANDIDATES,
-        "api_endpoint" => ENDPOINT_CANDIDATES,
+        "role" => FlatCandidate::RoleObjects,
+        "policy" => FlatCandidate::PolicyObjects,
+        "api_endpoint" => FlatCandidate::EndpointObjects,
         _ => unreachable!("flat protected-object dispatch is exhaustive"),
     };
     authorize_flat_candidate_query(
@@ -5564,143 +3810,7 @@ async fn authorized_entity_ids(
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
-    let limit = params.limit.clamp(1, 500);
-    let offset = params.offset.max(0);
-    let id = search_pattern(params.id);
-    let q = search_pattern(params.q);
-    let external_id = crate::models::external_id::normalize_external_id(params.external_id);
-    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
-    let order_by = authorized_entity_order_by(params.entity_order, params.dir);
-
-    let sql = r#"WITH RECURSIVE target_groups(id) AS (
-                   SELECT $8::uuid WHERE $8::uuid IS NOT NULL
-                   UNION ALL
-                   SELECT gh.child_id
-                   FROM group_hierarchy gh
-                   JOIN target_groups tg ON tg.id = gh.parent_id
-                   WHERE $9::boolean
-               ),
-               grants AS (
-                   SELECT * FROM subject_effective_grants($1)
-               ),
-               __CEILING_CTE__,
-               caps AS (
-                   SELECT a.id AS capability_id, aa.object_type
-                   FROM actions a
-                   JOIN action_applicability aa ON aa.action_id = a.id
-                   WHERE a.name = $2 AND aa.object_kind = 'entity'
-               ),
-               candidates AS (
-                   SELECT e.id, e.kind::text AS sub_kind, e.tenant_id, e.created_at, e.updated_at,
-                          e.name, e.status::text AS status,
-                          COALESCE((SELECT array_agg(gep.group_id)
-                                    FROM group_entity_parents gep
-                                    WHERE gep.entity_id = e.id), '{}'::uuid[]) AS parent_group_ids
-                   FROM entities e
-                   WHERE e.deleted_at IS NULL
-                     AND (e.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = e.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
-                     AND ($3::uuid IS NULL OR e.tenant_id = $3)
-                     AND ($4::text IS NULL OR e.kind::text = $4 OR 'entity:' || e.kind::text = $4)
-                     AND ($5::text IS NULL OR e.name ILIKE $5 OR e.attributes::text ILIKE $5)
-                     AND ($6::uuid IS NULL OR e.profile_id = $6)
-                     AND ($7::text IS NULL OR e.status::text = $7)
-                     AND ($8::uuid IS NULL OR EXISTS (
-                             SELECT 1 FROM group_entity_parents gep
-                             WHERE gep.entity_id = e.id
-                               AND gep.group_id IN (SELECT id FROM target_groups)))
-                     AND ($13::jsonb IS NULL OR e.attributes @> $13::jsonb)
-                     AND ($14::text IS NULL OR e.external_id = $14)
-                     AND ($15::text IS NULL OR e.id::text ILIKE $15)
-               ),
-               candidate_ancestors(object_id, ancestor_id) AS (
-                   SELECT c.id, gh.parent_id
-                   FROM candidates c
-                   JOIN group_hierarchy gh ON gh.child_id = ANY(c.parent_group_ids)
-                   UNION
-                   SELECT ca.object_id, gh.parent_id
-                   FROM candidate_ancestors ca
-                   JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
-               ),
-               candidate_ancestor_ids AS (
-                   SELECT object_id, array_agg(ancestor_id) AS ancestors
-                   FROM candidate_ancestors
-                   GROUP BY object_id
-               ),
-               authorized AS (
-                   SELECT c.id, c.created_at, c.updated_at, c.name, c.sub_kind, c.status
-                   FROM candidates c
-                   LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
-                   WHERE EXISTS (
-                       SELECT 1 FROM grants g
-                       WHERE g.effect = 'allow' AND g.conditions = '{}'::jsonb
-                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = g.capability_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'entity', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM grants g
-                       WHERE g.effect = 'deny'
-                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = g.capability_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'entity', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   )
-                   AND ($12::uuid IS NULL OR EXISTS (
-                       SELECT 1 FROM ceiling cl
-                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = cl.action_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'entity:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'entity', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   ))
-               )
-               SELECT id, COUNT(*) OVER() AS total
-               FROM authorized
-               ORDER BY __ORDER_BY__
-               LIMIT $10 OFFSET $11"#
-        .replace("__ORDER_BY__", order_by)
-        .replace("__CEILING_CTE__", &ceiling_cte("$12"));
-
-    let rows = crate::db::query(&sql)
-        .bind(params.subject_id)
-        .bind(params.action)
-        .bind(params.tenant_id)
-        .bind(params.object_type)
-        .bind(q)
-        .bind(params.profile_id)
-        .bind(params.entity_status.map(|status| match status {
-            crate::models::enums::EntityStatus::Active => "active".to_string(),
-            crate::models::enums::EntityStatus::Inactive => "inactive".to_string(),
-            crate::models::enums::EntityStatus::Suspended => "suspended".to_string(),
-        }))
-        .bind(params.parent_group_id)
-        .bind(params.include_descendants)
-        .bind(limit)
-        .bind(offset)
-        .bind(ceiling_credential_id)
-        .bind(attributes_contains)
-        .bind(external_id)
-        .bind(id)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
-
-    rows_to_authorized_object_ids(rows)
+    storage::visibility::authorized_entity_ids(pool, params, ceiling_credential_id).await
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5774,7 +3884,10 @@ pub async fn authorized_resource_kinds_with_ceiling(
     .await?;
 
     rows.into_iter()
-        .map(|row| row.try_get("kind").map_err(db_err))
+        .map(|row| {
+            row.kind
+                .ok_or_else(|| AppError::bad_request("missing authorized resource kind"))
+        })
         .collect()
 }
 
@@ -5783,142 +3896,9 @@ async fn authorized_resource_rows(
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
     projection: AuthorizedResourceProjection,
-) -> Result<Vec<crate::db::Row>, AppError> {
-    let limit = match projection {
-        AuthorizedResourceProjection::Ids => params.limit.clamp(1, 500),
-        AuthorizedResourceProjection::Kinds => 500,
-    };
-    let offset = params.offset.max(0);
-    let q = search_pattern(params.q);
-    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
-    let order_by = authorized_resource_order_by(params.resource_order, params.dir);
-
-    let select_clause = match projection {
-        AuthorizedResourceProjection::Ids => format!(
-            "SELECT id, COUNT(*) OVER() AS total
-             FROM authorized
-             ORDER BY {order_by}
-             LIMIT $9 OFFSET $10"
-        ),
-        AuthorizedResourceProjection::Kinds => String::from(
-            "SELECT DISTINCT sub_kind AS kind
-             FROM authorized
-             ORDER BY kind
-             LIMIT $9 OFFSET $10",
-        ),
-    };
-    let sql = r#"WITH RECURSIVE target_groups(id) AS (
-                   SELECT $6::uuid WHERE $6::uuid IS NOT NULL
-                   UNION ALL
-                   SELECT gh.child_id
-                   FROM group_hierarchy gh
-                   JOIN target_groups tg ON tg.id = gh.parent_id
-                   WHERE $7::boolean
-               ),
-               grants AS (
-                   SELECT * FROM subject_effective_grants($1)
-               ),
-               __CEILING_CTE__,
-               caps AS (
-                   SELECT a.id AS capability_id, aa.object_type
-                   FROM actions a
-                   JOIN action_applicability aa ON aa.action_id = a.id
-                   WHERE a.name = $2 AND aa.object_kind = 'resource'
-               ),
-               candidates AS (
-                   SELECT r.id, r.kind AS sub_kind, r.tenant_id, r.created_at, r.updated_at,
-                          r.name,
-                          COALESCE((SELECT array_agg(grp.group_id)
-                                    FROM group_resource_parents grp
-                                    WHERE grp.resource_id = r.id), '{}'::uuid[]) AS parent_group_ids
-                   FROM resources r
-                   WHERE r.deleted_at IS NULL
-                     AND (r.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = r.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
-                     AND ($3::uuid IS NULL OR r.tenant_id = $3)
-                     AND ($4::text IS NULL OR r.kind = $4 OR 'resource:' || r.kind = $4)
-                     AND ($5::text IS NULL OR r.name ILIKE $5 OR r.attributes::text ILIKE $5)
-                     AND ($6::uuid IS NULL OR EXISTS (
-                             SELECT 1 FROM group_resource_parents grp
-                             WHERE grp.resource_id = r.id
-                               AND grp.group_id IN (SELECT id FROM target_groups)))
-                     AND ($8::jsonb IS NULL OR r.attributes @> $8::jsonb)
-               ),
-               candidate_ancestors(object_id, ancestor_id) AS (
-                   SELECT c.id, gh.parent_id
-                   FROM candidates c
-                   JOIN group_hierarchy gh ON gh.child_id = ANY(c.parent_group_ids)
-                   UNION
-                   SELECT ca.object_id, gh.parent_id
-                   FROM candidate_ancestors ca
-                   JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
-               ),
-               candidate_ancestor_ids AS (
-                   SELECT object_id, array_agg(ancestor_id) AS ancestors
-                   FROM candidate_ancestors
-                   GROUP BY object_id
-               ),
-               authorized AS (
-                   SELECT c.id, c.sub_kind, c.created_at, c.updated_at, c.name
-                   FROM candidates c
-                   LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
-                   WHERE EXISTS (
-                       SELECT 1 FROM grants g
-                       WHERE g.effect = 'allow' AND g.conditions = '{}'::jsonb
-                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = g.capability_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'resource', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM grants g
-                       WHERE g.effect = 'deny'
-                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = g.capability_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'resource', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   )
-                   AND ($11::uuid IS NULL OR EXISTS (
-                       SELECT 1 FROM ceiling cl
-                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = cl.action_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'resource:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'resource', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   ))
-               )
-               __SELECT__"#
-        .replace("__SELECT__", &select_clause)
-        .replace("__CEILING_CTE__", &ceiling_cte("$11"));
-
-    crate::db::query(&sql)
-        .bind(params.subject_id)
-        .bind(params.action)
-        .bind(params.tenant_id)
-        .bind(params.object_type)
-        .bind(q)
-        .bind(params.parent_group_id)
-        .bind(params.include_descendants)
-        .bind(attributes_contains)
-        .bind(limit)
-        .bind(offset)
-        .bind(ceiling_credential_id)
-        .fetch_all(pool)
+) -> Result<Vec<AuthorizedPageRow>, AppError> {
+    storage::visibility::authorized_resource_rows(pool, params, ceiling_credential_id, projection)
         .await
-        .map_err(db_err)
 }
 
 async fn authorized_group_ids(
@@ -5926,148 +3906,20 @@ async fn authorized_group_ids(
     params: AuthorizedObjectIdsQuery,
     ceiling_credential_id: Option<Uuid>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
-    let limit = params.limit.clamp(1, 500);
-    let offset = params.offset.max(0);
-    let q = search_pattern(params.q);
-    let attributes_contains = params.attributes_contains.filter(|attrs| !attrs.is_null());
-    let status = params.entity_status.map(|status| match status {
-        crate::models::enums::EntityStatus::Active => "active".to_string(),
-        crate::models::enums::EntityStatus::Inactive => "inactive".to_string(),
-        crate::models::enums::EntityStatus::Suspended => "suspended".to_string(),
-    });
-    let order_by = authorized_group_order_by(params.group_order, params.dir);
-
-    // Scope matching is delegated to the shared `grant_scope_matches` predicate
-    // (the same logic the PDP's Rust path mirrors). For groups the relevant
-    // scopes are platform/tenant/object_kind/object plus `group_child_kind`/
-    // `group_descendant_kind`; the `group_*_objects` scope modes are
-    // CHECK-constrained to entity/resource objects, so they never target a group.
-    let sql = r#"WITH RECURSIVE target_groups(id) AS (
-                   SELECT $6::uuid WHERE $6::uuid IS NOT NULL
-                   UNION ALL
-                   SELECT gh.child_id
-                   FROM group_hierarchy gh
-                   JOIN target_groups tg ON tg.id = gh.parent_id
-                   WHERE $7::boolean
-               ),
-               grants AS (
-                   SELECT * FROM subject_effective_grants($1)
-               ),
-               __CEILING_CTE__,
-               caps AS (
-                   SELECT a.id AS capability_id, aa.object_type
-                   FROM actions a
-                   JOIN action_applicability aa ON aa.action_id = a.id
-                   WHERE a.name = $2 AND aa.object_kind = 'group'
-               ),
-               candidates AS (
-                   SELECT g.id, 'group'::text AS sub_kind, g.tenant_id, g.created_at, g.updated_at,
-                          g.name, g.status::text AS status,
-                          CASE WHEN gph.parent_id IS NULL THEN '{}'::uuid[]
-                               ELSE ARRAY[gph.parent_id] END AS parent_group_ids
-                   FROM groups g
-                   LEFT JOIN group_hierarchy gph ON gph.child_id = g.id
-                   WHERE g.deleted_at IS NULL
-                     AND (g.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = g.tenant_id AND t.status = 'active' AND t.deleted_at IS NULL))
-                     AND ($3::uuid IS NULL OR g.tenant_id = $3)
-                     AND ($4::text IS NULL OR g.group_type = $4)
-                     AND ($5::text IS NULL OR g.name ILIKE $5 OR g.description ILIKE $5 OR g.attributes::text ILIKE $5)
-                     AND ($8::text IS NULL OR g.status = $8)
-                     AND ($6::uuid IS NULL OR gph.parent_id IN (SELECT id FROM target_groups))
-                     AND ($12::jsonb IS NULL OR g.attributes @> $12::jsonb)
-               ),
-               candidate_ancestors(object_id, ancestor_id) AS (
-                   SELECT c.id, gh.parent_id
-                   FROM candidates c
-                   JOIN group_hierarchy gh ON gh.child_id = ANY(c.parent_group_ids)
-                   UNION
-                   SELECT ca.object_id, gh.parent_id
-                   FROM candidate_ancestors ca
-                   JOIN group_hierarchy gh ON gh.child_id = ca.ancestor_id
-               ),
-               candidate_ancestor_ids AS (
-                   SELECT object_id, array_agg(ancestor_id) AS ancestors
-                   FROM candidate_ancestors
-                   GROUP BY object_id
-               ),
-               authorized AS (
-                   SELECT c.id, c.created_at, c.updated_at, c.name, c.status
-                   FROM candidates c
-                   LEFT JOIN candidate_ancestor_ids ca ON ca.object_id = c.id
-                   WHERE EXISTS (
-                       SELECT 1 FROM grants g
-                       WHERE g.effect = 'allow' AND g.conditions = '{}'::jsonb
-                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = g.capability_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'group', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM grants g
-                       WHERE g.effect = 'deny'
-                         AND (g.tenant_boundary IS NULL OR g.tenant_boundary = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = g.capability_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(g.scope_kind, g.scope_ref, 'group', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   )
-                   AND ($11::uuid IS NULL OR EXISTS (
-                       SELECT 1 FROM ceiling cl
-                       WHERE (cl.tenant_id IS NULL OR cl.tenant_id = c.tenant_id)
-                         AND EXISTS (
-                             SELECT 1 FROM caps mc
-                             WHERE mc.capability_id = cl.action_id
-                               AND (mc.object_type IS NULL OR mc.object_type = 'group:' || c.sub_kind)
-                         )
-                         AND grant_scope_matches(cl.scope_kind, cl.scope_ref, 'group', c.sub_kind,
-                                                 c.id, c.tenant_id, c.parent_group_ids,
-                                                 COALESCE(ca.ancestors, '{}'::uuid[]))
-                   ))
-               )
-               SELECT id, COUNT(*) OVER() AS total
-               FROM authorized
-               ORDER BY __ORDER_BY__
-               LIMIT $9 OFFSET $10"#
-        .replace("__ORDER_BY__", order_by)
-        .replace("__CEILING_CTE__", &ceiling_cte("$11"));
-
-    let rows = crate::db::query(&sql)
-        .bind(params.subject_id)
-        .bind(params.action)
-        .bind(params.tenant_id)
-        .bind(params.group_type)
-        .bind(q)
-        .bind(params.parent_group_id)
-        .bind(params.include_descendants)
-        .bind(status)
-        .bind(limit)
-        .bind(offset)
-        .bind(ceiling_credential_id)
-        .bind(attributes_contains)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
-
-    rows_to_authorized_object_ids(rows)
+    storage::visibility::authorized_group_ids(pool, params, ceiling_credential_id).await
 }
 
 fn rows_to_authorized_object_ids(
-    rows: Vec<crate::db::Row>,
+    rows: Vec<AuthorizedPageRow>,
 ) -> Result<AuthorizedObjectIdsResponse, AppError> {
     let mut total = 0;
     let mut ids = Vec::with_capacity(rows.len());
     for row in rows {
-        ids.push(row.try_get("id").map_err(db_err)?);
-        total = row.try_get("total").map_err(db_err)?;
+        ids.push(
+            row.id
+                .ok_or_else(|| AppError::bad_request("missing authorized object id"))?,
+        );
+        total = row.total;
     }
     Ok(AuthorizedObjectIdsResponse { ids, total })
 }
@@ -6077,63 +3929,7 @@ pub async fn audit_logs(
     params: crate::models::access::AuditQuery,
     allowed_tenant_ids: Option<Vec<Uuid>>,
 ) -> Result<AuditLogResponse, AppError> {
-    let limit = params.limit.clamp(1, 200);
-    let offset = params.offset.max(0);
-    let items = crate::db::query_as::<AuditLogItem>(
-        r#"SELECT id, actor_entity_id, tenant_id, target_kind, target_id, event, outcome, details, created_at
-           FROM audit_logs
-           WHERE ($1::uuid IS NULL OR actor_entity_id = $1)
-             AND ($2::text IS NULL OR event = $2)
-             AND ($3::text IS NULL OR outcome = $3)
-             AND ($4::timestamptz IS NULL OR created_at >= $4)
-             AND ($5::timestamptz IS NULL OR created_at < $5)
-             AND ($6::uuid IS NULL OR tenant_id = $6)
-             AND ($7::uuid[] IS NULL OR tenant_id = ANY($7))
-             AND ($8::text IS NULL OR target_kind = $8)
-             AND ($9::uuid IS NULL OR target_id = $9)
-           ORDER BY created_at DESC
-           LIMIT $10 OFFSET $11"#,
-    )
-    .bind(params.actor_entity_id)
-    .bind(params.event.clone())
-    .bind(params.outcome.clone())
-    .bind(params.from)
-    .bind(params.to)
-    .bind(params.tenant_id)
-    .bind(allowed_tenant_ids.as_deref())
-    .bind(params.target_kind.clone())
-    .bind(params.target_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-    let total: i64 = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM audit_logs
-           WHERE ($1::uuid IS NULL OR actor_entity_id = $1)
-             AND ($2::text IS NULL OR event = $2)
-             AND ($3::text IS NULL OR outcome = $3)
-             AND ($4::timestamptz IS NULL OR created_at >= $4)
-             AND ($5::timestamptz IS NULL OR created_at < $5)
-             AND ($6::uuid IS NULL OR tenant_id = $6)
-             AND ($7::uuid[] IS NULL OR tenant_id = ANY($7))
-             AND ($8::text IS NULL OR target_kind = $8)
-             AND ($9::uuid IS NULL OR target_id = $9)"#,
-    )
-    .bind(params.actor_entity_id)
-    .bind(params.event)
-    .bind(params.outcome)
-    .bind(params.from)
-    .bind(params.to)
-    .bind(params.tenant_id)
-    .bind(allowed_tenant_ids.as_deref())
-    .bind(params.target_kind)
-    .bind(params.target_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-    Ok(AuditLogResponse { items, total })
+    storage::visibility::audit_logs(pool, params, allowed_tenant_ids).await
 }
 
 /// Tenants in which `entity_id` effectively holds `action_name` for `object_kind`,
@@ -6151,9 +3947,7 @@ pub async fn tenant_ids_for_action_on_object_kind(
     object_kind: &str,
 ) -> Result<Vec<Uuid>, AppError> {
     let Some(action_id): Option<Uuid> =
-        crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-            .bind(action_name)
-            .fetch_optional(pool)
+        storage::actions::action_by_name_optional(pool, action_name)
             .await
             .map_err(db_err)?
     else {
@@ -6213,172 +4007,14 @@ pub async fn orphan_policies(
     pool: &Database,
     params: AdminPageQuery,
 ) -> Result<OrphanPoliciesResponse, AppError> {
-    let limit = params.limit.clamp(1, 200);
-    let offset = params.offset.max(0);
-    let rows = crate::db::query(
-        r#"WITH orphaned AS (
-             SELECT ra.id,
-                    ra.tenant_id,
-                    'role_assignment'::text AS source_kind,
-                    ra.subject_kind,
-                    ra.subject_id,
-                    ra.role_id,
-                    NULL::uuid AS permission_block_id,
-                    ra.created_at,
-                    CASE
-                      WHEN (ra.subject_kind = 'entity' AND e.id IS NULL)
-                        OR (ra.subject_kind = 'group' AND g.id IS NULL)
-                      THEN 'subject_not_found'
-                      WHEN r.id IS NULL
-                      THEN 'role_not_found'
-                    END AS orphan_reason
-             FROM role_assignments ra
-             LEFT JOIN entities e ON ra.subject_kind = 'entity' AND ra.subject_id = e.id
-             LEFT JOIN principal_groups g ON ra.subject_kind = 'group' AND ra.subject_id = g.id
-             LEFT JOIN roles r ON ra.role_id = r.id
-             UNION ALL
-             SELECT dp.id,
-                    dp.tenant_id,
-                    'direct_policy'::text AS source_kind,
-                    dp.subject_kind,
-                    dp.subject_id,
-                    NULL::uuid AS role_id,
-                    dp.permission_block_id,
-                    dp.created_at,
-                    CASE
-                      WHEN (dp.subject_kind = 'entity' AND e.id IS NULL)
-                        OR (dp.subject_kind = 'group' AND g.id IS NULL)
-                      THEN 'subject_not_found'
-                      WHEN pb.id IS NULL
-                      THEN 'permission_block_not_found'
-                    END AS orphan_reason
-             FROM direct_policies dp
-             LEFT JOIN entities e ON dp.subject_kind = 'entity' AND dp.subject_id = e.id
-             LEFT JOIN principal_groups g ON dp.subject_kind = 'group' AND dp.subject_id = g.id
-             LEFT JOIN permission_blocks pb ON dp.permission_block_id = pb.id
-           )
-           SELECT * FROM orphaned
-           WHERE orphan_reason IS NOT NULL
-           ORDER BY created_at DESC
-           LIMIT $1 OFFSET $2"#,
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-    let total: i64 = crate::db::query_scalar(
-        r#"WITH orphaned AS (
-             SELECT CASE
-                      WHEN (ra.subject_kind = 'entity' AND e.id IS NULL)
-                        OR (ra.subject_kind = 'group' AND g.id IS NULL)
-                      THEN 'subject_not_found'
-                      WHEN r.id IS NULL
-                      THEN 'role_not_found'
-                    END AS orphan_reason
-             FROM role_assignments ra
-             LEFT JOIN entities e ON ra.subject_kind = 'entity' AND ra.subject_id = e.id
-             LEFT JOIN principal_groups g ON ra.subject_kind = 'group' AND ra.subject_id = g.id
-             LEFT JOIN roles r ON ra.role_id = r.id
-             UNION ALL
-             SELECT CASE
-                      WHEN (dp.subject_kind = 'entity' AND e.id IS NULL)
-                        OR (dp.subject_kind = 'group' AND g.id IS NULL)
-                      THEN 'subject_not_found'
-                      WHEN pb.id IS NULL
-                      THEN 'permission_block_not_found'
-                    END AS orphan_reason
-             FROM direct_policies dp
-             LEFT JOIN entities e ON dp.subject_kind = 'entity' AND dp.subject_id = e.id
-             LEFT JOIN principal_groups g ON dp.subject_kind = 'group' AND dp.subject_id = g.id
-             LEFT JOIN permission_blocks pb ON dp.permission_block_id = pb.id
-           )
-           SELECT COUNT(*) FROM orphaned WHERE orphan_reason IS NOT NULL"#,
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-    let items = rows
-        .into_iter()
-        .map(|row| {
-            Ok(OrphanPolicyItem {
-                id: row.try_get("id").map_err(db_err)?,
-                tenant_id: row.try_get("tenant_id").map_err(db_err)?,
-                source_kind: row.try_get("source_kind").map_err(db_err)?,
-                subject_kind: row.try_get("subject_kind").map_err(db_err)?,
-                subject_id: row.try_get("subject_id").map_err(db_err)?,
-                role_id: row.try_get("role_id").map_err(db_err)?,
-                permission_block_id: row.try_get("permission_block_id").map_err(db_err)?,
-                created_at: row.try_get("created_at").map_err(db_err)?,
-                orphan_reason: row.try_get("orphan_reason").map_err(db_err)?,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
-    Ok(OrphanPoliciesResponse { items, total })
+    storage::visibility::orphan_policies(pool, params).await
 }
 
 pub async fn expiring_credentials(
     pool: &Database,
     params: ExpiringCredentialsQuery,
 ) -> Result<ExpiringCredentialsResponse, AppError> {
-    let limit = params.limit.clamp(1, 200);
-    let offset = params.offset.max(0);
-    let days = params.days.max(0);
-    let rows = crate::db::query(
-        r#"SELECT c.id, c.entity_id, e.name AS entity_name, e.kind AS entity_kind,
-                  c.kind, c.status, c.expires_at, c.created_at
-           FROM credentials c
-           JOIN entities e ON e.id = c.entity_id
-           WHERE c.status = 'active'
-             AND c.expires_at IS NOT NULL
-             AND c.expires_at <= now() + ($1::text || ' days')::interval
-             AND ($2::uuid IS NULL OR c.entity_id = $2)
-             AND ($3::text IS NULL OR c.kind = $3)
-           ORDER BY c.expires_at ASC
-           LIMIT $4 OFFSET $5"#,
-    )
-    .bind(days.to_string())
-    .bind(params.entity_id)
-    .bind(params.kind)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-    let total: i64 = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM credentials c
-           WHERE c.status = 'active'
-             AND c.expires_at IS NOT NULL
-             AND c.expires_at <= now() + ($1::text || ' days')::interval
-             AND ($2::uuid IS NULL OR c.entity_id = $2)
-             AND ($3::text IS NULL OR c.kind = $3)"#,
-    )
-    .bind(days.to_string())
-    .bind(params.entity_id)
-    .bind(params.kind)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-    let now = Utc::now();
-    let items = rows
-        .into_iter()
-        .map(|row| {
-            let expires_at = row.try_get("expires_at").map_err(db_err)?;
-            Ok(ExpiringCredentialItem {
-                id: row.try_get("id").map_err(db_err)?,
-                entity_id: row.try_get("entity_id").map_err(db_err)?,
-                entity_name: row.try_get("entity_name").map_err(db_err)?,
-                entity_kind: row.try_get("entity_kind").map_err(db_err)?,
-                kind: row.try_get::<CredentialKind, _>("kind").map_err(db_err)?,
-                status: row.try_get("status").map_err(db_err)?,
-                expires_at,
-                days_remaining: (expires_at - now).num_days(),
-                created_at: row.try_get("created_at").map_err(db_err)?,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
-    Ok(ExpiringCredentialsResponse { items, total })
+    storage::visibility::expiring_credentials(pool, params).await
 }
 
 // ─── Engine helpers ───────────────────────────────────────────────────────────
@@ -6422,104 +4058,42 @@ pub(crate) async fn load_authz_subject(
     pool: &Database,
     entity_id: Uuid,
 ) -> Result<Option<AuthzSubjectRecord>, AppError> {
-    crate::db::query_as::<AuthzSubjectRecord>(
-        r#"SELECT id, name, kind, tenant_id, status, attributes
-           FROM entities
-           WHERE id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(entity_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_subject(pool, entity_id).await
 }
 
 pub(crate) async fn load_authz_tenant(
     pool: &Database,
     tenant_id: Uuid,
 ) -> Result<Option<AuthzTenantRecord>, AppError> {
-    crate::db::query_as::<AuthzTenantRecord>(
-        r#"SELECT id, name, status, deleted_at, attributes
-           FROM tenants
-           WHERE id = $1"#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_tenant(pool, tenant_id).await
 }
 
 pub(crate) async fn load_authz_resource(
     pool: &Database,
     resource_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    crate::db::query_as::<AuthzObjectRecord>(
-        r#"SELECT r.id, r.kind, r.name, r.tenant_id, r.attributes,
-                  COALESCE((SELECT array_agg(grp.group_id)
-                            FROM group_resource_parents grp
-                            WHERE grp.resource_id = r.id), '{}'::uuid[]) AS parent_group_ids
-           FROM resources r
-           WHERE r.id = $1 AND r.deleted_at IS NULL"#,
-    )
-    .bind(resource_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_resource(pool, resource_id).await
 }
 
 pub(crate) async fn load_authz_entity_object(
     pool: &Database,
     entity_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    crate::db::query_as::<AuthzObjectRecord>(
-        r#"SELECT e.id, e.kind, e.name, e.tenant_id, e.attributes,
-                  COALESCE((SELECT array_agg(gep.group_id)
-                            FROM group_entity_parents gep
-                            WHERE gep.entity_id = e.id), '{}'::uuid[]) AS parent_group_ids
-           FROM entities e
-           WHERE e.id = $1 AND e.deleted_at IS NULL"#,
-    )
-    .bind(entity_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_entity_object(pool, entity_id).await
 }
 
 pub(crate) async fn load_authz_group_object(
     pool: &Database,
     group_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    // The group hierarchy stays a tree (`PRIMARY KEY (child_id)`), so this is 0
-    // or 1 parent — carried as an array only so every protected object presents
-    // the same shape to the scope predicate.
-    crate::db::query_as::<AuthzObjectRecord>(
-        r#"SELECT g.id, 'group'::text AS kind, g.name, g.tenant_id, g.attributes,
-                  CASE WHEN gh.parent_id IS NULL THEN '{}'::uuid[] ELSE ARRAY[gh.parent_id] END
-                      AS parent_group_ids
-           FROM groups g
-           LEFT JOIN group_hierarchy gh ON gh.child_id = g.id
-           WHERE g.id = $1 AND g.deleted_at IS NULL"#,
-    )
-    .bind(group_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_group_object(pool, group_id).await
 }
 
 pub(crate) async fn load_authz_credential_object(
     pool: &Database,
     credential_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    crate::db::query_as::<AuthzObjectRecord>(
-        r#"SELECT c.id, c.kind, c.identifier AS name, e.tenant_id,
-                  c.metadata AS attributes, '{}'::uuid[] AS parent_group_ids
-           FROM credentials c
-           JOIN entities e ON e.id = c.entity_id
-           WHERE c.id = $1"#,
-    )
-    .bind(credential_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_credential_object(pool, credential_id).await
 }
 
 /// Recursive ancestors of every supplied group, de-duplicated. An object can be
@@ -6529,23 +4103,7 @@ pub(crate) async fn group_ancestor_ids(
     pool: &Database,
     group_ids: &[Uuid],
 ) -> Result<Vec<Uuid>, AppError> {
-    if group_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    crate::db::query_scalar(
-        r#"WITH RECURSIVE ancestors(id) AS (
-               SELECT parent_id FROM group_hierarchy WHERE child_id = ANY($1::uuid[])
-               UNION
-               SELECT gh.parent_id
-               FROM group_hierarchy gh
-               JOIN ancestors a ON gh.child_id = a.id
-           )
-           SELECT DISTINCT id FROM ancestors"#,
-    )
-    .bind(group_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::group_ancestor_ids(pool, group_ids).await
 }
 
 /// Canonical grant expansion for a subject: the single flat list of effective
@@ -6558,37 +4116,7 @@ pub async fn effective_grants_for_subject(
     pool: &Database,
     entity_id: Uuid,
 ) -> Result<Vec<EffectiveGrant>, AppError> {
-    // Canonical grant expansion lives in the `subject_effective_grants` SQL
-    // function, shared by this PDP path and every authorized
-    // listing reader so scope/effect/conditions semantics cannot drift.
-    let rows = crate::db::query(
-        r#"SELECT assignment_id, block_id, role_id, role_name, via, tenant_boundary,
-                  scope_kind, scope_ref, capability_id, effect, conditions
-           FROM subject_effective_grants($1)"#,
-    )
-    .bind(entity_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    rows.into_iter()
-        .map(|row| {
-            let scope_kind_text: String = row.try_get("scope_kind").map_err(db_err)?;
-            Ok(EffectiveGrant {
-                assignment_id: row.try_get("assignment_id").map_err(db_err)?,
-                block_id: row.try_get("block_id").map_err(db_err)?,
-                role_id: row.try_get("role_id").map_err(db_err)?,
-                role_name: row.try_get("role_name").map_err(db_err)?,
-                via: row.try_get("via").map_err(db_err)?,
-                tenant_boundary: row.try_get("tenant_boundary").map_err(db_err)?,
-                scope_kind: parse_scope_kind_text(&scope_kind_text)?,
-                scope_ref: row.try_get("scope_ref").map_err(db_err)?,
-                capability_id: row.try_get("capability_id").map_err(db_err)?,
-                effect: row.try_get("effect").map_err(db_err)?,
-                conditions: row.try_get("conditions").map_err(db_err)?,
-            })
-        })
-        .collect()
+    storage::visibility::effective_grants_for_subject(pool, entity_id).await
 }
 
 /// Locks every root group's owning tenant row first, then the hierarchy
@@ -6673,12 +4201,9 @@ async fn lock_group_tenant_rows(
     tx: &mut DbTransaction<'_>,
     group_ids: &[Uuid],
 ) -> Result<(), AppError> {
-    let tenant_ids: Vec<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM groups WHERE id = ANY($1::uuid[])")
-            .bind(group_ids)
-            .fetch_all(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let tenant_ids: Vec<Option<Uuid>> = storage::objects::group_tenants(tx, group_ids)
+        .await
+        .map_err(db_err)?;
     crate::tenants::repo::lock_tenant_rows_in_order(tx, &tenant_ids).await
 }
 
@@ -6692,20 +4217,9 @@ async fn lock_group_closures_after_tenant_rows(
     // and the locks below.
     lock_group_hierarchy(tx).await?;
 
-    let mut closure: Vec<Uuid> = crate::db::query_scalar(
-        r#"WITH RECURSIVE target_groups(id) AS (
-               SELECT id FROM UNNEST($1::uuid[]) AS root(id)
-               UNION
-               SELECT gh.child_id
-               FROM group_hierarchy gh
-               JOIN target_groups tg ON tg.id = gh.parent_id
-           )
-           SELECT id FROM target_groups"#,
-    )
-    .bind(root_group_ids)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let mut closure: Vec<Uuid> = storage::objects::descendant_groups(tx, root_group_ids)
+        .await
+        .map_err(db_err)?;
     closure.sort_unstable();
     closure.dedup();
 
@@ -6714,21 +4228,15 @@ async fn lock_group_closures_after_tenant_rows(
     // mutation already holding an object row. Object-only roots still need
     // this lock so their hierarchy cannot be changed while the prepared
     // closure is in use.
-    crate::db::query("SELECT id FROM object_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
-        .bind(&closure)
-        .fetch_all(tx.exec())
+    storage::objects::lock_object_groups(tx, &closure)
         .await
         .map_err(db_err)?;
 
-    crate::db::query("SELECT id FROM principal_groups WHERE id = ANY($1) ORDER BY id FOR UPDATE")
-        .bind(&closure)
-        .fetch_all(tx.exec())
+    storage::objects::lock_principal_groups(tx, &closure)
         .await
         .map_err(db_err)?;
 
-    crate::db::query_scalar("SELECT DISTINCT entity_id FROM group_members WHERE group_id = ANY($1)")
-        .bind(&closure)
-        .fetch_all(tx.exec())
+    storage::objects::group_member_ids(tx, &closure)
         .await
         .map_err(db_err)
 }
@@ -6737,80 +4245,21 @@ pub(crate) async fn load_authz_role_object(
     pool: &Database,
     role_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    crate::db::query_as::<AuthzObjectRecord>(
-        r#"SELECT r.id, 'role'::text AS kind, r.name, r.tenant_id,
-                  '{}'::jsonb AS attributes, '{}'::uuid[] AS parent_group_ids
-           FROM roles r
-           JOIN protected_object_ids registry
-             ON registry.id = r.id
-            AND registry.object_kind = 'role'
-            AND registry.source_table = 'roles'
-           WHERE r.id = $1 AND r.deleted_at IS NULL"#,
-    )
-    .bind(role_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_role_object(pool, role_id).await
 }
 
 pub(crate) async fn load_authz_policy_object(
     pool: &Database,
     policy_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    crate::db::query_as::<AuthzObjectRecord>(
-        r#"SELECT registry.id, 'policy'::text AS kind, NULL::text AS name,
-                  policy.tenant_id, '{}'::jsonb AS attributes,
-                  '{}'::uuid[] AS parent_group_ids
-           FROM protected_object_ids registry
-           JOIN LATERAL (
-               SELECT tenant_id
-               FROM direct_policies
-               WHERE registry.source_table = 'direct_policies' AND id = registry.id
-               UNION ALL
-               SELECT tenant_id
-               FROM role_assignments
-               WHERE registry.source_table = 'role_assignments' AND id = registry.id
-           ) policy ON TRUE
-           WHERE registry.id = $1 AND registry.object_kind = 'policy'"#,
-    )
-    .sqlite(
-        r#"SELECT registry.id, 'policy' AS kind, NULL AS name,
-                  policy.tenant_id, '{}' AS attributes, '[]' AS parent_group_ids
-           FROM protected_object_ids registry
-           JOIN (
-               SELECT 'direct_policies' AS source_table, id, tenant_id
-               FROM direct_policies WHERE id = $1
-               UNION ALL
-               SELECT 'role_assignments', id, tenant_id
-               FROM role_assignments WHERE id = $1
-           ) policy ON policy.source_table = registry.source_table AND policy.id = registry.id
-           WHERE registry.id = $1 AND registry.object_kind = 'policy'"#,
-    )
-    .bind(policy_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_policy_object(pool, policy_id).await
 }
 
 pub(crate) async fn load_authz_api_endpoint_object(
     pool: &Database,
     endpoint_id: Uuid,
 ) -> Result<Option<AuthzObjectRecord>, AppError> {
-    crate::db::query_as::<AuthzObjectRecord>(
-        r#"SELECT endpoint.id, 'api_endpoint'::text AS kind, endpoint.name,
-                  endpoint.tenant_id, '{}'::jsonb AS attributes,
-                  '{}'::uuid[] AS parent_group_ids
-           FROM api_endpoints endpoint
-           JOIN protected_object_ids registry
-             ON registry.id = endpoint.id
-            AND registry.object_kind = 'api_endpoint'
-            AND registry.source_table = 'api_endpoints'
-           WHERE endpoint.id = $1"#,
-    )
-    .bind(endpoint_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
+    storage::visibility::load_authz_api_endpoint_object(pool, endpoint_id).await
 }
 
 /// Serializes recursive group-closure reads with hierarchy mutations. A
@@ -6818,11 +4267,7 @@ pub(crate) async fn load_authz_api_endpoint_object(
 /// create or delete the hierarchy row, leaving no row lock for a reader to
 /// wait on.
 pub async fn lock_group_hierarchy(tx: &mut DbTransaction<'_>) -> Result<(), AppError> {
-    crate::db::query("SELECT pg_advisory_xact_lock(hashtextextended('atom:group-hierarchy', 0))")
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-    Ok(())
+    storage::objects::lock_group_hierarchy(tx).await
 }
 
 /// [`lock_group_closures_and_collect_member_ids`], mapped straight to
@@ -6864,12 +4309,9 @@ pub async fn lock_role_and_collect_grants_keys(
     tx: &mut DbTransaction<'_>,
     role_id: Uuid,
 ) -> Result<Vec<String>, AppError> {
-    let role_tenant_id: Option<Option<Uuid>> =
-        crate::db::query_scalar("SELECT tenant_id FROM roles WHERE id = $1")
-            .bind(role_id)
-            .fetch_optional(tx.exec())
-            .await
-            .map_err(db_err)?;
+    let role_tenant_id: Option<Option<Uuid>> = storage::roles::role_tenant_optional(tx, &role_id)
+        .await
+        .map_err(db_err)?;
     let Some(role_tenant_id) = role_tenant_id else {
         return Err(AppError::not_found(format!("role {role_id} not found")));
     };
@@ -6878,46 +4320,29 @@ pub async fn lock_role_and_collect_grants_keys(
         // accepts a soft-deleted role and owns the user-facing decision about
         // whether its tenant state permits restoration. This row lock is only
         // for the canonical tenant -> role order.
-        let tenant_locked: Option<Uuid> =
-            crate::db::query_scalar("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
-                .bind(tenant_id)
-                .fetch_optional(tx.exec())
-                .await
-                .map_err(db_err)?;
+        let tenant_locked: Option<Uuid> = storage::objects::lock_tenant_optional(tx, &tenant_id)
+            .await
+            .map_err(db_err)?;
         if tenant_locked.is_none() {
             return Err(AppError::not_found(format!(
                 "role {role_id} tenant {tenant_id} not found"
             )));
         }
     }
-    let locked: Option<Uuid> = crate::db::query_scalar(
-        r#"SELECT id FROM roles
-           WHERE id = $1 AND tenant_id IS NOT DISTINCT FROM $2
-           FOR UPDATE"#,
-    )
-    .bind(role_id)
-    .bind(role_tenant_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let locked: Option<Uuid> =
+        storage::roles::lock_role_row_optional(tx, &role_id, &role_tenant_id)
+            .await
+            .map_err(db_err)?;
     if locked.is_none() {
         return Err(AppError::not_found(format!("role {role_id} not found")));
     }
     crate::managed_by::ensure_not_config_managed_in_tx(tx, "roles", role_id).await?;
-    let entity_subject_ids: Vec<Uuid> = crate::db::query_scalar(
-        "SELECT subject_id FROM role_assignments WHERE role_id = $1 AND subject_kind = 'entity'",
-    )
-    .bind(role_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
-    let group_subject_ids: Vec<Uuid> = crate::db::query_scalar(
-        "SELECT subject_id FROM role_assignments WHERE role_id = $1 AND subject_kind = 'group'",
-    )
-    .bind(role_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let entity_subject_ids: Vec<Uuid> = storage::assignments::role_entity_subjects(tx, &role_id)
+        .await
+        .map_err(db_err)?;
+    let group_subject_ids: Vec<Uuid> = storage::assignments::role_group_subjects(tx, &role_id)
+        .await
+        .map_err(db_err)?;
     let mut member_ids = lock_group_closures_and_collect_member_ids(tx, &group_subject_ids).await?;
     member_ids.extend(entity_subject_ids);
     member_ids.sort_unstable();
@@ -6963,21 +4388,7 @@ pub async fn find_capability_ids_by_name(
     object_kind: &str,
     object_type: &str,
 ) -> Result<Vec<Uuid>, AppError> {
-    crate::db::query_scalar(
-        r#"SELECT c.id
-           FROM actions c
-           JOIN action_applicability ca ON ca.action_id = c.id
-           WHERE c.name = $1
-             AND ca.object_kind = $2
-             AND (ca.object_type IS NULL OR ca.object_type = $3)
-           ORDER BY c.id"#,
-    )
-    .bind(name)
-    .bind(object_kind)
-    .bind(format!("{object_kind}:{object_type}"))
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)
+    storage::actions::find_capability_ids_by_name(pool, name, object_kind, object_type).await
 }
 
 fn search_pattern(q: Option<String>) -> Option<String> {
@@ -7050,4 +4461,62 @@ mod tests {
         )
         .is_ok());
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct AuthorizedPageRow {
+    #[sqlx(default)]
+    id: Option<Uuid>,
+    #[sqlx(default)]
+    kind: Option<String>,
+    #[sqlx(default)]
+    total: i64,
+}
+
+#[derive(Clone, Copy)]
+enum FlatCandidate {
+    Endpoints,
+    Roles,
+    Assignments,
+    RoleObjects,
+    PolicyObjects,
+    EndpointObjects,
+    DirectPolicies,
+}
+
+#[derive(sqlx::FromRow)]
+struct ResourceGroupBoundary {
+    resource_tenant_id: Option<Uuid>,
+    group_tenant_id: Option<Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
+struct CompositeRoleCandidate {
+    id: Uuid,
+    tenant_id: Option<Uuid>,
+    has_capabilities: bool,
+    has_children: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct ActionIdentity {
+    id: Uuid,
+    name: String,
+}
+
+fn normalize_derived_kind(value: Option<String>) -> Result<Option<String>, AppError> {
+    let value = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_ascii_lowercase);
+    if value
+        .as_deref()
+        .is_some_and(|kind| !matches!(kind, "simple" | "composite" | "empty"))
+    {
+        return Err(AppError::bad_request(
+            "derivedKind must be simple, composite, or empty",
+        ));
+    }
+    Ok(value)
 }
