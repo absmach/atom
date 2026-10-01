@@ -11,6 +11,9 @@
 #    PostgreSQL or SQLite.
 # 2. The SQLite baseline declares the same tables, indexes and views as the
 #    PostgreSQL baseline, so the two schemas cannot drift apart unnoticed.
+# 3. The same holds for file storage: only an adapter under src/storage/ names
+#    a storage SDK. Everything else uses the BlobStore interface, so a new
+#    provider never touches domain code.
 set -euo pipefail
 
 status=0
@@ -132,7 +135,19 @@ then
   status=1
 fi
 
+# --- 3. no storage SDK outside its adapter ----------------------------------
+storage_violations="$(
+  grep -rnE '(^|[^A-Za-z0-9_])object_store::|\bextern crate object_store\b' src --include='*.rs' \
+  | grep -v '^src/storage/object_store_adapter\.rs:' \
+  || true
+)"
+if [[ -n "${storage_violations}" ]]; then
+  echo "storage SDK types used outside their adapter (use crate::storage::BlobStore):" >&2
+  printf '%s\n' "${storage_violations}" >&2
+  status=1
+fi
+
 if [[ "${status}" == 0 ]]; then
-  echo "database boundary and schema parity checks passed"
+  echo "database and storage boundary and schema parity checks passed"
 fi
 exit "${status}"

@@ -35,6 +35,9 @@ pub struct Config {
     pub audit_policy: AuditPolicyConfig,
     pub audit_retention: AuditRetentionConfig,
     pub purge: PurgeConfig,
+    /// File storage (`src/storage/`, `src/files/`). Off unless
+    /// `ATOM_STORAGE_BACKEND` names a backend.
+    pub storage: StorageConfig,
     pub rate_limits: RateLimitConfig,
     pub events: EventsConfig,
     pub body_limits: BodyLimitConfig,
@@ -562,6 +565,127 @@ impl RefreshTokenConfig {
     }
 }
 
+/// File storage. Provider settings (buckets, endpoints, credentials) are not
+/// here: the adapter that uses them reads them (`storage::build`), so they
+/// never sit in a struct that `Debug` could print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageConfig {
+    /// `ATOM_STORAGE_BACKEND`: `memory`, `local`, `s3`, `gcs` or `azure`.
+    /// `None` turns file storage off.
+    pub backend: Option<String>,
+    /// `ATOM_STORAGE_PREFIX`: a key prefix for everything Atom stores, so one
+    /// bucket can be shared with other data.
+    pub prefix: Option<String>,
+    /// `ATOM_FILE_MAX_BYTES`: the largest file accepted.
+    pub max_file_bytes: u64,
+    /// `ATOM_FILE_TENANT_QUOTA_BYTES`: the most a tenant may store, counting
+    /// soft-deleted files until they are purged. `None` = no quota.
+    pub tenant_quota_bytes: Option<u64>,
+    /// `ATOM_FILE_ALLOWED_TYPES`: content types accepted, as detected from the
+    /// bytes (comma-separated).
+    pub allowed_types: Vec<String>,
+    /// `ATOM_FILE_SIGNED_URL_MAX_TTL_SECS`: the longest a signed download
+    /// link may live.
+    pub signed_url_max_ttl_secs: u64,
+    /// `ATOM_FILE_DELETION_GRACE_SECS`: how long queued bytes are kept before
+    /// deletion. Must outlast the longest upload, since an upload's bytes are
+    /// queued for deletion until the upload commits.
+    pub deletion_grace_secs: u64,
+    /// `ATOM_FILE_DELETION_INTERVAL_SECS`: how often the deletion worker runs.
+    pub deletion_interval_secs: u64,
+    /// `ATOM_FILE_DELETION_BATCH`: blobs deleted per pass.
+    pub deletion_batch: i64,
+    /// How long a worker's claim on queued blobs lasts before another pass may
+    /// retake them, so a worker that dies mid-batch loses no work. Long enough
+    /// for a whole batch; not read from the environment.
+    pub deletion_lease_secs: u64,
+}
+
+pub const DEFAULT_FILE_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "application/pdf",
+];
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: None,
+            prefix: None,
+            max_file_bytes: 25 * 1024 * 1024,
+            tenant_quota_bytes: None,
+            allowed_types: DEFAULT_FILE_TYPES.iter().map(|t| t.to_string()).collect(),
+            signed_url_max_ttl_secs: 3600,
+            deletion_grace_secs: 3600,
+            deletion_interval_secs: 60,
+            deletion_batch: 100,
+            deletion_lease_secs: 900,
+        }
+    }
+}
+
+impl StorageConfig {
+    pub fn enabled(&self) -> bool {
+        self.backend.is_some()
+    }
+}
+
+fn storage_from_env() -> Result<StorageConfig> {
+    let default = StorageConfig::default();
+    let allowed_types = match nonempty_env("ATOM_FILE_ALLOWED_TYPES") {
+        Some(value) => value
+            .split(',')
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect(),
+        None => default.allowed_types.clone(),
+    };
+    let cfg = StorageConfig {
+        backend: nonempty_env("ATOM_STORAGE_BACKEND").map(|v| v.to_ascii_lowercase()),
+        prefix: nonempty_env("ATOM_STORAGE_PREFIX"),
+        max_file_bytes: env_parse("ATOM_FILE_MAX_BYTES", default.max_file_bytes)?,
+        tenant_quota_bytes: nonempty_env("ATOM_FILE_TENANT_QUOTA_BYTES")
+            .map(|value| {
+                value.parse::<u64>().map_err(|_| {
+                    anyhow::anyhow!("ATOM_FILE_TENANT_QUOTA_BYTES must be a byte count")
+                })
+            })
+            .transpose()?,
+        allowed_types,
+        signed_url_max_ttl_secs: env_parse(
+            "ATOM_FILE_SIGNED_URL_MAX_TTL_SECS",
+            default.signed_url_max_ttl_secs,
+        )?,
+        deletion_grace_secs: env_parse(
+            "ATOM_FILE_DELETION_GRACE_SECS",
+            default.deletion_grace_secs,
+        )?,
+        deletion_interval_secs: env_parse(
+            "ATOM_FILE_DELETION_INTERVAL_SECS",
+            default.deletion_interval_secs,
+        )?,
+        deletion_batch: env_parse("ATOM_FILE_DELETION_BATCH", default.deletion_batch)?,
+        deletion_lease_secs: default.deletion_lease_secs,
+    };
+    if cfg.max_file_bytes == 0 {
+        anyhow::bail!("ATOM_FILE_MAX_BYTES must be greater than zero");
+    }
+    if cfg.allowed_types.is_empty() {
+        anyhow::bail!("ATOM_FILE_ALLOWED_TYPES must name at least one content type");
+    }
+    if !(60..=86_400).contains(&cfg.signed_url_max_ttl_secs) {
+        anyhow::bail!("ATOM_FILE_SIGNED_URL_MAX_TTL_SECS must be between 60 and 86400");
+    }
+    if cfg.deletion_interval_secs == 0 || cfg.deletion_batch <= 0 {
+        anyhow::bail!(
+            "ATOM_FILE_DELETION_INTERVAL_SECS and ATOM_FILE_DELETION_BATCH must be positive"
+        );
+    }
+    Ok(cfg)
+}
+
 /// Physical purge of soft-deleted rows. Disabled by default: for an identity/
 /// authorization system, keeping tombstones indefinitely (and purging only on a
 /// deliberate, explicit decision) is the safe default — "never" until opted in.
@@ -1003,6 +1127,7 @@ impl Config {
             },
             audit_retention: audit_retention_from_env()?,
             purge: purge_from_env()?,
+            storage: storage_from_env()?,
             rate_limits: rate_limits_from_env()?,
             events: events_from_env()?,
             body_limits: body_limits_from_env()?,
@@ -1117,6 +1242,7 @@ impl Config {
             audit_policy: AuditPolicyConfig::default(),
             audit_retention: AuditRetentionConfig::default(),
             purge: PurgeConfig::default(),
+            storage: StorageConfig::default(),
             rate_limits: RateLimitConfig {
                 enabled: false,
                 ..RateLimitConfig::default()

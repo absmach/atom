@@ -143,7 +143,8 @@ fn contract_primary_http_middleware_statuses_are_documented() {
                 || path == "/.well-known/jwks.json"
                 || path.starts_with("/auth/")
                 || path.starts_with("/certs/")
-                || path.starts_with("/api/custom/");
+                || path.starts_with("/api/custom/")
+                || path.starts_with("/files");
             assert_eq!(
                 responses.contains("429"),
                 rate_limited,
@@ -657,6 +658,7 @@ fn mounted_operations() -> BTreeMap<String, BTreeSet<String>> {
         include_str!("../src/routes.rs"),
         include_str!("../src/certs/enrollment/http.rs"),
         include_str!("../src/certs/enrollment/est.rs"),
+        include_str!("../src/files/handlers.rs"),
     ] {
         for (path, methods) in routes_from_source(source) {
             let previous = operations.insert(path.clone(), methods);

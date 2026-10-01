@@ -113,6 +113,76 @@ pub async fn create_resource_with_audit(
     Ok(resource)
 }
 
+/// Inserts a resource inside the caller's transaction, with the same
+/// validation and tenant lock as [`create_resource_with_audit`], leaving the
+/// commit (and its outbox event) to the caller. For domains that create a
+/// resource together with rows of their own, such as `crate::files`.
+pub(crate) async fn insert_resource_in_tx(
+    tx: &mut DbTransaction<'_>,
+    req: CreateResource,
+) -> Result<Resource, AppError> {
+    let id = req.id.unwrap_or_else(Uuid::new_v4);
+    let attrs = if req.attributes.is_null() {
+        serde_json::json!({})
+    } else {
+        req.attributes
+    };
+    reject_parent_group_attribute(&attrs)?;
+    let alias = crate::models::alias::validate_alias_opt(req.alias)?;
+    crate::tenants::repo::lock_optional_active_tenant(tx, req.tenant_id).await?;
+    let new = NewResource {
+        id,
+        kind: &req.kind,
+        name: req.name.as_deref(),
+        alias: alias.as_deref(),
+        tenant_id: req.tenant_id,
+        owner_id: req.owner_id,
+        attributes: &attrs,
+    };
+    match tx {
+        DbTransaction::Postgres(pg_tx) => postgres::insert(pg_tx, new).await,
+        DbTransaction::Sqlite(lite_tx) => sqlite::insert(lite_tx, new).await,
+    }
+}
+
+/// Locks a live resource for a mutation in the caller's transaction, in the
+/// order every resource mutation uses (tenant row, then resource row), and
+/// refuses a config-managed one. Returns its tenant.
+pub(crate) async fn lock_live_resource_in_tx(
+    tx: &mut DbTransaction<'_>,
+    id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
+    let tenant_id = match tx {
+        DbTransaction::Postgres(pg_tx) => postgres::live_tenant_id(pg_tx, id).await?,
+        DbTransaction::Sqlite(lite_tx) => sqlite::live_tenant_id(lite_tx, id).await?,
+    };
+    let Some(tenant_id) = tenant_id else {
+        return Err(AppError::not_found(format!("resource {id} not found")));
+    };
+    crate::tenants::repo::lock_optional_active_tenant(tx, tenant_id).await?;
+    let locked = match tx {
+        DbTransaction::Postgres(pg_tx) => postgres::lock_live_row(pg_tx, id, tenant_id).await?,
+        DbTransaction::Sqlite(lite_tx) => sqlite::lock_live_row(lite_tx, id, tenant_id).await?,
+    };
+    if !locked {
+        return Err(AppError::not_found(format!("resource {id} not found")));
+    }
+    crate::managed_by::ensure_not_config_managed_in_tx(tx, "resources", id).await?;
+    Ok(tenant_id)
+}
+
+/// Marks a resource updated (which also advances its revision) when
+/// something it owns changed, as a file's bytes do on replacement.
+pub(crate) async fn touch_resource_in_tx(
+    tx: &mut DbTransaction<'_>,
+    id: Uuid,
+) -> Result<(), AppError> {
+    match tx {
+        DbTransaction::Postgres(pg_tx) => postgres::touch(pg_tx, id).await,
+        DbTransaction::Sqlite(lite_tx) => sqlite::touch(lite_tx, id).await,
+    }
+}
+
 pub async fn create_resource(pool: &Database, req: CreateResource) -> Result<Resource, AppError> {
     create_resource_with_audit(pool, false, None, req).await
 }

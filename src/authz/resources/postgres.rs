@@ -184,6 +184,15 @@ pub(super) async fn live_tenant_id(
     .map_err(db_err)
 }
 
+pub(super) async fn touch(tx: &mut PgConnection, id: Uuid) -> Result<(), AppError> {
+    sqlx::query("UPDATE resources SET updated_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(tx)
+        .await
+        .map(|_| ())
+        .map_err(db_err)
+}
+
 pub(super) async fn lock_live_row(
     tx: &mut PgConnection,
     id: Uuid,

@@ -662,6 +662,60 @@ impl Resource {
     async fn managed_by(&self) -> Option<&str> {
         self.0.managed_by.as_deref()
     }
+
+    /// What is stored for a resource of kind `file`: null for other kinds,
+    /// and while the file is deleted. Read-only; bytes go through `/files`.
+    async fn file(&self, ctx: &Context<'_>) -> Result<Option<FileInfo>> {
+        if self.0.kind != crate::files::FILE_KIND {
+            return Ok(None);
+        }
+        let state = ctx.data::<AppState>()?;
+        crate::files::repo::get(state.pool(), self.0.id)
+            .await
+            .map(|file| {
+                file.map(|file| FileInfo {
+                    url: crate::files::file_url(state, file.resource_id),
+                    file,
+                })
+            })
+            .map_err(|err| async_graphql::Error::new(err.to_string()))
+    }
+}
+
+/// The stored bytes of a file resource.
+pub struct FileInfo {
+    file: crate::files::FileObject,
+    url: String,
+}
+
+#[Object]
+impl FileInfo {
+    async fn size_bytes(&self) -> i64 {
+        self.file.size_bytes
+    }
+
+    /// Taken from the bytes where they carry a known signature.
+    async fn content_type(&self) -> &str {
+        &self.file.content_type
+    }
+
+    /// Hex SHA-256 of the bytes, also the download's ETag.
+    async fn sha256(&self) -> &str {
+        &self.file.sha256
+    }
+
+    /// Readable by anyone with the URL.
+    async fn public(&self) -> bool {
+        self.file.public
+    }
+
+    async fn url(&self) -> &str {
+        &self.url
+    }
+
+    async fn updated_at(&self) -> String {
+        timestamp(self.file.updated_at)
+    }
 }
 
 pub struct ApiEndpoint(pub api_endpoint_model::ApiEndpoint);

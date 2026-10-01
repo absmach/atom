@@ -79,6 +79,12 @@ lapin = { version = "4.10.0", default-features = false, features = [
 # rustls (not native-tls) so the deployment does not need OpenSSL at build/run
 # time; matches lapin's TLS backend.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# File storage (src/storage/): byte streams at the `BlobStore` boundary, and the
+# `object_store` adapter behind it. `object_store` 0.13 shares reqwest 0.12 with
+# the rest of the crate; provider backends are opt-in features below.
+bytes = "1"
+futures-util = "0.3"
+object_store = { version = "0.13", default-features = false, optional = true }
 redis = { version = "1", default-features = false, features = ["script"] }
 deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1"] }
 rmp-serde = "1"
@@ -89,8 +95,17 @@ rmp-serde = "1"
 # inlined no-ops and the metrics crates are not linked at all. At runtime, leave
 # the feature on but set ATOM_METRICS_ENABLED=false to skip recorder install and
 # the /metrics route (façade calls fall through to the global no-op recorder).
-default = ["metrics"]
+default = ["metrics", "storage-s3"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
+# File storage adapters. `storage-object-store` is the `object_store`-backed
+# adapter with the local filesystem and in-memory stores; each provider adds its
+# client. Domain code depends only on `storage::BlobStore`, never on these, so
+# a build without them still compiles and runs (storage then accepts only
+# `ATOM_STORAGE_BACKEND=memory`, or none).
+storage-object-store = ["dep:object_store", "object_store/fs"]
+storage-s3 = ["storage-object-store", "object_store/aws"]
+storage-gcs = ["storage-object-store", "object_store/gcp"]
+storage-azure = ["storage-object-store", "object_store/azure"]
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -72,7 +72,11 @@ WORKDIR /app
 COPY --from=builder-release /usr/local/bin/atom /usr/local/bin/atom
 COPY migrations ./migrations
 COPY email-templates ./email-templates
-RUN chown -R atom:atom /app /usr/local/bin/atom
+# /app/data is the atom-owned place for state a deployment mounts a volume on,
+# such as `ATOM_STORAGE_LOCAL_PATH=/app/data/files`: an empty named volume
+# copies the ownership of the directory it is mounted on, so it must exist in
+# the image. Bind mounts and Kubernetes volumes keep their own ownership.
+RUN mkdir -p /app/data && chown -R atom:atom /app /usr/local/bin/atom
 USER atom
 EXPOSE 8080 8081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
@@ -95,7 +99,11 @@ WORKDIR /app
 COPY --from=builder-dev /usr/local/bin/atom /usr/local/bin/atom
 COPY migrations ./migrations
 COPY email-templates ./email-templates
-RUN chown -R atom:atom /app /usr/local/bin/atom
+# /app/data is the atom-owned place for state a deployment mounts a volume on,
+# such as `ATOM_STORAGE_LOCAL_PATH=/app/data/files`: an empty named volume
+# copies the ownership of the directory it is mounted on, so it must exist in
+# the image. Bind mounts and Kubernetes volumes keep their own ownership.
+RUN mkdir -p /app/data && chown -R atom:atom /app /usr/local/bin/atom
 USER atom
 EXPOSE 8080 8081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

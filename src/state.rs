@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use crate::{
     cache::CacheClient, callout::CalloutService, config::Config, db::Database,
     events::publisher::EventPublisher, keys::ActiveKeys, rate_limit::RateLimiter,
+    storage::StorageResolver,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,9 @@ pub struct AppState {
     /// cache-free with zero behavior change (this is what keeps `cargo test`
     /// and local dev working without Redis).
     pub cache: Option<Arc<CacheClient>>,
+    /// Where file bytes live (`src/storage/`). Disabled unless
+    /// `ATOM_STORAGE_BACKEND` is set; installed via [`AppState::with_storage`].
+    pub storage: StorageResolver,
     grpc_status: Arc<RwLock<GrpcRuntimeStatus>>,
 }
 
@@ -96,6 +100,7 @@ impl AppState {
             event_publisher: None,
             callouts: CalloutService::disabled(),
             cache: cache.map(Arc::new),
+            storage: StorageResolver::disabled(),
             grpc_status: Arc::new(RwLock::new(grpc_status)),
         }
     }
@@ -113,6 +118,13 @@ impl AppState {
     /// [`CalloutService::disabled`] when unset.
     pub fn with_callouts(mut self, callouts: CalloutService) -> Self {
         self.callouts = callouts;
+        self
+    }
+
+    /// Installs the file storage resolver (built from configuration in
+    /// `runtime::initialize`, or a test's own store).
+    pub fn with_storage(mut self, storage: StorageResolver) -> Self {
+        self.storage = storage;
         self
     }
 

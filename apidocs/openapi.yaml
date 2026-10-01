@@ -39,6 +39,8 @@ tags:
     description: Native and RFC 7030 enrollment on the optional dedicated TLS listener
   - name: Custom endpoints
     description: Operator-configured REST projections over GraphQL
+  - name: Files
+    description: File resources whose bytes live in the configured object store; mounted only when ATOM_STORAGE_BACKEND is set
 
 security: []
 
@@ -1217,6 +1219,264 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /files:
+    post:
+      tags: [Files]
+      operationId: uploadFile
+      summary: Upload a file
+      description: >-
+        Streams the request body into the object store and creates a resource
+        of kind `file`. Requires `manage` or `write` in the tenant. The stored
+        type is taken from the bytes when they carry a known signature (PNG,
+        JPEG, GIF, WebP, PDF), otherwise from Content-Type, and must be in
+        ATOM_FILE_ALLOWED_TYPES. The body is limited to ATOM_FILE_MAX_BYTES
+        while it streams.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          description: Owning tenant; defaults to the caller's tenant, none for platform files
+          schema:
+            type: string
+            format: uuid
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: alias
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: owner_id
+          in: query
+          required: false
+          description: Owning entity; defaults to the caller
+          schema:
+            type: string
+            format: uuid
+        - name: public
+          in: query
+          required: false
+          description: Readable by anyone who has the URL
+          schema:
+            type: boolean
+            default: false
+      requestBody:
+        $ref: "#/components/requestBodies/FileBytes"
+      responses:
+        "201":
+          description: File created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/File"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /files/{id}:
+    get:
+      tags: [Files]
+      operationId: downloadFile
+      summary: Download a file
+      description: >-
+        Public files need no authentication. Private files need `read` on the
+        file, or a signed URL's `expires` and `signature`. Raster images and
+        PDF are served inline; every other type as an attachment with
+        `Content-Security-Policy: sandbox`. Every response carries
+        `X-Content-Type-Options: nosniff`. A single byte range is honoured.
+      security:
+        - {}
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UuidId"
+        - $ref: "#/components/parameters/IfNoneMatch"
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+            example: bytes=0-1023
+        - name: expires
+          in: query
+          required: false
+          description: Signed URL expiry, Unix seconds
+          schema:
+            type: integer
+            format: int64
+        - name: signature
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/FileContent"
+        "206":
+          $ref: "#/components/responses/FileContent"
+        "304":
+          description: The caller's copy (If-None-Match) is current
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "416":
+          description: The requested range is outside the file
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    put:
+      tags: [Files]
+      operationId: replaceFile
+      summary: Replace a file's bytes
+      description: >-
+        Requires `write` or `manage` on the file or its tenant. The id and URL
+        stay; the ETag changes. Checked as an upload is.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UuidId"
+      requestBody:
+        $ref: "#/components/requestBodies/FileBytes"
+      responses:
+        "200":
+          description: File replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/File"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      tags: [Files]
+      operationId: deleteFile
+      summary: Soft-delete a file
+      description: >-
+        Requires `delete` or `manage` on the file or its tenant. The bytes are
+        kept until the resource is purged, so it can be restored.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UuidId"
+      responses:
+        "204":
+          description: File deleted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /files/{id}/signed-url:
+    post:
+      tags: [Files]
+      operationId: signFileUrl
+      summary: Issue an expiring download link
+      description: >-
+        Requires `read` on the file. The link is signed with a key derived from
+        ATOM_KEY_ENCRYPTION_KEY and opens only this file, until it expires.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UuidId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expires_in]
+              properties:
+                expires_in:
+                  type: integer
+                  minimum: 1
+                  description: Seconds, at most ATOM_FILE_SIGNED_URL_MAX_TTL_SECS
+      responses:
+        "200":
+          description: Signed link
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [url, expires_at]
+                properties:
+                  url:
+                    type: string
+                    format: uri
+                  expires_at:
+                    type: string
+                    format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "415":
+          $ref: "#/components/responses/JsonUnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1305,6 +1565,40 @@ components:
             type: string
     RequestTimeout:
       description: The listener's total request deadline expired
+    ServiceUnavailable:
+      description: A dependency (such as the object store) is unavailable, or a required key is not configured
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    FileContent:
+      description: The file's bytes, or the requested range of them
+      headers:
+        ETag:
+          schema:
+            type: string
+        Cache-Control:
+          schema:
+            type: string
+        Content-Disposition:
+          schema:
+            type: string
+        X-Content-Type-Options:
+          schema:
+            type: string
+            enum: [nosniff]
+        Accept-Ranges:
+          schema:
+            type: string
+            enum: [bytes]
+        Content-Range:
+          schema:
+            type: string
+      content:
+        "*/*":
+          schema:
+            type: string
+            format: binary
     JsonUnsupportedMediaType:
       description: Content-Type is missing or is not JSON
       content:
@@ -1367,6 +1661,14 @@ components:
           schema: {}
 
   requestBodies:
+    FileBytes:
+      required: true
+      description: The raw file bytes; Content-Type is the declared type
+      content:
+        "*/*":
+          schema:
+            type: string
+            format: binary
     CustomEndpointBody:
       required: false
       content:
@@ -1381,6 +1683,48 @@ components:
             format: byte
 
   schemas:
+    File:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, owner_id, name, alias, size_bytes, content_type, sha256, public, url, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        owner_id:
+          type: string
+          format: uuid
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        alias:
+          type: string
+          nullable: true
+        size_bytes:
+          type: integer
+          format: int64
+        content_type:
+          type: string
+        sha256:
+          type: string
+          description: Hex SHA-256 of the bytes; the ETag
+        public:
+          type: boolean
+        url:
+          type: string
+          format: uri
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
     Error:
       type: object
       additionalProperties: false
