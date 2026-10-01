@@ -26,12 +26,21 @@ CREATE INDEX idx_file_objects_tenant ON file_objects(tenant_id);
 -- stops referring to them, and a worker deletes them after commit, retrying.
 -- An upload queues its own key before writing and unqueues it when it
 -- commits, so bytes whose upload never committed are collected too.
+--
+-- The worker claims a row (`claim_id`, `claimed_at`) before deleting its bytes
+-- and removes it only after the delete succeeds, so a worker that dies
+-- mid-batch leaves its claims to expire and be retried. An upload commits
+-- only by removing an unclaimed row; one that finds its key claimed clears
+-- the claim instead, so the worker's acknowledgement no longer matches and
+-- the row stays to collect the late bytes.
 CREATE TABLE blob_deletions (
     storage_key TEXT PRIMARY KEY,
     tenant_id   UUID,
     queued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     attempts    INTEGER NOT NULL DEFAULT 0,
-    last_error  TEXT
+    last_error  TEXT,
+    claim_id    UUID,
+    claimed_at  TIMESTAMPTZ
 );
 
 CREATE INDEX idx_blob_deletions_queued ON blob_deletions(queued_at);

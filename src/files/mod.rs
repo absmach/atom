@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    auth::{require_any_capability, scope_for_tenant, AuthContext, Scope},
+    auth::{require_any_capability, scope_for_tenant, AuthContext},
     authz::resources as resource_repo,
     error::{db_err, AppError},
     models::{
@@ -323,23 +323,30 @@ async fn find(state: &AppState, id: Uuid) -> Result<(Resource, FileObject), AppE
     Ok((resource, file))
 }
 
+/// The object decision on an existing file, as the GraphQL `resource` query
+/// makes it: every policy that matches the resource applies, object-kind,
+/// object-type and object-group denies and a scoped token's ceiling included.
+/// `manage` implies every other action.
 async fn require_on_file(
     state: &AppState,
     auth: &AuthContext,
     action: &str,
     file: &FileObject,
 ) -> Result<(), AppError> {
-    require_any_capability(
+    let allowed = crate::authz::engine::allows_any(
         state.pool(),
         auth,
-        &[
-            (action, Scope::Object(file.resource_id)),
-            ("manage", Scope::Object(file.resource_id)),
-            (action, scope_for_tenant(file.tenant_id)),
-            ("manage", scope_for_tenant(file.tenant_id)),
-        ],
+        auth.entity_id,
+        "resource",
+        file.resource_id,
+        &[action, "manage"],
     )
-    .await
+    .await?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }
 
 /// Replaces a file's bytes (`write` on the file). Its id, and so its URL,
@@ -436,7 +443,7 @@ pub async fn authorize_read(
     }
     match access {
         Access::Session(auth) => {
-            crate::auth::require_read_access(state.pool(), auth, file.tenant_id, id).await?;
+            require_on_file(state, auth, "read", &file).await?;
         }
         Access::Signed { expires, signature } => {
             if !signing::verify(state, id, expires, signature, Utc::now().timestamp()) {

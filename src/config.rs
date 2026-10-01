@@ -595,6 +595,10 @@ pub struct StorageConfig {
     pub deletion_interval_secs: u64,
     /// `ATOM_FILE_DELETION_BATCH`: blobs deleted per pass.
     pub deletion_batch: i64,
+    /// How long a worker's claim on queued blobs lasts before another pass may
+    /// retake them, so a worker that dies mid-batch loses no work. Long enough
+    /// for a whole batch; not read from the environment.
+    pub deletion_lease_secs: u64,
 }
 
 pub const DEFAULT_FILE_TYPES: &[&str] = &[
@@ -617,6 +621,7 @@ impl Default for StorageConfig {
             deletion_grace_secs: 3600,
             deletion_interval_secs: 60,
             deletion_batch: 100,
+            deletion_lease_secs: 900,
         }
     }
 }
@@ -662,6 +667,7 @@ fn storage_from_env() -> Result<StorageConfig> {
             default.deletion_interval_secs,
         )?,
         deletion_batch: env_parse("ATOM_FILE_DELETION_BATCH", default.deletion_batch)?,
+        deletion_lease_secs: default.deletion_lease_secs,
     };
     if cfg.max_file_bytes == 0 {
         anyhow::bail!("ATOM_FILE_MAX_BYTES must be greater than zero");

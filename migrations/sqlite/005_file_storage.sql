@@ -22,7 +22,9 @@ CREATE TABLE blob_deletions (
     tenant_id   BLOB,
     queued_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000Z'),
     attempts    INTEGER NOT NULL DEFAULT 0,
-    last_error  TEXT
+    last_error  TEXT,
+    claim_id    BLOB,
+    claimed_at  TEXT
 );
 
 CREATE INDEX idx_blob_deletions_queued ON blob_deletions(queued_at);

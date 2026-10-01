@@ -22,14 +22,17 @@ use atom::{
     identity::repo as identity_repo,
     keys::{self, ActiveKeys},
     models::{
-        enums::{Effect, SubjectKind},
+        enums::{Effect, SubjectKind, TenantStatus},
         policy::{CreatePermissionBlock, CreateRoleAssignment},
         resource::UpdateResource,
         role::CreateRole,
     },
     routes::create_router,
     state::AppState,
-    storage::{memory::MemoryBlobStore, StorageResolver},
+    storage::{
+        memory::MemoryBlobStore, BlobError, BlobKey, BlobMeta, BlobStore, ByteStream, PutMeta,
+        StorageResolver,
+    },
 };
 use axum::{
     body::{to_bytes, Body},
@@ -760,4 +763,235 @@ async fn file_routes_are_absent_without_storage() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// A tenant-wide deny of `action` on resources for `entity_id`.
+async fn deny_on_resources(pool: &Database, tenant_id: Uuid, entity_id: Uuid, action: &str) {
+    let action_id: Uuid = atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
+        .bind(action)
+        .fetch_one(pool)
+        .await
+        .expect("seeded action");
+    let role = authz_repo::create_role(
+        pool,
+        CreateRole {
+            name: format!("files-deny-{action}-{entity_id}"),
+            tenant_id: Some(tenant_id),
+            description: None,
+        },
+    )
+    .await
+    .expect("create role");
+    let block = authz_repo::create_permission_block(
+        pool,
+        CreatePermissionBlock {
+            tenant_id: Some(tenant_id),
+            scope_mode: "object_kind".into(),
+            object_kind: Some("resource".into()),
+            object_type: None,
+            object_id: None,
+            group_id: None,
+            effect: Effect::Deny,
+            conditions: json!({}),
+            action_ids: vec![action_id],
+        },
+    )
+    .await
+    .expect("create deny block");
+    authz_repo::replace_role_permission_block_links(pool, role.id, &[block.id])
+        .await
+        .expect("link block");
+    authz_repo::create_role_assignment(
+        pool,
+        CreateRoleAssignment {
+            tenant_id: Some(tenant_id),
+            subject_kind: SubjectKind::Entity,
+            subject_id: entity_id,
+            role_id: role.id,
+        },
+    )
+    .await
+    .expect("assign role");
+}
+
+#[tokio::test]
+#[ignore]
+async fn resource_policies_beyond_tenant_scope_govern_files() {
+    let h = Harness::new(|_| {}).await;
+    let (tenant_id, member) = tenant_member(&h.pool, &["write", "read"]).await;
+    let token = h.token(member, Some(tenant_id)).await;
+    let file = h.uploaded(&token, "", PNG).await;
+    let path = format!("/files/{}", id_of(&file));
+    assert_eq!(h.get(&path, Some(&token)).await.status(), StatusCode::OK);
+
+    // A deny on resources overrides the tenant-wide allow, as it does for the
+    // GraphQL `resource` query.
+    deny_on_resources(&h.pool, tenant_id, member, "read").await;
+    assert_eq!(
+        h.get(&path, Some(&token)).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = h
+        .send(
+            Request::post(format!("{path}/signed-url"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"expires_in":60}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    deny_on_resources(&h.pool, tenant_id, member, "write").await;
+    let response = h
+        .send(
+            Request::put(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(PNG.to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_deleted_or_inactive_tenant_serves_no_files() {
+    let h = Harness::new(|_| {}).await;
+    let token = h.admin().await;
+    for disable in ["status", "delete"] {
+        let (tenant_id, _) = tenant_member(&h.pool, &[]).await;
+        let query = format!("?tenant_id={tenant_id}");
+        let public = h
+            .uploaded(&token, &format!("{query}&public=true"), PNG)
+            .await;
+        let private = h.uploaded(&token, &query, PNG).await;
+        let response = h
+            .send(
+                Request::post(format!("/files/{}/signed-url", id_of(&private)))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"expires_in":60}"#))
+                    .unwrap(),
+            )
+            .await;
+        let signed = json_body(response).await["url"]
+            .as_str()
+            .unwrap()
+            .strip_prefix(BASE)
+            .unwrap()
+            .to_string();
+        let public_path = format!("/files/{}", id_of(&public));
+        assert_eq!(h.get(&public_path, None).await.status(), StatusCode::OK);
+        assert_eq!(h.get(&signed, None).await.status(), StatusCode::OK);
+
+        match disable {
+            "status" => {
+                atom::tenants::repo::change_tenant_status(
+                    &h.pool,
+                    tenant_id,
+                    TenantStatus::Inactive,
+                    None,
+                )
+                .await
+                .expect("deactivate tenant");
+            }
+            _ => {
+                atom::tenants::repo::soft_delete_tenant(
+                    &h.pool,
+                    tenant_id,
+                    Some(common::admin_id()),
+                )
+                .await
+                .expect("soft delete tenant");
+            }
+        }
+        assert_eq!(
+            h.get(&public_path, None).await.status(),
+            StatusCode::NOT_FOUND,
+            "{disable}"
+        );
+        assert_eq!(
+            h.get(&signed, None).await.status(),
+            StatusCode::NOT_FOUND,
+            "{disable}"
+        );
+    }
+}
+
+/// Delegates to a memory store, except that deletes never finish.
+struct StuckDeletes(Arc<MemoryBlobStore>);
+
+#[async_trait::async_trait]
+impl BlobStore for StuckDeletes {
+    fn name(&self) -> &'static str {
+        "stuck"
+    }
+    async fn put(
+        &self,
+        key: &BlobKey,
+        body: ByteStream,
+        meta: PutMeta,
+    ) -> Result<BlobMeta, BlobError> {
+        self.0.put(key, body, meta).await
+    }
+    async fn get(
+        &self,
+        key: &BlobKey,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<(BlobMeta, ByteStream), BlobError> {
+        self.0.get(key, range).await
+    }
+    async fn head(&self, key: &BlobKey) -> Result<BlobMeta, BlobError> {
+        self.0.head(key).await
+    }
+    async fn delete(&self, _key: &BlobKey) -> Result<(), BlobError> {
+        std::future::pending().await
+    }
+    async fn delete_prefix(&self, prefix: &BlobKey) -> Result<u64, BlobError> {
+        self.0.delete_prefix(prefix).await
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_interrupted_deletion_pass_loses_no_work() {
+    let h = Harness::new(|config| config.storage.deletion_grace_secs = 0).await;
+    let token = h.admin().await;
+    for _ in 0..2 {
+        let file = h.uploaded(&token, "", PNG).await;
+        let id = id_of(&file);
+        resource_repo::delete_resource(&h.pool, id, Some(common::admin_id()))
+            .await
+            .expect("soft delete");
+        resource_repo::purge_resource(&h.pool, id)
+            .await
+            .expect("purge");
+    }
+    assert_eq!((h.store.len(), h.queued().await), (2, 2));
+
+    // A pass that stops inside its first delete, as a process killed there.
+    let stuck = h.state.clone().with_storage(StorageResolver::new(
+        Arc::new(StuckDeletes(h.store.clone())),
+        None,
+    ));
+    let interrupted = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        worker::delete_due(&stuck),
+    )
+    .await;
+    assert!(interrupted.is_err(), "the pass was cut off");
+    assert_eq!(h.queued().await, 2, "claimed keys stay queued");
+
+    // While the claim's lease runs, no other pass takes those keys.
+    let summary = worker::delete_due(&h.state).await.expect("deletion pass");
+    assert_eq!(summary.deleted, 0);
+    assert_eq!(h.store.len(), 2);
+
+    // Once it expires, the keys are retaken and deleted.
+    let mut expired = h.state.clone();
+    expired.config.storage.deletion_lease_secs = 0;
+    let summary = worker::delete_due(&expired).await.expect("deletion pass");
+    assert_eq!(summary.deleted, 2);
+    assert_eq!((h.store.len(), h.queued().await), (0, 0));
 }

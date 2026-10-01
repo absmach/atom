@@ -40,10 +40,18 @@ size and type in the details).
 | Operation | Needs |
 | --- | --- |
 | Upload | `manage` or `write` in the tenant |
-| Download | `read` or `manage` on the file or its tenant, a valid signed URL, or nothing for a public file |
-| Replace bytes | `write` or `manage` on the file or its tenant |
-| Delete | `delete` or `manage` on the file or its tenant |
-| Issue a signed URL | `read` on the file |
+| Download | `read` or `manage` on the file, a valid signed URL, or nothing for a public file |
+| Replace bytes | `write` or `manage` on the file |
+| Delete | `delete` or `manage` on the file |
+| Issue a signed URL | `read` or `manage` on the file |
+
+Decisions on an existing file are the full policy decision on its resource,
+as for the GraphQL `resource` query: tenant, object-kind, object-type,
+object-group and object grants all apply, a deny overrides an allow, and a
+scoped access token is capped by its ceiling.
+
+A file whose tenant is deleted or not active is not served by any route,
+public files and signed URLs included.
 
 Where the bytes are stored is kept in `file_objects`, which only the server
 writes. It is not an attribute, so no GraphQL or REST input can point a file at
@@ -151,10 +159,13 @@ bytes inline. It keeps a queue, `blob_deletions`:
 - Replacing bytes, purging a file, and purging a tenant queue the old keys in
   the same transaction, through triggers on `file_objects`, so no path can drop
   a row and leave its bytes behind.
-- A worker deletes keys once they are older than `ATOM_FILE_DELETION_GRACE_SECS`,
-  retrying failures on later passes. It claims keys before deleting them; an
-  upload whose key was already claimed (it outlasted the grace period) fails
-  with `503` rather than refer to bytes being deleted.
+- A worker claims keys older than `ATOM_FILE_DELETION_GRACE_SECS`, deletes
+  their bytes, and only then removes each key from the queue. A failed delete
+  is released for a later pass; a worker that stops mid-batch leaves its claims
+  to expire (after 15 minutes) and be retaken, so no work is lost.
+- An upload commits only if its key is unclaimed. One whose key was already
+  claimed (it outlasted the grace period) fails with `503` and queues its key
+  again, so bytes that landed after the worker's delete are collected too.
 
 ## Adding another provider
 

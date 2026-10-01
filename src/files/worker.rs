@@ -48,20 +48,32 @@ pub fn spawn_blob_deletion_with_shutdown(
     }))
 }
 
-/// One pass: claims due keys and deletes their bytes, putting back any whose
-/// deletion failed.
+/// One pass: claims due keys, deletes their bytes, and only then removes
+/// each key from the queue. A key whose deletion failed is released for a
+/// later pass; one whose worker stopped mid-batch is retaken once its lease
+/// expires.
 pub async fn delete_due(state: &AppState) -> Result<DeletionSummary, AppError> {
     let config = &state.config.storage;
-    let cutoff = Utc::now()
-        - chrono::Duration::seconds(i64::try_from(config.deletion_grace_secs).unwrap_or(i64::MAX));
+    let now = Utc::now();
+    let ago = |secs: u64| now - chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX));
+    let claimed = repo::claim_due(
+        state.pool(),
+        ago(config.deletion_grace_secs),
+        ago(config.deletion_lease_secs),
+        config.deletion_batch,
+    )
+    .await?;
     let mut summary = DeletionSummary::default();
-    for blob in repo::claim_due(state.pool(), cutoff, config.deletion_batch).await? {
+    for blob in claimed {
         match delete_one(state, &blob).await {
-            Ok(()) => summary.deleted += 1,
+            Ok(()) => {
+                repo::finish_deletion(state.pool(), &blob).await?;
+                summary.deleted += 1;
+            }
             Err(err) => {
                 summary.failed += 1;
                 tracing::warn!(key = %blob.storage_key, attempts = blob.attempts + 1, error = %err, "blob deletion failed");
-                repo::requeue(state.pool(), &blob, &err.to_string()).await?;
+                repo::release(state.pool(), &blob, &err.to_string()).await?;
             }
         }
     }
@@ -69,8 +81,8 @@ pub async fn delete_due(state: &AppState) -> Result<DeletionSummary, AppError> {
 }
 
 async fn delete_one(state: &AppState, blob: &QueuedBlob) -> Result<(), AppError> {
-    // Keys are never reused, so a referenced key is one a restore or a
-    // failed-then-retried commit still needs; it is dropped from the queue.
+    // Keys are never reused, so a referenced key is one a file still needs;
+    // it is acknowledged without deleting its bytes.
     if repo::referenced(state.pool(), &blob.storage_key).await? {
         return Ok(());
     }

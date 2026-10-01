@@ -20,7 +20,8 @@ pub(super) async fn queue(
 ) -> Result<(), AppError> {
     sqlx::query(
         "INSERT INTO blob_deletions (storage_key, tenant_id) VALUES ($1, $2)
-         ON CONFLICT (storage_key) DO UPDATE SET queued_at = now()",
+         ON CONFLICT (storage_key) DO UPDATE
+         SET queued_at = now(), claim_id = NULL, claimed_at = NULL",
     )
     .bind(key)
     .bind(tenant_id)
@@ -31,7 +32,7 @@ pub(super) async fn queue(
 }
 
 pub(super) async fn unqueue(tx: &mut PgConnection, key: &str) -> Result<bool, AppError> {
-    sqlx::query("DELETE FROM blob_deletions WHERE storage_key = $1")
+    sqlx::query("DELETE FROM blob_deletions WHERE storage_key = $1 AND claim_id IS NULL")
         .bind(key)
         .execute(tx)
         .await
@@ -65,7 +66,9 @@ pub(super) async fn get(pool: &PgPool, resource_id: Uuid) -> Result<Option<FileO
     sqlx::query_as::<_, FileObject>(&format!(
         "SELECT {COLUMNS} FROM file_objects f
          JOIN resources r ON r.id = f.resource_id
-         WHERE f.resource_id = $1 AND r.deleted_at IS NULL"
+         LEFT JOIN tenants t ON t.id = f.tenant_id
+         WHERE f.resource_id = $1 AND r.deleted_at IS NULL
+           AND (f.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))"
     ))
     .bind(resource_id)
     .fetch_optional(pool)
@@ -121,35 +124,49 @@ pub(super) async fn tenant_usage(tx: &mut PgConnection, tenant_id: Uuid) -> Resu
 
 pub(super) async fn claim_due(
     pool: &PgPool,
+    claim_id: Uuid,
     cutoff: DateTime<Utc>,
+    lease_cutoff: DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<QueuedBlob>, AppError> {
     sqlx::query_as::<_, QueuedBlob>(
-        "DELETE FROM blob_deletions
+        "UPDATE blob_deletions SET claim_id = $1, claimed_at = now()
          WHERE storage_key IN (
                    SELECT storage_key FROM blob_deletions
-                   WHERE queued_at <= $1 ORDER BY queued_at LIMIT $2
+                   WHERE queued_at <= $2 AND (claim_id IS NULL OR claimed_at <= $3)
+                   ORDER BY queued_at LIMIT $4
                    FOR UPDATE SKIP LOCKED
                )
-         RETURNING storage_key, tenant_id, attempts",
+         RETURNING storage_key, tenant_id, attempts, claim_id",
     )
+    .bind(claim_id)
     .bind(cutoff)
+    .bind(lease_cutoff)
     .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(db_err)
 }
 
-pub(super) async fn requeue(pool: &PgPool, blob: &QueuedBlob, error: &str) -> Result<(), AppError> {
+pub(super) async fn finish(pool: &PgPool, blob: &QueuedBlob) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM blob_deletions WHERE storage_key = $1 AND claim_id = $2")
+        .bind(&blob.storage_key)
+        .bind(blob.claim_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(db_err)
+}
+
+pub(super) async fn release(pool: &PgPool, blob: &QueuedBlob, error: &str) -> Result<(), AppError> {
     sqlx::query(
-        "INSERT INTO blob_deletions (storage_key, tenant_id, attempts, last_error)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (storage_key) DO UPDATE
-         SET attempts = excluded.attempts, last_error = excluded.last_error, queued_at = now()",
+        "UPDATE blob_deletions
+         SET claim_id = NULL, claimed_at = NULL, attempts = attempts + 1,
+             last_error = $3, queued_at = now()
+         WHERE storage_key = $1 AND claim_id = $2",
     )
     .bind(&blob.storage_key)
-    .bind(blob.tenant_id)
-    .bind(blob.attempts + 1)
+    .bind(blob.claim_id)
     .bind(error)
     .execute(pool)
     .await
