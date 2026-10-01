@@ -12,6 +12,7 @@
 mod common;
 
 use async_graphql::Request;
+use atom::db::{query, query_as, query_scalar, Database};
 use atom::{
     auth::AuthContext,
     config::Config,
@@ -21,10 +22,16 @@ use atom::{
     state::AppState,
 };
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-fn state(pool: PgPool) -> AppState {
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct EntityEmailAttrs {
+    email: String,
+    verified_at: Option<chrono::DateTime<chrono::Utc>>,
+    attributes: serde_json::Value,
+}
+
+fn state(pool: Database) -> AppState {
     let primary = LoadedKey {
         kid: "test".into(),
         public_key_pem: String::new(),
@@ -61,9 +68,9 @@ fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
     })
 }
 
-async fn human(pool: &PgPool, attributes: serde_json::Value) -> Uuid {
+async fn human(pool: &Database, attributes: serde_json::Value) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
+    query(
         "INSERT INTO entities (id, kind, name, tenant_id, status, attributes) \
          VALUES ($1, 'human', $2, NULL, 'active', $3)",
     )
@@ -76,8 +83,8 @@ async fn human(pool: &PgPool, attributes: serde_json::Value) -> Uuid {
     id
 }
 
-async fn entity_email(pool: &PgPool, entity_id: Uuid, email: &str, verified: bool) {
-    sqlx::query(
+async fn entity_email(pool: &Database, entity_id: Uuid, email: &str, verified: bool) {
+    query(
         "INSERT INTO entity_emails (id, entity_id, email, verified_at) \
          VALUES ($1, $2, $3, CASE WHEN $4 THEN now() ELSE NULL END)",
     )
@@ -90,9 +97,9 @@ async fn entity_email(pool: &PgPool, entity_id: Uuid, email: &str, verified: boo
     .expect("insert entity_emails");
 }
 
-async fn password_credential(pool: &PgPool, entity_id: Uuid, identifier: &str) {
+async fn password_credential(pool: &Database, entity_id: Uuid, identifier: &str) {
     let hash = service::hash_secret(b"irrelevant-test-secret").expect("hash");
-    sqlx::query(
+    query(
         "INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash) \
          VALUES ($1, $2, 'password', $3, $4)",
     )
@@ -105,8 +112,8 @@ async fn password_credential(pool: &PgPool, entity_id: Uuid, identifier: &str) {
     .expect("insert password credential");
 }
 
-async fn oauth_identity(pool: &PgPool, entity_id: Uuid, email: &str, verified: bool) {
-    sqlx::query(
+async fn oauth_identity(pool: &Database, entity_id: Uuid, email: &str, verified: bool) {
+    query(
         "INSERT INTO oauth_identities (id, entity_id, provider, subject, email, email_verified) \
          VALUES ($1, $2, 'test-provider', $3, $4, $5)",
     )
@@ -181,12 +188,12 @@ async fn legacy_unverified_emails_counts_pending_tokens() {
     let entity_id = human(&pool, json!({})).await;
     let email = format!("pending-{entity_id}@example.test");
     entity_email(&pool, entity_id, &email, false).await;
-    let email_id: Uuid = sqlx::query_scalar("SELECT id FROM entity_emails WHERE entity_id = $1")
+    let email_id: Uuid = query_scalar::<Uuid>("SELECT id FROM entity_emails WHERE entity_id = $1")
         .bind(entity_id)
         .fetch_one(&pool)
         .await
         .expect("email id");
-    sqlx::query(
+    query(
         r#"INSERT INTO email_verification_tokens (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 day')"#,
     )
@@ -387,11 +394,7 @@ async fn legacy_reports_mutate_nothing() {
         &format!("mismatched-{entity_id}@example.test"),
     )
     .await;
-    let before: (
-        String,
-        Option<chrono::DateTime<chrono::Utc>>,
-        serde_json::Value,
-    ) = sqlx::query_as(
+    let before: EntityEmailAttrs = query_as::<EntityEmailAttrs>(
         "SELECT ee.email, ee.verified_at, e.attributes \
          FROM entity_emails ee JOIN entities e ON e.id = ee.entity_id \
          WHERE ee.entity_id = $1",
@@ -410,11 +413,7 @@ async fn legacy_reports_mutate_nothing() {
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
 
-    let after: (
-        String,
-        Option<chrono::DateTime<chrono::Utc>>,
-        serde_json::Value,
-    ) = sqlx::query_as(
+    let after: EntityEmailAttrs = query_as::<EntityEmailAttrs>(
         "SELECT ee.email, ee.verified_at, e.attributes \
          FROM entity_emails ee JOIN entities e ON e.id = ee.entity_id \
          WHERE ee.entity_id = $1",

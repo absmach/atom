@@ -3435,10 +3435,7 @@ fn search_pattern(q: Option<String>) -> Option<String> {
 // flags) so an operator can see a self-service path may already be in
 // flight before reaching for manual recovery — see AGENTS.md.
 
-fn pending_token_counts_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<PendingTokenCounts, AppError> {
-    use sqlx::Row;
+fn pending_token_counts_from_row(row: &crate::db::Row) -> Result<PendingTokenCounts, AppError> {
     Ok(PendingTokenCounts {
         verification: row.try_get("pending_verification").map_err(db_err)?,
         password_reset: row.try_get("pending_reset").map_err(db_err)?,
@@ -3451,11 +3448,10 @@ fn pending_token_counts_from_row(
 /// narrows to one account (operator follow-up on a specific report row, and
 /// what the adversarial tests use against the shared test database).
 pub async fn legacy_unverified_emails(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Option<Uuid>,
     params: AdminPageQuery,
 ) -> Result<LegacyUnverifiedEmailsResponse, AppError> {
-    use sqlx::Row;
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
     const WHERE: &str = r#"
@@ -3463,7 +3459,7 @@ pub async fn legacy_unverified_emails(
            JOIN entities e ON e.id = ee.entity_id AND e.deleted_at IS NULL
            WHERE ee.verified_at IS NULL AND ee.deleted_at IS NULL
              AND ($1::uuid IS NULL OR ee.entity_id = $1)"#;
-    let rows = sqlx::query(&format!(
+    let rows = crate::db::query(&format!(
         r#"SELECT ee.entity_id, e.kind AS entity_kind, e.status AS entity_status,
                   ee.email, ee.created_at AS email_created_at,
                   (SELECT COUNT(*) FROM email_verification_tokens t
@@ -3486,7 +3482,7 @@ pub async fn legacy_unverified_emails(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+    let total: i64 = crate::db::query_scalar::<i64>(&format!("SELECT COUNT(*) {WHERE}"))
         .bind(entity_id)
         .fetch_one(pool)
         .await
@@ -3511,11 +3507,10 @@ pub async fn legacy_unverified_emails(
 /// live canonical email (including entities with no canonical email row at
 /// all — `identifier` naming an address `entity_emails` does not).
 pub async fn legacy_credential_identifier_mismatches(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Option<Uuid>,
     params: AdminPageQuery,
 ) -> Result<LegacyCredentialIdentifierMismatchesResponse, AppError> {
-    use sqlx::Row;
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
     const WHERE: &str = r#"
@@ -3525,7 +3520,7 @@ pub async fn legacy_credential_identifier_mismatches(
            WHERE c.kind = 'password' AND c.status = 'active'
              AND (ee.email IS NULL OR c.identifier IS DISTINCT FROM ee.email)
              AND ($1::uuid IS NULL OR c.entity_id = $1)"#;
-    let rows = sqlx::query(&format!(
+    let rows = crate::db::query(&format!(
         r#"SELECT c.id AS credential_id, c.entity_id, c.identifier, c.created_at AS credential_created_at,
                   ee.email AS canonical_email, ee.verified_at AS canonical_verified_at,
                   (SELECT COUNT(*) FROM email_verification_tokens t
@@ -3548,7 +3543,7 @@ pub async fn legacy_credential_identifier_mismatches(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+    let total: i64 = crate::db::query_scalar::<i64>(&format!("SELECT COUNT(*) {WHERE}"))
         .bind(entity_id)
         .fetch_one(pool)
         .await
@@ -3574,11 +3569,10 @@ pub async fn legacy_credential_identifier_mismatches(
 /// canonical email for the linked entity (including no canonical email at
 /// all, and a canonical email that exists but is still unverified).
 pub async fn legacy_oauth_email_mismatches(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Option<Uuid>,
     params: AdminPageQuery,
 ) -> Result<LegacyOauthEmailMismatchesResponse, AppError> {
-    use sqlx::Row;
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
     const WHERE: &str = r#"
@@ -3589,7 +3583,7 @@ pub async fn legacy_oauth_email_mismatches(
               OR ee.verified_at IS NULL
               OR lower(ee.email) IS DISTINCT FROM lower(oi.email))
              AND ($1::uuid IS NULL OR oi.entity_id = $1)"#;
-    let rows = sqlx::query(&format!(
+    let rows = crate::db::query(&format!(
         r#"SELECT oi.entity_id, oi.provider, oi.subject, oi.email AS oauth_email,
                   oi.email_verified AS oauth_email_verified, oi.updated_at AS linked_at,
                   ee.email AS canonical_email, ee.verified_at AS canonical_verified_at,
@@ -3613,7 +3607,7 @@ pub async fn legacy_oauth_email_mismatches(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+    let total: i64 = crate::db::query_scalar::<i64>(&format!("SELECT COUNT(*) {WHERE}"))
         .bind(entity_id)
         .fetch_one(pool)
         .await
@@ -3643,28 +3637,24 @@ pub async fn legacy_oauth_email_mismatches(
 /// and `confirm_email_change` both keep in sync going forward; a mismatch
 /// here predates one of those paths running, or was written directly.
 pub async fn legacy_attributes_email_mismatches(
-    pool: &PgPool,
+    pool: &Database,
     entity_id: Option<Uuid>,
     params: AdminPageQuery,
 ) -> Result<LegacyAttributesEmailMismatchesResponse, AppError> {
-    use sqlx::Row;
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
     const WHERE: &str = r#"
            FROM entities e
            LEFT JOIN entity_emails ee ON ee.entity_id = e.id AND ee.deleted_at IS NULL
            WHERE e.kind = 'human' AND e.deleted_at IS NULL
-             -- `?` only checks key presence: {"email": null} passes it but
-             -- ->>'email' then extracts SQL NULL, not a comparable string.
-             -- A JSON-null value carries no legacy email to reconcile (the
-             -- established null-clears-the-key convention just wasn't used
-             -- to write it), so require an actual non-null text value too.
-             AND e.attributes ? 'email'
+             -- `->>'email'` is NULL both when the key is missing and when it
+             -- is present as JSON null, so this alone catches every row that
+             -- carries no reconcilable legacy email address.
              AND e.attributes->>'email' IS NOT NULL
              AND (ee.email IS NULL
                   OR lower(e.attributes->>'email') IS DISTINCT FROM lower(ee.email))
              AND ($1::uuid IS NULL OR e.id = $1)"#;
-    let rows = sqlx::query(&format!(
+    let rows = crate::db::query(&format!(
         r#"SELECT e.id AS entity_id, e.attributes->>'email' AS attributes_email, e.updated_at AS entity_updated_at,
                   ee.email AS canonical_email, ee.verified_at AS canonical_verified_at,
                   (SELECT COUNT(*) FROM email_verification_tokens t
@@ -3687,7 +3677,7 @@ pub async fn legacy_attributes_email_mismatches(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
-    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) {WHERE}"))
+    let total: i64 = crate::db::query_scalar::<i64>(&format!("SELECT COUNT(*) {WHERE}"))
         .bind(entity_id)
         .fetch_one(pool)
         .await
