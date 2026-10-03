@@ -14,6 +14,7 @@ platform, but its APIs and authorization model are product-neutral.
 - Online RBAC and ABAC decisions with deny-overrides-allow semantics
 - Tenant, object, object-type, group, and platform authorization scopes
 - GraphQL management API and gRPC runtime APIs
+- [MCP server](docs/content/docs/operations/mcp.mdx) so AI agents can query and manage access with a scoped token
 - Certificate issuance, renewal, revocation, CRL, OCSP, and EST enrollment
 - Transactional domain-event outbox and persisted audit trail
 - [File storage](docs/content/docs/operations/file-storage.mdx) for resources, over local disk, S3-compatible, GCS or Azure object stores

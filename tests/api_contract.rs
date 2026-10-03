@@ -140,6 +140,7 @@ fn contract_primary_http_middleware_statuses_are_documented() {
             );
 
             let rate_limited = path == "/graphql"
+                || path == "/mcp"
                 || path == "/.well-known/jwks.json"
                 || path.starts_with("/auth/")
                 || path.starts_with("/certs/")
@@ -165,6 +166,7 @@ fn contract_body_limited_primary_operations_document_payload_too_large() {
         ("/auth/password/reset", "post"),
         ("/auth/oauth/exchange", "post"),
         ("/graphql", "post"),
+        ("/mcp", "post"),
         ("/certs/issuers/{issuer_id}/ocsp", "post"),
         ("/api/custom/{path}", "get"),
         ("/api/custom/{path}", "post"),

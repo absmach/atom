@@ -33,6 +33,8 @@ tags:
     description: Identity bootstrap, login, OAuth, sessions, and signing keys
   - name: GraphQL
     description: Domain and administrative GraphQL operations
+  - name: MCP
+    description: Model Context Protocol server for AI agents and assistants
   - name: PKI artifacts
     description: Public trust, CRL, and OCSP publication endpoints
   - name: PKI enrollment
@@ -685,6 +687,50 @@ paths:
           $ref: "#/components/responses/JsonUnsupportedMediaType"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /mcp:
+    post:
+      tags: [MCP]
+      operationId: mcp
+      summary: Send one MCP JSON-RPC message
+      description: |
+        Model Context Protocol server over the Streamable HTTP transport,
+        stateless: each request carries a single JSON-RPC 2.0 message and is
+        answered with `application/json` (no sessions, no SSE). Supported
+        methods are `initialize`, `ping`, `tools/list`, and `tools/call`.
+        Notifications (messages without `id`) are acknowledged with 202.
+        Requires a Bearer token; cookie authentication is refused. A request
+        carrying an `Origin` header must match `ATOM_CORS_ALLOWED_ORIGINS`.
+        Tools run GraphQL operations with the caller's identity, so they are
+        authorized exactly like the equivalent GraphQL fields, and share the
+        GraphQL rate-limit bucket.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonRpcMessage"
+      responses:
+        "200":
+          description: JSON-RPC response; protocol errors appear in `error`, tool failures as `result.isError`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonRpcMessage"
+        "202":
+          description: Notification accepted; no body
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "429":
           $ref: "#/components/responses/RateLimited"
 
@@ -1683,6 +1729,35 @@ components:
             format: byte
 
   schemas:
+    JsonRpcMessage:
+      type: object
+      description: A JSON-RPC 2.0 request, notification, or response, as defined by the MCP specification.
+      required: [jsonrpc]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+        method:
+          type: string
+        params:
+          type: object
+          additionalProperties: true
+        result:
+          type: object
+          additionalProperties: true
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
+      additionalProperties: false
     File:
       type: object
       additionalProperties: false

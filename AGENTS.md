@@ -35,6 +35,9 @@ src/
   │                       RequireManage extractor + has_global_manage() helper
   keys.rs              — ES256 signing keys (primary/standby/retired), encryption at rest
   grpc.rs              — Tonic services: AuthService, AuthzService.Check, CertificateService
+  mcp.rs               — MCP server (`POST /mcp`, stateless Streamable HTTP, Bearer-only):
+  │                       each tool is a fixed GraphQL document run with the
+  │                       caller's AuthContext, so it inherits every gate/audit path
   broker_auth/         — the broker auth callout: Atom serving FluxMQ's
   │                       `broker.auth.v1.AuthService` directly (off by default)
   │  topic.rs          — the configurable topic→object grammar

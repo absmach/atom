@@ -1,0 +1,226 @@
+---
+title: MCP Server for AI Agents
+description: Connect Claude, Cursor, VS Code, and other Model Context Protocol clients to Atom, mint a least-privilege token for them, and see which tools they get.
+---
+
+# MCP Server for AI Agents
+
+Atom serves the [Model Context Protocol](https://modelcontextprotocol.io) at
+`POST /mcp` on the main HTTP listener. Any MCP client that supports the
+Streamable HTTP transport (Claude Code, Claude Desktop, Cursor, VS Code, and
+others) can use it to answer questions like "why can this device not publish
+to that channel?", search identities and the audit trail, and make scoped
+changes such as granting a role.
+
+The endpoint is always mounted; there is nothing to enable. Every tool runs a
+GraphQL operation as the token's owner, so an agent can do exactly what that
+token can do through GraphQL and nothing more.
+
+## 1. Mint a token for the agent
+
+MCP requests authenticate with `Authorization: Bearer <token>`. Cookies are
+refused. Give the agent a **scoped access token** whose ceiling allows only the
+actions it needs, not your session JWT or an unscoped API key: the agent's
+effective access is the owner's live authority intersected with the ceiling
+(see [Scoped access tokens](/reference/access-tokens)).
+
+A read-only token for one tenant:
+
+```bash
+curl -s http://localhost:8080/graphql \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "mutation($input: CreateAccessTokenInput!) { createAccessToken(input: $input) { credentialId token expiresAt } }",
+    "variables": { "input": {
+      "name": "claude-agent",
+      "description": "MCP agent, read only",
+      "permissions": [
+        { "actions": ["read", "authz.check"], "scopeMode": "tenant", "tenantId": "<tenant-id>" }
+      ]
+    } }
+  }' | jq -r .data.createAccessToken.token
+```
+
+The token (`atom_<id>_<secret>`) is shown once. Store it in a secret manager or
+an environment variable such as `ATOM_TOKEN`, not in a committed file.
+
+Add actions to the ceiling only for the tools you want the agent to use:
+
+| Tools | Action the owner and the ceiling must allow |
+| --- | --- |
+| `list_*`, `get_*` | `read` on the objects |
+| `authz_check` | `authz.check` in the subject's tenant (or platform) |
+| `authz_explain` | `policy.manage` or `manage` at **platform** scope |
+| `list_audit_logs` | `read` on `audit_log` |
+| `assign_role`, `remove_role_assignment` | `policy.manage` in the tenant (or platform for global assignments) |
+| `add_group_member`, `remove_group_member` | `manage` on the group or its tenant |
+
+## 2. Add Atom to your client
+
+Replace `https://atom.example.com` with your Atom URL (`http://localhost:8080`
+for the [quick start](/quickstart) stack).
+
+### Claude Code
+
+```bash
+claude mcp add --transport http atom https://atom.example.com/mcp \
+  --header "Authorization: Bearer $ATOM_TOKEN"
+```
+
+Or share it with a project through `.mcp.json`; Claude Code expands
+`${ATOM_TOKEN}` from each developer's environment:
+
+```json
+{
+  "mcpServers": {
+    "atom": {
+      "type": "http",
+      "url": "https://atom.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${ATOM_TOKEN}" }
+    }
+  }
+}
+```
+
+Run `/mcp` inside Claude Code to confirm `atom` is connected.
+
+### Claude Desktop
+
+Claude Desktop's custom connectors expect OAuth, which Atom's MCP endpoint does
+not offer yet (see [Limitations](#limitations)). Use the
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge (requires
+Node.js) in `claude_desktop_config.json` instead:
+
+```json
+{
+  "mcpServers": {
+    "atom": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote", "https://atom.example.com/mcp",
+        "--header", "Authorization:${ATOM_AUTH}"
+      ],
+      "env": { "ATOM_AUTH": "Bearer atom_<id>_<secret>" }
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the file.
+
+### Cursor
+
+`~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one project):
+
+```json
+{
+  "mcpServers": {
+    "atom": {
+      "url": "https://atom.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${env:ATOM_TOKEN}" }
+    }
+  }
+}
+```
+
+### VS Code
+
+`.vscode/mcp.json`; VS Code prompts for the token once and stores it securely:
+
+```json
+{
+  "inputs": [
+    { "type": "promptString", "id": "atom-token", "description": "Atom access token", "password": true }
+  ],
+  "servers": {
+    "atom": {
+      "type": "http",
+      "url": "https://atom.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${input:atom-token}" }
+    }
+  }
+}
+```
+
+### Other clients
+
+Point any Streamable HTTP client at `<atom-url>/mcp` with the
+`Authorization: Bearer` header. Clients that only speak stdio can use
+`mcp-remote` as shown for Claude Desktop.
+
+## 3. Check the connection
+
+```bash
+curl -s https://atom.example.com/mcp \
+  -H "Authorization: Bearer $ATOM_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
+```
+
+Call a tool directly:
+
+```bash
+curl -s https://atom.example.com/mcp \
+  -H "Authorization: Bearer $ATOM_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"authz_check",
+        "arguments":{"subjectId":"<entity-id>","action":"read","resourceId":"<resource-id>"}}}' \
+  | jq .result
+```
+
+A 401 means the token is missing, malformed, revoked, or expired. A tool result
+with `"isError": true` carries the GraphQL error, most often a denial because
+the token's ceiling or the owner's grants do not cover that tool.
+
+## Tools
+
+| Tool | What it does | Kind |
+| --- | --- | --- |
+| `authz_check` | Is subject X allowed to do action Y on object Z? | read |
+| `authz_explain` | Same, plus every grant evaluated and the one that decided | read |
+| `list_entities` / `get_entity` | Search identities, fetch one with attributes and groups | read |
+| `list_resources` / `get_resource` | Search resources, fetch one | read |
+| `list_tenants` | Search tenants | read |
+| `list_groups` / `list_group_members` | Walk the group hierarchy and membership | read |
+| `list_roles` | Roles with their permission blocks and actions | read |
+| `list_role_assignments` | Who holds which role (direct assignments only) | read |
+| `list_audit_logs` | Search the audit trail by actor, target, event, outcome, time | read |
+| `assign_role` | Grant a role to an entity or group | write |
+| `add_group_member` | Add an entity to a group | write |
+| `remove_role_assignment` | Revoke a role assignment | destructive |
+| `remove_group_member` | Remove an entity from a group | destructive |
+
+Each tool is marked with its kind (`readOnlyHint` / `destructiveHint`), so
+clients can run reads without asking and ask before changes. List tools page
+with `limit` / `offset` and return a `total` count.
+
+## Security
+
+- **Authorization is the GraphQL authorization.** Tools add no permissions and
+  skip no checks: control-plane gates, PDP decisions, the token ceiling, and
+  audit and domain events all behave as for the same GraphQL call.
+- **Use least privilege.** Prefer a read-only ceiling. Grant write actions only
+  to tokens for agents you expect to change access, and give those tokens an
+  expiry.
+- **Browser protection.** Cookie auth is refused, and a request with an
+  `Origin` header must match `ATOM_CORS_ALLOWED_ORIGINS`, which blocks DNS
+  rebinding attacks from web pages.
+- **Rate limits.** `/mcp` shares the GraphQL rate-limit bucket and request body
+  limit.
+- **Use TLS.** The token is a bearer credential; expose `/mcp` only over HTTPS
+  outside localhost.
+- **Revoke** an agent's access at any time with `revokeAccessToken`; the next
+  request fails.
+
+## Limitations
+
+- **No OAuth sign-in.** Atom does not yet act as the OAuth authorization server
+  the MCP authorization spec describes, so clients cannot discover a login
+  flow. They must be configured with a token as shown above.
+- **Stateless transport.** Each request is answered directly with JSON. There
+  are no sessions, server-sent events, progress notifications, or
+  server-initiated requests; `GET /mcp` returns 405.
+- **Audit transport label.** Some audit events record `transport: "graphql"`
+  for calls made through MCP, because tools execute through the GraphQL layer.
