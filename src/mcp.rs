@@ -599,6 +599,16 @@ fn offset() -> Value {
     json!({ "type": "integer", "minimum": 0 })
 }
 
+/// `tenantId` for tools whose gate checks the platform scope when it is
+/// omitted: a tenant-scoped token is refused without it, and a model that is
+/// not told so gives up or guesses.
+fn gated_tenant() -> Value {
+    uuid(
+        "Tenant to look in. Required unless the caller has platform-wide access: \
+         a tenant-scoped token is refused (`forbidden`) without it.",
+    )
+}
+
 fn id_input_schema() -> Value {
     object_schema(json!({ "id": uuid("Object id.") }), &["id"])
 }
@@ -714,7 +724,7 @@ fn list_roles_input_schema() -> Value {
 fn list_role_assignments_input_schema() -> Value {
     object_schema(
         json!({
-            "tenantId": uuid("Only assignments in this tenant."),
+            "tenantId": gated_tenant(),
             "subjectKind": { "type": "string", "enum": ["entity", "group"] },
             "subjectId": uuid("Entity or group holding the role."),
             "roleId": uuid("Only assignments of this role."),
@@ -741,7 +751,7 @@ fn list_audit_logs_input_schema() -> Value {
     object_schema(
         json!({
             "actorEntityId": uuid("Entity that performed the action."),
-            "tenantId": uuid("Only events in this tenant."),
+            "tenantId": gated_tenant(),
             "targetKind": { "type": "string", "description": "e.g. `entity`, `credential`." },
             "targetId": uuid("Object the event is about."),
             "event": { "type": "string", "description": "Event name, e.g. `auth.login`." },
@@ -793,7 +803,7 @@ fn authorized_object_ids_input_schema() -> Value {
                 "type": "string",
                 "description": "Narrow to one type within the kind, e.g. `device`.",
             },
-            "tenantId": uuid("Only objects in this tenant."),
+            "tenantId": gated_tenant(),
             "q": { "type": "string", "description": "Free-text search." },
             "limit": limit(),
             "offset": offset(),
@@ -805,7 +815,7 @@ fn authorized_object_ids_input_schema() -> Value {
 fn list_direct_policies_input_schema() -> Value {
     object_schema(
         json!({
-            "tenantId": uuid("Only policies in this tenant."),
+            "tenantId": gated_tenant(),
             "subjectKind": { "type": "string", "enum": ["entity", "group"] },
             "subjectId": uuid("Entity or group holding the policy."),
             "objectId": uuid("Only blocks that name this object."),

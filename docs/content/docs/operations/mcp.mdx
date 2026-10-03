@@ -52,10 +52,15 @@ Add actions to the ceiling only for the tools you want the agent to use:
 | `list_*`, `get_*` | `read` on the objects |
 | `authz_check`, `authz_bulk_check`, `authorized_object_ids` | `authz.check` in the subject's tenant (or platform) |
 | `authz_explain` | `policy.manage` or `manage` at **platform** scope |
-| `list_audit_logs` | `read` on `audit_log` |
+| `list_audit_logs` | `read` or `manage` at platform scope, or `read` on `audit_log` in the tenant |
 | `expiring_credentials`, `orphan_policies` | `manage` at **platform** scope |
 | `assign_role`, `remove_role_assignment` | `policy.manage` in the tenant (or platform for global assignments) |
 | `add_group_member`, `remove_group_member` | `manage` on the group or its tenant |
+
+With a tenant-scoped token, `authorized_object_ids`, `list_role_assignments`,
+`list_direct_policies`, and `list_audit_logs` must be given `tenantId`; without
+it they check platform scope and are refused. The tool descriptions tell the
+model this.
 
 ## 2. Add Atom to your client
 
