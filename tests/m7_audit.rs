@@ -145,10 +145,15 @@ async fn tenant_audit_filter_returns_only_allowed_tenant_rows() {
     )
     .await;
 
-    let allowed =
-        atom::authz::repo::tenant_ids_for_action_on_object_kind(&p, auditor, "read", "audit_log")
-            .await
-            .expect("tenant filter");
+    let allowed = atom::authz::repo::tenant_ids_for_action_on_object_kind(
+        &p,
+        auditor,
+        "read",
+        "audit_log",
+        None,
+    )
+    .await
+    .expect("tenant filter");
     let logs = atom::authz::repo::audit_logs(
         &p,
         AuditQuery {
@@ -329,6 +334,64 @@ async fn read_role(
     role.id
 }
 
+/// A scoped access token reads audit logs only where its ceiling also allows
+/// it: owner authority alone must not admit a tenant the ceiling excludes.
+#[tokio::test]
+#[ignore]
+async fn audit_tenant_filter_honours_the_token_ceiling() {
+    let p = pool().await;
+    let t = tenant(&p).await;
+    let owner = human(&p, Some(t)).await;
+    read_role(&p, t, owner, "allow").await;
+    let read = capability_id(&p, "read").await;
+    let ceiling = |object_kind: &str| atom::authz::repo::CredentialCeiling {
+        entries: vec![atom::authz::repo::EffectiveGrant {
+            assignment_id: Uuid::new_v4(),
+            block_id: Uuid::new_v4(),
+            role_id: None,
+            role_name: None,
+            via: "access_token_ceiling".to_string(),
+            tenant_boundary: None,
+            scope_kind: atom::models::enums::ScopeKind::ObjectKind,
+            scope_ref: Some(object_kind.to_string()),
+            capability_id: read,
+            effect: atom::models::enums::Effect::Allow,
+            conditions: json!({}),
+        }],
+    };
+
+    let resource_only = ceiling("resource");
+    let tenants = atom::authz::repo::tenant_ids_for_action_on_object_kind(
+        &p,
+        owner,
+        "read",
+        "audit_log",
+        Some(&resource_only),
+    )
+    .await
+    .expect("tenant ids");
+    assert!(
+        !tenants.contains(&t),
+        "a ceiling of read on resources must not admit audit logs, got: {tenants:?}"
+    );
+
+    // Control: a ceiling that does allow audit logs keeps the owner's tenant.
+    let audit = ceiling("audit_log");
+    let tenants = atom::authz::repo::tenant_ids_for_action_on_object_kind(
+        &p,
+        owner,
+        "read",
+        "audit_log",
+        Some(&audit),
+    )
+    .await
+    .expect("tenant ids");
+    assert!(
+        tenants.contains(&t),
+        "a ceiling of read on audit_log must keep the tenant"
+    );
+}
+
 /// The audit-log tenant filter must honour role-block effect: a role whose only
 /// read block is a *deny* must not grant the tenant's audit logs (the legacy
 /// query treated any role with a read block as an unconditional allow).
@@ -346,6 +409,7 @@ async fn audit_tenant_filter_honours_role_deny() {
         denied_subject,
         "read",
         "audit_log",
+        None,
     )
     .await
     .expect("tenant ids");
@@ -361,6 +425,7 @@ async fn audit_tenant_filter_honours_role_deny() {
         allowed_subject,
         "read",
         "audit_log",
+        None,
     )
     .await
     .expect("tenant ids");

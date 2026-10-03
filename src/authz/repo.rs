@@ -6144,11 +6144,17 @@ pub async fn audit_logs(
 /// real effect and conditions: a role whose only matching block is a *deny* does
 /// not grant access (deny overrides), and a conditional allow is not listable
 /// without request context. The grant's assignment tenant boundary is honoured.
+///
+/// `ceiling` is the caller's scoped access-token ceiling when the caller is
+/// `entity_id` itself (`AuthContext::ceiling_for`): a tenant survives only if the
+/// ceiling also covers it, so the result is owner authority ∩ token ceiling, as
+/// on every other authorized path. `None` (unscoped token, session) is no cap.
 pub async fn tenant_ids_for_action_on_object_kind(
     pool: &Database,
     entity_id: Uuid,
     action_name: &str,
     object_kind: &str,
+    ceiling: Option<&CredentialCeiling>,
 ) -> Result<Vec<Uuid>, AppError> {
     let Some(action_id): Option<Uuid> =
         crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
@@ -6206,7 +6212,49 @@ pub async fn tenant_ids_for_action_on_object_kind(
     Ok(allowed
         .into_iter()
         .filter(|t| !denied.contains(t))
+        .filter(|t| {
+            ceiling.is_none_or(|ceiling| {
+                ceiling_covers_tenant(&ceiling.entries, action_id, object_kind, *t)
+            })
+        })
         .collect())
+}
+
+/// Whether a scoped token's ceiling lets it use `action_id` on every
+/// `object_kind` object in `tenant` — the ceiling half of the tenant-bounded
+/// listing above. As in the coarse gates, only an unconditional entry counts,
+/// and an entry narrower than the whole kind in that tenant (an object type,
+/// one object, a group subtree) cannot cover a tenant-wide listing.
+fn ceiling_covers_tenant(
+    entries: &[EffectiveGrant],
+    action_id: Uuid,
+    object_kind: &str,
+    tenant: Uuid,
+) -> bool {
+    entries.iter().any(|entry| {
+        entry.capability_id == action_id
+            && entry.conditions.as_object().is_some_and(|m| m.is_empty())
+            && entry
+                .tenant_boundary
+                .is_none_or(|boundary| boundary == tenant)
+            && match entry.scope_kind {
+                ScopeKind::Platform => true,
+                ScopeKind::Tenant => {
+                    entry
+                        .scope_ref
+                        .as_deref()
+                        .and_then(|s| s.parse::<Uuid>().ok())
+                        == Some(tenant)
+                }
+                ScopeKind::ObjectKind => entry.scope_ref.as_deref() == Some(object_kind),
+                ScopeKind::ObjectType
+                | ScopeKind::Object
+                | ScopeKind::GroupObjectType
+                | ScopeKind::GroupTreeObjectType
+                | ScopeKind::GroupChildKind
+                | ScopeKind::GroupDescendantKind => false,
+            }
+    })
 }
 
 pub async fn orphan_policies(
@@ -6988,7 +7036,120 @@ fn search_pattern(q: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    fn ceiling_entry(
+        action_id: Uuid,
+        scope_kind: ScopeKind,
+        scope_ref: Option<&str>,
+        tenant_boundary: Option<Uuid>,
+        conditions: Value,
+    ) -> EffectiveGrant {
+        let id = Uuid::new_v4();
+        EffectiveGrant {
+            assignment_id: id,
+            block_id: id,
+            role_id: None,
+            role_name: None,
+            via: "access_token_ceiling".to_string(),
+            tenant_boundary,
+            scope_kind,
+            scope_ref: scope_ref.map(str::to_string),
+            capability_id: action_id,
+            effect: Effect::Allow,
+            conditions,
+        }
+    }
+
+    #[test]
+    fn ceiling_covers_a_tenant_only_with_an_unconditional_kind_wide_entry() {
+        let read = Uuid::new_v4();
+        let other_action = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let tenant_ref = tenant.to_string();
+        let covers =
+            |entry: EffectiveGrant| ceiling_covers_tenant(&[entry], read, "audit_log", tenant);
+
+        // Entries that cover every audit log in the tenant.
+        assert!(covers(ceiling_entry(
+            read,
+            ScopeKind::Platform,
+            None,
+            None,
+            json!({})
+        )));
+        assert!(covers(ceiling_entry(
+            read,
+            ScopeKind::Tenant,
+            Some(&tenant_ref),
+            None,
+            json!({}),
+        )));
+        assert!(covers(ceiling_entry(
+            read,
+            ScopeKind::ObjectKind,
+            Some("audit_log"),
+            None,
+            json!({}),
+        )));
+        assert!(covers(ceiling_entry(
+            read,
+            ScopeKind::ObjectKind,
+            Some("audit_log"),
+            Some(tenant),
+            json!({}),
+        )));
+
+        // A ceiling for another kind is the reported bypass: it must not
+        // admit the tenant's audit logs.
+        assert!(!covers(ceiling_entry(
+            read,
+            ScopeKind::ObjectKind,
+            Some("resource"),
+            None,
+            json!({}),
+        )));
+        assert!(!covers(ceiling_entry(
+            other_action,
+            ScopeKind::Platform,
+            None,
+            None,
+            json!({}),
+        )));
+        assert!(!covers(ceiling_entry(
+            read,
+            ScopeKind::Tenant,
+            Some(&other_tenant.to_string()),
+            None,
+            json!({}),
+        )));
+        assert!(!covers(ceiling_entry(
+            read,
+            ScopeKind::ObjectKind,
+            Some("audit_log"),
+            Some(other_tenant),
+            json!({}),
+        )));
+        assert!(!covers(ceiling_entry(
+            read,
+            ScopeKind::Platform,
+            None,
+            None,
+            json!({ "context.region": "eu" }),
+        )));
+        assert!(!covers(ceiling_entry(
+            read,
+            ScopeKind::Object,
+            Some(&Uuid::new_v4().to_string()),
+            None,
+            json!({}),
+        )));
+        // An empty ceiling grants nothing.
+        assert!(!ceiling_covers_tenant(&[], read, "audit_log", tenant));
+    }
 
     fn device_id() -> Uuid {
         Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid")
