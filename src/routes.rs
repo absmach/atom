@@ -82,6 +82,11 @@ pub fn create_router(state: AppState) -> Router {
             "/graphql",
             post(graphql::graphql_handler).layer(DefaultBodyLimit::max(graphql_body_limit)),
         )
+        // MCP (Streamable HTTP, stateless) — tools run through the GraphQL schema
+        .route(
+            "/mcp",
+            post(crate::mcp::mcp_handler).layer(DefaultBodyLimit::max(graphql_body_limit)),
+        )
         // Custom API endpoint executor
         .route(
             "/api/custom/*path",
