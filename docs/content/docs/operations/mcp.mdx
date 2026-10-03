@@ -258,5 +258,8 @@ the agent's token.
 - **Stateless transport.** Each request is answered directly with JSON. There
   are no sessions, server-sent events, progress notifications, or
   server-initiated requests; `GET /mcp` returns 405.
+- **Protocol version 2025-06-18 only.** Older clients that need `2025-03-26`
+  (which requires JSON-RPC batching) are not supported; a request whose
+  `MCP-Protocol-Version` header names another version gets 400.
 - **Audit rows do not record MCP.** Audit events do not say which surface a
   call came through; use the `mcp tool call` log line to correlate.

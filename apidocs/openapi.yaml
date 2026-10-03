@@ -702,6 +702,9 @@ paths:
         methods are `initialize`, `ping`, `tools/list`, `tools/call`,
         `prompts/list`, and `prompts/get`.
         Notifications (messages without `id`) are acknowledged with 202.
+        The only supported protocol version is `2025-06-18`; a request whose
+        `MCP-Protocol-Version` header names another version is rejected with
+        400.
         Requires a Bearer token; cookie authentication is refused. A request
         carrying an `Origin` header must match `ATOM_CORS_ALLOWED_ORIGINS`.
         Tools run GraphQL operations with the caller's identity, so they are
@@ -724,6 +727,12 @@ paths:
                 $ref: "#/components/schemas/JsonRpcMessage"
         "202":
           description: Notification accepted; no body
+        "400":
+          description: Unsupported `MCP-Protocol-Version` header
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonRpcMessage"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

@@ -33,7 +33,10 @@ use crate::{
 };
 
 const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26"];
+/// `2025-03-26` is deliberately absent: it requires servers to accept JSON-RPC
+/// batches, which this transport does not (`2025-06-18` removed batching).
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18"];
+const PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -51,6 +54,23 @@ pub async fn mcp_handler(
     if headers.contains_key(header::ORIGIN) {
         if let Err(err) = require_trusted_origin(&headers, &state.config.cors_allowed_origins) {
             return err.into_response();
+        }
+    }
+    // After initialization, clients repeat the negotiated version on every
+    // request; the spec requires 400 for one this server does not speak. A
+    // missing header (curl, the `initialize` request itself) is accepted.
+    if let Some(version) = headers.get(PROTOCOL_VERSION_HEADER) {
+        let supported = version
+            .to_str()
+            .is_ok_and(|version| SUPPORTED_PROTOCOL_VERSIONS.contains(&version));
+        if !supported {
+            let mut response = rpc_error(
+                Value::Null,
+                INVALID_REQUEST,
+                "unsupported MCP-Protocol-Version",
+            );
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            return response;
         }
     }
     let auth = match authenticate(&state, &headers).await {
@@ -1114,8 +1134,12 @@ mod tests {
 
     #[test]
     fn initialize_echoes_a_supported_version_and_falls_back_otherwise() {
+        let reply = initialize(&json!({ "protocolVersion": "2025-06-18" }));
+        assert_eq!(reply["protocolVersion"], "2025-06-18");
+
+        // 2025-03-26 requires batch support this transport lacks.
         let reply = initialize(&json!({ "protocolVersion": "2025-03-26" }));
-        assert_eq!(reply["protocolVersion"], "2025-03-26");
+        assert_eq!(reply["protocolVersion"], LATEST_PROTOCOL_VERSION);
 
         let reply = initialize(&json!({ "protocolVersion": "1999-01-01" }));
         assert_eq!(reply["protocolVersion"], LATEST_PROTOCOL_VERSION);

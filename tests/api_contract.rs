@@ -306,6 +306,32 @@ async fn contract_mcp_route_requires_bearer_auth_and_a_trusted_origin() {
         }
     }
 
+    // A negotiated protocol version the server does not speak is a 400,
+    // decided before authentication; a supported one proceeds to auth.
+    for (version, expected) in [
+        ("1999-01-01", StatusCode::BAD_REQUEST),
+        ("2025-03-26", StatusCode::BAD_REQUEST),
+        ("2025-06-18", StatusCode::UNAUTHORIZED),
+    ] {
+        let response = atom::routes::create_router(runtime_test_state())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("MCP-Protocol-Version", version)
+                    .body(Body::from(initialize))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            expected,
+            "MCP-Protocol-Version {version}"
+        );
+    }
+
     // Stateless transport: no server-initiated SSE stream to open.
     let response = atom::routes::create_router(runtime_test_state())
         .oneshot(
