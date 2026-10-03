@@ -699,7 +699,8 @@ paths:
         Model Context Protocol server over the Streamable HTTP transport,
         stateless: each request carries a single JSON-RPC 2.0 message and is
         answered with `application/json` (no sessions, no SSE). Supported
-        methods are `initialize`, `ping`, `tools/list`, and `tools/call`.
+        methods are `initialize`, `ping`, `tools/list`, `tools/call`,
+        `prompts/list`, and `prompts/get`.
         Notifications (messages without `id`) are acknowledged with 202.
         Requires a Bearer token; cookie authentication is refused. A request
         carrying an `Origin` header must match `ATOM_CORS_ALLOWED_ORIGINS`.

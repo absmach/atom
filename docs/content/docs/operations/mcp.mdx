@@ -1,6 +1,6 @@
 ---
 title: MCP Server for AI Agents
-description: Connect Claude, Cursor, VS Code, and other Model Context Protocol clients to Atom, mint a least-privilege token for them, and see which tools they get.
+description: Connect Claude, Cursor, VS Code, and other Model Context Protocol clients to Atom, mint a least-privilege token for them, and see which tools and prompts they get.
 ---
 
 # MCP Server for AI Agents
@@ -50,9 +50,10 @@ Add actions to the ceiling only for the tools you want the agent to use:
 | Tools | Action the owner and the ceiling must allow |
 | --- | --- |
 | `list_*`, `get_*` | `read` on the objects |
-| `authz_check` | `authz.check` in the subject's tenant (or platform) |
+| `authz_check`, `authz_bulk_check`, `authorized_object_ids` | `authz.check` in the subject's tenant (or platform) |
 | `authz_explain` | `policy.manage` or `manage` at **platform** scope |
 | `list_audit_logs` | `read` on `audit_log` |
+| `expiring_credentials`, `orphan_policies` | `manage` at **platform** scope |
 | `assign_role`, `remove_role_assignment` | `policy.manage` in the tenant (or platform for global assignments) |
 | `add_group_member`, `remove_group_member` | `manage` on the group or its tenant |
 
@@ -180,13 +181,19 @@ the token's ceiling or the owner's grants do not cover that tool.
 | --- | --- | --- |
 | `authz_check` | Is subject X allowed to do action Y on object Z? | read |
 | `authz_explain` | Same, plus every grant evaluated and the one that decided | read |
+| `authz_bulk_check` | Up to 20 checks in one call, results in input order | read |
+| `authorized_object_ids` | The reverse: which entities, resources, groups, roles, ... can X do Y on? | read |
 | `list_entities` / `get_entity` | Search identities, fetch one with attributes and groups | read |
 | `list_resources` / `get_resource` | Search resources, fetch one | read |
 | `list_tenants` | Search tenants | read |
 | `list_groups` / `list_group_members` | Walk the group hierarchy and membership | read |
+| `list_entity_groups` | Groups an entity is a direct member of | read |
 | `list_roles` | Roles with their permission blocks and actions | read |
 | `list_role_assignments` | Who holds which role (direct assignments only) | read |
+| `list_direct_policies` | Permission blocks granted to a subject without a role | read |
 | `list_audit_logs` | Search the audit trail by actor, target, event, outcome, time | read |
+| `expiring_credentials` | Credentials expiring soon or already expired (metadata only) | read |
+| `orphan_policies` | Assignments whose subject, role, or block no longer exists | read |
 | `assign_role` | Grant a role to an entity or group | write |
 | `add_group_member` | Add an entity to a group | write |
 | `remove_role_assignment` | Revoke a role assignment | destructive |
@@ -195,6 +202,26 @@ the token's ceiling or the owner's grants do not cover that tool.
 Each tool is marked with its kind (`readOnlyHint` / `destructiveHint`), so
 clients can run reads without asking and ask before changes. List tools page
 with `limit` / `offset` and return a `total` count.
+
+No tool returns a secret: there is no tool to mint a token, reveal a
+credential, or rotate keys, because tool output lands in the model's context
+and the client's logs. Credential revocation is not offered either: the
+revoke mutations refuse scoped access tokens by design, so it stays an
+administrator action in the admin UI or GraphQL API.
+
+## Prompts
+
+Prompts are ready-made workflows that appear in the client's prompt or slash
+command menu (in Claude Code, as `/mcp__atom__<name>`). They only produce
+instructions for your model; every step still runs as a normal tool call under
+the agent's token.
+
+| Prompt | Arguments | What it does |
+| --- | --- | --- |
+| `why_denied` | `subjectId`, `action`, `objectId`, optional `objectKind` | Explains an allow or deny decision and suggests the smallest fix. Read-only. |
+| `access_review` | `tenantId` | Reviews roles, assignments, and direct policies in a tenant and flags broad or stale grants. Read-only. |
+| `credential_hygiene` | optional `days` (default 30) | Lists expiring and expired credentials, failing credential logins, and orphaned assignments. Read-only; needs platform `manage`. |
+| `offboard_entity` | `entityId` | Gathers an entity's roles, direct policies, and groups, presents a removal plan, and removes roles and group memberships only after you confirm. |
 
 ## Security
 
@@ -213,6 +240,10 @@ with `limit` / `offset` and return a `total` count.
   outside localhost.
 - **Revoke** an agent's access at any time with `revokeAccessToken`; the next
   request fails.
+- **Tracing.** Audit and domain events from a tool call are the same as from
+  the GraphQL call it runs. Each tool call also logs an `mcp tool call` line
+  with the tool name, the caller's entity id, and whether it failed, so you can
+  tie events to MCP in your log pipeline.
 
 ## Limitations
 
@@ -222,5 +253,5 @@ with `limit` / `offset` and return a `total` count.
 - **Stateless transport.** Each request is answered directly with JSON. There
   are no sessions, server-sent events, progress notifications, or
   server-initiated requests; `GET /mcp` returns 405.
-- **Audit transport label.** Some audit events record `transport: "graphql"`
-  for calls made through MCP, because tools execute through the GraphQL layer.
+- **Audit rows do not record MCP.** Audit events do not say which surface a
+  call came through; use the `mcp tool call` log line to correlate.

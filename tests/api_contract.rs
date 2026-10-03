@@ -267,6 +267,60 @@ async fn contract_login_route_uses_documented_axum_json_rejection_statuses() {
 }
 
 #[tokio::test]
+async fn contract_mcp_route_requires_bearer_auth_and_a_trusted_origin() {
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+    for (origin, cookie, expected) in [
+        // No credentials at all.
+        (None, None, StatusCode::UNAUTHORIZED),
+        // Cookie auth is ambient, so MCP refuses it even when present.
+        (None, Some("atom_token=session"), StatusCode::UNAUTHORIZED),
+        // A browser request from an origin outside ATOM_CORS_ALLOWED_ORIGINS
+        // is refused before authentication (DNS-rebinding guard).
+        (Some("https://evil.example"), None, StatusCode::FORBIDDEN),
+    ] {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        let response = atom::routes::create_router(runtime_test_state())
+            .oneshot(request.body(Body::from(initialize)).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            expected,
+            "origin {origin:?} cookie {cookie:?}"
+        );
+        if expected == StatusCode::UNAUTHORIZED {
+            assert_eq!(
+                response.headers().get(header::WWW_AUTHENTICATE),
+                Some(&HeaderValue::from_static("Bearer")),
+                "a 401 must tell MCP clients to send a Bearer token"
+            );
+        }
+    }
+
+    // Stateless transport: no server-initiated SSE stream to open.
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/mcp")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
 async fn contract_graphql_route_uses_documented_json_request_shape() {
     for (content_type, body, expected) in [
         (
