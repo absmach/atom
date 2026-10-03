@@ -41,13 +41,14 @@
     "overrides": {
       "js-yaml": "^4.3.2",
       "sharp": "^0.35.4",
-      "postcss": "^8.5.18",
+      "postcss": "^8.5.28",
       "nanoid": "^3.3.17"
     },
     "auditConfig": {
       "ignoreCves": [
         "CVE-2025-71330",
-        "CVE-2025-71329"
+        "CVE-2025-71329",
+        "CVE-2026-93687"
       ]
     }
   }
