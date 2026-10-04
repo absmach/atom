@@ -201,12 +201,15 @@ the token's ceiling or the owner's grants do not cover that tool.
 | `orphan_policies` | Assignments whose subject, role, or block no longer exists | read |
 | `assign_role` | Grant a role to an entity or group | write |
 | `add_group_member` | Add an entity to a group | write |
-| `remove_role_assignment` | Revoke a role assignment | destructive |
-| `remove_group_member` | Remove an entity from a group | destructive |
+| `remove_role_assignment` | Revoke a role assignment | write |
+| `remove_group_member` | Remove an entity from a group | write |
 
-Each tool is marked with its kind (`readOnlyHint` / `destructiveHint`), so
-clients can run reads without asking and ask before changes. List tools page
-with `limit` / `offset` and return a `total` count.
+Read tools are marked `readOnlyHint`, so clients can run them without asking.
+Every write tool is marked `destructiveHint`, including `assign_role` and
+`add_group_member`: a role or group can carry a deny, and deny overrides allow,
+so granting one can remove access. Clients that confirm destructive tools ask
+before each of them. List tools page with `limit` / `offset` and return a
+`total` count.
 
 No tool returns a secret: there is no tool to mint a token, reveal a
 credential, or rotate keys, because tool output lands in the model's context

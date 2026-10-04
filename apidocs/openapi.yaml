@@ -701,7 +701,10 @@ paths:
         answered with `application/json` (no sessions, no SSE). Supported
         methods are `initialize`, `ping`, `tools/list`, `tools/call`,
         `prompts/list`, and `prompts/get`.
-        Notifications (messages without `id`) are acknowledged with 202.
+        Messages must be JSON-RPC 2.0 with a string or integer `id` on
+        requests; anything else is rejected with 400 before dispatch.
+        Notifications (messages without `id`) and responses are acknowledged
+        with 202.
         The only supported protocol version is `2025-06-18`; a request whose
         `MCP-Protocol-Version` header names another version is rejected with
         400.
@@ -728,7 +731,7 @@ paths:
         "202":
           description: Notification accepted; no body
         "400":
-          description: Unsupported `MCP-Protocol-Version` header
+          description: Malformed JSON or JSON-RPC envelope, or unsupported `MCP-Protocol-Version` header
           content:
             application/json:
               schema:

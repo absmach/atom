@@ -64,13 +64,11 @@ pub async fn mcp_handler(
             .to_str()
             .is_ok_and(|version| SUPPORTED_PROTOCOL_VERSIONS.contains(&version));
         if !supported {
-            let mut response = rpc_error(
+            return bad_message(
                 Value::Null,
                 INVALID_REQUEST,
                 "unsupported MCP-Protocol-Version",
             );
-            *response.status_mut() = StatusCode::BAD_REQUEST;
-            return response;
         }
     }
     let auth = match authenticate(&state, &headers).await {
@@ -79,24 +77,17 @@ pub async fn mcp_handler(
     };
 
     let Ok(message) = serde_json::from_slice::<Value>(&body) else {
-        return rpc_error(Value::Null, PARSE_ERROR, "invalid JSON");
+        return bad_message(Value::Null, PARSE_ERROR, "invalid JSON");
     };
-    if !message.is_object() {
-        return rpc_error(
-            Value::Null,
-            INVALID_REQUEST,
-            "expected a single JSON-RPC message",
-        );
-    }
-    // A message without an id is a notification (`notifications/initialized`,
-    // `notifications/cancelled`, ...) and gets no JSON-RPC reply.
-    let Some(id) = message.get("id").cloned() else {
-        return StatusCode::ACCEPTED.into_response();
+    let (id, method, params) = match classify(&message) {
+        Ok(Message::Request { id, method, params }) => (id, method, params),
+        // Neither gets a JSON-RPC reply. This server sends no requests, so a
+        // response can only be stale or stray; it is acknowledged and dropped.
+        Ok(Message::Notification | Message::Response) => {
+            return StatusCode::ACCEPTED.into_response()
+        }
+        Err(invalid) => return bad_message(invalid.id, INVALID_REQUEST, invalid.reason),
     };
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return rpc_error(id, INVALID_REQUEST, "missing method");
-    };
-    let params = message.get("params").unwrap_or(&Value::Null);
 
     match method {
         "initialize" => rpc_result(id, initialize(params)),
@@ -224,6 +215,78 @@ async fn call_tool(
     Ok(result)
 }
 
+/// One JSON-RPC 2.0 message, classified per the MCP base protocol. Nothing is
+/// dispatched until the envelope is valid, so a malformed `tools/call` can
+/// never run, nor be answered with an id the client cannot match.
+#[derive(Debug, PartialEq)]
+enum Message<'a> {
+    Request {
+        id: Value,
+        method: &'a str,
+        params: &'a Value,
+    },
+    /// `notifications/initialized`, `notifications/cancelled`, ...
+    Notification,
+    /// A reply to a server-initiated request.
+    Response,
+}
+
+#[derive(Debug, PartialEq)]
+struct InvalidMessage {
+    /// The message's id when it was a valid one, else null.
+    id: Value,
+    reason: &'static str,
+}
+
+fn classify(message: &Value) -> Result<Message<'_>, InvalidMessage> {
+    let invalid = |id: Option<&Value>, reason| InvalidMessage {
+        id: id.cloned().unwrap_or(Value::Null),
+        reason,
+    };
+    let Some(object) = message.as_object() else {
+        return Err(invalid(None, "expected a single JSON-RPC message"));
+    };
+    // A request id must be a string or an integer; null is not allowed.
+    let id = match object.get("id") {
+        Some(id) if id.is_string() || id.is_i64() || id.is_u64() => Some(id),
+        Some(_) => return Err(invalid(None, "id must be a string or an integer")),
+        None => None,
+    };
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(invalid(id, "jsonrpc must be \"2.0\""));
+    }
+    match (object.get("method"), id) {
+        (Some(Value::String(method)), id) => {
+            let params = match object.get("params") {
+                None => &Value::Null,
+                Some(params @ Value::Object(_)) => params,
+                Some(_) => return Err(invalid(id, "params must be an object")),
+            };
+            Ok(match id {
+                Some(id) => Message::Request {
+                    id: id.clone(),
+                    method,
+                    params,
+                },
+                None => Message::Notification,
+            })
+        }
+        (Some(_), id) => Err(invalid(id, "method must be a string")),
+        (None, Some(_)) if object.contains_key("result") != object.contains_key("error") => {
+            Ok(Message::Response)
+        }
+        (None, id) => Err(invalid(id, "expected a request, notification, or response")),
+    }
+}
+
+/// A message rejected before dispatch: HTTP 400 carrying a JSON-RPC error, as
+/// the transport spec asks for input the server cannot accept.
+fn bad_message(id: Value, code: i64, message: &str) -> Response {
+    let mut response = rpc_error(id, code, message);
+    *response.status_mut() = StatusCode::BAD_REQUEST;
+    response
+}
+
 fn rpc_result(id: Value, result: Value) -> Response {
     Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
 }
@@ -242,10 +305,11 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Response {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Access {
     Read,
-    /// Adds state; repeating it is harmless or rejected as a conflict.
+    /// Changes access. Always `destructiveHint: true`, which the spec defines
+    /// as "not only additive": even granting a role or a group membership can
+    /// remove access, because the new grants may carry a deny and deny
+    /// overrides allow.
     Write,
-    /// Removes access or data.
-    Destructive,
 }
 
 struct Tool {
@@ -266,8 +330,7 @@ impl Tool {
     fn descriptor(&self) -> Value {
         let annotations = match self.access {
             Access::Read => json!({ "readOnlyHint": true }),
-            Access::Write => json!({ "readOnlyHint": false, "destructiveHint": false }),
-            Access::Destructive => json!({ "readOnlyHint": false, "destructiveHint": true }),
+            Access::Write => json!({ "readOnlyHint": false, "destructiveHint": true }),
         };
         json!({
             "name": self.name,
@@ -515,7 +578,7 @@ const TOOLS: &[Tool] = &[
         description: "Revoke a role assignment by its id (from list_role_assignments). \
                       The subject loses the role's access immediately.",
         input_schema: id_input_schema,
-        access: Access::Destructive,
+        access: Access::Write,
         query: "mutation McpRemoveRoleAssignment($id: ID!) { deleteRoleAssignment(id: $id) }",
         field: "deleteRoleAssignment",
         wrap_input: false,
@@ -538,7 +601,7 @@ const TOOLS: &[Tool] = &[
         description: "Remove an entity from a group; it loses the access it inherited \
                       through that group immediately.",
         input_schema: group_member_input_schema,
-        access: Access::Destructive,
+        access: Access::Write,
         query: "mutation McpRemoveGroupMember($groupId: ID!, $entityId: ID!) { \
                 removeGroupMember(groupId: $groupId, entityId: $entityId) }",
         field: "removeGroupMember",
@@ -1143,6 +1206,87 @@ mod tests {
 
         let reply = initialize(&json!({ "protocolVersion": "1999-01-01" }));
         assert_eq!(reply["protocolVersion"], LATEST_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn classify_accepts_only_valid_json_rpc_envelopes() {
+        let request = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" });
+        assert_eq!(
+            classify(&request),
+            Ok(Message::Request {
+                id: json!(7),
+                method: "tools/list",
+                params: &Value::Null,
+            })
+        );
+        let string_id = json!({ "jsonrpc": "2.0", "id": "a", "method": "ping", "params": {} });
+        assert!(matches!(classify(&string_id), Ok(Message::Request { .. })));
+        assert_eq!(
+            classify(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })),
+            Ok(Message::Notification)
+        );
+        assert_eq!(
+            classify(&json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+            Ok(Message::Response)
+        );
+        assert_eq!(
+            classify(&json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": 1, "message": "x" } })),
+            Ok(Message::Response)
+        );
+
+        // Rejected, never dispatched. The id is echoed only when it is valid.
+        for (message, id) in [
+            (json!({}), Value::Null),
+            (json!([]), Value::Null),
+            (json!({ "id": 1, "method": "tools/call" }), json!(1)),
+            (
+                json!({ "jsonrpc": "1.0", "id": 1, "method": "tools/call" }),
+                json!(1),
+            ),
+            (
+                json!({ "jsonrpc": "2.0", "id": null, "method": "tools/call" }),
+                Value::Null,
+            ),
+            (
+                json!({ "jsonrpc": "2.0", "id": 1.5, "method": "tools/call" }),
+                Value::Null,
+            ),
+            (
+                json!({ "jsonrpc": "2.0", "id": {}, "method": "tools/call" }),
+                Value::Null,
+            ),
+            (json!({ "jsonrpc": "2.0", "id": 1, "method": 3 }), json!(1)),
+            (
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": [] }),
+                json!(1),
+            ),
+            (json!({ "jsonrpc": "2.0", "id": 1 }), json!(1)),
+            (
+                json!({ "jsonrpc": "2.0", "id": 1, "result": {}, "error": {} }),
+                json!(1),
+            ),
+        ] {
+            let err = classify(&message).expect_err(&message.to_string());
+            assert_eq!(err.id, id, "{message}");
+        }
+    }
+
+    #[test]
+    fn every_access_change_is_marked_destructive() {
+        for tool in TOOLS {
+            let annotations = &tool.descriptor()["annotations"];
+            match tool.access {
+                Access::Read => assert_eq!(annotations["readOnlyHint"], true, "{}", tool.name),
+                Access::Write => {
+                    assert_eq!(annotations["readOnlyHint"], false, "{}", tool.name);
+                    assert_eq!(annotations["destructiveHint"], true, "{}", tool.name);
+                }
+            }
+        }
+        for name in ["assign_role", "add_group_member"] {
+            let tool = TOOLS.iter().find(|tool| tool.name == name).expect(name);
+            assert_eq!(tool.access, Access::Write, "{name}");
+        }
     }
 
     #[test]
