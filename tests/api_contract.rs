@@ -140,6 +140,7 @@ fn contract_primary_http_middleware_statuses_are_documented() {
             );
 
             let rate_limited = path == "/graphql"
+                || path == "/mcp"
                 || path == "/.well-known/jwks.json"
                 || path.starts_with("/auth/")
                 || path.starts_with("/certs/")
@@ -165,6 +166,7 @@ fn contract_body_limited_primary_operations_document_payload_too_large() {
         ("/auth/password/reset", "post"),
         ("/auth/oauth/exchange", "post"),
         ("/graphql", "post"),
+        ("/mcp", "post"),
         ("/certs/issuers/{issuer_id}/ocsp", "post"),
         ("/api/custom/{path}", "get"),
         ("/api/custom/{path}", "post"),
@@ -262,6 +264,86 @@ async fn contract_login_route_uses_documented_axum_json_rejection_statuses() {
             .expect("login response");
         assert_eq!(response.status(), expected, "body: {body}");
     }
+}
+
+#[tokio::test]
+async fn contract_mcp_route_requires_bearer_auth_and_a_trusted_origin() {
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+    for (origin, cookie, expected) in [
+        // No credentials at all.
+        (None, None, StatusCode::UNAUTHORIZED),
+        // Cookie auth is ambient, so MCP refuses it even when present.
+        (None, Some("atom_token=session"), StatusCode::UNAUTHORIZED),
+        // A browser request from an origin outside ATOM_CORS_ALLOWED_ORIGINS
+        // is refused before authentication (DNS-rebinding guard).
+        (Some("https://evil.example"), None, StatusCode::FORBIDDEN),
+    ] {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        let response = atom::routes::create_router(runtime_test_state())
+            .oneshot(request.body(Body::from(initialize)).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            expected,
+            "origin {origin:?} cookie {cookie:?}"
+        );
+        if expected == StatusCode::UNAUTHORIZED {
+            assert_eq!(
+                response.headers().get(header::WWW_AUTHENTICATE),
+                Some(&HeaderValue::from_static("Bearer")),
+                "a 401 must tell MCP clients to send a Bearer token"
+            );
+        }
+    }
+
+    // A negotiated protocol version the server does not speak is a 400,
+    // decided before authentication; a supported one proceeds to auth.
+    for (version, expected) in [
+        ("1999-01-01", StatusCode::BAD_REQUEST),
+        ("2025-03-26", StatusCode::BAD_REQUEST),
+        ("2025-06-18", StatusCode::UNAUTHORIZED),
+    ] {
+        let response = atom::routes::create_router(runtime_test_state())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("MCP-Protocol-Version", version)
+                    .body(Body::from(initialize))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            expected,
+            "MCP-Protocol-Version {version}"
+        );
+    }
+
+    // Stateless transport: no server-initiated SSE stream to open.
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/mcp")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]

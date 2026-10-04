@@ -1,4 +1,4 @@
 {
   "title": "Operations",
-  "pages": ["stateless", "file-storage", "pkcs11", "sqlite"]
+  "pages": ["stateless", "file-storage", "pkcs11", "sqlite", "mcp"]
 }
