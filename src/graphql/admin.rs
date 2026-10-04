@@ -164,9 +164,14 @@ async fn audit_tenant_filter(
         return Ok(None);
     }
 
-    let mut tenant_ids =
-        authz_repo::tenant_ids_for_action_on_object_kind(pool, auth.entity_id, "read", "audit_log")
-            .await?;
+    let mut tenant_ids = authz_repo::tenant_ids_for_action_on_object_kind(
+        pool,
+        auth.entity_id,
+        "read",
+        "audit_log",
+        auth.ceiling_for(auth.entity_id),
+    )
+    .await?;
     tenant_ids.sort_unstable();
     tenant_ids.dedup();
 
