@@ -14,7 +14,7 @@ use tower_http::{
 };
 
 use crate::{
-    api_endpoints::handlers as api_endpoints, certs, graphql, health,
+    api_endpoints::handlers as api_endpoints, certs, events, graphql, health,
     identity::handlers as identity, keys, rate_limit, state::AppState,
 };
 
@@ -142,6 +142,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/auth/keys/rotate",
             post(keys::rotate_keys).layer(DefaultBodyLimit::max(auth_body_limit)),
+        )
+        .route(
+            "/internal/synth/usage",
+            post(events::http::publish_synth_usage),
         );
 
     // Prometheus scrape endpoint. Mounted only when the operator enabled metrics

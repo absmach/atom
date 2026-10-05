@@ -13,6 +13,7 @@
 //! is a no-op: no `event_outbox` rows are written and no delivery task is
 //! spawned, so existing deployments see zero behavior change.
 
+pub mod http;
 pub mod publisher;
 
 use serde::{Deserialize, Serialize};
