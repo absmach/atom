@@ -49,7 +49,7 @@ pub async fn publish_synth_usage(
         .ok_or_else(|| AppError::unauthorized("bearer token required"))?;
     let auth = authenticate_token(&state, token).await?;
     require_any_capability(
-        &state.pool,
+        &state.pool(),
         &auth,
         &[("manage", scope_for_tenant(Some(req.tenant_id)))],
     )
@@ -62,7 +62,7 @@ pub async fn publish_synth_usage(
     });
 
     events::enqueue(
-        &state.pool,
+        &state.pool(),
         state.config.events.amqp_url.is_some(),
         Some(auth.entity_id),
         Some(req.tenant_id),
