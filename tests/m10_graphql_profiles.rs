@@ -22,9 +22,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 async fn seeded_client_profile(pool: &Database) -> Uuid {
-    atom::db::query_scalar(
-        "SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL",
-    )
+    crate::common::db::query_scalar("SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL", r#"SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL"#)
     .fetch_one(pool)
     .await
     .expect("seeded client profile")
@@ -162,8 +160,9 @@ async fn unauthorized_profile_lookup_does_not_reveal_id_existence() {
     let pool = common::pool().await;
     let profile_id = seeded_client_profile(&pool).await;
     let caller_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
     )
     .bind(caller_id)
     .bind(format!("profile-unprivileged-{caller_id}"))

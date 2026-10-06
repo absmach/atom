@@ -2,7 +2,7 @@
 
 Atom is a lightweight identity and authorization service for cloud-native and
 edge systems. It provides authentication, multi-tenant authorization, audit,
-and managed PKI from one Rust binary backed by PostgreSQL.
+and managed PKI from one Rust binary backed by PostgreSQL or SQLite.
 
 Atom is built for the [Magistrala](https://github.com/absmach/magistrala) IoT
 platform, but its APIs and authorization model are product-neutral.
@@ -20,6 +20,7 @@ platform, but its APIs and authorization model are product-neutral.
 - Optional Redis acceleration without caching authorization decisions
 - Health, readiness, metrics, rate limiting, and graceful shutdown
 - [Stateless deployment](docs/content/docs/operations/stateless.mdx) with external PostgreSQL
+- [SQLite deployment](docs/content/docs/operations/sqlite.mdx) for one process on local storage
 
 ## Documentation
 
@@ -120,6 +121,24 @@ make db
 cargo run
 ```
 
+For a single-process SQLite deployment, keep your normal authentication and
+encryption settings in `.env`, then select a local database file:
+
+```bash
+test -f .env || cp .env.example .env
+mkdir -p data
+DATABASE_URL="sqlite://data/atom.db" cargo run --locked
+```
+
+Atom creates the file and applies the SQLite migrations automatically. The
+example `.env` contains development credentials and an encryption key. For a real
+deployment, replace `ADMIN_SECRET` and generate a unique `ATOM_KEY_ENCRYPTION_KEY`
+with `openssl rand -base64 32`; store that key securely and retain it across
+restarts. Atom generates its ES256 signing keys automatically. Switching
+`DATABASE_URL` does not transfer existing data between backends. See the
+[SQLite operations guide](docs/content/docs/operations/sqlite.mdx) for backups
+and the single-process storage requirement.
+
 Run the standard checks:
 
 ```bash
@@ -187,6 +206,7 @@ The canonical artifacts are:
 | `config/` | Demo and example bootstrap/callout configuration |
 | `examples/` | Runnable integrations, demos, and API collections |
 | `migrations/` | Immutable PostgreSQL migrations |
+| `migrations/sqlite/` | SQLite migrations for the same domain schema |
 | `proto/` | Atom-owned and vendored protobuf contracts |
 | `scripts/` | Validation and maintenance scripts |
 | `tests/` | Database-backed integration and contract tests |

@@ -1,3 +1,4 @@
+mod storage;
 use crate::db::Database;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -158,11 +159,10 @@ pub async fn login_credential_with_tenant(
 
     let (entity_id_opt, tenant_id_opt, outcome, kind) = match &result {
         Ok((r, kind)) => {
-            let tenant_id = crate::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-                .bind(r.entity_id)
-                .fetch_optional(pool)
+            let tenant_id = storage::entity_tenant(pool, r.entity_id)
                 .await
                 .ok()
+                .flatten()
                 .flatten();
             (
                 Some(r.entity_id),
@@ -320,19 +320,9 @@ fn login_attempt_identifier(identifier: &str) -> String {
 }
 
 async fn ensure_login_target_active(pool: &Database, entity_id: Uuid) -> Result<(), AppError> {
-    let ok: Option<Uuid> = crate::db::query_scalar(
-        r#"SELECT e.id
-           FROM entities e
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE e.id = $1
-             AND e.status = 'active'
-             AND e.deleted_at IS NULL
-             AND (e.tenant_id IS NULL OR (t.deleted_at IS NULL AND t.status = 'active'))"#,
-    )
-    .bind(entity_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
+    let ok: Option<Uuid> = storage::active_login_entity(pool, entity_id)
+        .await
+        .map_err(db_err)?;
     if ok.is_none() {
         return Err(AppError::unauthorized("entity is not active"));
     }
@@ -346,20 +336,10 @@ async fn ensure_login_not_throttled(
     failure_limit: i64,
     failure_window_secs: i64,
 ) -> Result<(), AppError> {
-    let failures: i64 = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM auth_login_attempts
-           WHERE identifier = $1
-             AND (($2::uuid IS NULL AND tenant_id IS NULL) OR tenant_id = $2)
-             AND success = FALSE
-             AND created_at >= now() - ($3::text || ' seconds')::interval"#,
-    )
-    .bind(identifier)
-    .bind(tenant_id)
-    .bind(failure_window_secs.to_string())
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+    let failures: i64 =
+        storage::recent_failed_logins(pool, identifier, tenant_id, failure_window_secs.to_string())
+            .await
+            .map_err(db_err)?;
 
     if failures >= failure_limit {
         Err(AppError::rate_limited(
@@ -377,16 +357,7 @@ async fn record_login_attempt(
     tenant_id: Option<Uuid>,
     success: bool,
 ) {
-    if let Err(err) = crate::db::query(
-        r#"INSERT INTO auth_login_attempts (identifier, tenant_id, success)
-           VALUES ($1, $2, $3)"#,
-    )
-    .bind(identifier)
-    .bind(tenant_id)
-    .bind(success)
-    .execute(pool)
-    .await
-    {
+    if let Err(err) = storage::record_login_attempt(pool, identifier, tenant_id, success).await {
         tracing::warn!("login attempt record failed: {err}");
     }
 }
@@ -533,41 +504,30 @@ async fn write_signup_human(
     tx: &mut DbTransaction<'_>,
     prepared: &PreparedSignup,
 ) -> Result<(), AppError> {
-    crate::db::query(
-        r#"INSERT INTO entities (id, kind, name, tenant_id, attributes)
-           VALUES ($1, $2, $3, NULL, $4)"#,
+    storage::insert_signup_entity(
+        tx,
+        prepared.entity_id,
+        EntityKind::Human,
+        &prepared.name,
+        &prepared.attributes,
     )
-    .bind(prepared.entity_id)
-    .bind(EntityKind::Human)
-    .bind(&prepared.name)
-    .bind(&prepared.attributes)
-    .execute(tx.exec())
     .await
     .map_err(|err| signup_conflict(err, "Username already taken"))?;
 
     super::repo::add_authenticated_user_membership_in_tx(tx, prepared.entity_id).await?;
 
-    crate::db::query(
-        r#"INSERT INTO entity_emails (id, entity_id, email)
-           VALUES ($1, $2, $3)"#,
-    )
-    .bind(prepared.email_id)
-    .bind(prepared.entity_id)
-    .bind(&prepared.email)
-    .execute(tx.exec())
-    .await
-    .map_err(|err| signup_conflict(err, "Email address already taken"))?;
+    storage::insert_signup_email(tx, prepared.email_id, prepared.entity_id, &prepared.email)
+        .await
+        .map_err(|err| signup_conflict(err, "Email address already taken"))?;
 
-    crate::db::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
-           VALUES ($1, $2, $3, $4, $5)"#,
+    storage::insert_signup_password(
+        tx,
+        Uuid::new_v4(),
+        prepared.entity_id,
+        CredentialKind::Password,
+        &prepared.email,
+        &prepared.password_hash,
     )
-    .bind(Uuid::new_v4())
-    .bind(prepared.entity_id)
-    .bind(CredentialKind::Password)
-    .bind(&prepared.email)
-    .bind(&prepared.password_hash)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -593,22 +553,16 @@ pub async fn verify_email(pool: &Database, token: &str) -> Result<(), AppError> 
     let (token_id, token_secret) = parse_secret_token(token, "atomv")
         .ok_or_else(|| AppError::bad_request("invalid verification token"))?;
 
-    let row = crate::db::query(
-        r#"SELECT entity_id, email_id, secret_hash, expires_at, consumed_at
-           FROM email_verification_tokens
-           WHERE id = $1"#,
-    )
-    .bind(token_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::bad_request("invalid verification token"),
-        other => AppError::Database(other),
-    })?;
+    let row = storage::verification_token(pool, token_id)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::bad_request("invalid verification token"),
+            other => AppError::Database(other),
+        })?;
 
-    let secret_hash: String = row.try_get("secret_hash").map_err(db_err)?;
-    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
-    let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
+    let secret_hash: String = row.secret_hash;
+    let expires_at: DateTime<Utc> = row.expires_at;
+    let consumed_at: Option<DateTime<Utc>> = row.consumed_at;
     if consumed_at.is_some() || expires_at < Utc::now() {
         return Err(AppError::bad_request("verification token expired"));
     }
@@ -616,8 +570,8 @@ pub async fn verify_email(pool: &Database, token: &str) -> Result<(), AppError> 
         return Err(AppError::bad_request("invalid verification token"));
     }
 
-    let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
-    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+    let email_id: Uuid = row.email_id;
+    let entity_id: Uuid = row.entity_id;
     let mut tx = pool.begin().await.map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
         .await?
@@ -625,23 +579,15 @@ pub async fn verify_email(pool: &Database, token: &str) -> Result<(), AppError> 
     {
         return Err(AppError::bad_request("invalid verification token"));
     }
-    let updated = crate::db::query(
-        "UPDATE email_verification_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
-    )
-    .bind(token_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if updated.rows_affected() == 0 {
+    let updated = storage::consume_verification_token(&mut tx, token_id)
+        .await
+        .map_err(db_err)?;
+    if updated == 0 {
         return Err(AppError::bad_request("verification token expired"));
     }
-    crate::db::query(
-        "UPDATE entity_emails SET verified_at = now(), updated_at = now() WHERE id = $1",
-    )
-    .bind(email_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::verify_canonical_email(&mut tx, email_id)
+        .await
+        .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
     Ok(())
 }
@@ -652,29 +598,16 @@ pub async fn resend_verification(
     email: &str,
 ) -> Result<(), AppError> {
     let email = normalize_email(email)?;
-    let row = crate::db::query(
-        r#"SELECT ee.id AS email_id, ee.entity_id
-           FROM entity_emails ee
-           JOIN entities e ON e.id = ee.entity_id
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE ee.email = $1
-             AND ee.verified_at IS NULL
-             AND e.kind = 'human'
-             AND e.status = 'active'
-             AND e.deleted_at IS NULL
-             AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))"#,
-    )
-    .bind(&email)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
+    let row = storage::unverified_email_owner(pool, &email)
+        .await
+        .map_err(db_err)?;
 
     let Some(row) = row else {
         return Ok(());
     };
 
-    let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
-    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+    let email_id: Uuid = row.email_id;
+    let entity_id: Uuid = row.entity_id;
     let (token_id, token_secret, token) = new_secret_token("atomv");
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = checked_expiration_from_now(
@@ -682,19 +615,9 @@ pub async fn resend_verification(
         cfg.email_verification_expiry_secs,
     )?;
 
-    crate::db::query(
-        r#"INSERT INTO email_verification_tokens
-             (id, entity_id, email_id, secret_hash, expires_at)
-           VALUES ($1, $2, $3, $4, $5)"#,
-    )
-    .bind(token_id)
-    .bind(entity_id)
-    .bind(email_id)
-    .bind(token_hash)
-    .bind(expires_at)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
+    storage::insert_verification_token(pool, token_id, entity_id, email_id, token_hash, expires_at)
+        .await
+        .map_err(db_err)?;
 
     if let Err(err) = send_verification_email(cfg, &email, &token).await {
         tracing::warn!("verification email resend failed: {err}");
@@ -708,51 +631,23 @@ pub async fn request_password_reset(
     req: PasswordResetRequest,
 ) -> Result<(), AppError> {
     let email = normalize_email(&req.email)?;
-    let row = crate::db::query(
-        r#"SELECT ee.id AS email_id, ee.entity_id
-           FROM entity_emails ee
-           JOIN entities e ON e.id = ee.entity_id
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE ee.email = $1
-             AND e.kind = 'human'
-             AND e.status = 'active'
-             AND e.deleted_at IS NULL
-             AND (e.tenant_id IS NULL OR (t.status = 'active' AND t.deleted_at IS NULL))
-             AND NOT EXISTS (
-                   SELECT 1
-                   FROM credentials c
-                   WHERE c.entity_id = e.id
-                     AND c.kind = 'password'
-                     AND c.status = 'active'
-                     AND c.managed_by = 'config'
-             )"#,
-    )
-    .bind(&email)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
+    let row = storage::password_reset_email_owner(pool, &email)
+        .await
+        .map_err(db_err)?;
 
     let Some(row) = row else {
         return Ok(());
     };
 
-    let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
-    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+    let email_id: Uuid = row.email_id;
+    let entity_id: Uuid = row.entity_id;
     let (token_id, token_secret, token) = new_secret_token("atomr");
     let token_hash = hash_secret(token_secret.as_bytes())?;
     let expires_at = Utc::now() + Duration::minutes(30);
 
-    crate::db::query(
-        r#"INSERT INTO password_reset_tokens
-             (id, entity_id, email_id, secret_hash, expires_at)
-           VALUES ($1, $2, $3, $4, $5)"#,
+    storage::insert_password_reset_token(
+        pool, token_id, entity_id, email_id, token_hash, expires_at,
     )
-    .bind(token_id)
-    .bind(entity_id)
-    .bind(email_id)
-    .bind(token_hash)
-    .bind(expires_at)
-    .execute(pool)
     .await
     .map_err(db_err)?;
 
@@ -780,22 +675,16 @@ pub async fn reset_password(
     let (token_id, token_secret) = parse_secret_token(&req.token, "atomr")
         .ok_or_else(|| AppError::bad_request("invalid password reset token"))?;
 
-    let row = crate::db::query(
-        r#"SELECT entity_id, email_id, secret_hash, expires_at, consumed_at
-           FROM password_reset_tokens
-           WHERE id = $1"#,
-    )
-    .bind(token_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::bad_request("invalid password reset token"),
-        other => AppError::Database(other),
-    })?;
+    let row = storage::password_reset_token(pool, token_id)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::bad_request("invalid password reset token"),
+            other => AppError::Database(other),
+        })?;
 
-    let secret_hash: String = row.try_get("secret_hash").map_err(db_err)?;
-    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
-    let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
+    let secret_hash: String = row.secret_hash;
+    let expires_at: DateTime<Utc> = row.expires_at;
+    let consumed_at: Option<DateTime<Utc>> = row.consumed_at;
     if consumed_at.is_some() || expires_at < Utc::now() {
         return Err(AppError::bad_request("password reset token expired"));
     }
@@ -803,11 +692,9 @@ pub async fn reset_password(
         return Err(AppError::bad_request("invalid password reset token"));
     }
 
-    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
-    let email_id: Uuid = row.try_get("email_id").map_err(db_err)?;
-    let email: String = crate::db::query_scalar("SELECT email FROM entity_emails WHERE id = $1")
-        .bind(email_id)
-        .fetch_one(pool)
+    let entity_id: Uuid = row.entity_id;
+    let email_id: Uuid = row.email_id;
+    let email: String = storage::email_address(pool, email_id)
         .await
         .map_err(db_err)?;
     let password_hash = hash_secret(req.password.as_bytes())?;
@@ -829,16 +716,12 @@ pub async fn reset_password(
     // finish. A pre-transaction pool query could miss one, leaving its cache
     // entry uninvalidated indefinitely. See `src/cache/mod.rs`'s consistency
     // model.
-    let session_keys: Vec<String> = crate::db::query_scalar::<Uuid>(
-        "SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
-    )
-    .bind(entity_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?
-    .into_iter()
-    .map(crate::cache::keys::session)
-    .collect();
+    let session_keys: Vec<String> = storage::active_session_ids(&mut tx, entity_id)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(crate::cache::keys::session)
+        .collect();
 
     let cache_lease = match cache {
         Some(cache) => Some(
@@ -875,44 +758,28 @@ async fn finish_password_reset_in_tx(
     email: &str,
     password_hash: String,
 ) -> Result<(), AppError> {
-    let updated = crate::db::query(
-        "UPDATE password_reset_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
-    )
-    .bind(token_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if updated.rows_affected() == 0 {
+    let updated = storage::consume_password_reset_token(tx, token_id)
+        .await
+        .map_err(db_err)?;
+    if updated == 0 {
         return Err(AppError::bad_request("password reset token expired"));
     }
-    crate::db::query(
-        r#"UPDATE credentials
-           SET status = 'revoked'
-           WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#,
+    storage::revoke_passwords(tx, entity_id)
+        .await
+        .map_err(db_err)?;
+    storage::insert_replacement_password(
+        tx,
+        Uuid::new_v4(),
+        entity_id,
+        CredentialKind::Password,
+        email,
+        password_hash,
     )
-    .bind(entity_id)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
-    crate::db::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
-           VALUES ($1, $2, $3, $4, $5)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(entity_id)
-    .bind(CredentialKind::Password)
-    .bind(email)
-    .bind(password_hash)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    crate::db::query(
-        "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
-    )
-    .bind(entity_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::revoke_sessions(tx, entity_id)
+        .await
+        .map_err(db_err)?;
     // A password reset is a full identity-state reset: a pending email-change
     // request was minted under the pre-reset credential state (possibly by a
     // briefly-compromised session) and must die with it. Otherwise an attacker
@@ -921,14 +788,9 @@ async fn finish_password_reset_in_tx(
     // attacker's inbox and taking over the account permanently. The mirror of
     // the confirm flow invalidating old-state verification/reset tokens in
     // the other direction.
-    crate::db::query(
-        "UPDATE email_change_tokens SET consumed_at = now() \
-         WHERE entity_id = $1 AND consumed_at IS NULL",
-    )
-    .bind(entity_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::invalidate_email_changes(tx, entity_id)
+        .await
+        .map_err(db_err)?;
     Ok(())
 }
 
@@ -970,12 +832,9 @@ pub async fn request_email_change(
         ));
     }
 
-    let session_created_at: DateTime<Utc> =
-        crate::db::query_scalar("SELECT created_at FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
+    let session_created_at: DateTime<Utc> = storage::session_created_at(pool, session_id)
+        .await
+        .map_err(db_err)?;
     let max_age = Duration::seconds(cfg.email_change_max_session_age_secs as i64);
     if Utc::now().signed_duration_since(session_created_at) > max_age {
         return Err(AppError::unauthorized(
@@ -984,13 +843,9 @@ pub async fn request_email_change(
     }
 
     let new_email = normalize_email(&req.new_email)?;
-    let current_email: Option<String> = crate::db::query_scalar(
-        "SELECT email FROM entity_emails WHERE entity_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(auth.entity_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
+    let current_email: Option<String> = storage::current_email(pool, auth.entity_id)
+        .await
+        .map_err(db_err)?;
     let Some(current_email) = current_email else {
         return Err(AppError::bad_request("account has no email on file"));
     };
@@ -1000,13 +855,9 @@ pub async fn request_email_change(
         ));
     }
 
-    let taken: bool = crate::db::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM entity_emails WHERE email = $1 AND deleted_at IS NULL)",
-    )
-    .bind(&new_email)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+    let taken: bool = storage::email_is_taken(pool, &new_email)
+        .await
+        .map_err(db_err)?;
     if taken {
         return Ok(());
     }
@@ -1040,27 +891,21 @@ pub async fn request_email_change(
     // Supersede older pending requests for this entity — only the most
     // recent one is honourable, and confirming a stale one would apply a
     // proposed email the user may no longer want.
-    crate::db::query(
-        "UPDATE email_change_tokens SET consumed_at = now() \
-         WHERE entity_id = $1 AND consumed_at IS NULL",
+    storage::supersede_email_changes(&mut tx, auth.entity_id)
+        .await
+        .map_err(db_err)?;
+    storage::insert_email_change(
+        &mut tx,
+        storage::InsertEmailChange {
+            token_id,
+            entity_id: auth.entity_id,
+            session_id,
+            current_email: &current_email,
+            new_email: &new_email,
+            token_hash: &token_hash,
+            expires_at,
+        },
     )
-    .bind(auth.entity_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    crate::db::query(
-        r#"INSERT INTO email_change_tokens
-             (id, entity_id, session_id, current_email, new_email, secret_hash, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-    )
-    .bind(token_id)
-    .bind(auth.entity_id)
-    .bind(session_id)
-    .bind(&current_email)
-    .bind(&new_email)
-    .bind(&token_hash)
-    .bind(expires_at)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -1090,22 +935,16 @@ pub async fn confirm_email_change(
     let (token_id, token_secret) = parse_secret_token(&req.token, "atomc")
         .ok_or_else(|| AppError::bad_request("invalid email change token"))?;
 
-    let row = crate::db::query(
-        r#"SELECT entity_id, current_email, new_email, secret_hash, expires_at, consumed_at
-           FROM email_change_tokens
-           WHERE id = $1"#,
-    )
-    .bind(token_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::bad_request("invalid email change token"),
-        other => AppError::Database(other),
-    })?;
+    let row = storage::email_change_token(pool, token_id)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::bad_request("invalid email change token"),
+            other => AppError::Database(other),
+        })?;
 
-    let secret_hash: String = row.try_get("secret_hash").map_err(db_err)?;
-    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
-    let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
+    let secret_hash: String = row.secret_hash;
+    let expires_at: DateTime<Utc> = row.expires_at;
+    let consumed_at: Option<DateTime<Utc>> = row.consumed_at;
     if consumed_at.is_some() || expires_at < Utc::now() {
         return Err(AppError::bad_request("email change token expired"));
     }
@@ -1113,9 +952,9 @@ pub async fn confirm_email_change(
         return Err(AppError::bad_request("invalid email change token"));
     }
 
-    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
-    let current_email: String = row.try_get("current_email").map_err(db_err)?;
-    let new_email: String = row.try_get("new_email").map_err(db_err)?;
+    let entity_id: Uuid = row.entity_id;
+    let current_email: String = row.current_email;
+    let new_email: String = row.new_email;
 
     let mut tx = pool.begin().await.map_err(db_err)?;
     if super::repo::lock_active_entity(&mut tx, entity_id)
@@ -1136,14 +975,9 @@ pub async fn confirm_email_change(
     // row. `deleted_at IS NULL` treats a since-deactivated email (e.g. an
     // admin cleared `attributes.email`) the same as one that changed — both
     // fail the drift check below rather than resurrecting a removed row.
-    let locked_email: Option<(Uuid, String)> = crate::db::query_as::<(Uuid, String)>(
-        "SELECT id, email FROM entity_emails \
-         WHERE entity_id = $1 AND deleted_at IS NULL FOR UPDATE",
-    )
-    .bind(entity_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let locked_email: Option<(Uuid, String)> = storage::lock_current_email(&mut tx, entity_id)
+        .await
+        .map_err(db_err)?;
     let Some((email_id, live_email)) = locked_email else {
         return Err(AppError::bad_request(
             "your email address changed since this request was made; request the change again",
@@ -1160,14 +994,10 @@ pub async fn confirm_email_change(
         ));
     }
 
-    let consumed = crate::db::query(
-        "UPDATE email_change_tokens SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
-    )
-    .bind(token_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if consumed.rows_affected() == 0 {
+    let consumed = storage::consume_email_change(&mut tx, token_id)
+        .await
+        .map_err(db_err)?;
+    if consumed == 0 {
         return Err(AppError::bad_request(
             "email change token already used or expired",
         ));
@@ -1177,26 +1007,19 @@ pub async fn confirm_email_change(
     // now serializes on the same entity lock (see the request path), so at
     // most one pending token exists at any committed instant — the sweep
     // stays as belt-and-braces against rows predating that serialization.
-    crate::db::query(
-        "UPDATE email_change_tokens SET consumed_at = now() \
-         WHERE entity_id = $1 AND consumed_at IS NULL",
-    )
-    .bind(entity_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::consume_other_email_changes(&mut tx, entity_id)
+        .await
+        .map_err(db_err)?;
 
     // Old-state cleanup: outstanding verification/reset tokens tied to the
     // email being replaced can never be redeemed against the new one.
     super::repo::invalidate_email_tokens_in_tx(&mut tx, email_id).await?;
 
-    let entity_row = crate::db::query("SELECT attributes, external_id FROM entities WHERE id = $1")
-        .bind(entity_id)
-        .fetch_one(tx.exec())
+    let entity_row = storage::entity_email_mirror(&mut tx, entity_id)
         .await
         .map_err(db_err)?;
-    let attributes: Value = entity_row.try_get("attributes").map_err(db_err)?;
-    let external_id: Option<String> = entity_row.try_get("external_id").map_err(db_err)?;
+    let attributes: Value = entity_row.attributes;
+    let external_id: Option<String> = entity_row.external_id;
 
     // Explicit case-insensitive recheck, ahead of and independent from the
     // unique index below. `idx_entity_emails_email` is a plain (case-
@@ -1207,40 +1030,20 @@ pub async fn confirm_email_change(
     // that could ever exist (a bootstrap-provisioned row predating a
     // normalization fix, for one) — see AGENTS.md on why this codebase
     // never trusts a single-path invariant for uniqueness.
-    let case_insensitive_collision: bool = crate::db::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM entity_emails
-             WHERE lower(email) = lower($1) AND deleted_at IS NULL AND entity_id != $2
-         )",
-    )
-    .bind(&new_email)
-    .bind(entity_id)
-    .fetch_one(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let case_insensitive_collision: bool = storage::email_collision(&mut tx, &new_email, entity_id)
+        .await
+        .map_err(db_err)?;
     if case_insensitive_collision {
         return Err(AppError::conflict("Email address already taken"));
     }
 
-    crate::db::query(
-        "UPDATE entity_emails SET email = $2, verified_at = now(), updated_at = now() \
-         WHERE id = $1",
-    )
-    .bind(email_id)
-    .bind(&new_email)
-    .execute(tx.exec())
-    .await
-    .map_err(entity_write_conflict)?;
+    storage::change_canonical_email(&mut tx, email_id, &new_email)
+        .await
+        .map_err(entity_write_conflict)?;
 
-    crate::db::query(
-        "UPDATE credentials SET identifier = $2 \
-         WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
-    )
-    .bind(entity_id)
-    .bind(&new_email)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::change_password_identifier(&mut tx, entity_id, &new_email)
+        .await
+        .map_err(db_err)?;
 
     // Compatibility mirror: only entities that already carry `attributes.email`
     // (bootstrap-provisioned or admin-managed rows — see
@@ -1250,10 +1053,7 @@ pub async fn confirm_email_change(
     if attributes.get("email").is_some() {
         let mut updated = attributes;
         updated["email"] = Value::String(new_email.clone());
-        crate::db::query("UPDATE entities SET attributes = $2, updated_at = now() WHERE id = $1")
-            .bind(entity_id)
-            .bind(updated)
-            .execute(tx.exec())
+        storage::change_email_mirror(&mut tx, entity_id, updated)
             .await
             .map_err(db_err)?;
     }
@@ -1262,13 +1062,9 @@ pub async fn confirm_email_change(
     // concurrently (itself gated on the same lock — see `create_session_in_tx`)
     // can be missed. Every session is revoked, including the requesting one:
     // a fresh login is required everywhere, matching `reset_password`.
-    let session_ids: Vec<Uuid> = crate::db::query_scalar(
-        "SELECT id FROM sessions WHERE entity_id = $1 AND revoked_at IS NULL",
-    )
-    .bind(entity_id)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let session_ids: Vec<Uuid> = storage::email_change_sessions(&mut tx, entity_id)
+        .await
+        .map_err(db_err)?;
     let session_keys: Vec<String> = session_ids
         .iter()
         .copied()
@@ -1299,13 +1095,9 @@ pub async fn confirm_email_change(
     };
 
     let outcome = async {
-        crate::db::query(
-            "UPDATE sessions SET revoked_at = now() WHERE entity_id = $1 AND revoked_at IS NULL",
-        )
-        .bind(entity_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+        storage::revoke_email_change_sessions(&mut tx, entity_id)
+            .await
+            .map_err(db_err)?;
 
         audit::commit_with_audit(
             pool,
@@ -1385,22 +1177,21 @@ pub async fn oauth_start(
     let state_hash = hash_secret(state_secret.as_bytes())?;
     let nonce = Nonce::new_random();
 
-    crate::db::query(
-        r#"INSERT INTO oauth_login_states
-             (id, provider, state_hash, pkce_verifier, nonce, return_to, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+    storage::insert_oauth_state(
+        pool,
+        storage::InsertOauthState {
+            state_id,
+            name: &provider.name,
+            state_hash,
+            pkce_verifier: pkce_verifier.secret(),
+            nonce: nonce.secret(),
+            return_to: return_to.as_deref(),
+            expires_at: checked_expiration_from_now(
+                "ATOM_OAUTH_STATE_EXPIRY_SECS",
+                cfg.oauth_state_expiry_secs,
+            )?,
+        },
     )
-    .bind(state_id)
-    .bind(&provider.name)
-    .bind(state_hash)
-    .bind(pkce_verifier.secret())
-    .bind(nonce.secret())
-    .bind(return_to.as_deref())
-    .bind(checked_expiration_from_now(
-        "ATOM_OAUTH_STATE_EXPIRY_SECS",
-        cfg.oauth_state_expiry_secs,
-    )?)
-    .execute(pool)
     .await
     .map_err(db_err)?;
 
@@ -1503,22 +1294,16 @@ pub async fn oauth_exchange(
 ) -> Result<LoginResponse, AppError> {
     let (code_id, code_secret) = parse_secret_token(code, "atomx")
         .ok_or_else(|| AppError::bad_request("invalid exchange code"))?;
-    let row = crate::db::query(
-        r#"SELECT entity_id, secret_hash, expires_at, consumed_at
-           FROM auth_exchange_codes
-           WHERE id = $1"#,
-    )
-    .bind(code_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::bad_request("invalid exchange code"),
-        other => AppError::Database(other),
-    })?;
+    let row = storage::exchange_code(pool, code_id)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::bad_request("invalid exchange code"),
+            other => AppError::Database(other),
+        })?;
 
-    let hash: String = row.try_get("secret_hash").map_err(db_err)?;
-    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
-    let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
+    let hash: String = row.secret_hash;
+    let expires_at: DateTime<Utc> = row.expires_at;
+    let consumed_at: Option<DateTime<Utc>> = row.consumed_at;
     if consumed_at.is_some()
         || expires_at < Utc::now()
         || !verify_secret(code_secret.as_bytes(), &hash)
@@ -1526,17 +1311,13 @@ pub async fn oauth_exchange(
         return Err(AppError::bad_request("invalid exchange code"));
     }
 
-    let updated = crate::db::query(
-        "UPDATE auth_exchange_codes SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
-    )
-    .bind(code_id)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
-    if updated.rows_affected() == 0 {
+    let updated = storage::consume_exchange_code(pool, code_id)
+        .await
+        .map_err(db_err)?;
+    if updated == 0 {
         return Err(AppError::bad_request("invalid exchange code"));
     }
-    let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+    let entity_id: Uuid = row.entity_id;
     create_login_response(pool, cfg, primary_key, entity_id, Some(true)).await
 }
 
@@ -1706,7 +1487,7 @@ pub async fn exchange_refresh_token(
             )
             .await);
         }
-        Err(_) => {
+        Err(AppError::NotFound(_)) => {
             return Err(deny_refresh_token_exchange_rollback(
                 tx,
                 pool,
@@ -1719,6 +1500,7 @@ pub async fn exchange_refresh_token(
             )
             .await);
         }
+        Err(err) => return Err(err),
     };
 
     let Some(locked) =
@@ -2002,33 +1784,26 @@ async fn resolve_login_identity(
     }
 
     let row = login_entity_row(pool, identifier, tenant_id).await?;
-    let entity_id = row.try_get("id").map_err(db_err)?;
+    let entity_id = row.id;
     Ok(LoginIdentity {
         entity_id,
-        tenant_id: row.try_get("tenant_id").unwrap_or(None),
-        status: row.try_get("status").map_err(db_err)?,
+        tenant_id: row.tenant_id,
+        status: row.status,
         email_verified: entity_email_verified(pool, entity_id).await?,
         credential_identifier: None,
     })
 }
 
 async fn entity_email_verified(pool: &Database, entity_id: Uuid) -> Result<Option<bool>, AppError> {
-    let row = crate::db::query(
-        r#"SELECT COUNT(*) AS email_count,
-                  COALESCE(bool_or(verified_at IS NOT NULL), false) AS any_verified
-           FROM entity_emails
-           WHERE entity_id = $1"#,
-    )
-    .bind(entity_id)
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
+    let row = storage::email_verification_status(pool, entity_id)
+        .await
+        .map_err(db_err)?;
 
-    let email_count: i64 = row.try_get("email_count").map_err(db_err)?;
+    let email_count: i64 = row.email_count;
     if email_count == 0 {
         return Ok(None);
     }
-    row.try_get("any_verified").map(Some).map_err(db_err)
+    Ok(Some(row.any_verified))
 }
 
 async fn login_identity_by_email(
@@ -2036,45 +1811,24 @@ async fn login_identity_by_email(
     email: &str,
     tenant_id: Option<Uuid>,
 ) -> Result<Option<LoginIdentity>, AppError> {
-    let canonical = crate::db::query(
-        r#"SELECT e.id, e.tenant_id, e.status, ee.verified_at
-           FROM entity_emails ee
-           JOIN entities e ON e.id = ee.entity_id
-           WHERE ee.email = $1
-             AND ee.deleted_at IS NULL
-             AND e.deleted_at IS NULL
-             AND ($2::uuid IS NULL OR e.tenant_id = $2)"#,
-    )
-    .bind(email)
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
+    let canonical = storage::canonical_login_identity(pool, email, tenant_id)
+        .await
+        .map_err(db_err)?;
 
     if let Some(row) = canonical {
-        let verified_at: Option<DateTime<Utc>> = row.try_get("verified_at").unwrap_or(None);
+        let verified_at: Option<DateTime<Utc>> = row.verified_at;
         return Ok(Some(LoginIdentity {
-            entity_id: row.try_get("id").map_err(db_err)?,
-            tenant_id: row.try_get("tenant_id").unwrap_or(None),
-            status: row.try_get("status").map_err(db_err)?,
+            entity_id: row.id,
+            tenant_id: row.tenant_id,
+            status: row.status,
             email_verified: Some(verified_at.is_some()),
             credential_identifier: Some(email.to_string()),
         }));
     }
 
-    let mut rows = crate::db::query(
-        r#"SELECT e.id, e.tenant_id, e.status
-           FROM entities e
-           WHERE lower(btrim(e.attributes->>'email')) = $1
-             AND e.deleted_at IS NULL
-             AND ($2::uuid IS NULL OR e.tenant_id = $2)
-           LIMIT 2"#,
-    )
-    .bind(email)
-    .bind(tenant_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    let mut rows = storage::legacy_login_identities(pool, email, tenant_id)
+        .await
+        .map_err(db_err)?;
 
     if rows.is_empty() {
         return Ok(None);
@@ -2090,9 +1844,9 @@ async fn login_identity_by_email(
 
     let row = rows.remove(0);
     Ok(Some(LoginIdentity {
-        entity_id: row.try_get("id").map_err(db_err)?,
-        tenant_id: row.try_get("tenant_id").unwrap_or(None),
-        status: row.try_get("status").map_err(db_err)?,
+        entity_id: row.id,
+        tenant_id: row.tenant_id,
+        status: row.status,
         email_verified: None,
         credential_identifier: None,
     }))
@@ -2131,27 +1885,13 @@ async fn password_credential_for_login(
     entity_id: Uuid,
     identifier: Option<&str>,
 ) -> Result<Option<PasswordCredential>, AppError> {
-    let row = crate::db::query(
-        r#"SELECT id, secret_hash
-           FROM credentials
-           WHERE entity_id = $1
-             AND kind = $2
-             AND status = $3
-             AND ($4::text IS NULL OR identifier = $4 OR identifier IS NULL)
-           ORDER BY
-             CASE
-               WHEN $4::text IS NOT NULL AND identifier = $4 THEN 0
-               WHEN identifier IS NULL THEN 1
-               ELSE 2
-             END,
-             created_at DESC
-           LIMIT 1"#,
+    let row = storage::password_credential(
+        pool,
+        entity_id,
+        CredentialKind::Password,
+        CredentialStatus::Active,
+        identifier,
     )
-    .bind(entity_id)
-    .bind(CredentialKind::Password)
-    .bind(CredentialStatus::Active)
-    .bind(identifier)
-    .fetch_optional(pool)
     .await
     .map_err(db_err)?;
 
@@ -2160,11 +1900,10 @@ async fn password_credential_for_login(
     };
 
     let secret_hash = row
-        .try_get::<Option<String>, _>("secret_hash")
-        .unwrap_or(None)
+        .secret_hash
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
     Ok(Some(PasswordCredential {
-        id: row.try_get("id").map_err(db_err)?,
+        id: row.id,
         kind: CredentialKind::Password,
         secret_hash,
     }))
@@ -2219,22 +1958,13 @@ async fn active_shared_key_by_id(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<PasswordCredential>, AppError> {
-    let row = crate::db::query(
-        r#"SELECT c.id, c.secret_hash
-           FROM credentials c
-           JOIN entities e ON e.id = c.entity_id
-           WHERE c.id = $1
-             AND c.entity_id = $2
-             AND c.kind = $3
-             AND c.status = $4
-             AND e.kind <> 'human'
-             AND (c.expires_at IS NULL OR c.expires_at > now())"#,
+    let row = storage::shared_key_by_id(
+        pool,
+        credential_id,
+        entity_id,
+        CredentialKind::SharedKey,
+        CredentialStatus::Active,
     )
-    .bind(credential_id)
-    .bind(entity_id)
-    .bind(CredentialKind::SharedKey)
-    .bind(CredentialStatus::Active)
-    .fetch_optional(pool)
     .await
     .map_err(db_err)?;
 
@@ -2246,23 +1976,13 @@ async fn active_shared_keys_by_lookup_hash(
     entity_id: Uuid,
     lookup_hash: &[u8],
 ) -> Result<Vec<PasswordCredential>, AppError> {
-    let rows = crate::db::query(
-        r#"SELECT c.id, c.secret_hash
-           FROM credentials c
-           JOIN entities e ON e.id = c.entity_id
-           WHERE c.entity_id = $1
-             AND c.kind = $2
-             AND c.status = $3
-             AND c.secret_lookup_hash = $4
-             AND e.kind <> 'human'
-             AND (c.expires_at IS NULL OR c.expires_at > now())
-           ORDER BY c.created_at DESC"#,
+    let rows = storage::shared_keys_by_digest(
+        pool,
+        entity_id,
+        CredentialKind::SharedKey,
+        CredentialStatus::Active,
+        lookup_hash,
     )
-    .bind(entity_id)
-    .bind(CredentialKind::SharedKey)
-    .bind(CredentialStatus::Active)
-    .bind(lookup_hash)
-    .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
@@ -2275,22 +1995,12 @@ async fn active_shared_keys_without_lookup_hash(
     pool: &Database,
     entity_id: Uuid,
 ) -> Result<Vec<PasswordCredential>, AppError> {
-    let rows = crate::db::query(
-        r#"SELECT c.id, c.secret_hash
-           FROM credentials c
-           JOIN entities e ON e.id = c.entity_id
-           WHERE c.entity_id = $1
-             AND c.kind = $2
-             AND c.status = $3
-             AND c.secret_lookup_hash IS NULL
-             AND e.kind <> 'human'
-             AND (c.expires_at IS NULL OR c.expires_at > now())
-           ORDER BY c.created_at DESC"#,
+    let rows = storage::legacy_shared_keys(
+        pool,
+        entity_id,
+        CredentialKind::SharedKey,
+        CredentialStatus::Active,
     )
-    .bind(entity_id)
-    .bind(CredentialKind::SharedKey)
-    .bind(CredentialStatus::Active)
-    .fetch_all(pool)
     .await
     .map_err(db_err)?;
 
@@ -2299,13 +2009,14 @@ async fn active_shared_keys_without_lookup_hash(
         .collect()
 }
 
-fn shared_key_credential_from_row(row: crate::db::Row) -> Result<PasswordCredential, AppError> {
+fn shared_key_credential_from_row(
+    row: storage::SecretCredential,
+) -> Result<PasswordCredential, AppError> {
     let secret_hash = row
-        .try_get::<Option<String>, _>("secret_hash")
-        .unwrap_or(None)
+        .secret_hash
         .ok_or_else(|| AppError::unauthorized("invalid credentials"))?;
     Ok(PasswordCredential {
-        id: row.try_get("id").map_err(db_err)?,
+        id: row.id,
         kind: CredentialKind::SharedKey,
         secret_hash,
     })
@@ -2315,30 +2026,11 @@ async fn login_entity_row(
     pool: &Database,
     identifier: &str,
     tenant_id: Option<Uuid>,
-) -> Result<crate::db::Row, AppError> {
+) -> Result<storage::StoredLoginIdentity, AppError> {
     if let Ok(entity_id) = Uuid::parse_str(identifier) {
         let row = match tenant_id {
-            Some(tenant_id) => {
-                crate::db::query(
-                    "SELECT id, tenant_id, status
-                     FROM entities
-                     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-                )
-                .bind(entity_id)
-                .bind(tenant_id)
-                .fetch_optional(pool)
-                .await
-            }
-            None => {
-                crate::db::query(
-                    "SELECT id, tenant_id, status
-                         FROM entities
-                         WHERE id = $1 AND deleted_at IS NULL",
-                )
-                .bind(entity_id)
-                .fetch_optional(pool)
-                .await
-            }
+            Some(tenant_id) => storage::login_entity_in_tenant(pool, entity_id, tenant_id).await,
+            None => storage::login_entity_by_id(pool, entity_id).await,
         }
         .map_err(db_err)?;
 
@@ -2347,42 +2039,17 @@ async fn login_entity_row(
 
     let mut rows = match tenant_id {
         Some(tenant_id) => {
-            crate::db::query(
-                "SELECT id, tenant_id, status
-                 FROM entities
-                 WHERE name = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-            )
-            .bind(identifier)
-            .bind(tenant_id)
-            .fetch_all(pool)
-            .await
+            storage::login_entities_by_tenant_name(pool, identifier, tenant_id).await
         }
-        None => {
-            crate::db::query(
-                "SELECT id, tenant_id, status
-                 FROM entities
-                 WHERE name = $1 AND deleted_at IS NULL
-                 LIMIT 2",
-            )
-            .bind(identifier)
-            .fetch_all(pool)
-            .await
-        }
+        None => storage::login_entities_by_name(pool, identifier).await,
     }
     .map_err(db_err)?;
 
     if rows.is_empty() {
         if let (Some(tenant_id), Some(alias)) = (tenant_id, normalize_alias(Some(identifier))) {
-            rows = crate::db::query(
-                "SELECT id, tenant_id, status
-                 FROM entities
-                 WHERE lower(alias) = $1 AND tenant_id = $2 AND deleted_at IS NULL",
-            )
-            .bind(alias)
-            .bind(tenant_id)
-            .fetch_all(pool)
-            .await
-            .map_err(db_err)?;
+            rows = storage::login_entities_by_alias(pool, alias, tenant_id)
+                .await
+                .map_err(db_err)?;
         }
     }
 
@@ -2406,22 +2073,8 @@ async fn resolve_login_tenant(
     validate_tenant_selector(tenant_id, tenant_alias.as_deref())?;
 
     let Some(row) = (match (tenant_id, tenant_alias) {
-        (Some(tenant_id), None) => {
-            crate::db::query("SELECT id, status FROM tenants WHERE id = $1 AND deleted_at IS NULL")
-                .bind(tenant_id)
-                .fetch_optional(pool)
-                .await
-        }
-        (None, Some(tenant_alias)) => {
-            crate::db::query(
-                "SELECT id, status
-                 FROM tenants
-                 WHERE lower(alias) = $1 AND deleted_at IS NULL",
-            )
-            .bind(tenant_alias)
-            .fetch_optional(pool)
-            .await
-        }
+        (Some(tenant_id), None) => storage::login_tenant_by_id(pool, tenant_id).await,
+        (None, Some(tenant_alias)) => storage::login_tenant_by_alias(pool, tenant_alias).await,
         (None, None) => return Ok(None),
         (Some(_), Some(_)) => {
             return Err(AppError::bad_request(
@@ -2434,11 +2087,11 @@ async fn resolve_login_tenant(
         return Err(AppError::unauthorized("invalid credentials"));
     };
 
-    let status: String = row.try_get("status").map_err(db_err)?;
+    let status: String = row.status;
     if status != "active" {
         return Err(AppError::unauthorized("tenant is not active"));
     }
-    row.try_get("id").map(Some).map_err(db_err)
+    Ok(Some(row.id))
 }
 
 async fn insert_email_token_in_tx(
@@ -2449,19 +2102,9 @@ async fn insert_email_token_in_tx(
     token_hash: String,
     expires_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    crate::db::query(
-        r#"INSERT INTO email_verification_tokens
-             (id, entity_id, email_id, secret_hash, expires_at)
-           VALUES ($1, $2, $3, $4, $5)"#,
-    )
-    .bind(token_id)
-    .bind(entity_id)
-    .bind(email_id)
-    .bind(token_hash)
-    .bind(expires_at)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::insert_email_token(tx, token_id, entity_id, email_id, token_hash, expires_at)
+        .await
+        .map_err(db_err)?;
     Ok(())
 }
 
@@ -2507,23 +2150,16 @@ async fn consume_oauth_state(
 ) -> Result<OAuthStateRow, AppError> {
     let (state_id, state_secret) = parse_secret_token(state, "atoms")
         .ok_or_else(|| AppError::bad_request("invalid oauth state"))?;
-    let row = crate::db::query(
-        r#"SELECT state_hash, pkce_verifier, nonce, return_to, expires_at, consumed_at
-           FROM oauth_login_states
-           WHERE id = $1 AND provider = $2"#,
-    )
-    .bind(state_id)
-    .bind(provider)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::bad_request("invalid oauth state"),
-        other => AppError::Database(other),
-    })?;
+    let row = storage::oauth_state(pool, state_id, provider)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::bad_request("invalid oauth state"),
+            other => AppError::Database(other),
+        })?;
 
-    let state_hash: String = row.try_get("state_hash").map_err(db_err)?;
-    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
-    let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
+    let state_hash: String = row.state_hash;
+    let expires_at: DateTime<Utc> = row.expires_at;
+    let consumed_at: Option<DateTime<Utc>> = row.consumed_at;
     if consumed_at.is_some()
         || expires_at < Utc::now()
         || !verify_secret(state_secret.as_bytes(), &state_hash)
@@ -2531,21 +2167,17 @@ async fn consume_oauth_state(
         return Err(AppError::bad_request("invalid oauth state"));
     }
 
-    let updated = crate::db::query(
-        "UPDATE oauth_login_states SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
-    )
-    .bind(state_id)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
-    if updated.rows_affected() == 0 {
+    let updated = storage::consume_oauth_state(pool, state_id)
+        .await
+        .map_err(db_err)?;
+    if updated == 0 {
         return Err(AppError::bad_request("invalid oauth state"));
     }
 
     Ok(OAuthStateRow {
-        pkce_verifier: row.try_get("pkce_verifier").map_err(db_err)?,
-        nonce: row.try_get("nonce").map_err(db_err)?,
-        return_to: row.try_get("return_to").unwrap_or(None),
+        pkce_verifier: row.pkce_verifier,
+        nonce: row.nonce,
+        return_to: row.return_to,
     })
 }
 
@@ -2557,34 +2189,20 @@ async fn upsert_oauth_identity(
     profile: Value,
 ) -> Result<Uuid, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    if let Some(row) = crate::db::query(
-        "SELECT entity_id FROM oauth_identities WHERE provider = $1 AND subject = $2",
-    )
-    .bind(provider)
-    .bind(subject)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?
+    if let Some(row) = storage::linked_oauth_entity(&mut tx, provider, subject)
+        .await
+        .map_err(db_err)?
     {
-        let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
+        let entity_id: Uuid = row.entity_id;
         if super::repo::lock_active_entity(&mut tx, entity_id)
             .await?
             .is_none()
         {
             return Err(AppError::unauthorized("entity is not active"));
         }
-        crate::db::query(
-            r#"UPDATE oauth_identities
-               SET email = $3, email_verified = true, profile = $4, updated_at = now()
-               WHERE provider = $1 AND subject = $2"#,
-        )
-        .bind(provider)
-        .bind(subject)
-        .bind(email)
-        .bind(profile)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+        storage::update_oauth_identity(&mut tx, provider, subject, email, profile)
+            .await
+            .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
         return Ok(entity_id);
     }
@@ -2599,26 +2217,18 @@ async fn upsert_oauth_identity(
     // the time it observes the row. Locking `ee` too forces this query to
     // wait for `confirm_email_change`'s (or the admin sync path's) `entity_emails
     // FOR UPDATE`, then re-check `ee.email` against the now-current row.
-    let entity_id = match crate::db::query(
-        "SELECT ee.entity_id, ee.verified_at
-         FROM entity_emails ee
-         JOIN entities e ON e.id = ee.entity_id
-         WHERE ee.email = $1 AND ee.deleted_at IS NULL
-         FOR UPDATE OF e, ee",
-    )
-    .bind(email)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?
+    let entity_id = match storage::lock_oauth_email(&mut tx, email)
+        .await
+        .map_err(db_err)?
     {
         Some(row) => {
-            let verified_at: Option<DateTime<Utc>> = row.try_get("verified_at").unwrap_or(None);
+            let verified_at: Option<DateTime<Utc>> = row.verified_at;
             if verified_at.is_none() {
                 return Err(AppError::unauthorized(
                     "email address is pending verification; automatic OAuth linking is not allowed",
                 ));
             }
-            let entity_id = row.try_get("entity_id").map_err(db_err)?;
+            let entity_id = row.entity_id;
             if super::repo::lock_active_entity(&mut tx, entity_id)
                 .await?
                 .is_none()
@@ -2631,43 +2241,28 @@ async fn upsert_oauth_identity(
         None => {
             let entity_id = Uuid::new_v4();
             let name = email.split('@').next().unwrap_or("human");
-            crate::db::query(
-                r#"INSERT INTO entities (id, kind, name, tenant_id, attributes)
-                   VALUES ($1, $2, $3, NULL, '{}')"#,
-            )
-            .bind(entity_id)
-            .bind(EntityKind::Human)
-            .bind(name)
-            .execute(tx.exec())
-            .await
-            .map_err(db_err)?;
+            storage::insert_oauth_entity(&mut tx, entity_id, EntityKind::Human, name)
+                .await
+                .map_err(db_err)?;
             super::repo::add_authenticated_user_membership_in_tx(&mut tx, entity_id).await?;
-            crate::db::query(
-                r#"INSERT INTO entity_emails (id, entity_id, email, verified_at)
-                   VALUES ($1, $2, $3, now())"#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(entity_id)
-            .bind(email)
-            .execute(tx.exec())
-            .await
-            .map_err(db_err)?;
+            storage::insert_verified_oauth_email(&mut tx, Uuid::new_v4(), entity_id, email)
+                .await
+                .map_err(db_err)?;
             entity_id
         }
     };
 
-    crate::db::query(
-        r#"INSERT INTO oauth_identities
-             (id, entity_id, provider, subject, email, email_verified, profile)
-           VALUES ($1, $2, $3, $4, $5, true, $6)"#,
+    storage::insert_oauth_identity(
+        &mut tx,
+        storage::InsertOauthIdentity {
+            id: Uuid::new_v4(),
+            entity_id,
+            provider,
+            subject,
+            email,
+            profile,
+        },
     )
-    .bind(Uuid::new_v4())
-    .bind(entity_id)
-    .bind(provider)
-    .bind(subject)
-    .bind(email)
-    .bind(profile)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2688,18 +2283,13 @@ async fn create_exchange_code(
     {
         return Err(AppError::unauthorized("entity is not active"));
     }
-    crate::db::query(
-        r#"INSERT INTO auth_exchange_codes (id, entity_id, secret_hash, expires_at)
-           VALUES ($1, $2, $3, $4)"#,
+    storage::insert_exchange_code(
+        &mut tx,
+        code_id,
+        entity_id,
+        code_hash,
+        checked_expiration_from_now("ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS", expiry_secs)?,
     )
-    .bind(code_id)
-    .bind(entity_id)
-    .bind(code_hash)
-    .bind(checked_expiration_from_now(
-        "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
-        expiry_secs,
-    )?)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
@@ -2928,16 +2518,9 @@ pub async fn create_password_in_tx(
     let hash = hash_secret(password.as_bytes())?;
     let id = Uuid::new_v4();
 
-    crate::db::query(
-        "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(id)
-    .bind(entity_id)
-    .bind(CredentialKind::Password)
-    .bind(hash)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    storage::insert_password(tx, id, entity_id, CredentialKind::Password, hash)
+        .await
+        .map_err(db_err)?;
     Ok(id)
 }
 
@@ -2956,69 +2539,49 @@ pub async fn change_own_password_in_tx(
         .await?;
     validate_password_for_kind(&kind, new_password)?;
 
-    let rows = crate::db::query(
-        r#"SELECT secret_hash
-           FROM credentials
-           WHERE entity_id = $1
-             AND kind = $2
-             AND status = $3"#,
+    let rows = storage::active_password_hashes(
+        tx,
+        entity_id,
+        CredentialKind::Password,
+        CredentialStatus::Active,
     )
-    .bind(entity_id)
-    .bind(CredentialKind::Password)
-    .bind(CredentialStatus::Active)
-    .fetch_all(tx.exec())
     .await
     .map_err(db_err)?;
 
     let current_matches = rows.iter().any(|row| {
-        row.try_get::<String, _>("secret_hash")
-            .map(|hash| verify_secret(current_password.as_bytes(), &hash))
+        row.secret_hash
+            .as_ref()
+            .map(|hash| verify_secret(current_password.as_bytes(), hash))
             .unwrap_or(false)
     });
     if !current_matches {
         return Err(AppError::unauthorized("current password is incorrect"));
     }
 
-    let identifier: Option<String> = crate::db::query_scalar(
-        r#"SELECT email
-           FROM entity_emails
-           WHERE entity_id = $1 AND deleted_at IS NULL
-           ORDER BY verified_at DESC NULLS LAST, created_at DESC
-           LIMIT 1"#,
-    )
-    .bind(entity_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let identifier: Option<String> = storage::password_identifier(tx, entity_id)
+        .await
+        .map_err(db_err)?;
 
-    crate::db::query(
-        r#"UPDATE credentials
-           SET status = $3
-           WHERE entity_id = $1
-             AND kind = $2
-             AND status = $4
-             AND managed_by IS DISTINCT FROM 'config'"#,
+    storage::revoke_unmanaged_passwords(
+        tx,
+        entity_id,
+        CredentialKind::Password,
+        CredentialStatus::Revoked,
+        CredentialStatus::Active,
     )
-    .bind(entity_id)
-    .bind(CredentialKind::Password)
-    .bind(CredentialStatus::Revoked)
-    .bind(CredentialStatus::Active)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
     let hash = hash_secret(new_password.as_bytes())?;
     let id = Uuid::new_v4();
-    crate::db::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash)
-           VALUES ($1, $2, $3, $4, $5)"#,
+    storage::insert_changed_password(
+        tx,
+        id,
+        entity_id,
+        CredentialKind::Password,
+        identifier,
+        hash,
     )
-    .bind(id)
-    .bind(entity_id)
-    .bind(CredentialKind::Password)
-    .bind(identifier)
-    .bind(hash)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -3087,25 +2650,22 @@ pub async fn create_shared_key_in_tx(
     let lookup_hash = shared_key_lookup_hash(signing_keys, key.as_bytes())?;
     let metadata = serde_json::json!({ "description": req.description });
 
-    crate::db::query(
-        r#"INSERT INTO credentials
-             (id, entity_id, kind, secret_hash,
-              secret_ciphertext, secret_nonce, secret_key_id, secret_enc_alg,
-              secret_lookup_hash, expires_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+    storage::insert_shared_key(
+        tx,
+        storage::InsertSharedKey {
+            cred_id,
+            entity_id,
+            kind: CredentialKind::SharedKey,
+            hash,
+            ciphertext: sealed.ciphertext,
+            nonce: sealed.nonce,
+            key_encryption_key_id: &signing_keys.key_encryption_key_id,
+            encryption_algorithm: crypto::AEAD_ALG,
+            lookup_hash,
+            expires_at: req.expires_at,
+            metadata,
+        },
     )
-    .bind(cred_id)
-    .bind(entity_id)
-    .bind(CredentialKind::SharedKey)
-    .bind(hash)
-    .bind(sealed.ciphertext)
-    .bind(sealed.nonce)
-    .bind(&signing_keys.key_encryption_key_id)
-    .bind(crypto::AEAD_ALG)
-    .bind(lookup_hash)
-    .bind(req.expires_at)
-    .bind(metadata)
-    .execute(tx.exec())
     .await
     .map_err(db_err)?;
 
@@ -3134,22 +2694,9 @@ async fn ensure_no_active_config_managed_credential_in_tx(
             )))
         }
     };
-    let managed_id: Option<Uuid> = crate::db::query_scalar(
-        r#"SELECT id
-           FROM credentials
-           WHERE entity_id = $1
-             AND kind = $2
-             AND status = 'active'
-             AND managed_by = 'config'
-           ORDER BY id
-           LIMIT 1
-           FOR UPDATE"#,
-    )
-    .bind(entity_id)
-    .bind(kind)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let managed_id: Option<Uuid> = storage::lock_managed_credential(tx, entity_id, kind)
+        .await
+        .map_err(db_err)?;
     if managed_id.is_some() {
         return Err(AppError::conflict(format!(
             "{label} credential is managed by the bootstrap config file and cannot be modified via the API"
@@ -3171,62 +2718,36 @@ pub async fn reveal_shared_key(
     // the winning row version; a separate precheck would have an MVCC race.
     // Return not_found so this path does not acknowledge that a protected
     // credential exists.
-    let row = crate::db::query(
-        r#"SELECT c.expires_at,
-                  c.status,
-                  c.secret_hash,
-                  c.secret_ciphertext,
-                  c.secret_nonce,
-                  e.status AS entity_status,
-                  t.status AS tenant_status
-           FROM credentials c
-           JOIN entities e ON e.id = c.entity_id
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE c.id = $1
-             AND c.entity_id = $2
-             AND c.kind = $3
-             AND c.managed_by IS NULL
-             AND e.kind <> 'human'
-             AND e.deleted_at IS NULL
-             AND (t.id IS NULL OR t.deleted_at IS NULL)
-           FOR SHARE OF c"#,
-    )
-    .bind(credential_id)
-    .bind(entity_id)
-    .bind(CredentialKind::SharedKey)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::not_found("shared key not found"),
-        other => AppError::Database(other),
-    })?;
+    let row = storage::reveal_shared_key(pool, credential_id, entity_id, CredentialKind::SharedKey)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::not_found("shared key not found"),
+            other => AppError::Database(other),
+        })?;
 
-    let status: CredentialStatus = row.try_get("status").map_err(db_err)?;
+    let status: CredentialStatus = row.status;
     if status != CredentialStatus::Active {
         return Err(AppError::unauthorized("shared key revoked"));
     }
-    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at").map_err(db_err)?;
+    let expires_at: Option<DateTime<Utc>> = row.expires_at;
     if expires_at.is_some_and(|expires_at| expires_at < Utc::now()) {
         return Err(AppError::unauthorized("shared key expired"));
     }
 
-    let entity_status: EntityStatus = row.try_get("entity_status").map_err(db_err)?;
+    let entity_status: EntityStatus = row.entity_status;
     if entity_status != EntityStatus::Active {
         return Err(AppError::unauthorized("entity is not active"));
     }
-    if let Some(tenant_status) = row
-        .try_get::<Option<crate::models::enums::TenantStatus>, _>("tenant_status")
-        .unwrap_or(None)
-    {
+    if let Some(tenant_status) = row.tenant_status {
         if tenant_status != crate::models::enums::TenantStatus::Active {
             return Err(AppError::unauthorized("tenant is not active"));
         }
     }
 
-    let secret_hash: Option<String> = row.try_get("secret_hash").map_err(db_err)?;
+    let secret_hash: Option<String> = row.secret_hash;
     let secret_hash = secret_hash.ok_or_else(lost_shared_key_error)?;
-    let ciphertext: Option<Vec<u8>> = row.try_get("secret_ciphertext").map_err(db_err)?;
-    let nonce: Option<Vec<u8>> = row.try_get("secret_nonce").map_err(db_err)?;
+    let ciphertext: Option<Vec<u8>> = row.secret_ciphertext;
+    let nonce: Option<Vec<u8>> = row.secret_nonce;
     let (Some(ciphertext), Some(nonce)) = (ciphertext, nonce) else {
         return Err(lost_shared_key_error());
     };
@@ -3566,16 +3087,10 @@ pub async fn revoke_credential_in_tx(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let row: Option<(String, Option<String>)> = crate::db::query_as(
-        "SELECT kind, managed_by FROM credentials
-         WHERE id = $1 AND entity_id = $2
-         FOR UPDATE",
-    )
-    .bind(cred_id)
-    .bind(entity_id)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let row: Option<(String, Option<String>)> =
+        storage::lock_credential_owner(tx, cred_id, entity_id)
+            .await
+            .map_err(db_err)?;
     let (kind, managed_by) = match row {
         Some(row) => row,
         None => return Err(AppError::not_found("credential not found")),
@@ -3594,22 +3109,10 @@ pub async fn revoke_credential_in_tx(
     // from a tenant soft delete) with this explicit revocation, so a later tenant
     // restore — which only reactivates credentials still marked `tenant_deleted` —
     // cannot resurrect a credential an admin has deliberately revoked.
-    let result = crate::db::query(
-        r#"UPDATE credentials
-           SET status = 'revoked',
-               metadata = metadata - 'revoked_at' - 'revocation_reason'
-                          || jsonb_build_object(
-                              'revoked_at', now(),
-                              'revocation_reason', 'manual'
-                          )
-           WHERE id = $1 AND entity_id = $2"#,
-    )
-    .bind(cred_id)
-    .bind(entity_id)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if result.rows_affected() == 0 {
+    let result = storage::revoke_credential(tx, cred_id, entity_id)
+        .await
+        .map_err(db_err)?;
+    if result == 0 {
         return Err(AppError::not_found("credential not found"));
     }
     Ok(())
@@ -3624,36 +3127,14 @@ pub async fn list_credentials(
     // material. Mutation endpoints (revoke/reveal/replace) still refuse to
     // touch them, and `reveal_shared_key` in particular refuses to read the
     // plaintext key out of a config-managed row.
-    let rows = crate::db::query(
-        "SELECT id, kind, identifier, status, expires_at, created_at, managed_by
-         FROM credentials
-         WHERE entity_id = $1
-         ORDER BY created_at DESC",
-    )
-    .bind(entity_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    let rows = storage::credentials(pool, entity_id)
+        .await
+        .map_err(db_err)?;
 
-    let summaries = rows
-        .into_iter()
-        .map(|r| {
-            Ok(CredentialSummary {
-                id: r.try_get("id").map_err(db_err)?,
-                kind: r.try_get("kind").map_err(db_err)?,
-                identifier: r.try_get("identifier").map_err(db_err)?,
-                status: r.try_get("status").map_err(db_err)?,
-                expires_at: r.try_get("expires_at").map_err(db_err)?,
-                created_at: r.try_get("created_at").map_err(db_err)?,
-                managed_by: r.try_get("managed_by").map_err(db_err)?,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
-
-    Ok(summaries)
+    Ok(rows)
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, sqlx::FromRow)]
 pub struct CredentialSummary {
     pub id: Uuid,
     pub kind: CredentialKind,
@@ -3675,22 +3156,27 @@ mod tests {
 
         let entity_id = Uuid::new_v4();
         let email = format!("oidc-unverified-{entity_id}@example.test");
-        crate::db::query(
+        crate::test_db::query(
             "INSERT INTO entities (id, kind, name, status, attributes)
              VALUES ($1, 'human', $2, 'active', '{}')",
+            r#"INSERT INTO entities (id, kind, name, status, attributes)
+             VALUES ($1, 'human', $2, 'active', '{}')"#,
         )
         .bind(entity_id)
         .bind(format!("oidc-unverified-{entity_id}"))
         .execute(&pool)
         .await
         .expect("insert entity");
-        crate::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
-            .bind(Uuid::new_v4())
-            .bind(entity_id)
-            .bind(&email)
-            .execute(&pool)
-            .await
-            .expect("insert unverified email");
+        crate::test_db::query(
+            "INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)",
+            r#"INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(entity_id)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("insert unverified email");
 
         let result = upsert_oauth_identity(
             &pool,
@@ -3705,19 +3191,24 @@ mod tests {
             Err(AppError::Unauthorized(message))
                 if message.contains("pending verification")
         ));
-        let links: i64 =
-            crate::db::query_scalar("SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1")
-                .bind(entity_id)
-                .fetch_one(&pool)
-                .await
-                .expect("count rejected links");
+        let links: i64 = crate::test_db::query_scalar(
+            "SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1",
+            r#"SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1"#,
+        )
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count rejected links");
         assert_eq!(links, 0);
 
-        crate::db::query("UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1")
-            .bind(entity_id)
-            .execute(&pool)
-            .await
-            .expect("verify email");
+        crate::test_db::query(
+            "UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1",
+            r#"UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1"#,
+        )
+        .bind(entity_id)
+        .execute(&pool)
+        .await
+        .expect("verify email");
         let linked = upsert_oauth_identity(
             &pool,
             "test-provider",

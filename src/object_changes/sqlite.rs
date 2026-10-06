@@ -1,6 +1,5 @@
 //! SQLite implementation of the object-coordination storage operations
-//! declared in [`super`], independent of the PostgreSQL adapter and of the
-//! general-purpose `crate::db::translate` layer.
+//! declared in [`super`], independent of the PostgreSQL adapter.
 //!
 //! Differences from PostgreSQL, all deliberate:
 //! - No advisory or row locks: SQLite admits one write transaction at a time

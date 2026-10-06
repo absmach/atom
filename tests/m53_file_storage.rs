@@ -65,7 +65,7 @@ impl Harness {
         config.signing_keys.key_encryption_key = Some(SecretBytes::new(vec![7; 32]).unwrap());
         configure(&mut config);
         // Tests run one at a time; each starts with an empty deletion queue.
-        atom::db::query("DELETE FROM blob_deletions")
+        crate::common::db::query("DELETE FROM blob_deletions", "DELETE FROM blob_deletions")
             .execute(&pool)
             .await
             .expect("clear queue");
@@ -140,10 +140,13 @@ impl Harness {
     }
 
     async fn queued(&self) -> i64 {
-        atom::db::query_scalar("SELECT COUNT(*) FROM blob_deletions")
-            .fetch_one(&self.pool)
-            .await
-            .expect("count queue")
+        crate::common::db::query_scalar(
+            "SELECT COUNT(*) FROM blob_deletions",
+            "SELECT COUNT(*) FROM blob_deletions",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .expect("count queue")
     }
 }
 
@@ -176,16 +179,17 @@ fn id_of(file: &Value) -> Uuid {
 /// A tenant and an entity in it holding `actions` across the tenant.
 async fn tenant_member(pool: &Database, actions: &[&str]) -> (Uuid, Uuid) {
     let tenant_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(tenant_id)
-        .bind(format!("files-tenant-{tenant_id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
-    let entity_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')",
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
     )
+    .bind(tenant_id)
+    .bind(format!("files-tenant-{tenant_id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
+    let entity_id = Uuid::new_v4();
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')", "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')")
     .bind(entity_id)
     .bind(format!("files-member-{entity_id}"))
     .bind(tenant_id)
@@ -198,11 +202,14 @@ async fn tenant_member(pool: &Database, actions: &[&str]) -> (Uuid, Uuid) {
 
     let mut action_ids = Vec::new();
     for action in actions {
-        let id: Uuid = atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-            .bind(*action)
-            .fetch_one(pool)
-            .await
-            .expect("seeded action");
+        let id: Uuid = crate::common::db::query_scalar(
+            "SELECT id FROM actions WHERE name = $1",
+            "SELECT id FROM actions WHERE name = $1",
+        )
+        .bind(*action)
+        .fetch_one(pool)
+        .await
+        .expect("seeded action");
         action_ids.push(id);
     }
     let role = authz_repo::create_role(
@@ -767,11 +774,14 @@ async fn file_routes_are_absent_without_storage() {
 
 /// A tenant-wide deny of `action` on resources for `entity_id`.
 async fn deny_on_resources(pool: &Database, tenant_id: Uuid, entity_id: Uuid, action: &str) {
-    let action_id: Uuid = atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-        .bind(action)
-        .fetch_one(pool)
-        .await
-        .expect("seeded action");
+    let action_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1",
+        "SELECT id FROM actions WHERE name = $1",
+    )
+    .bind(action)
+    .fetch_one(pool)
+    .await
+    .expect("seeded action");
     let role = authz_repo::create_role(
         pool,
         CreateRole {

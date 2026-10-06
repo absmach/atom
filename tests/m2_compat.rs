@@ -17,20 +17,26 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn manage_capability_id(pool: &atom::db::Database) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("manage cap")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'manage' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'manage' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("manage cap")
 }
 
 async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("m2-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("m2-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
@@ -40,7 +46,7 @@ async fn make_active_entity(
     kind: &str,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')")
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')"#)
         .bind(id)
         .bind(kind)
         .bind(format!("m2-ent-{id}"))
@@ -109,14 +115,20 @@ async fn entity_as_object_can_be_authorised_via_object_kind_form() {
         .expect("evaluate");
     assert!(!resp.allowed);
 
-    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(binding.id)
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM entities WHERE id = ANY($1::uuid[])")
-        .bind(&[alice, device, other_device][..])
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM direct_policies WHERE id = $1",
+        r#"DELETE FROM direct_policies WHERE id = $1"#,
+    )
+    .bind(binding.id)
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE id = ANY($1::uuid[])",
+        r#"DELETE FROM entities WHERE id IN (SELECT unhex(value) FROM json_each($1))"#,
+    )
+    .bind(&[alice, device, other_device][..])
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -181,14 +193,20 @@ async fn entity_subtype_scope_uses_namespaced_object_type() {
         resp.reason
     );
 
-    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(binding.id)
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM entities WHERE id = ANY($1::uuid[])")
-        .bind(&[alice, device1, device2, svc][..])
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM direct_policies WHERE id = $1",
+        r#"DELETE FROM direct_policies WHERE id = $1"#,
+    )
+    .bind(binding.id)
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE id = ANY($1::uuid[])",
+        r#"DELETE FROM entities WHERE id IN (SELECT unhex(value) FROM json_each($1))"#,
+    )
+    .bind(&[alice, device1, device2, svc][..])
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -216,8 +234,11 @@ async fn admin_platform_inherits_into_entity_objects() {
         resp.reason
     );
 
-    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
-        .bind(target)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE id = $1",
+        r#"DELETE FROM entities WHERE id = $1"#,
+    )
+    .bind(target)
+    .execute(&p)
+    .await;
 }

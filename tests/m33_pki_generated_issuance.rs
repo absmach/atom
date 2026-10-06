@@ -37,9 +37,12 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
 
     // Make the stored profile choose P-384. This proves generated-key
     // selection follows profile data rather than a hardcoded P-256 default.
-    atom::db::query(
+    crate::common::db::query(
         r#"UPDATE certificate_profiles
            SET permitted_key_algorithms = '[{"algorithm":"ecdsa","sizes":[384]}]'::jsonb
+           WHERE tenant_id IS NULL AND name = 'client'"#,
+        r#"UPDATE certificate_profiles
+           SET permitted_key_algorithms = '[{"algorithm":"ecdsa","sizes":[384]}]'
            WHERE tenant_id IS NULL AND name = 'client'"#,
     )
     .execute(&pool)
@@ -174,14 +177,17 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
 
     // The only durable artifact is the issuer-bound certificate and its
     // non-secret profile/chain metadata.
-    let persisted: (Option<Uuid>, Value, Option<String>, Option<Vec<u8>>) = atom::db::query_as(
-        r#"SELECT issuer_id, metadata, secret_hash, secret_ciphertext
+    let persisted: (Option<Uuid>, Value, Option<String>, Option<Vec<u8>>) =
+        crate::common::db::query_as(
+            r#"SELECT issuer_id, metadata, secret_hash, secret_ciphertext
            FROM credentials WHERE id = $1"#,
-    )
-    .bind(credential_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+            r#"SELECT issuer_id, metadata, secret_hash, secret_ciphertext
+           FROM credentials WHERE id = $1"#,
+        )
+        .bind(credential_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(persisted.0, Some(issuer.id));
     assert!(persisted.2.is_none() && persisted.3.is_none());
     let persisted_text = persisted.1.to_string();
@@ -190,7 +196,10 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
     assert_eq!(persisted.1["profile_name"], "client");
     assert_eq!(persisted.1["chain_pem"], chain_pem);
 
-    let audit_details: Value = atom::db::query_scalar(
+    let audit_details: Value = crate::common::db::query_scalar(
+        r#"SELECT details FROM audit_logs
+           WHERE event = 'certificate.issue' AND target_id = $1
+           ORDER BY created_at DESC LIMIT 1"#,
         r#"SELECT details FROM audit_logs
            WHERE event = 'certificate.issue' AND target_id = $1
            ORDER BY created_at DESC LIMIT 1"#,
@@ -199,10 +208,14 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let outbox_payload: Value = atom::db::query_scalar(
+    let outbox_payload: Value = crate::common::db::query_scalar(
         r#"SELECT payload FROM event_outbox
            WHERE event = 'certificate.issue'
              AND (payload->>'target_id')::uuid = $1
+           ORDER BY created_at DESC LIMIT 1"#,
+        r#"SELECT payload FROM event_outbox
+           WHERE event = 'certificate.issue'
+             AND atom_uuid((payload->>'target_id')) = $1
            ORDER BY created_at DESC LIMIT 1"#,
     )
     .bind(entity_a)
@@ -268,7 +281,14 @@ async fn managed_generated_key_issuance_enforces_the_pr006_contract() {
         event_count(&pool, "event_outbox", entity_a).await,
         before_events + 1
     );
-    let failure: (String, String) = atom::db::query_as(
+    let failure: (String, String) = crate::common::db::query_as(
+        r#"SELECT payload->>'outcome', payload->'details'->>'transport'
+           FROM event_outbox
+           WHERE event = 'certificate.issue'
+             AND actor_entity_id = $1
+             AND payload->>'outcome' = 'error'
+           ORDER BY created_at DESC
+           LIMIT 1"#,
         r#"SELECT payload->>'outcome', payload->'details'->>'transport'
            FROM event_outbox
            WHERE event = 'certificate.issue'
@@ -356,8 +376,9 @@ fn assert_generated_key_matches_certificate(private_key_pem: &str, certificate_p
 }
 
 async fn certificate_count(pool: &Database, entity_id: Uuid) -> i64 {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'certificate'",
+        r#"SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'certificate'"#,
     )
     .bind(entity_id)
     .fetch_one(pool)
@@ -366,10 +387,15 @@ async fn certificate_count(pool: &Database, entity_id: Uuid) -> i64 {
 }
 
 async fn error_event_count(pool: &Database, event: &str, target_id: Uuid) -> i64 {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         r#"SELECT COUNT(*) FROM event_outbox
            WHERE event = $1
              AND (payload->>'target_id')::uuid = $2
+             AND payload->>'outcome' = 'error'
+             AND payload->'details'->>'transport' = 'graphql'"#,
+        r#"SELECT COUNT(*) FROM event_outbox
+           WHERE event = $1
+             AND atom_uuid((payload->>'target_id')) = $2
              AND payload->>'outcome' = 'error'
              AND payload->'details'->>'transport' = 'graphql'"#,
     )
@@ -390,7 +416,12 @@ async fn event_count(pool: &Database, table: &str, target_id: Uuid) -> i64 {
         }
         _ => panic!("unsupported event table"),
     };
-    atom::db::query_scalar(query)
+    let sqlite_query = match table {
+        "audit_logs" => query,
+        "event_outbox" => "SELECT COUNT(*) FROM event_outbox WHERE event = 'certificate.issue' AND atom_uuid(payload->>'target_id') = $1",
+        _ => panic!("unsupported event table"),
+    };
+    crate::common::db::query_scalar(query, sqlite_query)
         .bind(target_id)
         .fetch_one(pool)
         .await
@@ -403,7 +434,12 @@ async fn install_persistence_failure_trigger(pool: &Database, entity_id: Uuid) {
         "trg_pki_test_generated_persistence_failure",
         "credentials",
         &format!(
-            "NEW.entity_id = '{entity_id}'::uuid AND NEW.kind = 'certificate' AND NEW.issuer_id IS NOT NULL"
+            "NEW.entity_id = {} AND NEW.kind = 'certificate' AND NEW.issuer_id IS NOT NULL",
+            if pool.kind() == atom::db::DatabaseKind::Sqlite {
+                format!("atom_uuid('{entity_id}')")
+            } else {
+                format!("'{entity_id}'::uuid")
+            }
         ),
         "synthetic generated credential failure",
     )

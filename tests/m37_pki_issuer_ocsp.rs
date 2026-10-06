@@ -274,16 +274,22 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
     // PR-011's production uniqueness model permits the same serial under two
     // issuers. Exact issuer+serial lookup keeps A and B independent even after
     // A is revoked.
-    atom::db::query("DROP INDEX IF EXISTS idx_credentials_certificate_serial")
-        .execute(&pool)
-        .await
-        .unwrap();
-    atom::db::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
-        .bind(&leaf_a.serial_number)
-        .bind(leaf_b.credential_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "DROP INDEX IF EXISTS idx_credentials_certificate_serial",
+        r#"DROP INDEX IF EXISTS idx_credentials_certificate_serial"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        "UPDATE credentials SET identifier = $1 WHERE id = $2",
+        r#"UPDATE credentials SET identifier = $1 WHERE id = $2"#,
+    )
+    .bind(&leaf_a.serial_number)
+    .bind(leaf_b.credential_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let duplicate_b_request =
         ocsp_request(issuer_b_pem, &leaf_a.serial_number, RequestHash::Sha1, None);
     let duplicate_b =
@@ -309,8 +315,9 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
         ref other => panic!("expected revoked status, got {other:?}"),
     };
     assert_eq!(revoked.revocation_reason, Some(CrlReason::KeyCompromise));
-    let (recorded_at, recorded_reason): (DateTime<Utc>, String) = atom::db::query_as(
+    let (recorded_at, recorded_reason): (DateTime<Utc>, String) = crate::common::db::query_as(
         "SELECT revoked_at, reason FROM certificate_revocations WHERE credential_id = $1",
+        r#"SELECT revoked_at, reason FROM certificate_revocations WHERE credential_id = $1"#,
     )
     .bind(leaf_a.credential_id)
     .fetch_one(&pool)
@@ -329,11 +336,14 @@ async fn per_issuer_ocsp_enforces_the_pr010_contract() {
 
     // A physical credential purge must not turn a revoked issuer/serial into
     // unknown while the certificate is still valid.
-    atom::db::query("DELETE FROM credentials WHERE id = $1")
-        .bind(leaf_a.credential_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "DELETE FROM credentials WHERE id = $1",
+        r#"DELETE FROM credentials WHERE id = $1"#,
+    )
+    .bind(leaf_a.credential_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let revoked_after_purge =
         service::issuer_ocsp_response(&pool, &config, issuer_a.id, &request_a_sha1)
             .await

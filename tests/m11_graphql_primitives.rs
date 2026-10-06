@@ -56,8 +56,9 @@ fn authed_as(entity_id: Uuid, query: impl Into<String>) -> Request {
 async fn create_human(pool: &Database) -> (Uuid, String) {
     let id = Uuid::new_v4();
     let name = format!("graphql-human-{id}");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')"#,
     )
     .bind(id)
     .bind(&name)
@@ -70,8 +71,9 @@ async fn create_human(pool: &Database) -> (Uuid, String) {
 async fn create_device(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
     let name = format!("graphql-device-{id}");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'device', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'device', $2, 'active')"#,
     )
     .bind(id)
     .bind(name)
@@ -82,9 +84,7 @@ async fn create_device(pool: &Database) -> Uuid {
 }
 
 async fn seeded_client_profile(pool: &Database) -> Uuid {
-    atom::db::query_scalar(
-        "SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL",
-    )
+    crate::common::db::query_scalar("SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL", r#"SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL"#)
     .fetch_one(pool)
     .await
     .expect("seeded client profile")
@@ -124,7 +124,7 @@ async fn profile_with_schema(pool: &Database, json_schema: Value) -> Uuid {
 }
 
 async fn delete_tenant_row(pool: &Database, tenant_id: Uuid) {
-    let _ = atom::db::query_as::<Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at")
+    let _ = crate::common::db::query_as::<Tenant>("DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at", r#"DELETE FROM tenants WHERE id = $1 RETURNING id, name, alias, status, tags, attributes, created_by, updated_by, deleted_at, deleted_by, created_at, updated_at"#)
         .bind(tenant_id)
         .fetch_optional(pool)
         .await;
@@ -255,11 +255,15 @@ async fn change_own_password_requires_current_password() {
         "{:?}",
         wrong_current.errors
     );
-    let failure_count: i64 = atom::db::query_scalar(
+    let failure_count: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM event_outbox
          WHERE event = 'credential.create'
            AND payload->>'outcome' = 'deny'
            AND payload->'details'->>'entity_id' = $1",
+        r#"SELECT COUNT(*) FROM event_outbox
+         WHERE event = 'credential.create'
+           AND payload->>'outcome' = 'deny'
+           AND payload->'details'->>'entity_id' = $1"#,
     )
     .bind(entity_id.to_string())
     .fetch_one(&pool)
@@ -329,9 +333,11 @@ async fn change_own_password_rejects_config_managed_password() {
     let managed_password = "managed-password-123";
     let managed_hash = service::hash_secret(managed_password.as_bytes()).expect("hash password");
     let managed_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
          VALUES ($1, $2, 'password', $3, 'config')",
+        r#"INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
+         VALUES ($1, $2, 'password', $3, 'config')"#,
     )
     .bind(managed_id)
     .bind(entity_id)
@@ -352,15 +358,16 @@ async fn change_own_password_rejects_config_managed_password() {
     assert!(matches!(err, atom::error::AppError::Conflict(_)));
     tx.rollback().await.expect("roll back password change");
 
-    let status: String = atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
-        .bind(managed_id)
-        .fetch_one(&pool)
-        .await
-        .expect("managed password status");
-    assert_eq!(status, "active");
-    let active_count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
+    let status: String = crate::common::db::query_scalar(
+        "SELECT status FROM credentials WHERE id = $1",
+        r#"SELECT status FROM credentials WHERE id = $1"#,
     )
+    .bind(managed_id)
+    .fetch_one(&pool)
+    .await
+    .expect("managed password status");
+    assert_eq!(status, "active");
+    let active_count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'", r#"SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'"#)
     .bind(entity_id)
     .fetch_one(&pool)
     .await
@@ -410,12 +417,14 @@ async fn refresh_session_mutation_extends_current_session() {
         .is_some_and(|token| !token.is_empty()));
     assert!(refresh["expiresAt"].as_str().is_some());
 
-    let refreshed_expires_at: chrono::DateTime<chrono::Utc> =
-        atom::db::query_scalar("SELECT expires_at FROM sessions WHERE id = $1")
-            .bind(session.id)
-            .fetch_one(&pool)
-            .await
-            .expect("refreshed session expiry");
+    let refreshed_expires_at: chrono::DateTime<chrono::Utc> = crate::common::db::query_scalar(
+        "SELECT expires_at FROM sessions WHERE id = $1",
+        r#"SELECT expires_at FROM sessions WHERE id = $1"#,
+    )
+    .bind(session.id)
+    .fetch_one(&pool)
+    .await
+    .expect("refreshed session expiry");
     assert!(refreshed_expires_at > session.expires_at);
 }
 
@@ -492,17 +501,21 @@ async fn login_mutation_accepts_entity_uuid_identifier() {
 #[ignore]
 async fn login_mutation_accepts_email_attribute_for_admin_created_password() {
     let pool = common::pool().await;
-    let tenant_id: Uuid =
-        atom::db::query_scalar("INSERT INTO tenants (name, alias) VALUES ($1, $2) RETURNING id")
-            .bind(format!("graphql-login-tenant-{}", Uuid::new_v4()))
-            .bind(format!("login-{}", Uuid::new_v4().simple()))
-            .fetch_one(&pool)
-            .await
-            .expect("insert tenant");
+    let tenant_id: Uuid = crate::common::db::query_scalar(
+        "INSERT INTO tenants (name, alias) VALUES ($1, $2) RETURNING id",
+        r#"INSERT INTO tenants (name, alias) VALUES ($1, $2) RETURNING id"#,
+    )
+    .bind(format!("graphql-login-tenant-{}", Uuid::new_v4()))
+    .bind(format!("login-{}", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .expect("insert tenant");
     let entity_id = Uuid::new_v4();
     let name = format!("graphql-human-{entity_id}");
     let email = format!("{name}@example.test");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
+           VALUES ($1, 'human', $2, $3, 'active', $4)"#,
         r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
            VALUES ($1, 'human', $2, $3, 'active', $4)"#,
     )
@@ -550,9 +563,7 @@ async fn login_mutation_accepts_canonical_email_with_unqualified_password() {
     let pool = common::pool().await;
     let (entity_id, name) = create_human(&pool).await;
     let email = format!("{name}@example.test");
-    atom::db::query(
-        "INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())",
-    )
+    crate::common::db::query("INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())", r#"INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())"#)
     .bind(Uuid::new_v4())
     .bind(entity_id)
     .bind(&email)
