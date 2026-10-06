@@ -1,6 +1,6 @@
 # Atom — Identity & Authorization Service
 
-Lightweight replacement for Keycloak — single Rust binary, single Postgres database. Built for Magistrala IoT platform but generic enough for any cloud-native system.
+Lightweight replacement for Keycloak — single Rust binary backed by PostgreSQL or SQLite. Built for Magistrala IoT platform but generic enough for any cloud-native system.
 
 ## Stack
 
