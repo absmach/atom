@@ -551,7 +551,7 @@ async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
         ]),
     )
     .await;
-    let audits: Vec<String> = crate::common::db::query_scalar("SELECT event FROM audit_logs WHERE target_id=ANY($1) ORDER BY event", r#"SELECT event FROM audit_logs WHERE target_idIN (SELECT unhex(value) FROM json_each($1)) ORDER BY event"#)
+    let audits: Vec<String> = crate::common::db::query_scalar("SELECT event FROM audit_logs WHERE target_id=ANY($1) ORDER BY event", r#"SELECT event FROM audit_logs WHERE target_id IN (SELECT unhex(value) FROM json_each($1)) ORDER BY event"#)
     .bind(vec![app, data, absent])
     .fetch_all(&pool)
     .await
@@ -565,7 +565,7 @@ async fn batch_creates_are_observed_but_only_updates_and_deletes_are_audited() {
             "resource.update"
         ]
     );
-    let events: Vec<String> = crate::common::db::query_scalar("SELECT event FROM event_outbox WHERE payload->>'target_id'=ANY($1) ORDER BY event", r#"SELECT event FROM event_outbox WHERE payload->>'target_id'IN (SELECT value FROM json_each($1)) ORDER BY event"#)
+    let events: Vec<String> = crate::common::db::query_scalar("SELECT event FROM event_outbox WHERE payload->>'target_id'=ANY($1) ORDER BY event", r#"SELECT event FROM event_outbox WHERE payload->>'target_id' IN (SELECT value FROM json_each($1)) ORDER BY event"#)
     .bind(vec![app.to_string(), data.to_string(), absent.to_string()])
     .fetch_all(&pool)
     .await
