@@ -53,15 +53,18 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
     assert_eq!(client.extended_key_usages().len(), 1);
     assert_eq!(server.extended_key_usages().len(), 1);
 
-    let empty_key_usages =
-        atom::db::query("UPDATE certificate_profiles SET key_usages = '{}'::text[] WHERE id = $1")
-            .bind(client.id())
-            .execute(&pool)
-            .await
-            .map(|_| ());
+    let empty_key_usages = crate::common::db::query(
+        "UPDATE certificate_profiles SET key_usages = '{}'::text[] WHERE id = $1",
+        r#"UPDATE certificate_profiles SET key_usages = '[]' WHERE id = $1"#,
+    )
+    .bind(client.id())
+    .execute(&pool)
+    .await
+    .map(|_| ());
     assert_check_violation(empty_key_usages);
-    let empty_extended_key_usages = atom::db::query(
+    let empty_extended_key_usages = crate::common::db::query(
         "UPDATE certificate_profiles SET extended_key_usages = '{}'::text[] WHERE id = $1",
+        r#"UPDATE certificate_profiles SET extended_key_usages = '[]' WHERE id = $1"#,
     )
     .bind(client.id())
     .execute(&pool)
@@ -187,9 +190,12 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         &["client_auth"],
     )
     .await;
-    atom::db::query(
+    crate::common::db::query(
         r#"UPDATE certificate_profiles
            SET permitted_key_algorithms = '[{"algorithm":"ecdsa","sizes":[384]}]'::jsonb
+           WHERE id = $1"#,
+        r#"UPDATE certificate_profiles
+           SET permitted_key_algorithms = '[{"algorithm":"ecdsa","sizes":[384]}]'
            WHERE id = $1"#,
     )
     .bind(p384_id)
@@ -380,9 +386,7 @@ async fn stored_profiles_and_pki_core_enforce_the_pr004_contract() {
         .unwrap();
     assert_eq!(tenant_override.maximum_ttl_seconds(), 3600);
     let platform_ceiling = profile::profile_by_id(&pool, ceiling_id).await.unwrap();
-    let narrowed_platform = atom::db::query(
-        "UPDATE certificate_profiles SET default_ttl_seconds = 3000, maximum_ttl_seconds = 3500 WHERE id = $1",
-    )
+    let narrowed_platform = crate::common::db::query("UPDATE certificate_profiles SET default_ttl_seconds = 3000, maximum_ttl_seconds = 3500 WHERE id = $1", r#"UPDATE certificate_profiles SET default_ttl_seconds = 3000, maximum_ttl_seconds = 3500 WHERE id = $1"#)
     .bind(ceiling_id)
     .execute(&pool)
     .await
@@ -632,20 +636,21 @@ fn assert_openssl_profile(certificate: &IssuedCertificate) {
 
 async fn create_tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("pki-profile-{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("pki-profile-{id}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
 async fn create_entity(pool: &Database, tenant_id: Option<Uuid>, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')"#)
     .bind(id)
     .bind(format!("{prefix}-{id}"))
     .bind(tenant_id)
@@ -665,7 +670,7 @@ async fn insert_platform_profile(
     extended_key_usages: &[&str],
 ) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         r#"
         INSERT INTO certificate_profiles (
             id, name, permitted_key_algorithms, default_ttl_seconds,
@@ -677,6 +682,19 @@ async fn insert_platform_profile(
             $3, $4, 600, $5, $6, $7,
             'urn:atom:{scope}entity:{entity_id}',
             '{"ca":false,"path_len":null}'::jsonb
+        )
+        "#,
+        r#"
+        INSERT INTO certificate_profiles (
+            id, name, permitted_key_algorithms, default_ttl_seconds,
+            maximum_ttl_seconds, renewal_threshold_seconds, key_usages,
+            extended_key_usages, san_policy, identity_uri_template,
+            basic_constraints
+        ) VALUES (
+            $1, $2, '[{"algorithm":"ecdsa","sizes":[256]}]',
+            $3, $4, 600, $5, $6, $7,
+            'urn:atom:{scope}entity:{entity_id}',
+            '{"ca":false,"path_len":null}'
         )
         "#,
     )
@@ -701,7 +719,7 @@ async fn insert_tenant_override(
     maximum_ttl: i64,
     san_policy: Value,
 ) -> Result<(), sqlx::Error> {
-    atom::db::query(
+    crate::common::db::query(
         r#"
         INSERT INTO certificate_profiles (
             id, tenant_id, base_profile_id, name, permitted_key_algorithms,
@@ -716,6 +734,22 @@ async fn insert_tenant_override(
             ARRAY['server_auth']::text[], $6,
             'urn:atom:{scope}entity:{entity_id}',
             '{"ca":false,"path_len":null}'::jsonb
+        )
+        "#,
+        r#"
+        INSERT INTO certificate_profiles (
+            id, tenant_id, base_profile_id, name, permitted_key_algorithms,
+            default_ttl_seconds, maximum_ttl_seconds,
+            renewal_threshold_seconds, key_usages, extended_key_usages,
+            san_policy, identity_uri_template, basic_constraints
+        ) VALUES (
+            $1, $2, $3, 'tenant_ceiling',
+            '[{"algorithm":"ecdsa","sizes":[256]}]',
+            $4, $5, 300,
+            json_array(atom_text('digital_signature')),
+            json_array(atom_text('server_auth')), $6,
+            'urn:atom:{scope}entity:{entity_id}',
+            '{"ca":false,"path_len":null}'
         )
         "#,
     )

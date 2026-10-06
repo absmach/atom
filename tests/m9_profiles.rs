@@ -20,9 +20,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 async fn seeded_client_profile(pool: &atom::db::Database) -> Uuid {
-    atom::db::query_scalar(
-        "SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL",
-    )
+    crate::common::db::query_scalar("SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL", r#"SELECT id FROM profiles WHERE object_kind = 'entity' AND kind = 'device' AND key = 'client' AND tenant_id IS NULL"#)
     .fetch_one(pool)
     .await
     .expect("seeded client profile")

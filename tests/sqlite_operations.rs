@@ -4,11 +4,13 @@
 //! every test creates its own database file — so they run in the default
 //! `cargo test`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use atom::{
     config::DbPoolConfig,
-    db::{query, query_scalar, Database, DatabaseKind},
+    db::{Database, DatabaseKind},
     error::{db_err, AppError},
 };
 use uuid::Uuid;
@@ -38,10 +40,13 @@ async fn open(path: &Path) -> Database {
 }
 
 async fn pragma_int(db: &Database, name: &str) -> i64 {
-    query_scalar::<i64>(&format!("SELECT * FROM pragma_{name}"))
-        .fetch_one(db)
-        .await
-        .unwrap_or_else(|e| panic!("pragma {name}: {e}"))
+    crate::common::db::query_scalar::<i64>(
+        &format!("SELECT * FROM pragma_{name}"),
+        &format!("SELECT * FROM pragma_{name}"),
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or_else(|e| panic!("pragma {name}: {e}"))
 }
 
 #[tokio::test]
@@ -50,10 +55,13 @@ async fn connections_apply_the_fixed_durability_policy() {
     let db = open(&path).await;
     assert_eq!(db.kind(), DatabaseKind::Sqlite);
 
-    let journal: String = query_scalar("SELECT journal_mode FROM pragma_journal_mode")
-        .fetch_one(&db)
-        .await
-        .unwrap();
+    let journal: String = crate::common::db::query_scalar(
+        "SELECT journal_mode FROM pragma_journal_mode",
+        r#"SELECT journal_mode FROM pragma_journal_mode"#,
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
     assert_eq!(journal.to_ascii_lowercase(), "wal");
     // 2 = FULL: fsync on every commit.
     assert_eq!(pragma_int(&db, "synchronous").await, 2);
@@ -71,9 +79,11 @@ async fn tables_indexes_and_views_use_only_sqlite_builtins() {
     // the database fail, so only triggers may depend on them.
     let path = temp_db_path();
     let db = open(&path).await;
-    let offenders: Vec<String> = query_scalar(
+    let offenders: Vec<String> = crate::common::db::query_scalar(
         "SELECT name FROM sqlite_master
          WHERE type IN ('table', 'index', 'view') AND sql LIKE '%atom\\_%' ESCAPE '\\'",
+        r#"SELECT name FROM sqlite_master
+         WHERE type IN ('table', 'index', 'view') AND sql LIKE '%atom\_%' ESCAPE '\'"#,
     )
     .fetch_all(&db)
     .await
@@ -92,21 +102,27 @@ async fn data_survives_a_restart() {
     let entity_id = Uuid::new_v4();
     {
         let db = open(&path).await;
-        query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-            .bind(entity_id)
-            .bind(format!("restart-{entity_id}"))
-            .execute(&db)
-            .await
-            .expect("insert");
+        crate::common::db::query(
+            "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+            r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+        )
+        .bind(entity_id)
+        .bind(format!("restart-{entity_id}"))
+        .execute(&db)
+        .await
+        .expect("insert");
     }
     // Reopening applies migrations again: the baseline must be idempotent and
     // must not disturb existing rows.
     let db = open(&path).await;
-    let name: String = query_scalar("SELECT name FROM entities WHERE id = $1")
-        .bind(entity_id)
-        .fetch_one(&db)
-        .await
-        .expect("row persisted");
+    let name: String = crate::common::db::query_scalar(
+        "SELECT name FROM entities WHERE id = $1",
+        r#"SELECT name FROM entities WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&db)
+    .await
+    .expect("row persisted");
     assert_eq!(name, format!("restart-{entity_id}"));
     drop(db);
     cleanup(&path);
@@ -138,27 +154,36 @@ async fn a_rolled_back_transaction_leaves_no_trace() {
     let db = open(&path).await;
     let entity_id = Uuid::new_v4();
     let mut tx = db.begin().await.expect("begin");
-    query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-        .bind(entity_id)
-        .bind(format!("rollback-{entity_id}"))
-        .execute(&mut tx)
-        .await
-        .expect("insert in tx");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+    )
+    .bind(entity_id)
+    .bind(format!("rollback-{entity_id}"))
+    .execute(&mut tx)
+    .await
+    .expect("insert in tx");
     // The registry row is written by a trigger in the same transaction.
-    let registered: i64 = query_scalar("SELECT COUNT(*) FROM protected_object_ids WHERE id = $1")
-        .bind(entity_id)
-        .fetch_one(&mut tx)
-        .await
-        .unwrap();
+    let registered: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM protected_object_ids WHERE id = $1",
+        r#"SELECT COUNT(*) FROM protected_object_ids WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&mut tx)
+    .await
+    .unwrap();
     assert_eq!(registered, 1);
     tx.rollback().await.expect("rollback");
 
     for table in ["entities", "protected_object_ids"] {
-        let n: i64 = query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE id = $1"))
-            .bind(entity_id)
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let n: i64 = crate::common::db::query_scalar(
+            &format!("SELECT COUNT(*) FROM {table} WHERE id = $1"),
+            &format!("SELECT COUNT(*) FROM {table} WHERE id = $1"),
+        )
+        .bind(entity_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(n, 0, "{table} row survived a rollback");
     }
     drop(db);
@@ -172,28 +197,36 @@ async fn a_failed_statement_aborts_the_whole_transaction_atomically() {
     let entity_id = Uuid::new_v4();
     let name = format!("atomic-{entity_id}");
     let mut tx = db.begin().await.expect("begin");
-    query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-        .bind(entity_id)
-        .bind(&name)
-        .execute(&mut tx)
-        .await
-        .expect("first insert");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+    )
+    .bind(entity_id)
+    .bind(&name)
+    .execute(&mut tx)
+    .await
+    .expect("first insert");
     // Same live name in the same (global) scope violates the unique index.
-    let duplicate =
-        query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-            .bind(Uuid::new_v4())
-            .bind(&name)
-            .execute(&mut tx)
-            .await
-            .expect_err("duplicate name must be rejected");
+    let duplicate = crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(&name)
+    .execute(&mut tx)
+    .await
+    .expect_err("duplicate name must be rejected");
     assert!(atom::error::is_unique_violation(&duplicate));
     drop(tx);
 
-    let n: i64 = query_scalar("SELECT COUNT(*) FROM entities WHERE name = $1")
-        .bind(&name)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+    let n: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM entities WHERE name = $1",
+        r#"SELECT COUNT(*) FROM entities WHERE name = $1"#,
+    )
+    .bind(&name)
+    .fetch_one(&db)
+    .await
+    .unwrap();
     assert_eq!(n, 0, "dropping the transaction must discard its writes");
     drop(db);
     cleanup(&path);
@@ -204,14 +237,18 @@ async fn invariant_triggers_reject_and_classify_as_check_violations() {
     let path = temp_db_path();
     let db = open(&path).await;
     let entity_id = Uuid::new_v4();
-    query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')")
-        .bind(entity_id)
-        .bind(format!("human-{entity_id}"))
-        .execute(&db)
-        .await
-        .expect("insert human");
-    let err = query(
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')"#,
+    )
+    .bind(entity_id)
+    .bind(format!("human-{entity_id}"))
+    .execute(&db)
+    .await
+    .expect("insert human");
+    let err = crate::common::db::query(
         "INSERT INTO credentials (entity_id, kind, secret_hash) VALUES ($1, 'shared_key', 'x')",
+        r#"INSERT INTO credentials (entity_id, kind, secret_hash) VALUES ($1, 'shared_key', 'x')"#,
     )
     .bind(entity_id)
     .execute(&db)
@@ -235,33 +272,42 @@ async fn a_second_writer_waits_for_the_first_then_proceeds() {
         .await
         .expect("second pool");
     let mut writer = db.begin().await.expect("hold the write lock");
-    query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-        .bind(Uuid::new_v4())
-        .bind(format!("busy-{}", Uuid::new_v4()))
-        .execute(&mut writer)
-        .await
-        .expect("write");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("busy-{}", Uuid::new_v4()))
+    .execute(&mut writer)
+    .await
+    .expect("write");
 
     // Shorten the wait for the test by racing the attempt against a deadline:
     // a blocked writer must still be waiting, not have failed or succeeded.
     let attempt = tokio::time::timeout(
         std::time::Duration::from_millis(400),
-        query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-            .bind(Uuid::new_v4())
-            .bind(format!("blocked-{}", Uuid::new_v4()))
-            .execute(&other),
+        crate::common::db::query(
+            "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+            r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(format!("blocked-{}", Uuid::new_v4()))
+        .execute(&other),
     )
     .await;
     assert!(attempt.is_err(), "a second writer must wait for the first");
     writer.rollback().await.expect("release");
 
     // Once released the same write succeeds.
-    query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-        .bind(Uuid::new_v4())
-        .bind(format!("after-{}", Uuid::new_v4()))
-        .execute(&other)
-        .await
-        .expect("write after release");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("after-{}", Uuid::new_v4()))
+    .execute(&other)
+    .await
+    .expect("write after release");
     drop(other);
     drop(db);
     cleanup(&path);
@@ -292,27 +338,36 @@ async fn a_copied_database_file_restores_to_the_same_data() {
     let entity_id = Uuid::new_v4();
     {
         let db = open(&path).await;
-        query("INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')")
-            .bind(entity_id)
-            .bind(format!("backup-{entity_id}"))
-            .execute(&db)
-            .await
-            .expect("insert");
+        crate::common::db::query(
+            "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+            r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
+        )
+        .bind(entity_id)
+        .bind(format!("backup-{entity_id}"))
+        .execute(&db)
+        .await
+        .expect("insert");
         // Fold the WAL into the main file so a plain file copy is a complete
         // backup (the documented procedure), then copy while owning the lock.
-        query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&db)
-            .await
-            .expect("checkpoint");
+        crate::common::db::query(
+            "PRAGMA wal_checkpoint(TRUNCATE)",
+            r#"PRAGMA wal_checkpoint(TRUNCATE)"#,
+        )
+        .execute(&db)
+        .await
+        .expect("checkpoint");
         let backup = path.with_file_name("backup.db");
         std::fs::copy(&path, &backup).expect("copy database file");
         drop(db);
         let restored = open(&backup).await;
-        let name: String = query_scalar("SELECT name FROM entities WHERE id = $1")
-            .bind(entity_id)
-            .fetch_one(&restored)
-            .await
-            .expect("row present in the restored copy");
+        let name: String = crate::common::db::query_scalar(
+            "SELECT name FROM entities WHERE id = $1",
+            r#"SELECT name FROM entities WHERE id = $1"#,
+        )
+        .bind(entity_id)
+        .fetch_one(&restored)
+        .await
+        .expect("row present in the restored copy");
         assert_eq!(name, format!("backup-{entity_id}"));
         drop(restored);
     }

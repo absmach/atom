@@ -117,7 +117,13 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         "revoked",
         "expired",
     ] {
-        atom::db::query(
+        crate::common::db::query(
+            r#"UPDATE pki_authorities
+               SET status = $2,
+                   issuance_enabled = false,
+                   csr_pem = 'test-pending-csr',
+                   failure_reason = $3
+               WHERE id = $1"#,
             r#"UPDATE pki_authorities
                SET status = $2,
                    issuance_enabled = false,
@@ -147,21 +153,9 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     assert_eq!(readiness.active_count, 1);
     assert_eq!(readiness.active_backends, vec![AuthorityKeyBackend::Pkcs11]);
 
-    atom::db::query("UPDATE pki_authorities SET issuance_enabled = false WHERE id = $1")
-        .bind(platform_leaf_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
-    assert_eq!(readiness.active_count, 1);
-    assert!(readiness.active_backends.is_empty());
-    atom::db::query("UPDATE pki_authorities SET issuance_enabled = true WHERE id = $1")
-        .bind(platform_leaf_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    atom::db::query(
-        "UPDATE pki_authorities SET not_after = now() - interval '1 second' WHERE id = $1",
+    crate::common::db::query(
+        "UPDATE pki_authorities SET issuance_enabled = false WHERE id = $1",
+        r#"UPDATE pki_authorities SET issuance_enabled = false WHERE id = $1"#,
     )
     .bind(platform_leaf_id)
     .execute(&pool)
@@ -170,8 +164,28 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
     assert_eq!(readiness.active_count, 1);
     assert!(readiness.active_backends.is_empty());
-    atom::db::query(
+    crate::common::db::query(
+        "UPDATE pki_authorities SET issuance_enabled = true WHERE id = $1",
+        r#"UPDATE pki_authorities SET issuance_enabled = true WHERE id = $1"#,
+    )
+    .bind(platform_leaf_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        "UPDATE pki_authorities SET not_after = now() - interval '1 second' WHERE id = $1",
+        r#"UPDATE pki_authorities SET not_after = atom_ts_add(now(), -(1)) WHERE id = $1"#,
+    )
+    .bind(platform_leaf_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let readiness = repo::leaf_issuer_readiness(&pool).await.unwrap();
+    assert_eq!(readiness.active_count, 1);
+    assert!(readiness.active_backends.is_empty());
+    crate::common::db::query(
         "UPDATE pki_authorities SET not_after = now() + interval '365 days' WHERE id = $1",
+        r#"UPDATE pki_authorities SET not_after = atom_ts_add(now(), (31536000)) WHERE id = $1"#,
     )
     .bind(platform_leaf_id)
     .execute(&pool)
@@ -217,10 +231,8 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     let conflict = insert_authority(&pool, &conflicting_v2).await.unwrap_err();
     assert!(is_database_code(&conflict, "23505"));
 
-    atom::db::query(
-        "UPDATE pki_authorities SET status = 'retiring', issuance_enabled = false, \
-         retiring_at = now(), updated_at = now() WHERE id = $1",
-    )
+    crate::common::db::query("UPDATE pki_authorities SET status = 'retiring', issuance_enabled = false, \
+         retiring_at = now(), updated_at = now() WHERE id = $1", r#"UPDATE pki_authorities SET status = 'retiring', issuance_enabled = false, retiring_at = now(), updated_at = now() WHERE id = $1"#)
     .bind(tenant_a_v1.id)
     .execute(&pool)
     .await
@@ -277,11 +289,14 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     .unwrap_err();
     assert!(is_database_code(&wrong_global_issuer, "23514"));
 
-    let delete_in_use_issuer = atom::db::query("DELETE FROM pki_authorities WHERE id = $1")
-        .bind(platform_leaf_id)
-        .execute(&pool)
-        .await
-        .unwrap_err();
+    let delete_in_use_issuer = crate::common::db::query(
+        "DELETE FROM pki_authorities WHERE id = $1",
+        r#"DELETE FROM pki_authorities WHERE id = $1"#,
+    )
+    .bind(platform_leaf_id)
+    .execute(&pool)
+    .await
+    .unwrap_err();
     // Postgres 18 tightened RESTRICT violations to SQLSTATE 23001
     // (restrict_violation); earlier versions returned the generic 23503
     // (foreign_key_violation). Both mean the same thing here.
@@ -290,12 +305,15 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
             || is_database_code(&delete_in_use_issuer, "23503")
     );
 
-    let tenant_move = atom::db::query("UPDATE entities SET tenant_id = $1 WHERE id = $2")
-        .bind(tenant_b)
-        .bind(entity_a)
-        .execute(&pool)
-        .await
-        .unwrap_err();
+    let tenant_move = crate::common::db::query(
+        "UPDATE entities SET tenant_id = $1 WHERE id = $2",
+        r#"UPDATE entities SET tenant_id = $1 WHERE id = $2"#,
+    )
+    .bind(tenant_b)
+    .bind(entity_a)
+    .execute(&pool)
+    .await
+    .unwrap_err();
     assert!(is_database_code(&tenant_move, "23514"));
 
     let invalid_parent = TestAuthority::tenant(Uuid::new_v4(), tenant_b, platform_leaf_id, 2, 31);
@@ -308,8 +326,9 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
         .unwrap_err();
     assert!(is_database_code(&duplicate_global_error, "23505"));
 
-    let outside_parent_validity = atom::db::query(
+    let outside_parent_validity = crate::common::db::query(
         "UPDATE pki_authorities SET not_after = now() + interval '500 days' WHERE id = $1",
+        r#"UPDATE pki_authorities SET not_after = atom_ts_add(now(), (43200000)) WHERE id = $1"#,
     )
     .bind(conflicting_v2.id)
     .execute(&pool)
@@ -339,8 +358,9 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     )
     .await
     .unwrap();
-    let shared_serial_count: i64 = atom::db::query_scalar(
+    let shared_serial_count: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE kind = 'certificate' AND identifier = $1",
+        r#"SELECT COUNT(*) FROM credentials WHERE kind = 'certificate' AND identifier = $1"#,
     )
     .bind("01020304")
     .fetch_one(&pool)
@@ -348,7 +368,10 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     .unwrap();
     assert_eq!(shared_serial_count, 2);
 
-    let null_entity = atom::db::query(
+    let null_entity = crate::common::db::query(
+        r#"INSERT INTO credentials
+             (id, entity_id, kind, identifier, issuer_id, metadata, expires_at)
+           VALUES ($1, NULL, 'certificate', $2, $3, $4, $5)"#,
         r#"INSERT INTO credentials
              (id, entity_id, kind, identifier, issuer_id, metadata, expires_at)
            VALUES ($1, NULL, 'certificate', $2, $3, $4, $5)"#,
@@ -377,48 +400,61 @@ async fn authorities_are_scope_safe_and_rotation_ready() {
     )
     .await
     .unwrap();
-    atom::db::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
-        .bind(purge_tenant_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1",
+        r#"UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1"#,
+    )
+    .bind(purge_tenant_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     atom::tenants::repo::purge_tenant(&pool, purge_tenant_id)
         .await
         .unwrap();
     assert_eq!(
-        atom::db::query_scalar::<i64>("SELECT COUNT(*) FROM tenants WHERE id = $1")
-            .bind(purge_tenant_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
+        crate::common::db::query_scalar::<i64>(
+            "SELECT COUNT(*) FROM tenants WHERE id = $1",
+            r#"SELECT COUNT(*) FROM tenants WHERE id = $1"#
+        )
+        .bind(purge_tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
         0
     );
     assert_eq!(
-        atom::db::query_scalar::<i64>("SELECT COUNT(*) FROM pki_authorities WHERE id = $1")
-            .bind(purge_authority.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
+        crate::common::db::query_scalar::<i64>(
+            "SELECT COUNT(*) FROM pki_authorities WHERE id = $1",
+            r#"SELECT COUNT(*) FROM pki_authorities WHERE id = $1"#
+        )
+        .bind(purge_authority.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
         0
     );
 }
 
 async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("{prefix}-{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("{prefix}-{id}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
 async fn create_entity(pool: &Database, tenant_id: Option<Uuid>, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, tenant_id, name, kind) VALUES ($1, $2, $3, 'service')",
+        r#"INSERT INTO entities (id, tenant_id, name, kind) VALUES ($1, $2, $3, 'service')"#,
     )
     .bind(id)
     .bind(tenant_id)
@@ -436,7 +472,19 @@ async fn insert_authority(pool: &Database, authority: &TestAuthority) -> Result<
         "platform_intermediate" => (now - Duration::hours(2), now + Duration::days(390)),
         _ => (now - Duration::hours(1), now + Duration::days(365)),
     };
-    atom::db::query(
+    crate::common::db::query(
+        r#"
+        INSERT INTO pki_authorities (
+            id, tenant_id, parent_id, kind, version, status, issuance_enabled,
+            subject, serial_number, fingerprint_sha256, certificate_pem, chain_pem,
+            not_before, not_after, key_backend, key_reference, activated_at
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12,
+            $13, $14, $15, $16, $17
+        )
+        "#,
         r#"
         INSERT INTO pki_authorities (
             id, tenant_id, parent_id, kind, version, status, issuance_enabled,
@@ -479,7 +527,13 @@ async fn insert_certificate(
     serial: &str,
     certificate_fingerprint: &str,
 ) -> Result<(), sqlx::Error> {
-    atom::db::query(
+    crate::common::db::query(
+        r#"
+        INSERT INTO credentials (
+            id, entity_id, kind, identifier, issuer_id, metadata, expires_at
+        )
+        VALUES ($1, $2, 'certificate', $3, $4, $5, $6)
+        "#,
         r#"
         INSERT INTO credentials (
             id, entity_id, kind, identifier, issuer_id, metadata, expires_at

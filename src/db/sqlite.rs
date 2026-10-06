@@ -226,16 +226,21 @@ mod tests {
             .await
             .unwrap();
         db.run_migrations().await.unwrap();
-        let admins: i64 =
-            crate::db::query_scalar("SELECT count(*) FROM entities WHERE name = 'admin'")
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let admins: i64 = crate::test_db::query_scalar(
+            "SELECT count(*) FROM entities WHERE name = 'admin'",
+            r#"SELECT count(*) FROM entities WHERE name = 'admin'"#,
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(admins, 1);
-        let registered: i64 = crate::db::query_scalar("SELECT count(*) FROM protected_object_ids")
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let registered: i64 = crate::test_db::query_scalar(
+            "SELECT count(*) FROM protected_object_ids",
+            r#"SELECT count(*) FROM protected_object_ids"#,
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert!(registered >= 3);
     }
 

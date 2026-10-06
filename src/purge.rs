@@ -6,6 +6,8 @@
 //! foreign-key cascades (the same removal a hard delete used to perform). It is
 //! disabled by default — see [`crate::config::PurgeConfig`].
 
+mod storage;
+
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
@@ -22,8 +24,6 @@ use crate::{
 /// credentials must be captured first), roles (scoped block GC), and tenants
 /// (cascade across every table) are handled specially in [`purge_expired`].
 const PURGE_TABLES: &[&str] = &["object_groups", "principal_groups", "resources"];
-
-const PURGE_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_5055_5247;
 
 #[derive(Debug, Clone)]
 pub struct PurgeSummary {
@@ -163,10 +163,7 @@ pub fn spawn_refresh_token_cleanup_with_shutdown(
 pub async fn purge_expired(pool: &Database, cfg: PurgeConfig) -> Result<PurgeSummary, AppError> {
     let cutoff = Utc::now() - Duration::days(cfg.retention_days);
     let mut tx = pool.begin().await?;
-    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(PURGE_ADVISORY_LOCK_ID)
-        .fetch_one(tx.exec())
-        .await?;
+    let acquired = storage::claim_sweep(&mut tx).await?;
 
     if !acquired {
         return Ok(PurgeSummary {
@@ -182,41 +179,30 @@ pub async fn purge_expired(pool: &Database, cfg: PurgeConfig) -> Result<PurgeSum
     let mut doomed_ids: Vec<Uuid> = Vec::new();
 
     for table in PURGE_TABLES {
-        let ids = select_doomed(&mut tx, table, cutoff, cfg.batch_size).await?;
-        deleted_rows += delete_by_ids(&mut tx, table, &ids).await?;
+        let ids = storage::select_doomed(&mut tx, table, cutoff, cfg.batch_size).await?;
+        deleted_rows += storage::delete_by_ids(&mut tx, table, &ids).await?;
         doomed_ids.extend(ids);
     }
 
     // Entities: capture cascaded credential ids before the delete removes them.
-    let entity_ids = select_doomed(&mut tx, "entities", cutoff, cfg.batch_size).await?;
+    let entity_ids = storage::select_doomed(&mut tx, "entities", cutoff, cfg.batch_size).await?;
     if !entity_ids.is_empty() {
-        crate::db::query(
-            "DELETE FROM pki_enrollment_rate_windows
-             WHERE scope_kind = 'entity' AND scope_id = ANY($1)",
-        )
-        .bind(&entity_ids)
-        .execute(tx.exec())
-        .await?;
-        let credential_ids: Vec<Uuid> =
-            crate::db::query_scalar("SELECT id FROM credentials WHERE entity_id = ANY($1)")
-                .bind(&entity_ids)
-                .fetch_all(tx.exec())
-                .await?;
-        deleted_rows += delete_by_ids(&mut tx, "entities", &entity_ids).await?;
+        let credential_ids = storage::prepare_entity_purge(&mut tx, &entity_ids).await?;
+        deleted_rows += storage::delete_by_ids(&mut tx, "entities", &entity_ids).await?;
         doomed_ids.extend(entity_ids);
         doomed_ids.extend(credential_ids);
     }
 
-    let role_ids = purge_roles(&mut tx, cutoff, cfg.batch_size).await?;
+    let role_ids = storage::purge_roles(&mut tx, cutoff, cfg.batch_size).await?;
     deleted_rows += i64::try_from(role_ids.len()).unwrap_or(i64::MAX);
     doomed_ids.extend(role_ids);
 
     // Tenants: gather the tenant + all cascaded children before the cascade.
-    let tenant_ids = select_doomed(&mut tx, "tenants", cutoff, cfg.batch_size).await?;
+    let tenant_ids = storage::select_doomed(&mut tx, "tenants", cutoff, cfg.batch_size).await?;
     if !tenant_ids.is_empty() {
         let child_ids = crate::tenants::repo::tenant_purge_object_ids(&mut tx, &tenant_ids).await?;
         crate::tenants::repo::purge_tenant_pki_in_tx(&mut tx, &tenant_ids).await?;
-        deleted_rows += delete_by_ids(&mut tx, "tenants", &tenant_ids).await?;
+        deleted_rows += storage::delete_by_ids(&mut tx, "tenants", &tenant_ids).await?;
         doomed_ids.extend(child_ids); // already includes the tenant ids themselves
     }
 
@@ -228,87 +214,4 @@ pub async fn purge_expired(pool: &Database, cfg: PurgeConfig) -> Result<PurgeSum
         deleted_rows,
         cutoff,
     })
-}
-
-/// Locks and returns one bounded batch of tombstoned ids past the cutoff.
-async fn select_doomed(
-    tx: &mut DbTransaction<'_>,
-    table: &str,
-    cutoff: chrono::DateTime<Utc>,
-    batch_size: i64,
-) -> Result<Vec<Uuid>, AppError> {
-    // `table` is from the fixed PURGE_TABLES allowlist / literals, never input.
-    let sql = format!(
-        r#"SELECT id FROM {table}
-           WHERE deleted_at IS NOT NULL AND deleted_at < $1
-           ORDER BY deleted_at ASC
-           LIMIT $2
-           FOR UPDATE SKIP LOCKED"#
-    );
-    Ok(crate::db::query_scalar(&sql)
-        .bind(cutoff)
-        .bind(batch_size)
-        .fetch_all(tx.exec())
-        .await?)
-}
-
-async fn delete_by_ids(
-    tx: &mut DbTransaction<'_>,
-    table: &str,
-    ids: &[Uuid],
-) -> Result<i64, AppError> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
-    let sql = format!("DELETE FROM {table} WHERE id = ANY($1)");
-    let result = crate::db::query(&sql).bind(ids).execute(tx.exec()).await?;
-    Ok(i64::try_from(result.rows_affected()).unwrap_or(i64::MAX))
-}
-
-/// Purges one batch of tombstoned roles and GCs the permission blocks orphaned
-/// by their removal, returning the physically removed role ids so the caller can
-/// fold them into the canonical authz-reference cleanup.
-async fn purge_roles(
-    tx: &mut DbTransaction<'_>,
-    cutoff: chrono::DateTime<Utc>,
-    batch_size: i64,
-) -> Result<Vec<Uuid>, AppError> {
-    let role_ids = select_doomed(tx, "roles", cutoff, batch_size).await?;
-    if role_ids.is_empty() {
-        return Ok(role_ids);
-    }
-
-    let candidate_block_ids: Vec<Uuid> = crate::db::query_scalar(
-        r#"SELECT DISTINCT permission_block_id
-           FROM role_permission_blocks
-           WHERE role_id = ANY($1)"#,
-    )
-    .bind(&role_ids)
-    .fetch_all(tx.exec())
-    .await?;
-
-    crate::db::query("DELETE FROM roles WHERE id = ANY($1)")
-        .bind(&role_ids)
-        .execute(tx.exec())
-        .await?;
-
-    if !candidate_block_ids.is_empty() {
-        crate::db::query(
-            r#"DELETE FROM permission_blocks pb
-               WHERE pb.id = ANY($1)
-                 AND NOT EXISTS (
-                     SELECT 1 FROM role_permission_blocks
-                     WHERE permission_block_id = pb.id
-                 )
-                 AND NOT EXISTS (
-                     SELECT 1 FROM direct_policies
-                     WHERE permission_block_id = pb.id
-                 )"#,
-        )
-        .bind(&candidate_block_ids)
-        .execute(tx.exec())
-        .await?;
-    }
-
-    Ok(role_ids)
 }

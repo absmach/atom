@@ -1,28 +1,22 @@
 # Repository-per-domain pattern
 
-Status: pilot delivered (the `resources` domain — see below); the rest of the
-codebase is being ported domain by domain as tracked follow-up work, not in
-one pass. This document is the contract this and every future port must
-follow, written up front per review request on PR #119.
+Status: all production storage uses native PostgreSQL and SQLite adapters.
+The domain repositories share business rules and transaction orchestration;
+each private backend adapter owns the SQL it executes. There is no runtime
+SQL translator or generic `db::query*` compatibility API.
 
-## Why this replaces the general-purpose translator
+## Storage boundary
 
-The first cut of SQLite support (still present for every domain not yet
-ported) routed all SQL through one query layer, `crate::db::{query, query_as,
-query_scalar}`, executing PostgreSQL-dialect SQL unchanged on PostgreSQL and a
-mechanically translated (`crate::db::translate`) form on SQLite. That
-approach avoided hand-writing ~700 PostgreSQL-specific constructs twice, and
-is fully tested (both backends, every DB-gated suite) — but a generic
-compatibility layer is exactly that: generic. It found real gaps only when a
-construct's translation was subtly wrong for one specific shape of query (a
-`json_each`-scoped correlation, a `generate_series`-in-SELECT-list
-expansion), and it is not something a reader can audit a query's SQLite
-behavior from without also reading the translator.
+The initial SQLite implementation translated PostgreSQL statements at runtime.
+That made a statement's actual SQLite behavior difficult to audit. The completed
+repository migration replaces it with explicit SQL and typed domain operations
+throughout identity, authorization, tenants, bootstrap, credentials, PKI,
+audit, events, endpoints, object coordination, ownership, cleanup, and health.
 
-Per review, storage is moving to explicit per-backend implementations behind
-small domain-shaped contracts instead: each backend owns its native SQL for a
-domain's operations, so what runs against SQLite is source code, not a
-transformation of PostgreSQL source code.
+`src/db/` now owns connection pools, transactions/savepoints, migrations,
+SQLite runtime functions, and value codecs. It does not decide domain behavior
+or rewrite SQL. `tests/common/db.rs` is a test-only fixture runner that requires
+explicit SQL for both backends; it is never linked into the service.
 
 ## The contract shape
 
@@ -89,12 +83,16 @@ is the point:
   driver type) and are the single place a mutation's outbox row and its
   commit happen together. A repository's write function takes the open
   transaction, inserts through its own backend's native SQL, and hands
-  control back to the caller, which calls the audit commit helper — the
-  repository itself never calls `.commit()`.
-- No repository method opens and commits its own transaction. A multi-step
-  mutation (lock a tenant, then insert, then commit-with-outbox) shares the
-  one transaction end to end, exactly as `create_resource_with_audit`
-  demonstrates below.
+  control back to the caller. An `_in_tx` operation or a backend operation
+  borrowing a connection never commits the caller's transaction.
+- Pool-taking convenience operations may open and finish their own complete
+  transaction. Event-producing mutations finish through the shared audit or
+  observation commit helpers; native SQLite operations such as invitation
+  upsert and coordinated lock reads own their `BEGIN IMMEDIATE` transaction.
+  A multi-step mutation (lock a tenant, insert, then commit with its outbox
+  event) must share one transaction end to end, as
+  `create_resource_with_audit` demonstrates below. Read the value to return
+  before committing so a later read failure cannot misreport a committed write.
 - Cross-domain locking helpers (`tenants::repo::lock_optional_active_tenant`,
   `lock_tenant_rows_in_order`, …) stay shared infrastructure, called by any
   domain's write path before it opens its own backend match — the review
@@ -102,12 +100,12 @@ is the point:
   and duplicating tenant-locking SQL per domain would be exactly the kind of
   helper-per-SQL-statement interface the review is against.
 - The canonical grant expansion (`subject_effective_grants`,
-  `grant_scope_matches`) is unaffected by this migration: it is consumed by
-  the PDP/control-plane/listing readers as one shared SQL view/function per
-  backend already (SQL view on PostgreSQL, SQL view + inline expansion on
-  SQLite — see the SQLite baseline migration), not duplicated per domain.
+  `grant_scope_matches`) is consumed by the PDP, control-plane gates and
+  listing readers through `src/authz/sql/`: PostgreSQL calls the migrated
+  function; SQLite uses one recursive SQL source and registered scope function.
+  Neither grant expansion nor access-token ceiling SQL is copied per domain.
 
-## The pilot: `resources`
+## Resource repository
 
 `src/authz/resources/` implements `create_resource_with_audit`,
 `create_resource`, `get_resource`, `list_resources_by_ids`, and
@@ -118,46 +116,52 @@ mutation the review asked to see proven (`create_resource_with_audit`: lock
 the owning tenant, insert the row, then commit with its `resource.create`
 outbox event in the same transaction — verified by
 `tests/m26_audit_event_publishing.rs`'s
-`outbox_failure_rolls_back_the_domain_mutation`, which fails the outbox
+`resource_repository_rolls_back_when_outbox_insert_fails`, which fails the outbox
 insert deliberately and asserts the resource insert rolled back with it, on
 both backends).
 
-Backend-specific points this pilot had to resolve natively (documented here
-so later ports do not have to rediscover them):
+Backend-specific SQL and encoding conventions used by the native adapters:
 
 | Construct | PostgreSQL | SQLite |
 | --- | --- | --- |
 | Recursive group-hierarchy CTE | `WITH RECURSIVE ... $n::uuid` | same, drop the cast — SQLite's `WITH RECURSIVE` is unchanged from PostgreSQL's |
 | Case-insensitive search | `ILIKE` | `LIKE` (ASCII case-insensitive by default in SQLite) |
-| jsonb containment (`@>`) | native operator | `atom_json_contains(col, $n)`, one of the SQL functions already registered per connection (`crate::db::sqlite_functions`) for the whole SQLite backend, not new for this pilot |
+| jsonb containment (`@>`) | native operator | `atom_json_contains(col, $n)`, one of the SQL functions already registered per connection (`crate::db::sqlite_functions`) for the whole SQLite backend |
 | `id = ANY($1::uuid[])`, ordered by input order | native array operators + `array_position` | `id IN (SELECT unhex(value) FROM json_each($1))`, ordered by `NULLIF(instr($1, lower(hex(id))), 0)` — position in the JSON text is monotonic with array index because every element is the same fixed width; `crate::db::native::uuid_array_json` encodes the parameter |
 | `NULLS LAST` | native | unchanged — SQLite has supported it natively since 3.30 (2019), below the bundled 3.46/3.47 |
 | JSON parameter binding | bind `serde_json::Value` directly | bind `value.to_string()` (SQLite JSON columns are `TEXT`) |
 
-`crate::db::native` is the one shared low-level helper this pilot needed
+`crate::db::native` is a shared low-level helper
 (encoding a `&[Uuid]` as the same JSON-array-of-hex-strings format the rest
 of the SQLite backend already uses for UUID arrays) — infrastructure, not a
 query-building API, in line with the review's allowance for "shared internal
 helpers... where they are useful."
 
-## Porting the rest
+## Adding or changing storage
 
-Not attempted in one pass — the storage code this eventually touches is
-~34,000 lines across ~24 files. Tracked as a follow-up, one domain at a time,
-each repeating exactly the pilot's shape (contract in `mod.rs`, native SQL in
-`postgres.rs`/`sqlite.rs`, tests run unchanged against both backends). Until a
-domain is ported, it continues to run on the general-purpose query
-layer/translator described in `IMPLEMENTATION-NOTES.md` — both approaches
-coexist during the migration, and `scripts/check-db-boundary.sh` accepts
-either. The translator itself is only removed once every domain has moved
-off it.
+1. Add a typed operation to the owning domain module. Keep authorization,
+   validation, cache coordination, and transaction/outbox orchestration shared.
+2. Implement native SQL in both private backend adapters. Accept a borrowed
+   connection when the caller already owns a transaction; never acquire a
+   second connection from the pool inside it.
+3. Use the canonical grants and scope helpers in `src/authz/sql/` for every
+   subject-forward reader. SQLite's recursive grant expansion lives in one
+   shared SQL source; do not copy it into each listing adapter.
+4. Add a paired, forward-only migration if the schema changes. Existing applied
+   migrations must not be edited.
+5. Run the same behavior tests on both backends. Fixtures supply native SQL
+   explicitly; PostgreSQL-only lock-observation tests must state why they skip
+   SQLite. Run `scripts/check-db-boundary.sh` to enforce the boundary and schema
+   parity.
 
-## Second port: object coordination
+The resource regressions cover ascending/descending name and timestamp order,
+NULL placement, stable pagination, and rollback of the real resource mutation
+when its transactional outbox insert fails.
 
-`src/object_changes/` (batch commits, revisions, fenced leases — landed on
-main while this work was in flight) is the second domain on the pattern, and
-the first ported straight from PostgreSQL-only code rather than from the
-translator. Points it had to resolve, beyond the pilot's table above:
+## Object coordination
+
+`src/object_changes/` (batch commits, revisions, fenced leases) uses the same
+repository pattern. Its additional backend-specific conventions are:
 
 | Construct | PostgreSQL | SQLite |
 | --- | --- | --- |
@@ -176,7 +180,7 @@ made by triggers. Any UPDATE that returns `revision` therefore sets
 `revision = revision + 1` itself (redundant but harmless on PostgreSQL, whose
 trigger computes the same value); the SQLite trigger's
 `WHEN NEW.revision = OLD.revision` guard then skips its own bump. Updates that
-do not return `revision` keep relying on the trigger. A future port of any
+do not return `revision` keep relying on the trigger. Any
 entity or resource write that returns `revision` must keep this.
 
 Three of its nine integration tests stay PostgreSQL-only because they

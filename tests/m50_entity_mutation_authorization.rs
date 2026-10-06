@@ -76,21 +76,22 @@ fn assert_forbidden(response: &Response, context: &str) {
 
 async fn tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("entity-auth-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("entity-auth-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn entity(pool: &Database, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) \
-         VALUES ($1, $2, $3, $4, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) \
+         VALUES ($1, $2, $3, $4, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')"#)
     .bind(id)
     .bind(kind)
     .bind(format!("entity-auth-{kind}-{id}"))
@@ -102,10 +103,8 @@ async fn entity(pool: &Database, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
 }
 
 async fn add_tenant_member(pool: &Database, tenant_id: Uuid, entity_id: Uuid) {
-    atom::db::query(
-        "INSERT INTO tenant_memberships (tenant_id, entity_id, status) \
-         VALUES ($1, $2, 'active')",
-    )
+    crate::common::db::query("INSERT INTO tenant_memberships (tenant_id, entity_id, status) \
+         VALUES ($1, $2, 'active')", r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')"#)
     .bind(tenant_id)
     .bind(entity_id)
     .execute(pool)
@@ -128,12 +127,10 @@ async fn race_pool(application_name: &str) -> Database {
 
 async fn wait_for_application_lock(pool: &Database, application_name: &str) -> bool {
     for _ in 0..200 {
-        let waiting = atom::db::query_scalar(
-            "SELECT EXISTS(\
+        let waiting = crate::common::db::query_scalar("SELECT EXISTS(\
                  SELECT 1 FROM pg_stat_activity \
                  WHERE application_name = $1 AND wait_event_type = 'Lock'\
-             )",
-        )
+             )", r#"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock')"#)
         .bind(application_name)
         .fetch_one(pool)
         .await
@@ -148,29 +145,23 @@ async fn wait_for_application_lock(pool: &Database, application_name: &str) -> b
 
 async fn allow_tenant_action(pool: &Database, subject_id: Uuid, tenant_id: Uuid, action: &str) {
     let block_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO permission_blocks (id, tenant_id, scope_mode, effect) \
-         VALUES ($1, $2, 'tenant', 'allow')",
-    )
+    crate::common::db::query("INSERT INTO permission_blocks (id, tenant_id, scope_mode, effect) \
+         VALUES ($1, $2, 'tenant', 'allow')", r#"INSERT INTO permission_blocks (id, tenant_id, scope_mode, effect) VALUES ($1, $2, 'tenant', 'allow')"#)
     .bind(block_id)
     .bind(tenant_id)
     .execute(pool)
     .await
     .expect("insert tenant permission block");
-    atom::db::query(
-        "INSERT INTO permission_block_actions (permission_block_id, action_id) \
-         SELECT $1, id FROM actions WHERE name = $2",
-    )
+    crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) \
+         SELECT $1, id FROM actions WHERE name = $2", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = $2"#)
     .bind(block_id)
     .bind(action)
     .execute(pool)
     .await
     .expect("link tenant action");
-    atom::db::query(
-        "INSERT INTO direct_policies \
+    crate::common::db::query("INSERT INTO direct_policies \
          (tenant_id, subject_kind, subject_id, permission_block_id) \
-         VALUES ($1, 'entity', $2, $3)",
-    )
+         VALUES ($1, 'entity', $2, $3)", r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)"#)
     .bind(tenant_id)
     .bind(subject_id)
     .bind(block_id)
@@ -180,38 +171,34 @@ async fn allow_tenant_action(pool: &Database, subject_id: Uuid, tenant_id: Uuid,
 }
 
 async fn allow_object_action(pool: &Database, subject_id: Uuid, object_id: Uuid, action: &str) {
-    let tenant_id: Option<Uuid> =
-        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-            .bind(object_id)
-            .fetch_one(pool)
-            .await
-            .expect("object tenant");
-    let block_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO permission_blocks \
-         (id, tenant_id, scope_mode, object_id, effect) \
-         VALUES ($1, $2, 'object', $3, 'allow')",
+    let tenant_id: Option<Uuid> = crate::common::db::query_scalar(
+        "SELECT tenant_id FROM entities WHERE id = $1",
+        r#"SELECT tenant_id FROM entities WHERE id = $1"#,
     )
+    .bind(object_id)
+    .fetch_one(pool)
+    .await
+    .expect("object tenant");
+    let block_id = Uuid::new_v4();
+    crate::common::db::query("INSERT INTO permission_blocks \
+         (id, tenant_id, scope_mode, object_id, effect) \
+         VALUES ($1, $2, 'object', $3, 'allow')", r#"INSERT INTO permission_blocks (id, tenant_id, scope_mode, object_id, effect) VALUES ($1, $2, 'object', $3, 'allow')"#)
     .bind(block_id)
     .bind(tenant_id)
     .bind(object_id)
     .execute(pool)
     .await
     .expect("insert object permission block");
-    atom::db::query(
-        "INSERT INTO permission_block_actions (permission_block_id, action_id) \
-         SELECT $1, id FROM actions WHERE name = $2",
-    )
+    crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) \
+         SELECT $1, id FROM actions WHERE name = $2", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = $2"#)
     .bind(block_id)
     .bind(action)
     .execute(pool)
     .await
     .expect("link object action");
-    atom::db::query(
-        "INSERT INTO direct_policies \
+    crate::common::db::query("INSERT INTO direct_policies \
          (tenant_id, subject_kind, subject_id, permission_block_id) \
-         VALUES ($1, 'entity', $2, $3)",
-    )
+         VALUES ($1, 'entity', $2, $3)", r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)"#)
     .bind(tenant_id)
     .bind(subject_id)
     .bind(block_id)
@@ -223,11 +210,9 @@ async fn allow_object_action(pool: &Database, subject_id: Uuid, object_id: Uuid,
 async fn entity_profile(pool: &Database, kind: &str, json_schema: Value) -> (Uuid, Uuid) {
     let profile_id = Uuid::new_v4();
     let profile_version_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO profiles \
+    crate::common::db::query("INSERT INTO profiles \
          (id, object_kind, kind, key, display_name, status) \
-         VALUES ($1, 'entity', $2, $3, $4, 'active')",
-    )
+         VALUES ($1, 'entity', $2, $3, $4, 'active')", r#"INSERT INTO profiles (id, object_kind, kind, key, display_name, status) VALUES ($1, 'entity', $2, $3, $4, 'active')"#)
     .bind(profile_id)
     .bind(kind)
     .bind(format!("entity-auth-{kind}-{profile_id}"))
@@ -235,11 +220,9 @@ async fn entity_profile(pool: &Database, kind: &str, json_schema: Value) -> (Uui
     .execute(pool)
     .await
     .expect("insert profile");
-    atom::db::query(
-        "INSERT INTO profile_versions \
+    crate::common::db::query("INSERT INTO profile_versions \
          (id, profile_id, version, json_schema, ui_schema, status) \
-         VALUES ($1, $2, 1, $3, '{}', 'active')",
-    )
+         VALUES ($1, $2, 1, $3, '{}', 'active')", r#"INSERT INTO profile_versions (id, profile_id, version, json_schema, ui_schema, status) VALUES ($1, $2, 1, $3, '{}', 'active')"#)
     .bind(profile_version_id)
     .bind(profile_id)
     .bind(json_schema)
@@ -268,11 +251,14 @@ async fn self_update_and_delete_require_real_grants() {
         &update,
         "self-targeting must not bypass update authorization",
     );
-    let name: String = atom::db::query_scalar("SELECT name FROM entities WHERE id = $1")
-        .bind(caller)
-        .fetch_one(&pool)
-        .await
-        .expect("entity name");
+    let name: String = crate::common::db::query_scalar(
+        "SELECT name FROM entities WHERE id = $1",
+        r#"SELECT name FROM entities WHERE id = $1"#,
+    )
+    .bind(caller)
+    .fetch_one(&pool)
+    .await
+    .expect("entity name");
     assert_ne!(name, "grant-free-self-update");
 
     let delete = schema
@@ -286,11 +272,14 @@ async fn self_update_and_delete_require_real_grants() {
         "self-targeting must not bypass delete authorization",
     );
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        atom::db::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
-            .bind(caller)
-            .fetch_one(&pool)
-            .await
-            .expect("entity lifecycle");
+        crate::common::db::query_as(
+            "SELECT status, deleted_at FROM entities WHERE id = $1",
+            r#"SELECT status, deleted_at FROM entities WHERE id = $1"#,
+        )
+        .bind(caller)
+        .fetch_one(&pool)
+        .await
+        .expect("entity lifecycle");
     assert_eq!(status, "active");
     assert!(deleted_at.is_none());
 }
@@ -329,12 +318,14 @@ async fn entity_move_requires_source_and_destination_authority() {
         &source_only,
         "source authority alone must not authorize a tenant move",
     );
-    let persisted_tenant: Option<Uuid> =
-        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-            .bind(target)
-            .fetch_one(&pool)
-            .await
-            .expect("target tenant after denied move");
+    let persisted_tenant: Option<Uuid> = crate::common::db::query_scalar(
+        "SELECT tenant_id FROM entities WHERE id = $1",
+        r#"SELECT tenant_id FROM entities WHERE id = $1"#,
+    )
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .expect("target tenant after denied move");
     assert_eq!(persisted_tenant, Some(source_tenant));
 
     allow_tenant_action(&pool, caller, destination_tenant, "write").await;
@@ -344,12 +335,14 @@ async fn entity_move_requires_source_and_destination_authority() {
         authorized.data.into_json().expect("json")["updateEntity"]["tenantId"],
         destination_tenant.to_string()
     );
-    let persisted_tenant: Option<Uuid> =
-        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-            .bind(target)
-            .fetch_one(&pool)
-            .await
-            .expect("target tenant after authorized move");
+    let persisted_tenant: Option<Uuid> = crate::common::db::query_scalar(
+        "SELECT tenant_id FROM entities WHERE id = $1",
+        r#"SELECT tenant_id FROM entities WHERE id = $1"#,
+    )
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .expect("target tenant after authorized move");
     assert_eq!(persisted_tenant, Some(destination_tenant));
 }
 
@@ -385,11 +378,15 @@ async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
     let mut tenant_ids = [source_tenant, requested_destination, concurrent_destination];
     tenant_ids.sort_unstable();
     for tenant_id in tenant_ids {
-        atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
-            .bind(tenant_id)
-            .fetch_one(&mut competing)
-            .await
-            .expect("lock tenant for competing move");
+        crate::common::db::query(
+            "SELECT id FROM tenants WHERE id = $1 FOR UPDATE",
+            r#"SELECT id FROM tenants WHERE id = $1"#,
+        )
+        .locked()
+        .bind(tenant_id)
+        .fetch_one(&mut competing)
+        .await
+        .expect("lock tenant for competing move");
     }
 
     let mutation_pool = race_pool.clone();
@@ -425,12 +422,15 @@ async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
         "authorized mutation never reached the tenant-lock serialization point"
     );
 
-    atom::db::query("UPDATE entities SET tenant_id = $2 WHERE id = $1")
-        .bind(target)
-        .bind(concurrent_destination)
-        .execute(&mut competing)
-        .await
-        .expect("commit competing tenant move");
+    crate::common::db::query(
+        "UPDATE entities SET tenant_id = $2 WHERE id = $1",
+        r#"UPDATE entities SET tenant_id = $2 WHERE id = $1"#,
+    )
+    .bind(target)
+    .bind(concurrent_destination)
+    .execute(&mut competing)
+    .await
+    .expect("commit competing tenant move");
     competing.commit().await.expect("commit competing move");
 
     let error = tokio::time::timeout(std::time::Duration::from_secs(5), mutation)
@@ -442,12 +442,14 @@ async fn concurrent_tenant_move_invalidates_the_authorized_snapshot() {
         matches!(error, AppError::Conflict(ref message) if message.contains("changed after authorization")),
         "unexpected stale-snapshot error: {error}"
     );
-    let (tenant_id, name): (Option<Uuid>, String) =
-        atom::db::query_as("SELECT tenant_id, name FROM entities WHERE id = $1")
-            .bind(target)
-            .fetch_one(&pool)
-            .await
-            .expect("entity after racing moves");
+    let (tenant_id, name): (Option<Uuid>, String) = crate::common::db::query_as(
+        "SELECT tenant_id, name FROM entities WHERE id = $1",
+        r#"SELECT tenant_id, name FROM entities WHERE id = $1"#,
+    )
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .expect("entity after racing moves");
     assert_eq!(tenant_id, Some(concurrent_destination));
     assert_ne!(name, "must-not-commit-after-race");
 }
@@ -471,11 +473,15 @@ async fn concurrent_tenant_freeze_blocks_authorized_delete() {
     let application_name = format!("atom-entity-delete-race-{}", target.simple());
     let race_pool = race_pool(&application_name).await;
     let mut freezing = pool.begin().await.expect("begin concurrent freeze");
-    atom::db::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
-        .bind(tenant_id)
-        .fetch_one(&mut freezing)
-        .await
-        .expect("lock tenant for freeze");
+    crate::common::db::query(
+        "SELECT id FROM tenants WHERE id = $1 FOR UPDATE",
+        r#"SELECT id FROM tenants WHERE id = $1"#,
+    )
+    .locked()
+    .bind(tenant_id)
+    .fetch_one(&mut freezing)
+    .await
+    .expect("lock tenant for freeze");
 
     let mutation_pool = race_pool.clone();
     let deletion = tokio::spawn(async move {
@@ -496,11 +502,14 @@ async fn concurrent_tenant_freeze_blocks_authorized_delete() {
         wait_for_application_lock(&pool, &application_name).await,
         "authorized delete never reached the tenant-lock serialization point"
     );
-    atom::db::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
-        .bind(tenant_id)
-        .execute(&mut freezing)
-        .await
-        .expect("freeze tenant");
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'frozen' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'frozen' WHERE id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(&mut freezing)
+    .await
+    .expect("freeze tenant");
     freezing.commit().await.expect("commit concurrent freeze");
 
     let error = tokio::time::timeout(std::time::Duration::from_secs(5), deletion)
@@ -513,11 +522,14 @@ async fn concurrent_tenant_freeze_blocks_authorized_delete() {
         "unexpected frozen-tenant error: {error}"
     );
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        atom::db::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
-            .bind(target)
-            .fetch_one(&pool)
-            .await
-            .expect("entity after concurrent tenant freeze");
+        crate::common::db::query_as(
+            "SELECT status, deleted_at FROM entities WHERE id = $1",
+            r#"SELECT status, deleted_at FROM entities WHERE id = $1"#,
+        )
+        .bind(target)
+        .fetch_one(&pool)
+        .await
+        .expect("entity after concurrent tenant freeze");
     assert_eq!(status, "active");
     assert!(deleted_at.is_none());
 }
@@ -538,11 +550,9 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         }),
     )
     .await;
-    atom::db::query(
-        "UPDATE entities \
+    crate::common::db::query("UPDATE entities \
          SET profile_id = $2, profile_version_id = $3, attributes = $4 \
-         WHERE id = $1",
-    )
+         WHERE id = $1", r#"UPDATE entities SET profile_id = $2, profile_version_id = $3, attributes = $4 WHERE id = $1"#)
     .bind(target)
     .bind(old_profile_id)
     .bind(old_profile_version_id)
@@ -565,12 +575,14 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         &denied_update,
         "the owner's live grant must not exceed an empty token ceiling",
     );
-    let name_after_denied_update: String =
-        atom::db::query_scalar("SELECT name FROM entities WHERE id = $1")
-            .bind(target)
-            .fetch_one(&pool)
-            .await
-            .expect("entity name after ceiling denial");
+    let name_after_denied_update: String = crate::common::db::query_scalar(
+        "SELECT name FROM entities WHERE id = $1",
+        r#"SELECT name FROM entities WHERE id = $1"#,
+    )
+    .bind(target)
+    .fetch_one(&pool)
+    .await
+    .expect("entity name after ceiling denial");
     assert_ne!(name_after_denied_update, "outside-token-ceiling");
     let denied_delete = schema
         .execute(authed_scoped(
@@ -583,11 +595,14 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         "delete must also honor the scoped-token ceiling",
     );
     let deleted_at_after_denied_delete: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT deleted_at FROM entities WHERE id = $1")
-            .bind(target)
-            .fetch_one(&pool)
-            .await
-            .expect("entity tombstone after ceiling denial");
+        crate::common::db::query_scalar(
+            "SELECT deleted_at FROM entities WHERE id = $1",
+            r#"SELECT deleted_at FROM entities WHERE id = $1"#,
+        )
+        .bind(target)
+        .fetch_one(&pool)
+        .await
+        .expect("entity tombstone after ceiling denial");
     assert!(deleted_at_after_denied_delete.is_none());
 
     let (profile_id, profile_version_id) = entity_profile(
@@ -648,10 +663,8 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         Option<Uuid>,
         String,
         Value,
-    ) = atom::db::query_as(
-        "SELECT name, kind, alias, external_id, profile_id, profile_version_id, status, attributes \
-         FROM entities WHERE id = $1",
-    )
+    ) = crate::common::db::query_as("SELECT name, kind, alias, external_id, profile_id, profile_version_id, status, attributes \
+         FROM entities WHERE id = $1", r#"SELECT name, kind, alias, external_id, profile_id, profile_version_id, status, attributes FROM entities WHERE id = $1"#)
     .bind(target)
     .fetch_one(&pool)
     .await
@@ -677,11 +690,14 @@ async fn entity_mutations_enforce_token_ceiling_and_preserve_existing_fields() {
         authorized_delete.errors
     );
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        atom::db::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
-            .bind(target)
-            .fetch_one(&pool)
-            .await
-            .expect("deleted entity");
+        crate::common::db::query_as(
+            "SELECT status, deleted_at FROM entities WHERE id = $1",
+            r#"SELECT status, deleted_at FROM entities WHERE id = $1"#,
+        )
+        .bind(target)
+        .fetch_one(&pool)
+        .await
+        .expect("deleted entity");
     assert_eq!(status, "inactive");
     assert!(deleted_at.is_some());
 }

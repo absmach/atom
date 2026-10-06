@@ -63,9 +63,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
         .parse()
         .expect("authority UUID");
 
-    let audit_details: Value = atom::db::query_scalar(
-        "SELECT details FROM audit_logs WHERE event = 'pki.authority.provisioning_started' AND target_id = $1",
-    )
+    let audit_details: Value = crate::common::db::query_scalar("SELECT details FROM audit_logs WHERE event = 'pki.authority.provisioning_started' AND target_id = $1", r#"SELECT details FROM audit_logs WHERE event = 'pki.authority.provisioning_started' AND target_id = $1"#)
     .bind(authority_id)
     .fetch_one(&pool)
     .await
@@ -74,9 +72,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
     assert!(audit_details.get("csr_pem").is_none());
     assert!(audit_details.get("key_reference").is_none());
 
-    let outbox_payload: Value = atom::db::query_scalar(
-        "SELECT payload FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1",
-    )
+    let outbox_payload: Value = crate::common::db::query_scalar("SELECT payload FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1", r#"SELECT payload FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND atom_uuid((payload->>'target_id')) = $1"#)
     .bind(authority_id)
     .fetch_one(&pool)
     .await
@@ -115,9 +111,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
         authority_id.to_string()
     );
     assert_eq!(
-        atom::db::query_scalar::<i64>(
-            "SELECT count(*) FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1",
-        )
+        crate::common::db::query_scalar::<i64>("SELECT count(*) FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND (payload->>'target_id')::uuid = $1", r#"SELECT count(*) FROM event_outbox WHERE event = 'pki.authority.provisioning_started' AND atom_uuid((payload->>'target_id')) = $1"#)
         .bind(authority_id)
         .fetch_one(&pool)
         .await
@@ -126,9 +120,7 @@ async fn graphql_provisioning_writes_redacted_audit_and_outbox_events() {
         "an idempotent replay must not publish another lifecycle transition"
     );
     assert_eq!(
-        atom::db::query_scalar::<i64>(
-            "SELECT count(*) FROM audit_logs WHERE event = 'pki.authority.provisioning_replayed' AND target_id = $1",
-        )
+        crate::common::db::query_scalar::<i64>("SELECT count(*) FROM audit_logs WHERE event = 'pki.authority.provisioning_replayed' AND target_id = $1", r#"SELECT count(*) FROM audit_logs WHERE event = 'pki.authority.provisioning_replayed' AND target_id = $1"#)
         .bind(authority_id)
         .fetch_one(&pool)
         .await
@@ -160,12 +152,15 @@ async fn import_root(pool: &Database, pem: &str) {
 
 async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("{prefix}-{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("{prefix}-{id}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 

@@ -1,7 +1,9 @@
 //! Standalone Atom startup and coordinated shutdown.
 //!
-//! PostgreSQL owns durable application state. Each process recreates its pools,
+//! The configured database owns durable application state. Each process recreates its pools,
 //! keys and clients from the database and externally supplied configuration.
+
+mod storage;
 
 use anyhow::Context;
 use std::time::Duration;
@@ -450,25 +452,7 @@ async fn bootstrap_password_credentials(
     {
         anyhow::bail!("active {label} entity {entity_id} not found");
     }
-    let count: i64 = db::query_scalar(
-        "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'password' AND status = 'active'",
-    )
-    .bind(entity_id)
-    .fetch_one(tx.exec())
-    .await?;
-
-    let mut created = false;
-    if count == 0 {
-        db::query(
-            "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(entity_id)
-        .bind(hash)
-        .execute(tx.exec())
-        .await?;
-        created = true;
-    }
+    let created = storage::ensure_initial_password(&mut tx, entity_id, &hash).await?;
     tx.commit()
         .await
         .with_context(|| format!("failed to commit {label} password bootstrap"))?;

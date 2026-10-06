@@ -36,19 +36,25 @@ fn capability_config(name: &str, object_type: &str) -> BootstrapConfig {
 }
 
 async fn action_id(pool: &atom::db::Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("capability id lookup")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1",
+        r#"SELECT id FROM actions WHERE name = $1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("capability id lookup")
 }
 
 async fn managed_by(pool: &atom::db::Database, name: &str) -> Option<String> {
-    atom::db::query_scalar("SELECT managed_by FROM actions WHERE name = $1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("capability managed_by lookup")
+    crate::common::db::query_scalar(
+        "SELECT managed_by FROM actions WHERE name = $1",
+        r#"SELECT managed_by FROM actions WHERE name = $1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("capability managed_by lookup")
 }
 
 #[tokio::test]
@@ -66,7 +72,11 @@ async fn capability_bootstrap_stamps_managed_by_config() {
 
     assert_eq!(managed_by(&p, &name).await.as_deref(), Some("config"));
 
-    let app_managed: Option<String> = atom::db::query_scalar(
+    let app_managed: Option<String> = crate::common::db::query_scalar(
+        r#"SELECT ca.managed_by
+             FROM action_applicability ca
+             JOIN actions a ON a.id = ca.action_id
+            WHERE a.name = $1 AND ca.object_type = $2"#,
         r#"SELECT ca.managed_by
              FROM action_applicability ca
              JOIN actions a ON a.id = ca.action_id
@@ -92,14 +102,21 @@ async fn capability_bootstrap_is_idempotent() {
     apply(&p, &signing_keys, &cfg).await.expect("first apply");
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
-    let count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM actions WHERE name = $1")
-        .bind(&name)
-        .fetch_one(&p)
-        .await
-        .expect("count capabilities");
+    let count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM actions WHERE name = $1",
+        r#"SELECT COUNT(*) FROM actions WHERE name = $1"#,
+    )
+    .bind(&name)
+    .fetch_one(&p)
+    .await
+    .expect("count capabilities");
     assert_eq!(count, 1);
 
-    let app_count: i64 = atom::db::query_scalar(
+    let app_count: i64 = crate::common::db::query_scalar(
+        r#"SELECT COUNT(*)
+             FROM action_applicability ca
+             JOIN actions a ON a.id = ca.action_id
+            WHERE a.name = $1"#,
         r#"SELECT COUNT(*)
              FROM action_applicability ca
              JOIN actions a ON a.id = ca.action_id
@@ -236,7 +253,11 @@ async fn assignment_rule_bootstrap_stamps_managed_by_and_guards_delete() {
         .await
         .expect("apply bootstrap");
 
-    let (rule_id, rule_managed_by): (Uuid, Option<String>) = atom::db::query_as(
+    let (rule_id, rule_managed_by): (Uuid, Option<String>) = crate::common::db::query_as(
+        r#"SELECT id, managed_by
+             FROM action_assignment_rules
+            WHERE entity_kind = 'device'
+              AND action_name = $1"#,
         r#"SELECT id, managed_by
              FROM action_assignment_rules
             WHERE entity_kind = 'device'

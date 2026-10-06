@@ -54,7 +54,18 @@ async fn create_test_tenant(pool: &atom::db::Database) -> Uuid {
 }
 
 async fn tenant_admin_has(pool: &atom::db::Database, tenant_id: Uuid, capability: &str) -> bool {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
+        r#"SELECT EXISTS (
+               SELECT 1
+               FROM roles r
+               JOIN role_permission_blocks rpb ON rpb.role_id = r.id
+               JOIN permission_block_actions pba
+                 ON pba.permission_block_id = rpb.permission_block_id
+               JOIN actions a ON a.id = pba.action_id
+               WHERE r.tenant_id = $1
+                 AND r.managed_by = 'system:tenant-admin'
+                 AND a.name = $2
+           )"#,
         r#"SELECT EXISTS (
                SELECT 1
                FROM roles r
@@ -95,7 +106,13 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
         .expect("idempotent reapply");
     assert!(tenant_admin_has(&pool, existing_tenant, &capability).await);
 
-    let shared_block: Uuid = atom::db::query_scalar(
+    let shared_block: Uuid = crate::common::db::query_scalar(
+        r#"SELECT rpb.permission_block_id
+           FROM roles r
+           JOIN role_permission_blocks rpb ON rpb.role_id = r.id
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           WHERE r.tenant_id = $1 AND r.managed_by = 'system:tenant-admin'
+             AND pb.managed_by = 'system:tenant-admin'"#,
         r#"SELECT rpb.permission_block_id
            FROM roles r
            JOIN role_permission_blocks rpb ON rpb.role_id = r.id
@@ -108,15 +125,19 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
     .await
     .expect("system tenant-admin block");
     let other_role = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(other_role)
-        .bind(format!("shared-block-role-{}", Uuid::new_v4()))
-        .bind(existing_tenant)
-        .execute(&pool)
-        .await
-        .expect("create role sharing old block");
-    atom::db::query(
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(other_role)
+    .bind(format!("shared-block-role-{}", Uuid::new_v4()))
+    .bind(existing_tenant)
+    .execute(&pool)
+    .await
+    .expect("create role sharing old block");
+    crate::common::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)"#,
     )
     .bind(other_role)
     .bind(shared_block)
@@ -130,7 +151,12 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
         .expect("replace tenant defaults");
     assert!(tenant_admin_has(&pool, existing_tenant, &replacement_capability).await);
     assert!(!tenant_admin_has(&pool, existing_tenant, &capability).await);
-    let shared_block_gained_replacement: bool = atom::db::query_scalar(
+    let shared_block_gained_replacement: bool = crate::common::db::query_scalar(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM permission_block_actions pba
+               JOIN actions a ON a.id = pba.action_id
+               WHERE pba.permission_block_id = $1 AND a.name = $2
+           )"#,
         r#"SELECT EXISTS (
                SELECT 1 FROM permission_block_actions pba
                JOIN actions a ON a.id = pba.action_id
@@ -200,7 +226,12 @@ async fn tenant_admin_defaults_are_safe_and_idempotent() {
     apply(&pool, &signing_keys, &denied_cfg)
         .await
         .expect("install tenant-admin default");
-    atom::db::query(
+    crate::common::db::query(
+        r#"
+        INSERT INTO action_assignment_rules
+            (entity_kind, action_name, object_kind, decision, is_absolute)
+        VALUES ('human', $1, 'tenant', 'deny', false)
+        "#,
         r#"
         INSERT INTO action_assignment_rules
             (entity_kind, action_name, object_kind, decision, is_absolute)

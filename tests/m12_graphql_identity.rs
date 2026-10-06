@@ -87,13 +87,16 @@ fn authed_scoped_with_credential(
 
 async fn entity(pool: &Database, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("graphql-identity-{kind}-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert entity");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("graphql-identity-{kind}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert entity");
     id
 }
 
@@ -381,16 +384,23 @@ async fn access_tokens_are_self_scoped_with_permission_ceiling() {
     assert_eq!(pat["name"], name);
 
     let (kind, scoped, status): (CredentialKind, bool, CredentialStatus) =
-        atom::db::query_as("SELECT kind, scoped, status FROM credentials WHERE id = $1")
-            .bind(credential_id)
-            .fetch_one(&pool)
-            .await
-            .expect("credential row");
+        crate::common::db::query_as(
+            "SELECT kind, scoped, status FROM credentials WHERE id = $1",
+            r#"SELECT kind, scoped, status FROM credentials WHERE id = $1"#,
+        )
+        .bind(credential_id)
+        .fetch_one(&pool)
+        .await
+        .expect("credential row");
     assert_eq!(kind, CredentialKind::AccessToken);
     assert!(scoped);
     assert_eq!(status, CredentialStatus::Active);
 
-    let limit_actions: i64 = atom::db::query_scalar(
+    let limit_actions: i64 = crate::common::db::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM credential_permission_limits l
+           JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+           WHERE l.credential_id = $1"#,
         r#"SELECT COUNT(*)
            FROM credential_permission_limits l
            JOIN credential_permission_limit_actions la ON la.limit_id = l.id
@@ -476,7 +486,9 @@ async fn access_token_ceiling_intersects_owner_grants() {
 
     // Owner gets read+manage on the object via a direct policy permission block.
     let block_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO permission_blocks (id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'allow')"#,
         r#"INSERT INTO permission_blocks (id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow')"#,
     )
@@ -486,7 +498,9 @@ async fn access_token_ceiling_intersects_owner_grants() {
     .await
     .expect("insert block");
     for action in ["read", "manage"] {
-        atom::db::query(
+        crate::common::db::query(
+            r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+               SELECT $1, id FROM actions WHERE name = $2"#,
             r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
                SELECT $1, id FROM actions WHERE name = $2"#,
         )
@@ -496,7 +510,9 @@ async fn access_token_ceiling_intersects_owner_grants() {
         .await
         .expect("insert block action");
     }
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
+           VALUES ('entity', $1, $2)"#,
         r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
            VALUES ('entity', $1, $2)"#,
     )
@@ -604,11 +620,14 @@ async fn access_token_ceiling_intersects_owner_grants() {
     .unwrap());
 
     // Remove the owner's grant: the token's access disappears immediately.
-    atom::db::query("DELETE FROM direct_policies WHERE subject_id = $1")
-        .bind(owner_id)
-        .execute(&pool)
-        .await
-        .expect("delete policy");
+    crate::common::db::query(
+        "DELETE FROM direct_policies WHERE subject_id = $1",
+        r#"DELETE FROM direct_policies WHERE subject_id = $1"#,
+    )
+    .bind(owner_id)
+    .execute(&pool)
+    .await
+    .expect("delete policy");
     assert!(
         !engine::evaluate_with_ceiling(&pool, &read_req, Some(&ceiling))
             .await
@@ -629,27 +648,21 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
 
     // Owner holds read+manage on the object.
     let block_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')",
-    )
+    crate::common::db::query("INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')", r#"INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')"#)
     .bind(block_id)
     .bind(object)
     .execute(&pool)
     .await
     .expect("block");
     for action in ["read", "manage"] {
-        atom::db::query(
-            "INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = $2",
-        )
+        crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = $2", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = $2"#)
         .bind(block_id)
         .bind(action)
         .execute(&pool)
         .await
         .expect("block action");
     }
-    atom::db::query(
-        "INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)",
-    )
+    crate::common::db::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)", r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)"#)
     .bind(owner)
     .bind(block_id)
     .execute(&pool)
@@ -660,24 +673,18 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
     // set is {object, second_object}, the ceiling covers only {object}.
     let second_object = entity(&pool, "device").await;
     let second_block_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')",
-    )
+    crate::common::db::query("INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')", r#"INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')"#)
     .bind(second_block_id)
     .bind(second_object)
     .execute(&pool)
     .await
     .expect("second block");
-    atom::db::query(
-        "INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'",
-    )
+    crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'read'"#)
     .bind(second_block_id)
     .execute(&pool)
     .await
     .expect("second block action");
-    atom::db::query(
-        "INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)",
-    )
+    crate::common::db::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)", r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)"#)
     .bind(owner)
     .bind(second_block_id)
     .execute(&pool)
@@ -728,9 +735,7 @@ async fn scoped_token_cannot_manage_credentials_or_escalate_self_check() {
         "scoped token must not widen ceilings"
     );
     // Ceiling rows unchanged (still read-only).
-    let actions: Vec<String> = atom::db::query_scalar(
-        "SELECT a.name FROM credential_permission_limits l JOIN credential_permission_limit_actions la ON la.limit_id = l.id JOIN actions a ON a.id = la.action_id WHERE l.credential_id = $1",
-    )
+    let actions: Vec<String> = crate::common::db::query_scalar("SELECT a.name FROM credential_permission_limits l JOIN credential_permission_limit_actions la ON la.limit_id = l.id JOIN actions a ON a.id = la.action_id WHERE l.credential_id = $1", r#"SELECT a.name FROM credential_permission_limits l JOIN credential_permission_limit_actions la ON la.limit_id = l.id JOIN actions a ON a.id = la.action_id WHERE l.credential_id = $1"#)
     .bind(cred_id)
     .fetch_all(&pool)
     .await
@@ -986,7 +991,12 @@ async fn replace_access_token_permissions_is_owner_only_and_non_empty() {
         .await;
     assert!(replaced.errors.is_empty(), "{:?}", replaced.errors);
 
-    let actions: Vec<String> = atom::db::query_scalar(
+    let actions: Vec<String> = crate::common::db::query_scalar(
+        r#"SELECT a.name
+           FROM credential_permission_limits l
+           JOIN credential_permission_limit_actions la ON la.limit_id = l.id
+           JOIN actions a ON a.id = la.action_id
+           WHERE l.credential_id = $1"#,
         r#"SELECT a.name
            FROM credential_permission_limits l
            JOIN credential_permission_limit_actions la ON la.limit_id = l.id
@@ -1024,9 +1034,7 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
         .message
         .contains("cannot be created for human entities"));
 
-    let direct_human_insert = atom::db::query(
-        "INSERT INTO credentials (entity_id, kind, secret_hash) VALUES ($1, 'shared_key', 'hash')",
-    )
+    let direct_human_insert = crate::common::db::query("INSERT INTO credentials (entity_id, kind, secret_hash) VALUES ($1, 'shared_key', 'hash')", r#"INSERT INTO credentials (entity_id, kind, secret_hash) VALUES ($1, 'shared_key', 'hash')"#)
     .bind(human_id)
     .execute(&pool)
     .await;
@@ -1064,9 +1072,7 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
         serde_json::Value,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
-    ) = atom::db::query_as(
-        "SELECT secret_hash, metadata, secret_ciphertext, secret_lookup_hash FROM credentials WHERE id = $1",
-    )
+    ) = crate::common::db::query_as("SELECT secret_hash, metadata, secret_ciphertext, secret_lookup_hash FROM credentials WHERE id = $1", r#"SELECT secret_hash, metadata, secret_ciphertext, secret_lookup_hash FROM credentials WHERE id = $1"#)
     .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
     .fetch_one(&pool)
     .await
@@ -1078,10 +1084,13 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     assert!(!ciphertext.windows(key.len()).any(|w| w == key.as_bytes()));
     assert_eq!(lookup_hash.expect("lookup hash stored").len(), 32);
 
-    let device_kind_change = atom::db::query("UPDATE entities SET kind = 'human' WHERE id = $1")
-        .bind(device_id)
-        .execute(&pool)
-        .await;
+    let device_kind_change = crate::common::db::query(
+        "UPDATE entities SET kind = 'human' WHERE id = $1",
+        r#"UPDATE entities SET kind = 'human' WHERE id = $1"#,
+    )
+    .bind(device_id)
+    .execute(&pool)
+    .await;
     let db_err = device_kind_change
         .expect_err("DB constraint should reject changing a shared-key device to non-device");
     assert!(atom::error::is_check_violation(&db_err));
@@ -1134,10 +1143,8 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
     );
 
     // Revealing secret material must leave a durable compliance record.
-    let reveal_audit: serde_json::Value = atom::db::query_scalar(
-        "SELECT details FROM audit_logs WHERE event = 'credential.reveal' \
-         AND target_id = $1 AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1",
-    )
+    let reveal_audit: serde_json::Value = crate::common::db::query_scalar("SELECT details FROM audit_logs WHERE event = 'credential.reveal' \
+         AND target_id = $1 AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1", r#"SELECT details FROM audit_logs WHERE event = 'credential.reveal' AND target_id = $1 AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1"#)
     .bind(device_id)
     .fetch_one(&pool)
     .await
@@ -1181,9 +1188,12 @@ async fn shared_key_can_be_created_revealed_and_used_for_authentication() {
 
     // Tampering with the stored ciphertext must surface as an unrecoverable key
     // rather than returning a wrong secret.
-    atom::db::query(
+    crate::common::db::query(
         r#"UPDATE credentials
            SET secret_ciphertext = decode(md5(random()::text), 'hex')
+           WHERE id = $1"#,
+        r#"UPDATE credentials
+           SET secret_ciphertext = unhex(md5(random()))
            WHERE id = $1"#,
     )
     .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
@@ -1240,8 +1250,9 @@ async fn arbitrary_shared_key_uses_indexed_lookup_and_explicit_kind() {
     assert_eq!(created_json["createSharedKey"]["key"], manual_key);
 
     let (stored_hash, lookup_hash, metadata): (String, Option<Vec<u8>>, serde_json::Value) =
-        atom::db::query_as(
+        crate::common::db::query_as(
             "SELECT secret_hash, secret_lookup_hash, metadata FROM credentials WHERE id = $1",
+            r#"SELECT secret_hash, secret_lookup_hash, metadata FROM credentials WHERE id = $1"#,
         )
         .bind(credential_id.parse::<Uuid>().expect("credential uuid"))
         .fetch_one(&pool)
@@ -1421,24 +1432,18 @@ async fn delegated_access_token_mint_requires_manage_and_unscoped_caller() {
 
     // `manager` holds manage on the target so it may manage the target's credentials.
     let block_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')",
-    )
+    crate::common::db::query("INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')", r#"INSERT INTO permission_blocks (id, scope_mode, object_id, effect) VALUES ($1, 'object', $2, 'allow')"#)
     .bind(block_id)
     .bind(target)
     .execute(&pool)
     .await
     .expect("block");
-    atom::db::query(
-        "INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'manage'",
-    )
+    crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'manage'", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) SELECT $1, id FROM actions WHERE name = 'manage'"#)
     .bind(block_id)
     .execute(&pool)
     .await
     .expect("block action");
-    atom::db::query(
-        "INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)",
-    )
+    crate::common::db::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)", r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)"#)
     .bind(manager)
     .bind(block_id)
     .execute(&pool)
@@ -1462,12 +1467,14 @@ async fn delegated_access_token_mint_requires_manage_and_unscoped_caller() {
         .parse::<Uuid>()
         .expect("uuid");
     // Credential is owned by the target, and scoped.
-    let (owner, scoped): (Uuid, bool) =
-        atom::db::query_as("SELECT entity_id, scoped FROM credentials WHERE id = $1")
-            .bind(cred_id)
-            .fetch_one(&pool)
-            .await
-            .expect("credential");
+    let (owner, scoped): (Uuid, bool) = crate::common::db::query_as(
+        "SELECT entity_id, scoped FROM credentials WHERE id = $1",
+        r#"SELECT entity_id, scoped FROM credentials WHERE id = $1"#,
+    )
+    .bind(cred_id)
+    .fetch_one(&pool)
+    .await
+    .expect("credential");
     assert_eq!(owner, target, "delegated token must be owned by the target");
     assert!(scoped);
 
@@ -1536,14 +1543,18 @@ async fn unscoped_access_token_carries_owner_authority() {
         .to_string();
 
     // Persisted unscoped, with zero ceiling rows.
-    let scoped: bool = atom::db::query_scalar("SELECT scoped FROM credentials WHERE id = $1")
-        .bind(cred_id)
-        .fetch_one(&pool)
-        .await
-        .expect("scoped");
+    let scoped: bool = crate::common::db::query_scalar(
+        "SELECT scoped FROM credentials WHERE id = $1",
+        r#"SELECT scoped FROM credentials WHERE id = $1"#,
+    )
+    .bind(cred_id)
+    .fetch_one(&pool)
+    .await
+    .expect("scoped");
     assert!(!scoped, "token must persist as unscoped");
-    let ceiling_rows: i64 = atom::db::query_scalar(
+    let ceiling_rows: i64 = crate::common::db::query_scalar(
         "SELECT count(*) FROM credential_permission_limits WHERE credential_id = $1",
+        r#"SELECT count(*) FROM credential_permission_limits WHERE credential_id = $1"#,
     )
     .bind(cred_id)
     .fetch_one(&pool)
@@ -1610,12 +1621,14 @@ async fn access_token_verifier_hmac_and_argon2_fallback() {
     )
     .await
     .expect("mint without KEK");
-    let (hash, lookup): (Option<String>, Option<Vec<u8>>) =
-        atom::db::query_as("SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1")
-            .bind(fallback.credential_id)
-            .fetch_one(&pool)
-            .await
-            .expect("row");
+    let (hash, lookup): (Option<String>, Option<Vec<u8>>) = crate::common::db::query_as(
+        "SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1",
+        r#"SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1"#,
+    )
+    .bind(fallback.credential_id)
+    .fetch_one(&pool)
+    .await
+    .expect("row");
     assert!(hash.is_some(), "no-KEK mint must store an argon2 hash");
     assert!(
         lookup.is_none(),
@@ -1636,12 +1649,14 @@ async fn access_token_verifier_hmac_and_argon2_fallback() {
     )
     .await
     .expect("mint with KEK");
-    let (hash, lookup): (Option<String>, Option<Vec<u8>>) =
-        atom::db::query_as("SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1")
-            .bind(hmac_minted.credential_id)
-            .fetch_one(&pool)
-            .await
-            .expect("row");
+    let (hash, lookup): (Option<String>, Option<Vec<u8>>) = crate::common::db::query_as(
+        "SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1",
+        r#"SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1"#,
+    )
+    .bind(hmac_minted.credential_id)
+    .fetch_one(&pool)
+    .await
+    .expect("row");
     assert!(hash.is_none(), "KEK mint must not store an argon2 hash");
     assert!(lookup.is_some(), "KEK mint must store the keyed digest");
     let ctx = authenticate_token(&app_state, &hmac_minted.token)
@@ -1690,16 +1705,17 @@ async fn create_access_token_rejects_past_expiry() {
 async fn delegated_mint_audit_row_carries_owner_tenant() {
     let pool = common::pool().await;
     let tenant_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(tenant_id)
-        .bind(format!("audit-tenant-{tenant_id}"))
-        .execute(&pool)
-        .await
-        .expect("tenant");
-    let owner = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, status, tenant_id) VALUES ($1, 'service', $2, 'active', $3)",
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
     )
+    .bind(tenant_id)
+    .bind(format!("audit-tenant-{tenant_id}"))
+    .execute(&pool)
+    .await
+    .expect("tenant");
+    let owner = Uuid::new_v4();
+    crate::common::db::query("INSERT INTO entities (id, kind, name, status, tenant_id) VALUES ($1, 'service', $2, 'active', $3)", r#"INSERT INTO entities (id, kind, name, status, tenant_id) VALUES ($1, 'service', $2, 'active', $3)"#)
     .bind(owner)
     .bind(format!("audit-owner-{owner}"))
     .bind(tenant_id)
@@ -1720,7 +1736,10 @@ async fn delegated_mint_audit_row_carries_owner_tenant() {
         .parse::<Uuid>()
         .expect("uuid");
 
-    let audit_tenant: Option<Uuid> = atom::db::query_scalar(
+    let audit_tenant: Option<Uuid> = crate::common::db::query_scalar(
+        r#"SELECT tenant_id FROM audit_logs
+           WHERE target_id = $1 AND event = 'credential.create'
+           ORDER BY created_at DESC LIMIT 1"#,
         r#"SELECT tenant_id FROM audit_logs
            WHERE target_id = $1 AND event = 'credential.create'
            ORDER BY created_at DESC LIMIT 1"#,
@@ -1767,12 +1786,14 @@ async fn argon2_access_token_upgrades_to_hmac_on_use() {
         .expect("argon2 token authenticates");
     assert_eq!(ctx.entity_id, owner);
 
-    let (hash, lookup): (Option<String>, Option<Vec<u8>>) =
-        atom::db::query_as("SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1")
-            .bind(minted.credential_id)
-            .fetch_one(&pool)
-            .await
-            .expect("row");
+    let (hash, lookup): (Option<String>, Option<Vec<u8>>) = crate::common::db::query_as(
+        "SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1",
+        r#"SELECT secret_hash, secret_lookup_hash FROM credentials WHERE id = $1"#,
+    )
+    .bind(minted.credential_id)
+    .fetch_one(&pool)
+    .await
+    .expect("row");
     assert!(
         lookup.is_some(),
         "first use with a KEK must store the keyed digest"
@@ -1814,8 +1835,9 @@ async fn access_token_authentication_stamps_last_used_at() {
     .expect("mint");
 
     let last_used = |pool: Database, id: Uuid| async move {
-        atom::db::query_scalar::<Option<chrono::DateTime<chrono::Utc>>>(
+        crate::common::db::query_scalar::<Option<chrono::DateTime<chrono::Utc>>>(
             "SELECT last_used_at FROM credentials WHERE id = $1",
+            r#"SELECT last_used_at FROM credentials WHERE id = $1"#,
         )
         .bind(id)
         .fetch_one(&pool)
@@ -1939,8 +1961,9 @@ async fn admin_lists_and_manages_delegated_tokens() {
     );
     let replaced = schema.execute(authed(replace_mutation.clone())).await;
     assert!(replaced.errors.is_empty(), "{:?}", replaced.errors);
-    let scope_modes: Vec<String> = atom::db::query_scalar(
+    let scope_modes: Vec<String> = crate::common::db::query_scalar(
         "SELECT scope_mode FROM credential_permission_limits WHERE credential_id = $1",
+        r#"SELECT scope_mode FROM credential_permission_limits WHERE credential_id = $1"#,
     )
     .bind(cred_id.parse::<Uuid>().expect("uuid"))
     .fetch_all(&pool)
@@ -1972,13 +1995,19 @@ async fn admin_lists_and_manages_delegated_tokens() {
         )))
         .await;
     assert!(revoked.errors.is_empty(), "{:?}", revoked.errors);
-    let status: String = atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
-        .bind(cred_id.parse::<Uuid>().expect("uuid"))
-        .fetch_one(&pool)
-        .await
-        .expect("credential");
+    let status: String = crate::common::db::query_scalar(
+        "SELECT status FROM credentials WHERE id = $1",
+        r#"SELECT status FROM credentials WHERE id = $1"#,
+    )
+    .bind(cred_id.parse::<Uuid>().expect("uuid"))
+    .fetch_one(&pool)
+    .await
+    .expect("credential");
     assert_eq!(status, "revoked");
-    let delegated: serde_json::Value = atom::db::query_scalar(
+    let delegated: serde_json::Value = crate::common::db::query_scalar(
+        r#"SELECT details FROM audit_logs
+           WHERE target_id = $1 AND event = 'credential.revoke'
+           ORDER BY created_at DESC LIMIT 1"#,
         r#"SELECT details FROM audit_logs
            WHERE target_id = $1 AND event = 'credential.revoke'
            ORDER BY created_at DESC LIMIT 1"#,

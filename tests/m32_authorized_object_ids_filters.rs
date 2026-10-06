@@ -59,18 +59,23 @@ fn authed_scoped(
 
 async fn make_tenant(pool: &Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("{name}-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("{name}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn make_entity(pool: &Database, tenant_id: Uuid, attributes: Value) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
+           VALUES ($1, 'device', $2, $3, 'active', $4)"#,
         r#"INSERT INTO entities (id, kind, name, tenant_id, status, attributes)
            VALUES ($1, 'device', $2, $3, 'active', $4)"#,
     )
@@ -86,19 +91,24 @@ async fn make_entity(pool: &Database, tenant_id: Uuid, attributes: Value) -> Uui
 
 async fn make_object_group(pool: &Database, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(id)
-        .bind(format!("m32-{name}-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert object group");
+    crate::common::db::query(
+        "INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(id)
+    .bind(format!("m32-{name}-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert object group");
     id
 }
 
 /// Object-scoped `read` allow for `subject_id` on one entity.
 async fn grant_read(pool: &Database, tenant_id: Uuid, subject_id: Uuid, object_id: Uuid) {
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
     )
@@ -107,7 +117,9 @@ async fn grant_read(pool: &Database, tenant_id: Uuid, subject_id: Uuid, object_i
     .fetch_one(pool)
     .await
     .expect("insert read block");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+           SELECT $1, id FROM actions WHERE name = 'read'"#,
         r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            SELECT $1, id FROM actions WHERE name = 'read'"#,
     )
@@ -115,7 +127,9 @@ async fn grant_read(pool: &Database, tenant_id: Uuid, subject_id: Uuid, object_i
     .execute(pool)
     .await
     .expect("insert read action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -225,9 +239,7 @@ async fn include_descendants_walks_the_tree_only_when_set() {
     let subject_id = make_entity(&pool, tenant_id, json!({})).await;
     let parent = make_object_group(&pool, tenant_id, "parent").await;
     let child = make_object_group(&pool, tenant_id, "child").await;
-    atom::db::query(
-        "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
-    )
+    crate::common::db::query("INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)", r#"INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)"#)
     .bind(parent)
     .bind(child)
     .bind(tenant_id)
@@ -440,12 +452,15 @@ async fn external_id_and_entity_status_also_narrow() {
     let subject_id = make_entity(&pool, tenant_id, json!({})).await;
     let serial = format!("SN-{}", Uuid::new_v4());
     let matching = make_entity(&pool, tenant_id, json!({})).await;
-    atom::db::query("UPDATE entities SET external_id = $1 WHERE id = $2")
-        .bind(&serial)
-        .bind(matching)
-        .execute(&pool)
-        .await
-        .expect("set external_id");
+    crate::common::db::query(
+        "UPDATE entities SET external_id = $1 WHERE id = $2",
+        r#"UPDATE entities SET external_id = $1 WHERE id = $2"#,
+    )
+    .bind(&serial)
+    .bind(matching)
+    .execute(&pool)
+    .await
+    .expect("set external_id");
     let other = make_entity(&pool, tenant_id, json!({})).await;
     grant_read(&pool, tenant_id, subject_id, matching).await;
     grant_read(&pool, tenant_id, subject_id, other).await;

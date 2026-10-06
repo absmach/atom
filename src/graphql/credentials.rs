@@ -540,17 +540,9 @@ async fn credential_tenant_id(
     entity_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<Uuid>> {
-    let tenant_id = crate::db::query_scalar::<Option<Uuid>>(
-        "SELECT e.tenant_id FROM credentials c JOIN entities e ON e.id = c.entity_id WHERE c.id = $1 AND c.entity_id = $2",
-    )
-    .bind(credential_id)
-    .bind(entity_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(crate::error::AppError::Database)
-    .map_err(gql_error)?
-    .ok_or_else(|| async_graphql::Error::new("credential not found"))?;
-    Ok(tenant_id)
+    crate::identity::repo::credential_tenant_id(pool, entity_id, credential_id)
+        .await
+        .map_err(gql_error)
 }
 
 fn permission_input_into_model(

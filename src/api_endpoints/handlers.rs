@@ -373,30 +373,17 @@ async fn execution_auth_context(
             let service_entity_id = endpoint.service_entity_id.ok_or_else(|| {
                 AppError::bad_request("service_context endpoint has no service entity")
             })?;
-            let row = crate::db::query(
-                r#"SELECT e.tenant_id, e.status AS entity_status, t.status AS tenant_status
-                   FROM entities e
-                   LEFT JOIN tenants t ON t.id = e.tenant_id
-                   WHERE e.id = $1"#,
-            )
-            .bind(service_entity_id)
-            .fetch_one(state.pool())
-            .await
-            .map_err(crate::error::db_err)?;
-            let entity_status: crate::models::enums::EntityStatus =
-                row.try_get("entity_status").map_err(crate::error::db_err)?;
-            if entity_status != crate::models::enums::EntityStatus::Active {
+            let identity =
+                api_endpoint_repo::service_identity(state.pool(), service_entity_id).await?;
+            if identity.entity_status != crate::models::enums::EntityStatus::Active {
                 return Err(AppError::Forbidden);
             }
-            if let Some(tenant_status) = row
-                .try_get::<Option<crate::models::enums::TenantStatus>, _>("tenant_status")
-                .unwrap_or(None)
-            {
+            if let Some(tenant_status) = identity.tenant_status {
                 if tenant_status != crate::models::enums::TenantStatus::Active {
                     return Err(AppError::Forbidden);
                 }
             }
-            let tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
+            let tenant_id = identity.tenant_id;
             Ok(AuthContext {
                 entity_id: service_entity_id,
                 tenant_id,

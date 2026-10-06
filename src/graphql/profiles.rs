@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthContext,
-    error::{db_err, AppError},
+    error::AppError,
     identity::profile_repo,
     models::profile::{
         CreateProfile, CreateProfileVersion, ListProfiles, UpdateProfile, UpdateProfileVersion,
@@ -69,7 +69,7 @@ impl ProfileQuery {
         require_profile_target_access(
             state.pool(),
             &auth,
-            profile_tenant_target(state.pool(), id)
+            profile_repo::profile_tenant_target(state.pool(), id)
                 .await
                 .map_err(gql_error)?,
             id,
@@ -95,7 +95,7 @@ impl ProfileQuery {
         require_profile_target_access(
             state.pool(),
             &auth,
-            profile_tenant_target(state.pool(), profile_id)
+            profile_repo::profile_tenant_target(state.pool(), profile_id)
                 .await
                 .map_err(gql_error)?,
             profile_id,
@@ -181,7 +181,7 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let profile_id = parse_id(profile_id, "profileId")?;
-        let target = profile_tenant_target(state.pool(), profile_id)
+        let target = profile_repo::profile_tenant_target(state.pool(), profile_id)
             .await
             .map_err(gql_error)?;
         let tenant_id = target.flatten();
@@ -241,7 +241,7 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let target = profile_tenant_target(state.pool(), id)
+        let target = profile_repo::profile_tenant_target(state.pool(), id)
             .await
             .map_err(gql_error)?;
         let tenant_id = target.flatten();
@@ -303,7 +303,7 @@ impl ProfileMutation {
         let auth = require_auth(ctx)?;
         let state = ctx.data::<AppState>()?;
         let id = parse_id(id, "id")?;
-        let target = profile_version_tenant_target(state.pool(), id)
+        let target = profile_repo::profile_version_tenant_target(state.pool(), id)
             .await
             .map_err(gql_error)?;
         let tenant_id = target.and_then(|(_, tenant_id)| tenant_id);
@@ -355,37 +355,6 @@ impl ProfileMutation {
 
         result.map(Into::into).map_err(gql_error)
     }
-}
-
-/// Resolve only the tenant boundary needed for the non-exact profile gate.
-/// The caller must pass the outer `Option` to `require_profile_target_access`
-/// before returning a row or a not-found error, so an unauthorized caller
-/// cannot distinguish a missing id from a profile in another tenant.
-async fn profile_tenant_target(
-    pool: &Database,
-    id: Uuid,
-) -> std::result::Result<Option<Option<Uuid>>, AppError> {
-    crate::db::query_scalar("SELECT tenant_id FROM profiles WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_err)
-}
-
-async fn profile_version_tenant_target(
-    pool: &Database,
-    id: Uuid,
-) -> std::result::Result<Option<(Uuid, Option<Uuid>)>, AppError> {
-    crate::db::query_as(
-        r#"SELECT version.profile_id, profile.tenant_id
-           FROM profile_versions version
-           JOIN profiles profile ON profile.id = version.profile_id
-           WHERE version.id = $1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)
 }
 
 async fn require_profile_target_access(

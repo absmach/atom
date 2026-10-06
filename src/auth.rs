@@ -1,3 +1,5 @@
+mod repository;
+
 use crate::db::Database;
 use axum::{
     async_trait,
@@ -18,11 +20,9 @@ use crate::{
         },
         keys as cache_keys, CacheCategory, Lookup,
     },
-    error::{db_err, AppError},
+    error::AppError,
     keys::{ActiveKeys, LoadedKey},
-    models::enums::{
-        CredentialKind, CredentialStatus, Effect, EntityStatus, ScopeKind, TenantStatus,
-    },
+    models::enums::{CredentialStatus, Effect, EntityStatus, ScopeKind, TenantStatus},
     state::AppState,
 };
 
@@ -284,48 +284,7 @@ async fn load_session_entity_tenant(
     session_id: Uuid,
     entity_id: Uuid,
 ) -> Result<SessionEntityTenantSnapshot, AppError> {
-    let row = crate::db::query(
-        r#"SELECT s.revoked_at,
-                  s.expires_at,
-                  e.tenant_id,
-                  e.status AS entity_status,
-                  t.status AS tenant_status
-           FROM sessions s
-           JOIN entities e ON e.id = s.entity_id
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE s.id = $1 AND s.entity_id = $2
-             AND e.deleted_at IS NULL
-             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
-    )
-    .bind(session_id)
-    .bind(entity_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::unauthorized("session not found"),
-        other => AppError::Database(other),
-    })?;
-
-    let revoked_at: Option<chrono::DateTime<Utc>> = row.try_get("revoked_at").unwrap_or(None);
-    let expires_at: chrono::DateTime<Utc> = row
-        .try_get("expires_at")
-        .map_err(|_| AppError::unauthorized("corrupt session"))?;
-    let entity_status: EntityStatus = row
-        .try_get("entity_status")
-        .map_err(|_| AppError::unauthorized("corrupt entity"))?;
-    let entity_tenant_id: Option<Uuid> = row.try_get("tenant_id").unwrap_or(None);
-    let tenant_status: Option<TenantStatus> = row
-        .try_get::<Option<TenantStatus>, _>("tenant_status")
-        .unwrap_or(None);
-
-    Ok(SessionEntityTenantSnapshot {
-        session_entity_id: entity_id,
-        revoked_at,
-        expires_at,
-        entity_tenant_id,
-        entity_status,
-        tenant_status,
-    })
+    repository::load_session_entity_tenant(pool, session_id, entity_id).await
 }
 
 /// The one canonical set of deny checks for JWT/session authentication —
@@ -579,49 +538,7 @@ async fn load_credential_row(
     pool: &Database,
     cred_id: Uuid,
 ) -> Result<CredentialSnapshot, AppError> {
-    // Only access-token credentials enter this cache. Password credentials
-    // remain uncached and are verified through the normal password path.
-    let row = crate::db::query(
-        r#"SELECT c.entity_id,
-                  c.secret_hash,
-                  c.secret_lookup_hash,
-                  c.status,
-                  c.expires_at,
-                  c.scoped,
-                  e.tenant_id,
-                  e.status AS entity_status,
-                  t.status AS tenant_status
-           FROM credentials c
-           JOIN entities e ON e.id = c.entity_id
-           LEFT JOIN tenants t ON t.id = e.tenant_id
-           WHERE c.id = $1 AND c.kind = $2
-             AND e.deleted_at IS NULL
-             AND (t.id IS NULL OR t.deleted_at IS NULL)"#,
-    )
-    .bind(cred_id)
-    .bind(CredentialKind::AccessToken)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::RowNotFound => AppError::unauthorized("api key not found"),
-        other => AppError::Database(other),
-    })?;
-
-    Ok(CredentialSnapshot {
-        entity_id: row.try_get("entity_id").map_err(db_err)?,
-        tenant_id: row.try_get("tenant_id").unwrap_or(None),
-        secret_hash: row.try_get("secret_hash").unwrap_or(None),
-        secret_lookup_hash: row.try_get("secret_lookup_hash").unwrap_or(None),
-        status: row.try_get("status").map_err(db_err)?,
-        expires_at: row.try_get("expires_at").unwrap_or(None),
-        scoped: row.try_get("scoped").unwrap_or(false),
-        entity_status: row
-            .try_get("entity_status")
-            .map_err(|_| AppError::unauthorized("corrupt entity"))?,
-        tenant_status: row
-            .try_get::<Option<TenantStatus>, _>("tenant_status")
-            .unwrap_or(None),
-    })
+    repository::load_credential_row(pool, cred_id).await
 }
 
 /// The one canonical set of deny checks for API-key authentication —
@@ -706,16 +623,7 @@ async fn finish_api_key_auth(
                 state.cache.as_deref(),
                 CacheCategory::Credential,
                 std::slice::from_ref(&credential_key),
-                || async {
-                    crate::db::query(
-                        "UPDATE credentials SET secret_lookup_hash = $1, secret_hash = NULL WHERE id = $2",
-                    )
-                    .bind(digest)
-                    .bind(cred_id)
-                    .execute(state.pool())
-                    .await
-                    .map_err(AppError::Database)
-                },
+                || async { repository::upgrade_verifier(state.pool(), cred_id, &digest).await },
             )
             .await;
             if let Err(err) = result {
@@ -732,16 +640,7 @@ async fn finish_api_key_auth(
     // one write per credential per five minutes so the auth hot path stays
     // read-mostly. Best-effort: a failed stamp never fails authentication.
     // Not cached data, so no invalidation is needed.
-    if let Err(err) = crate::db::query(
-        r#"UPDATE credentials
-           SET last_used_at = now()
-           WHERE id = $1
-             AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')"#,
-    )
-    .bind(cred_id)
-    .execute(state.pool())
-    .await
-    {
+    if let Err(err) = repository::touch_usage(state.pool(), cred_id).await {
         tracing::warn!(
             credential_id = %cred_id,
             error = %err,
@@ -1272,38 +1171,15 @@ fn is_unconditional(conditions: &serde_json::Value) -> bool {
 }
 
 async fn actor_is_active(pool: &Database, entity_id: Uuid) -> Result<bool, AppError> {
-    let active: Option<bool> = crate::db::query_scalar(
-        r#"SELECT (actor.status = 'active'
-                   AND actor.deleted_at IS NULL
-                   AND (actor.tenant_id IS NULL OR (actor_tenant.status = 'active' AND actor_tenant.deleted_at IS NULL)))
-           FROM entities actor
-           LEFT JOIN tenants actor_tenant ON actor_tenant.id = actor.tenant_id
-           WHERE actor.id = $1"#,
-    )
-    .bind(entity_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
-    Ok(active.unwrap_or(false))
+    repository::actor_is_active(pool, entity_id).await
 }
 
 async fn tenant_is_active(pool: &Database, tenant_id: Uuid) -> Result<bool, AppError> {
-    let active: Option<bool> = crate::db::query_scalar(
-        "SELECT status = 'active' AND deleted_at IS NULL FROM tenants WHERE id = $1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?;
-    Ok(active.unwrap_or(false))
+    repository::tenant_is_active(pool, tenant_id).await
 }
 
 async fn action_id_by_name(pool: &Database, name: &str) -> Result<Option<Uuid>, AppError> {
-    crate::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-        .bind(name)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_err)
+    repository::action_id_by_name(pool, name).await
 }
 
 pub async fn require_any_capability(
@@ -1386,20 +1262,7 @@ async fn action_ids_by_name(
     pool: &Database,
     names: &[&str],
 ) -> Result<std::collections::HashMap<String, Uuid>, AppError> {
-    let owned: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-    let rows = crate::db::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
-        .bind(&owned)
-        .fetch_all(pool)
-        .await
-        .map_err(db_err)?;
-    rows.into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get::<String, _>("name").map_err(db_err)?,
-                row.try_get::<Uuid, _>("id").map_err(db_err)?,
-            ))
-        })
-        .collect()
+    repository::action_ids_by_name(pool, names).await
 }
 
 pub fn scope_for_tenant(tenant_id: Option<Uuid>) -> Scope {

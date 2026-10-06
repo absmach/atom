@@ -1,3 +1,5 @@
+mod repository;
+
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
@@ -71,7 +73,7 @@ pub struct SigningKeyMetadata {
     pub key_encryption_key_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SigningKeyStorageSummary {
     pub total: i64,
     pub encrypted: i64,
@@ -276,38 +278,23 @@ async fn fetch_active_keys<'e, E>(
 where
     E: crate::db::IntoTarget<'e>,
 {
-    let rows = crate::db::query(
-        r#"SELECT kid,
-                  public_key,
-                  private_key,
-                  private_key_ciphertext,
-                  private_key_nonce,
-                  private_key_key_id,
-                  private_key_encryption_alg,
-                  status
-           FROM signing_keys
-           WHERE status IN ('primary', 'standby')
-           ORDER BY created_at DESC"#,
-    )
-    .fetch_all(executor)
-    .await
-    .map_err(db_err)?;
+    let rows = repository::active_keys(executor).await?;
 
     let mut primary: Option<LoadedKey> = None;
     let mut standby: Option<LoadedKey> = None;
 
     for row in rows {
-        let kid: String = row.try_get("kid").map_err(db_err)?;
-        let status: String = row.try_get("status").map_err(db_err)?;
-        let public_pem: String = row.try_get("public_key").map_err(db_err)?;
+        let kid = row.kid;
+        let status = row.status;
+        let public_pem = row.public_key;
         let private_pem = private_key_from_row(
             cfg,
             &kid,
-            row.try_get("private_key").map_err(db_err)?,
-            row.try_get("private_key_ciphertext").map_err(db_err)?,
-            row.try_get("private_key_nonce").map_err(db_err)?,
-            row.try_get("private_key_key_id").map_err(db_err)?,
-            row.try_get("private_key_encryption_alg").map_err(db_err)?,
+            row.private_key,
+            row.private_key_ciphertext,
+            row.private_key_nonce,
+            row.private_key_key_id,
+            row.private_key_encryption_alg,
         )?;
 
         let loaded = load_key_row(kid, public_pem, private_pem)?;
@@ -328,37 +315,12 @@ where
 pub async fn bootstrap_if_needed(pool: &Database, cfg: &SigningKeyConfig) -> Result<(), AppError> {
     encrypt_legacy_plaintext_keys(pool, cfg).await?;
 
-    let count: i64 =
-        crate::db::query_scalar("SELECT COUNT(*) FROM signing_keys WHERE status = 'primary'")
-            .fetch_one(pool)
-            .await
-            .map_err(db_err)?;
+    let count = repository::primary_count(pool).await?;
 
     if count == 0 {
         let (kid, public_pem, private_pem) = generate_key_pair()?;
         let storage = storage_values_for_private_key(cfg, &kid, private_pem)?;
-        crate::db::query(
-            r#"INSERT INTO signing_keys (
-                   kid,
-                   public_key,
-                   private_key,
-                   private_key_ciphertext,
-                   private_key_nonce,
-                   private_key_key_id,
-                   private_key_encryption_alg,
-                   status
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'primary')"#,
-        )
-        .bind(&kid)
-        .bind(&public_pem)
-        .bind(storage.plaintext)
-        .bind(storage.ciphertext)
-        .bind(storage.nonce)
-        .bind(storage.key_id)
-        .bind(storage.encryption_alg)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+        repository::insert_primary(pool, &kid, &public_pem, storage).await?;
         tracing::info!("generated initial signing key kid={kid}");
     }
 
@@ -386,40 +348,11 @@ pub async fn rotate_in_tx(
     tx: &mut DbTransaction<'_>,
     cfg: &SigningKeyConfig,
 ) -> Result<ActiveKeys, AppError> {
-    crate::db::query("UPDATE signing_keys SET status = 'retired' WHERE status = 'standby'")
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-
-    crate::db::query("UPDATE signing_keys SET status = 'standby' WHERE status = 'primary'")
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+    repository::demote_active(tx).await?;
 
     let (kid, public_pem, private_pem) = generate_key_pair()?;
     let storage = storage_values_for_private_key(cfg, &kid, private_pem)?;
-    crate::db::query(
-        r#"INSERT INTO signing_keys (
-               kid,
-               public_key,
-               private_key,
-               private_key_ciphertext,
-               private_key_nonce,
-               private_key_key_id,
-               private_key_encryption_alg,
-               status
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'primary')"#,
-    )
-    .bind(&kid)
-    .bind(&public_pem)
-    .bind(storage.plaintext)
-    .bind(storage.ciphertext)
-    .bind(storage.nonce)
-    .bind(storage.key_id)
-    .bind(storage.encryption_alg)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    repository::insert_primary(tx.exec(), &kid, &public_pem, storage).await?;
 
     tracing::info!("signing key rotated, new primary kid={kid}");
 
@@ -489,38 +422,20 @@ pub async fn encrypt_legacy_plaintext_keys(
         return Ok(0);
     }
 
-    let rows = crate::db::query(
-        r#"SELECT kid, private_key
-           FROM signing_keys
-           WHERE private_key IS NOT NULL
-             AND private_key_ciphertext IS NULL"#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    let rows = repository::legacy_keys(pool).await?;
 
     let mut encrypted = 0_u64;
-    for row in rows {
-        let kid: String = row.try_get("kid").map_err(db_err)?;
-        let private_pem: String = row.try_get("private_key").map_err(db_err)?;
+    for (kid, private_pem) in rows {
         let material = encrypt_private_key(cfg, &kid, &private_pem)?;
-        crate::db::query(
-            r#"UPDATE signing_keys
-               SET private_key = NULL,
-                   private_key_ciphertext = $2,
-                   private_key_nonce = $3,
-                   private_key_key_id = $4,
-                   private_key_encryption_alg = $5
-               WHERE kid = $1"#,
+        repository::encrypt_legacy(
+            pool,
+            &kid,
+            &material.ciphertext,
+            &material.nonce,
+            &cfg.key_encryption_key_id,
+            SIGNING_KEY_ENCRYPTION_ALG,
         )
-        .bind(&kid)
-        .bind(material.ciphertext)
-        .bind(material.nonce)
-        .bind(&cfg.key_encryption_key_id)
-        .bind(SIGNING_KEY_ENCRYPTION_ALG)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+        .await?;
         encrypted += 1;
     }
 
@@ -531,25 +446,12 @@ pub async fn encrypt_legacy_plaintext_keys(
 }
 
 pub async fn list_metadata(pool: &Database) -> Result<Vec<SigningKeyMetadata>, AppError> {
-    let rows = crate::db::query(
-        r#"SELECT kid,
-                  algorithm,
-                  status,
-                  created_at,
-                  private_key IS NOT NULL AS has_plaintext,
-                  private_key_ciphertext IS NOT NULL AS has_ciphertext,
-                  private_key_key_id
-           FROM signing_keys
-           ORDER BY created_at DESC"#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
+    let rows = repository::metadata(pool).await?;
 
     rows.into_iter()
         .map(|row| {
-            let has_ciphertext: bool = row.try_get("has_ciphertext").map_err(db_err)?;
-            let has_plaintext: bool = row.try_get("has_plaintext").map_err(db_err)?;
+            let has_ciphertext = row.has_ciphertext;
+            let has_plaintext = row.has_plaintext;
             let storage_mode = if has_ciphertext {
                 SigningKeyStorageMode::Encrypted
             } else if has_plaintext {
@@ -560,33 +462,19 @@ pub async fn list_metadata(pool: &Database) -> Result<Vec<SigningKeyMetadata>, A
                 )));
             };
             Ok(SigningKeyMetadata {
-                kid: row.try_get("kid").map_err(db_err)?,
-                algorithm: row.try_get("algorithm").map_err(db_err)?,
-                status: row.try_get("status").map_err(db_err)?,
-                created_at: row.try_get("created_at").map_err(db_err)?,
+                kid: row.kid,
+                algorithm: row.algorithm,
+                status: row.status,
+                created_at: row.created_at,
                 storage_mode,
-                key_encryption_key_id: row.try_get("private_key_key_id").map_err(db_err)?,
+                key_encryption_key_id: row.private_key_key_id,
             })
         })
         .collect()
 }
 
 pub async fn storage_summary(pool: &Database) -> Result<SigningKeyStorageSummary, AppError> {
-    let row = crate::db::query(
-        r#"SELECT COUNT(*)::bigint AS total,
-                  COUNT(*) FILTER (WHERE private_key_ciphertext IS NOT NULL)::bigint AS encrypted,
-                  COUNT(*) FILTER (WHERE private_key IS NOT NULL)::bigint AS plaintext
-           FROM signing_keys"#,
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    Ok(SigningKeyStorageSummary {
-        total: row.try_get("total").map_err(db_err)?,
-        encrypted: row.try_get("encrypted").map_err(db_err)?,
-        plaintext: row.try_get("plaintext").map_err(db_err)?,
-    })
+    repository::storage_summary(pool).await
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
