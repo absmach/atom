@@ -21,7 +21,7 @@ on:
       - "buf.gen.yaml"
       - ".github/workflows/apidocs.yml"
   pull_request:
-    branches: [main, certificates]
+    branches: [main, certificates, feature/tenant-local-identities]
 
 jobs:
   proto:

@@ -2,7 +2,7 @@ name: Frontend
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, feature/tenant-local-identities]
     paths:
       - "ui/**"
       - "docs/**"
