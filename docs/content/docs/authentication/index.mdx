@@ -52,3 +52,44 @@ grant platform privileges.
   <Card title="JWT Tokens" href="/authentication/jwt" description="Token claims, session binding, and verification." />
   <Card title="JWKS & Key Rotation" href="/authentication/jwks" description="ES256 signing keys, JWKS endpoint, and zero-downtime rotation." />
 </Cards>
+
+## Google, GitHub and Apple login
+
+Set complete `ATOM_GOOGLE_CLIENT_ID` / `ATOM_GOOGLE_CLIENT_SECRET`,
+`ATOM_GITHUB_CLIENT_ID` / `ATOM_GITHUB_CLIENT_SECRET`, or
+`ATOM_APPLE_CLIENT_ID` / `ATOM_APPLE_CLIENT_SECRET` pairs. Blank placeholders
+leave a provider disabled; partial pairs and duplicate provider names refuse
+startup. Existing `ATOM_OIDC_PROVIDERS` JSON configuration remains supported.
+`ATOM_SELF_REGISTRATION_ENABLED` must be enabled to start social authentication.
+
+Register `${ATOM_PUBLIC_BASE_URL}/auth/oauth/google/callback`,
+`${ATOM_PUBLIC_BASE_URL}/auth/oauth/github/callback` and
+`${ATOM_PUBLIC_BASE_URL}/auth/oauth/apple/callback` with the corresponding
+provider. Set `ATOM_OAUTH_SUCCESS_REDIRECT` and `ATOM_OAUTH_ERROR_REDIRECT` to the
+frontend callback. For Atomic both are its public `/auth/callback` URL.
+
+Google uses OIDC discovery, PKCE and nonce verification. GitHub uses its OAuth
+code exchange with PKCE, then reads the authenticated numeric user ID and a
+verified primary email from `/user` and `/user/emails`. Provider access tokens
+are used only during the callback and are not stored.
+
+Apple uses OIDC signature, audience, issuer and nonce verification and a
+form-urlencoded POST callback (`POST /auth/oauth/apple/callback`). That callback
+returns HTTP 303 so the frontend receives a GET. Configure an Apple Services ID
+and a generated ES256 client-secret JWT, signed with the developer team's key;
+rotate the JWT before expiry (Apple allows at most six months). Client credentials
+are sent in the token request body. Apple requires a public HTTPS callback.
+See [Apple setup](https://developer.apple.com/documentation/signinwithapple/configuring-your-environment-for-sign-in-with-apple).
+
+A frontend may add a random `client_state` to the start request, keep it in its
+browser session and submit the same value with `{code, client_state}` to
+`POST /auth/oauth/exchange`. Atom persists the binding through provider state
+and the single-use exchange code, rejecting missing or mismatched values before
+consuming the code. This prevents an attacker substituting their own code into
+another browser's login. Existing clients that omit `client_state` at both ends
+continue to work. The exchange response preserves the usual login fields and
+adds nullable `email`, taken from the provider's verified identity.
+
+A new provider can link by email only to an already verified account email;
+unverified password accounts must verify their email first. Repeated provider
+logins use the stable provider subject and active-entity checks.

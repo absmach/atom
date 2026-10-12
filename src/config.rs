@@ -2164,12 +2164,61 @@ fn parse_cors_allowed_origins(public_base_url: &str) -> Vec<String> {
 }
 
 fn parse_oidc_providers() -> Result<Vec<OidcProviderConfig>> {
-    match std::env::var("ATOM_OIDC_PROVIDERS") {
+    let mut providers: Vec<OidcProviderConfig> = match std::env::var("ATOM_OIDC_PROVIDERS") {
         Ok(value) if !value.trim().is_empty() => {
-            serde_json::from_str(&value).context("ATOM_OIDC_PROVIDERS must be valid JSON")
+            serde_json::from_str(&value).context("ATOM_OIDC_PROVIDERS must be valid JSON")?
         }
-        _ => Ok(Vec::new()),
+        _ => Vec::new(),
+    };
+    // Named settings provide a simpler contract for the built-in providers.
+    // Empty placeholders leave a provider disabled; a partial pair is an error.
+    for (name, issuer, scopes) in [
+        (
+            "google",
+            "https://accounts.google.com",
+            vec!["openid", "email", "profile"],
+        ),
+        (
+            "github",
+            "https://github.com",
+            vec!["read:user", "user:email"],
+        ),
+        (
+            "apple",
+            "https://appleid.apple.com",
+            vec!["openid", "email"],
+        ),
+    ] {
+        let prefix = format!("ATOM_{}", name.to_ascii_uppercase());
+        let id = nonempty_env(&format!("{prefix}_CLIENT_ID"));
+        let secret = nonempty_env(&format!("{prefix}_CLIENT_SECRET"));
+        match (id, secret) {
+            (None, None) => (),
+            (Some(client_id), Some(client_secret)) => {
+                anyhow::ensure!(
+                    !providers.iter().any(|p| p.name == name),
+                    "duplicate OAuth provider: {name}"
+                );
+                providers.push(OidcProviderConfig {
+                    name: name.into(),
+                    issuer: issuer.into(),
+                    client_id,
+                    client_secret,
+                    scopes: scopes.into_iter().map(String::from).collect(),
+                });
+            }
+            _ => anyhow::bail!("{prefix}_CLIENT_ID and {prefix}_CLIENT_SECRET must both be set"),
+        }
     }
+    let mut names = std::collections::HashSet::new();
+    for provider in &providers {
+        anyhow::ensure!(
+            names.insert(&provider.name),
+            "duplicate OAuth provider: {}",
+            provider.name
+        );
+    }
+    Ok(providers)
 }
 
 fn smtp_from_env() -> Option<SmtpConfig> {
@@ -2226,6 +2275,44 @@ mod tests {
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn named_social_providers_require_complete_credentials_and_reject_duplicates() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _guards: Vec<_> = [
+            "ATOM_OIDC_PROVIDERS",
+            "ATOM_GOOGLE_CLIENT_ID",
+            "ATOM_GOOGLE_CLIENT_SECRET",
+            "ATOM_GITHUB_CLIENT_ID",
+            "ATOM_GITHUB_CLIENT_SECRET",
+            "ATOM_APPLE_CLIENT_ID",
+            "ATOM_APPLE_CLIENT_SECRET",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::unset)
+        .collect();
+        assert!(super::parse_oidc_providers()
+            .expect("empty providers")
+            .is_empty());
+        let _id = EnvVarGuard::set("ATOM_GOOGLE_CLIENT_ID", "client");
+        assert!(super::parse_oidc_providers().is_err());
+        let _secret = EnvVarGuard::set("ATOM_GOOGLE_CLIENT_SECRET", "secret");
+        let providers = super::parse_oidc_providers().expect("Google");
+        assert_eq!(providers[0].issuer, "https://accounts.google.com");
+        let _github_id = EnvVarGuard::set("ATOM_GITHUB_CLIENT_ID", "github-client");
+        let _github_secret = EnvVarGuard::set("ATOM_GITHUB_CLIENT_SECRET", "github-secret");
+        let _apple_id = EnvVarGuard::set("ATOM_APPLE_CLIENT_ID", "apple-services-id");
+        let _apple_secret = EnvVarGuard::set("ATOM_APPLE_CLIENT_SECRET", "apple-jwt");
+        let providers = super::parse_oidc_providers().expect("all providers");
+        assert_eq!(providers.len(), 3);
+        assert_eq!(providers[1].scopes, ["read:user", "user:email"]);
+        assert_eq!(providers[2].scopes, ["openid", "email"]);
+        let _duplicate = EnvVarGuard::set(
+            "ATOM_OIDC_PROVIDERS",
+            r#"[{"name":"google","issuer":"https://accounts.google.com","client_id":"client","client_secret":"secret"}]"#,
+        );
+        assert!(super::parse_oidc_providers().is_err());
+    }
 
     #[test]
     fn public_url_joins_base_and_ui_paths() {
