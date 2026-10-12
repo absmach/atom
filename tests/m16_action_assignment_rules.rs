@@ -18,11 +18,14 @@ use atom::{
 async fn repo_validates_action_assignment_rule_creation() {
     let p = common::pool().await;
     let action_name = format!("m16-action-{}", uuid::Uuid::new_v4());
-    atom::db::query("INSERT INTO actions (name, description) VALUES ($1, 'm16 test action')")
-        .bind(&action_name)
-        .execute(&p)
-        .await
-        .expect("insert action");
+    crate::common::db::query(
+        "INSERT INTO actions (name, description) VALUES ($1, 'm16 test action')",
+        r#"INSERT INTO actions (name, description) VALUES ($1, 'm16 test action')"#,
+    )
+    .bind(&action_name)
+    .execute(&p)
+    .await
+    .expect("insert action");
 
     let created = repo::create_action_assignment_rule(
         &p,
@@ -106,12 +109,15 @@ async fn repo_validates_action_assignment_rule_creation() {
     assert!(matches!(invalid_object_type, AppError::BadRequest(_)));
 
     let tenant_id = uuid::Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(tenant_id)
-        .bind(format!("m16-tenant-{tenant_id}"))
-        .execute(&p)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(tenant_id)
+    .bind(format!("m16-tenant-{tenant_id}"))
+    .execute(&p)
+    .await
+    .expect("insert tenant");
 
     for req in [
         CreateActionAssignmentRule {
@@ -162,17 +168,18 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     // the whole scenario to one tenant. The seeded device→manage→resource deny
     // is an absolute global rule, so it still fires for a tenant-scoped grant.
     let tenant_id = uuid::Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(tenant_id)
-        .bind(format!("m16-tenant-{tenant_id}"))
-        .execute(&p)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(tenant_id)
+    .bind(format!("m16-tenant-{tenant_id}"))
+    .execute(&p)
+    .await
+    .expect("insert tenant");
 
     let device_id = uuid::Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')"#)
     .bind(device_id)
     .bind(format!("m16-device-{device_id}"))
     .bind(tenant_id)
@@ -180,11 +187,13 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
     .await
     .expect("insert device");
 
-    let manage_action_id: uuid::Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
-            .fetch_one(&p)
-            .await
-            .expect("manage action");
+    let manage_action_id: uuid::Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'manage'",
+        r#"SELECT id FROM actions WHERE name = 'manage'"#,
+    )
+    .fetch_one(&p)
+    .await
+    .expect("manage action");
 
     let block = repo::create_permission_block(
         &p,
@@ -249,17 +258,18 @@ async fn guardrails_apply_to_direct_policy_and_role_permission_block_links() {
 async fn inactive_subject_cannot_receive_role_or_direct_grants() {
     let p = common::pool().await;
     let tenant_id = uuid::Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(tenant_id)
-        .bind(format!("m16-inactive-tenant-{tenant_id}"))
-        .execute(&p)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(tenant_id)
+    .bind(format!("m16-inactive-tenant-{tenant_id}"))
+    .execute(&p)
+    .await
+    .expect("insert tenant");
 
     let subject_id = uuid::Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'inactive')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'inactive')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'inactive')"#)
     .bind(subject_id)
     .bind(format!("m16-inactive-subject-{subject_id}"))
     .bind(tenant_id)
@@ -290,11 +300,13 @@ async fn inactive_subject_cannot_receive_role_or_direct_grants() {
     .expect_err("inactive subject role assignment rejected");
     assert!(matches!(role_err, AppError::BadRequest(_)));
 
-    let manage_action_id: uuid::Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'manage'")
-            .fetch_one(&p)
-            .await
-            .expect("manage action");
+    let manage_action_id: uuid::Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'manage'",
+        r#"SELECT id FROM actions WHERE name = 'manage'"#,
+    )
+    .fetch_one(&p)
+    .await
+    .expect("manage action");
     let block = repo::create_permission_block(
         &p,
         CreatePermissionBlock {
@@ -324,18 +336,22 @@ async fn inactive_subject_cannot_receive_role_or_direct_grants() {
     .expect_err("inactive subject direct policy rejected");
     assert!(matches!(policy_err, AppError::BadRequest(_)));
 
-    let assignment_count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM role_assignments WHERE subject_id = $1")
-            .bind(subject_id)
-            .fetch_one(&p)
-            .await
-            .expect("count role assignments");
-    let policy_count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1")
-            .bind(subject_id)
-            .fetch_one(&p)
-            .await
-            .expect("count direct policies");
+    let assignment_count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM role_assignments WHERE subject_id = $1",
+        r#"SELECT COUNT(*) FROM role_assignments WHERE subject_id = $1"#,
+    )
+    .bind(subject_id)
+    .fetch_one(&p)
+    .await
+    .expect("count role assignments");
+    let policy_count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1",
+        r#"SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1"#,
+    )
+    .bind(subject_id)
+    .fetch_one(&p)
+    .await
+    .expect("count direct policies");
     assert_eq!(assignment_count, 0);
     assert_eq!(policy_count, 0);
 }

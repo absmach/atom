@@ -42,9 +42,12 @@ async fn state_with_events_disabled(pool: Database) -> AppState {
 }
 
 async fn build_state(pool: Database, config: Config) -> AppState {
-    let _ = atom::db::query("TRUNCATE TABLE signing_keys CASCADE")
-        .execute(&pool)
-        .await;
+    let _ = crate::common::db::query(
+        "TRUNCATE TABLE signing_keys CASCADE",
+        r#"DELETE FROM signing_keys"#,
+    )
+    .execute(&pool)
+    .await;
     keys::bootstrap_if_needed(&pool, &config.signing_keys)
         .await
         .expect("bootstrap signing keys");
@@ -89,9 +92,11 @@ async fn create_resource_via_graphql(schema: &AtomSchema, name: &str) -> Uuid {
 }
 
 async fn outbox_row_for(pool: &Database, event: &str, target_id: Uuid) -> Option<Value> {
-    atom::db::query_scalar::<Value>(
+    crate::common::db::query_scalar::<Value>(
         "SELECT payload FROM event_outbox
          WHERE event = $1 AND (payload->>'target_id')::uuid = $2",
+        r#"SELECT payload FROM event_outbox
+         WHERE event = $1 AND atom_uuid((payload->>'target_id')) = $2"#,
     )
     .bind(event)
     .bind(target_id)
@@ -115,8 +120,9 @@ async fn resource_create_produces_an_event_even_though_it_is_never_db_audited() 
 
     let resource_id = create_resource_via_graphql(&schema, &name).await;
 
-    let audited: Option<Uuid> = atom::db::query_scalar(
+    let audited: Option<Uuid> = crate::common::db::query_scalar(
         "SELECT target_id FROM audit_logs WHERE event = 'resource.create' AND target_id = $1",
+        r#"SELECT target_id FROM audit_logs WHERE event = 'resource.create' AND target_id = $1"#,
     )
     .bind(resource_id)
     .fetch_optional(&pool)
@@ -165,12 +171,15 @@ async fn no_event_outbox_rows_are_written_when_events_are_not_configured() {
 async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
     let pool = common::pool().await;
     let action_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
-        .bind(action_id)
-        .bind(format!("m26-applicability-{action_id}"))
-        .execute(&pool)
-        .await
-        .expect("insert action");
+    crate::common::db::query(
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO actions (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(action_id)
+    .bind(format!("m26-applicability-{action_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert action");
 
     authz_repo::add_capability_applicability_with_audit(
         &pool,
@@ -193,10 +202,13 @@ async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
     .await
     .expect("replay action applicability add");
 
-    let event_count: i64 = atom::db::query_scalar(
+    let event_count: i64 = crate::common::db::query_scalar(
         r#"SELECT COUNT(*) FROM event_outbox
            WHERE event = 'action_applicability.add'
              AND (payload->>'target_id')::uuid = $1"#,
+        r#"SELECT COUNT(*) FROM event_outbox
+           WHERE event = 'action_applicability.add'
+             AND atom_uuid((payload->>'target_id')) = $1"#,
     )
     .bind(action_id)
     .fetch_one(&pool)
@@ -207,11 +219,14 @@ async fn duplicate_action_applicability_add_does_not_publish_a_false_event() {
         "an idempotent replay must not claim a second mutation occurred"
     );
 
-    atom::db::query("DELETE FROM actions WHERE id = $1")
-        .bind(action_id)
-        .execute(&pool)
-        .await
-        .expect("clean up action");
+    crate::common::db::query(
+        "DELETE FROM actions WHERE id = $1",
+        r#"DELETE FROM actions WHERE id = $1"#,
+    )
+    .bind(action_id)
+    .execute(&pool)
+    .await
+    .expect("clean up action");
 }
 
 /// Installs a `BEFORE INSERT` trigger on `table` that raises for exactly one
@@ -238,11 +253,14 @@ async fn drop_rejecting_trigger(pool: &Database, name: &str, table: &str) {
 }
 
 async fn action_exists(pool: &Database, action_id: Uuid) -> bool {
-    atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)")
-        .bind(action_id)
-        .fetch_one(pool)
-        .await
-        .expect("query action existence")
+    crate::common::db::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)",
+        r#"SELECT EXISTS (SELECT 1 FROM actions WHERE id = $1)"#,
+    )
+    .bind(action_id)
+    .fetch_one(pool)
+    .await
+    .expect("query action existence")
 }
 
 /// If outbox insertion fails, the domain mutation must roll back with it. This
@@ -262,12 +280,15 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-atomic-{action_id}");
     let mut tx = pool.clone().begin().await.expect("begin transaction");
-    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
-        .bind(action_id)
-        .bind(&action_name)
-        .execute(&mut tx)
-        .await
-        .expect("insert action in transaction");
+    crate::common::db::query(
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO actions (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(action_id)
+    .bind(&action_name)
+    .execute(&mut tx)
+    .await
+    .expect("insert action in transaction");
     let result = audit::commit_with_observation(
         tx,
         true,
@@ -284,11 +305,14 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
     let survived = action_exists(&pool, action_id).await;
 
     drop_rejecting_trigger(&pool, "m26_reject_atomic_test_event", "event_outbox").await;
-    atom::db::query("DELETE FROM actions WHERE id = $1")
-        .bind(action_id)
-        .execute(&pool)
-        .await
-        .expect("clean up test action");
+    crate::common::db::query(
+        "DELETE FROM actions WHERE id = $1",
+        r#"DELETE FROM actions WHERE id = $1"#,
+    )
+    .bind(action_id)
+    .execute(&pool)
+    .await
+    .expect("clean up test action");
 
     assert!(
         result.is_err(),
@@ -298,6 +322,51 @@ async fn outbox_failure_rolls_back_the_domain_mutation() {
         !survived,
         "domain mutation must roll back with outbox insert"
     );
+}
+
+/// Exercise the domain repository itself, including its insert and commit,
+/// rather than only the shared commit helper.
+#[tokio::test]
+#[ignore]
+async fn resource_repository_rolls_back_when_outbox_insert_fails() {
+    let pool = common::pool().await;
+    let id = Uuid::new_v4();
+    atom::db::testing::install_rejecting_trigger(
+        &pool,
+        "m26_reject_resource_creation",
+        "event_outbox",
+        &format!(
+            "NEW.event = 'resource.create' AND NEW.payload->>'target_id' = '{}'",
+            id
+        ),
+        "forced resource outbox failure",
+    )
+    .await;
+    let result = atom::authz::resources::create_resource_with_audit(
+        &pool,
+        true,
+        Some(common::admin_id()),
+        atom::models::resource::CreateResource {
+            id: Some(id),
+            kind: "channel".into(),
+            name: Some(format!("m26-rollback-{id}")),
+            alias: None,
+            tenant_id: None,
+            owner_id: None,
+            attributes: serde_json::json!({}),
+        },
+    )
+    .await;
+    drop_rejecting_trigger(&pool, "m26_reject_resource_creation", "event_outbox").await;
+    assert!(result.is_err(), "the outbox failure must reach the caller");
+    assert!(
+        matches!(
+            atom::authz::resources::get_resource(&pool, id).await,
+            Err(atom::error::AppError::NotFound(_))
+        ),
+        "resource insertion must roll back with its outbox event"
+    );
+    assert!(outbox_row_for(&pool, "resource.create", id).await.is_none());
 }
 
 /// Persisted audit storage is a separate fire-and-forget channel: its failure
@@ -317,12 +386,15 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
     let action_id = Uuid::new_v4();
     let action_name = format!("m26-audit-{action_id}");
     let mut tx = pool.clone().begin().await.expect("begin transaction");
-    atom::db::query("INSERT INTO actions (id, name) VALUES ($1, $2)")
-        .bind(action_id)
-        .bind(&action_name)
-        .execute(&mut tx)
-        .await
-        .expect("insert action in transaction");
+    crate::common::db::query(
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO actions (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(action_id)
+    .bind(&action_name)
+    .execute(&mut tx)
+    .await
+    .expect("insert action in transaction");
     let result = audit::commit_with_audit(
         &pool,
         tx,
@@ -341,11 +413,14 @@ async fn audit_storage_failure_does_not_fail_the_domain_mutation() {
     let survived = action_exists(&pool, action_id).await;
 
     drop_rejecting_trigger(&pool, "m26_reject_audit_test_event", "audit_logs").await;
-    atom::db::query("DELETE FROM actions WHERE id = $1")
-        .bind(action_id)
-        .execute(&pool)
-        .await
-        .expect("clean up test action");
+    crate::common::db::query(
+        "DELETE FROM actions WHERE id = $1",
+        r#"DELETE FROM actions WHERE id = $1"#,
+    )
+    .bind(action_id)
+    .execute(&pool)
+    .await
+    .expect("clean up test action");
 
     result.expect("audit storage failure must not fail the mutation");
     assert!(
@@ -401,18 +476,80 @@ async fn failure_events_publish_even_when_the_tenant_and_actor_do_not_exist() {
 
     // The column copies must survive too — they are what the publisher and any
     // operator query filter on.
-    let (row_tenant, row_actor): (Option<Uuid>, Option<Uuid>) =
-        atom::db::query_as("SELECT tenant_id, actor_entity_id FROM event_outbox WHERE event = $1")
-            .bind(&event)
-            .fetch_one(&pool)
-            .await
-            .expect("query outbox columns");
+    let (row_tenant, row_actor): (Option<Uuid>, Option<Uuid>) = crate::common::db::query_as(
+        "SELECT tenant_id, actor_entity_id FROM event_outbox WHERE event = $1",
+        r#"SELECT tenant_id, actor_entity_id FROM event_outbox WHERE event = $1"#,
+    )
+    .bind(&event)
+    .fetch_one(&pool)
+    .await
+    .expect("query outbox columns");
     assert_eq!(row_tenant, Some(missing_tenant));
     assert_eq!(row_actor, Some(missing_actor));
 
-    atom::db::query("DELETE FROM event_outbox WHERE event = $1")
-        .bind(&event)
-        .execute(&pool)
-        .await
-        .expect("clean up test outbox row");
+    crate::common::db::query(
+        "DELETE FROM event_outbox WHERE event = $1",
+        r#"DELETE FROM event_outbox WHERE event = $1"#,
+    )
+    .bind(&event)
+    .execute(&pool)
+    .await
+    .expect("clean up test outbox row");
+}
+
+/// Certificate retries rely on a failed nested write leaving the caller's
+/// transaction usable, including when the pool has only one connection.
+#[tokio::test]
+#[ignore]
+async fn failed_savepoint_preserves_the_outer_transaction() {
+    let pool = atom::db::testing::single_connection_database().await;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let mut outer = pool.begin().await.expect("begin outer transaction");
+    crate::common::db::query(
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+    )
+    .bind(first)
+    .bind(format!("savepoint-{first}"))
+    .execute(&mut outer)
+    .await
+    .expect("outer write");
+
+    let mut failed = outer.begin().await.expect("begin retry savepoint");
+    let error = crate::common::db::query(
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+    )
+    .bind(first)
+    .bind(format!("duplicate-{first}"))
+    .execute(&mut failed)
+    .await
+    .expect_err("force unique violation");
+    assert!(atom::error::is_unique_violation(&error));
+    failed.rollback().await.expect("rollback failed savepoint");
+
+    let mut retry = outer.begin().await.expect("begin next savepoint");
+    crate::common::db::query(
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+        "INSERT INTO actions (id, name) VALUES ($1, $2)",
+    )
+    .bind(second)
+    .bind(format!("savepoint-{second}"))
+    .execute(&mut retry)
+    .await
+    .expect("retry on the same connection");
+    retry.commit().await.expect("release successful savepoint");
+    outer.commit().await.expect("commit outer transaction");
+
+    let count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM actions WHERE id IN ($1, $2)",
+        "SELECT COUNT(*) FROM actions WHERE id IN ($1, $2)",
+    )
+    .bind(first)
+    .bind(second)
+    .fetch_one(&pool)
+    .await
+    .expect("read committed writes");
+    assert_eq!(count, 2, "outer and retried writes must both survive");
 }

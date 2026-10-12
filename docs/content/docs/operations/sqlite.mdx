@@ -6,9 +6,9 @@ description: When to choose SQLite, how to configure it, its fixed durability po
 # Running Atom on SQLite
 
 Atom stores its data in PostgreSQL or in a local SQLite file. The scheme of
-`DATABASE_URL` selects the backend; nothing else changes. Both backends are
-first-class: they run the same application code, the same schema and the same
-test suites.
+`DATABASE_URL` selects the backend. Both backends share business rules and
+authorization evaluation, with native SQL repositories and migrations for each
+storage engine. The database contract tests run against both backends.
 
 | | PostgreSQL | SQLite |
 | --- | --- | --- |
@@ -35,6 +35,33 @@ DATABASE_URL=sqlite::memory:                     # in-memory; lost on exit, for 
 - `ATOM_DB_MAX_CONNECTIONS` sets the pool size when present; otherwise a file
   database uses a small pool of 5 (SQLite has one writer, so a large pool only
   adds contention).
+
+### Run locally
+
+Start from the development environment example if you do not already have an
+`.env` file. The command below preserves an existing configuration:
+
+```bash
+test -f .env || cp .env.example .env
+mkdir -p data
+DATABASE_URL="sqlite://data/atom.db" cargo run --locked
+```
+
+The example contains development credentials and an encryption key. For a real
+deployment, replace `ADMIN_SECRET` with a strong administrator password and
+generate a unique `ATOM_KEY_ENCRYPTION_KEY` with `openssl rand -base64 32`. Save
+that value securely in your deployment configuration. Atom generates its ES256
+signing keys automatically; there is no `JWT_SECRET`.
+
+Check readiness from another terminal:
+
+```bash
+curl http://localhost:8080/health/ready
+```
+
+PostgreSQL is not required for this configuration. Keep the same
+`ATOM_KEY_ENCRYPTION_KEY` across restarts; replacing it makes existing encrypted
+credentials and keys unreadable.
 
 ## Fixed runtime policy
 
@@ -114,8 +141,9 @@ aware of:
   write lock rather than running in parallel; reads are unaffected.
 - **No advisory or row locks.** Atom's PostgreSQL row/advisory locks exist to
   order concurrent writers. On SQLite the single write lock already guarantees
-  the same ordering, so those statements become no-ops (a statement that asked
-  for a row lock is run under the write lock).
+  the same serialization for mutations. SQLite repositories read and update
+  through the caller's `BEGIN IMMEDIATE` transaction instead of issuing
+  PostgreSQL lock statements.
 - **Data encodings.** UUIDs are stored as 16-byte blobs, timestamps as
   fixed-width UTC text with microseconds, JSON as validated text, arrays as JSON
   text. These are internal; the API, events and exports are identical.
@@ -132,6 +160,18 @@ aware of:
 Pick SQLite when a single Atom process on one host is enough and you value a
 zero-dependency deployment. Pick PostgreSQL when you need more than one Atom
 replica, an external database team, managed backups/PITR, or sustained heavy
-write load. Moving from one to the other is an export/import through Atom's
-API and bootstrap configuration; the two database files are not
-interchangeable.
+write load.
+
+## Moving an existing deployment to PostgreSQL
+
+Changing `DATABASE_URL` connects Atom to a different database; it does **not**
+copy existing data. SQLite and PostgreSQL storage encodings and migration
+histories are not interchangeable.
+
+There is currently no complete database migration command. API/bootstrap
+provisioning can recreate supported configuration, but it is not a backup or
+full transfer of credentials, sessions, audit history, and event delivery state.
+A complete migration needs a separately implemented and validated export/import
+workflow, a maintenance window, and verification before accepting live writes
+on PostgreSQL. Keep the source backup and encryption keys until that migration
+is verified.

@@ -282,8 +282,6 @@ mod tests {
     }
 }
 
-crate::impl_db_enum_arg!(AuthorityKind, AuthorityStatus, AuthorityKeyBackend);
-
 impl TryFrom<crate::db::TextList> for Vec<AuthorityKeyBackend> {
     type Error = serde_json::Error;
 

@@ -1,8 +1,7 @@
 //! PostgreSQL implementation of the resource repository contract declared in
 //! [`super`] (`create_resource_with_audit`, `get_resource`, `list_resources`, …).
-//! Owns its native SQL; nothing here runs through the general-purpose SQLite
-//! translator (`crate::db::translate`) — see [`super::sqlite`] for that
-//! backend's independent implementation of the same operations.
+//! Owns native PostgreSQL SQL; see [`super::sqlite`] for the corresponding
+//! SQLite operations.
 
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
@@ -20,9 +19,9 @@ pub(super) fn order_by(order: ResourceOrderField, dir: SortDir) -> &'static str 
     match (order, dir) {
         (ResourceOrderField::CreatedAt, SortDir::Asc) => "r.created_at ASC, r.id ASC",
         (ResourceOrderField::CreatedAt, SortDir::Desc) => "r.created_at DESC, r.id ASC",
-        (ResourceOrderField::UpdatedAt, SortDir::Asc) => "r.updated_at ASC, r.id ASC",
+        (ResourceOrderField::UpdatedAt, SortDir::Asc) => "r.updated_at ASC NULLS LAST, r.id ASC",
         (ResourceOrderField::UpdatedAt, SortDir::Desc) => "r.updated_at DESC NULLS LAST, r.id ASC",
-        (ResourceOrderField::Name, SortDir::Asc) => "lower(r.name) ASC, r.id ASC",
+        (ResourceOrderField::Name, SortDir::Asc) => "lower(r.name) ASC NULLS LAST, r.id ASC",
         (ResourceOrderField::Name, SortDir::Desc) => "lower(r.name) DESC NULLS LAST, r.id ASC",
         (ResourceOrderField::Kind, SortDir::Asc) => "r.kind ASC, r.id ASC",
         (ResourceOrderField::Kind, SortDir::Desc) => "r.kind DESC, r.id ASC",

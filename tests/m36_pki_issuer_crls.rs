@@ -63,9 +63,7 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     // A stale CRL-state fingerprint is a data-integrity failure, not a cache
     // miss. Regenerating would re-sign on every public request forever while
     // leaving the corrupted state untouched.
-    atom::db::query(
-        "UPDATE certificate_crl_state SET issuer_fingerprint_sha256 = repeat('0', 64) WHERE issuer_id = $1",
-    )
+    crate::common::db::query("UPDATE certificate_crl_state SET issuer_fingerprint_sha256 = repeat('0', 64) WHERE issuer_id = $1", r#"UPDATE certificate_crl_state SET issuer_fingerprint_sha256 = repeat('0', 64) WHERE issuer_id = $1"#)
     .bind(issuer_a.id)
     .execute(&pool)
     .await
@@ -76,8 +74,9 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     assert!(mismatch
         .to_string()
         .contains("CRL state fingerprint does not match"));
-    atom::db::query(
+    crate::common::db::query(
         "UPDATE certificate_crl_state SET issuer_fingerprint_sha256 = $1 WHERE issuer_id = $2",
+        r#"UPDATE certificate_crl_state SET issuer_fingerprint_sha256 = $1 WHERE issuer_id = $2"#,
     )
     .bind(issuer_a.fingerprint_sha256.as_deref().unwrap())
     .bind(issuer_a.id)
@@ -91,12 +90,14 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         .unwrap();
     assert_eq!(empty_b.crl_number, 1);
     assert!(crl_serials(&empty_b.der).is_empty());
-    let b_issuer_id: Uuid =
-        atom::db::query_scalar("SELECT issuer_id FROM certificate_crl_state WHERE issuer_id = $1")
-            .bind(issuer_b.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let b_issuer_id: Uuid = crate::common::db::query_scalar(
+        "SELECT issuer_id FROM certificate_crl_state WHERE issuer_id = $1",
+        r#"SELECT issuer_id FROM certificate_crl_state WHERE issuer_id = $1"#,
+    )
+    .bind(issuer_b.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(b_issuer_id, issuer_b.id);
 
     // The platform leaf issuer publishes too; roots and platform
@@ -272,12 +273,18 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     // Corrupt bytes with a matching cache hash still fail ASN.1 validation and
     // are regenerated from durable revocation state. A subsequent call models
     // a process restart and reuses the repaired database artifact.
-    atom::db::query(
+    crate::common::db::query(
         r#"UPDATE certificate_crl_state
            SET crl_der = decode('010203', 'hex'),
                crl_sha256 = encode(digest(decode('010203', 'hex'), 'sha256'), 'hex'),
                dirty = FALSE,
                next_update = now() + interval '1 hour'
+           WHERE issuer_id = $1"#,
+        r#"UPDATE certificate_crl_state
+           SET crl_der = unhex('010203'),
+               crl_sha256 = atom_sha256_hex(unhex('010203')),
+               dirty = FALSE,
+               next_update = atom_ts_add(now(), (3600))
            WHERE issuer_id = $1"#,
     )
     .bind(issuer_a.id)
@@ -312,7 +319,11 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
     assert!(PkiIssuer::from_managed_authority(&old, &config.pki_ca_keys).is_err());
     // Retained artifact signing must not depend on discovery-route metadata
     // added after the original authority could have been provisioned.
-    atom::db::query(
+    crate::common::db::query(
+        r#"UPDATE pki_authorities
+           SET ocsp_url = NULL, ca_issuers_url = NULL,
+               crl_distribution_point_url = NULL
+           WHERE id = $1"#,
         r#"UPDATE pki_authorities
            SET ocsp_url = NULL, ca_issuers_url = NULL,
                crl_distribution_point_url = NULL
@@ -395,8 +406,9 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
 
     // Expired issuers may serve an already-valid retained artifact, but they
     // cannot regenerate or sign after that artifact is invalidated.
-    atom::db::query(
+    crate::common::db::query(
         "UPDATE pki_authorities SET status = 'expired', issuance_enabled = FALSE WHERE id = $1",
+        r#"UPDATE pki_authorities SET status = 'expired', issuance_enabled = FALSE WHERE id = $1"#,
     )
     .bind(issuer_a_v2.id)
     .execute(&pool)
@@ -407,11 +419,14 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         .unwrap();
     assert!(retained_expired.cache_hit);
     assert_eq!(retained_expired.der, new_crl.der);
-    atom::db::query("UPDATE certificate_crl_state SET dirty = TRUE WHERE issuer_id = $1")
-        .bind(issuer_a_v2.id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE certificate_crl_state SET dirty = TRUE WHERE issuer_id = $1",
+        r#"UPDATE certificate_crl_state SET dirty = TRUE WHERE issuer_id = $1"#,
+    )
+    .bind(issuer_a_v2.id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let expired_error = service::issuer_crl(&pool, &config, issuer_a_v2.id)
         .await
         .unwrap_err();
@@ -455,14 +470,18 @@ async fn per_issuer_crls_enforce_the_pr009_contract() {
         "key_compromise",
     )
     .await;
-    atom::db::query("DELETE FROM entities WHERE id = $1")
-        .bind(purge_entity)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "DELETE FROM entities WHERE id = $1",
+        r#"DELETE FROM entities WHERE id = $1"#,
+    )
+    .bind(purge_entity)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(
-        atom::db::query_scalar::<i64>(
+        crate::common::db::query_scalar::<i64>(
             "SELECT COUNT(*) FROM certificate_revocations WHERE credential_id = $1",
+            r#"SELECT COUNT(*) FROM certificate_revocations WHERE credential_id = $1"#
         )
         .bind(purge_leaf.credential_id)
         .fetch_one(&pool)
@@ -548,9 +567,11 @@ fn crl_contains(der: &[u8], serial_number: &str) -> bool {
 }
 
 async fn non_leaf_authority_ids(pool: &Database) -> Vec<Uuid> {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         "SELECT id FROM pki_authorities
          WHERE kind IN ('root', 'platform_intermediate') ORDER BY kind",
+        r#"SELECT id FROM pki_authorities
+         WHERE kind IN ('root', 'platform_intermediate') ORDER BY kind"#,
     )
     .fetch_all(pool)
     .await

@@ -37,19 +37,25 @@ fn service_entity(id: Uuid, credentials: Vec<BootstrapCredential>) -> BootstrapC
 }
 
 async fn managed_by_entity(pool: &atom::db::Database, id: Uuid) -> Option<String> {
-    atom::db::query_scalar("SELECT managed_by FROM entities WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .expect("entity managed_by lookup")
+    crate::common::db::query_scalar(
+        "SELECT managed_by FROM entities WHERE id = $1",
+        r#"SELECT managed_by FROM entities WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("entity managed_by lookup")
 }
 
 async fn managed_by_credential(pool: &atom::db::Database, id: Uuid) -> Option<String> {
-    atom::db::query_scalar("SELECT managed_by FROM credentials WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .expect("credential managed_by lookup")
+    crate::common::db::query_scalar(
+        "SELECT managed_by FROM credentials WHERE id = $1",
+        r#"SELECT managed_by FROM credentials WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("credential managed_by lookup")
 }
 
 fn bootstrap_token() -> (Uuid, String) {
@@ -195,11 +201,14 @@ async fn bootstrap_access_token_is_idempotent() {
     apply(&p, &signing_keys, &cfg).await.expect("first apply");
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
-    let count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM credentials WHERE id = $1")
-        .bind(cred_id)
-        .fetch_one(&p)
-        .await
-        .expect("count credential");
+    let count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM credentials WHERE id = $1",
+        r#"SELECT COUNT(*) FROM credentials WHERE id = $1"#,
+    )
+    .bind(cred_id)
+    .fetch_one(&p)
+    .await
+    .expect("count credential");
     assert_eq!(count, 1);
 }
 
@@ -227,7 +236,12 @@ async fn bootstrap_access_token_authenticates_at_runtime() {
         .await
         .expect("apply bootstrap");
 
-    let entity_ok: Option<Uuid> = atom::db::query_scalar(
+    let entity_ok: Option<Uuid> = crate::common::db::query_scalar(
+        r#"SELECT c.entity_id
+           FROM credentials c
+           JOIN entities e ON e.id = c.entity_id
+           WHERE c.id = $1 AND c.kind = 'access_token' AND c.status = 'active'
+             AND e.deleted_at IS NULL"#,
         r#"SELECT c.entity_id
            FROM credentials c
            JOIN entities e ON e.id = c.entity_id
@@ -249,8 +263,9 @@ async fn api_created_entity_and_credential_are_not_stamped() {
     let p = pool().await;
 
     let entity_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'service', $2, 'active')"#,
     )
     .bind(entity_id)
     .bind(format!("runtime-{entity_id}"))
@@ -260,9 +275,7 @@ async fn api_created_entity_and_credential_are_not_stamped() {
     assert!(managed_by_entity(&p, entity_id).await.is_none());
 
     let cred_id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', 'x')",
-    )
+    crate::common::db::query("INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', 'x')", r#"INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', 'x')"#)
     .bind(cred_id)
     .bind(entity_id)
     .execute(&p)

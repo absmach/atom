@@ -18,20 +18,21 @@ use uuid::Uuid;
 
 async fn make_tenant(pool: &atom::db::Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("{name}-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("{name}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn make_entity(pool: &atom::db::Database, tenant_id: Uuid, kind: &str, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')"#)
     .bind(id)
     .bind(kind)
     .bind(format!("{name}-{id}"))
@@ -44,26 +45,32 @@ async fn make_entity(pool: &atom::db::Database, tenant_id: Uuid, kind: &str, nam
 
 async fn make_global_entity(pool: &atom::db::Database, kind: &str, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("{name}-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert global entity");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("{name}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert global entity");
     id
 }
 
 async fn make_resource(pool: &atom::db::Database, tenant_id: Uuid, kind: &str, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("{name}-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("{name}-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
@@ -76,7 +83,9 @@ async fn make_resource_with_attributes_at(
     created_at: chrono::DateTime<Utc>,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO resources (id, kind, name, tenant_id, attributes, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
         r#"INSERT INTO resources (id, kind, name, tenant_id, attributes, created_at)
            VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
@@ -99,7 +108,9 @@ async fn grant_resource_read(
     resource_id: Uuid,
     action_id: Uuid,
 ) {
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
     )
@@ -108,15 +119,19 @@ async fn grant_resource_read(
     .fetch_one(pool)
     .await
     .expect("insert read block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(action_id)
     .execute(pool)
     .await
     .expect("insert read action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies
+           (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies
            (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
@@ -142,7 +157,7 @@ async fn make_group(
         "object_groups"
     };
     let sql = format!("INSERT INTO {table} (id, name, tenant_id) VALUES ($1, $2, $3)");
-    atom::db::query(&sql)
+    crate::common::db::query(&sql, &sql)
         .bind(id)
         .bind(format!("{name}-{id}"))
         .bind(tenant_id)
@@ -153,11 +168,14 @@ async fn make_group(
 }
 
 async fn action_id(pool: &atom::db::Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("action")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1 LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = $1 LIMIT 1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("action")
 }
 
 async fn make_role_with_block(
@@ -170,13 +188,16 @@ async fn make_role_with_block(
     action_id: Uuid,
 ) -> Uuid {
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(role_id)
-        .bind(format!("role-{role_id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(role_id)
+    .bind(format!("role-{role_id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert role");
 
     let scope_mode = match applies_to {
         "object_group_type" => "group_direct_objects",
@@ -185,7 +206,11 @@ async fn make_role_with_block(
         "object_group_descendant_kind" => "group_descendant_groups",
         other => other,
     };
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks
+           (scope_mode, object_kind, object_type, tenant_id, group_id, effect)
+           VALUES ($1, $2, $3, $4, $5, 'allow')
+           RETURNING id"#,
         r#"INSERT INTO permission_blocks
            (scope_mode, object_kind, object_type, tenant_id, group_id, effect)
            VALUES ($1, $2, $3, $4, $5, 'allow')
@@ -200,8 +225,9 @@ async fn make_role_with_block(
     .await
     .expect("insert permission block");
 
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)"#,
     )
     .bind(role_id)
     .bind(block_id)
@@ -209,8 +235,9 @@ async fn make_role_with_block(
     .await
     .expect("insert role permission block");
 
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(action_id)
@@ -227,7 +254,10 @@ async fn assign_role_to_entity(
     entity_id: Uuid,
     role_id: Uuid,
 ) {
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO role_assignments
+           (tenant_id, subject_kind, subject_id, role_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO role_assignments
            (tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, 'entity', $2, $3)"#,
@@ -246,7 +276,10 @@ async fn assign_role_to_group(
     group_id: Uuid,
     role_id: Uuid,
 ) {
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO role_assignments
+           (tenant_id, subject_kind, subject_id, role_id)
+           VALUES ($1, 'group', $2, $3)"#,
         r#"INSERT INTO role_assignments
            (tenant_id, subject_kind, subject_id, role_id)
            VALUES ($1, 'group', $2, $3)"#,
@@ -311,14 +344,21 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
     let read_id = action_id(&pool, "read").await;
 
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
-        .bind(role_id)
-        .bind(format!("platform-device-reader-{role_id}"))
-        .execute(&pool)
-        .await
-        .expect("insert platform role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO roles (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(role_id)
+    .bind(format!("platform-device-reader-{role_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert platform role");
 
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks
+           (scope_mode, object_kind, object_type, effect)
+           VALUES ('object_type', 'entity', 'entity:device', 'allow')
+           RETURNING id"#,
         r#"INSERT INTO permission_blocks
            (scope_mode, object_kind, object_type, effect)
            VALUES ('object_type', 'entity', 'entity:device', 'allow')
@@ -328,23 +368,27 @@ async fn platform_object_type_scope_lists_entities_across_tenants() {
     .await
     .expect("insert platform object_type block");
 
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)"#,
     )
     .bind(role_id)
     .bind(block_id)
     .execute(&pool)
     .await
     .expect("link platform role block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(read_id)
     .execute(&pool)
     .await
     .expect("link read action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO role_assignments (subject_kind, subject_id, role_id)
+           VALUES ('entity', $1, $2)"#,
         r#"INSERT INTO role_assignments (subject_kind, subject_id, role_id)
            VALUES ('entity', $1, $2)"#,
     )
@@ -587,7 +631,11 @@ async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     .await;
     assign_role_to_entity(&pool, tenant_id, subject_id, role_id).await;
 
-    let deny_block_id: Uuid = atom::db::query_scalar(
+    let deny_block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks
+           (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'deny')
+           RETURNING id"#,
         r#"INSERT INTO permission_blocks
            (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'deny')
@@ -598,15 +646,19 @@ async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     .fetch_one(&pool)
     .await
     .expect("insert deny block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(deny_block_id)
     .bind(read_id)
     .execute(&pool)
     .await
     .expect("insert deny action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies
+           (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies
            (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
@@ -640,10 +692,13 @@ async fn authorized_listing_uses_role_permissions_and_deny_overrides() {
     .await;
     assert!(rule_ids.is_empty(), "channel role must not list rules");
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
-        .bind(&[allowed_channel_id, denied_channel_id, rule_id][..])
-        .execute(&pool)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = ANY($1::uuid[])",
+        r#"DELETE FROM resources WHERE id IN (SELECT unhex(value) FROM json_each($1))"#,
+    )
+    .bind(&[allowed_channel_id, denied_channel_id, rule_id][..])
+    .execute(&pool)
+    .await;
 }
 
 #[tokio::test]
@@ -664,8 +719,9 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     let parent_object_group_id = make_group(&pool, tenant_id, "object", "parent-object").await;
     let child_object_group_id = make_group(&pool, tenant_id, "object", "child-object").await;
 
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2), ($3, $4)",
+        r#"INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2), ($3, $4)"#,
     )
     .bind(direct_principal_group_id)
     .bind(direct_subject_id)
@@ -675,9 +731,7 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     .await
     .expect("insert principal group members");
 
-    atom::db::query(
-        "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
-    )
+    crate::common::db::query("INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)", r#"INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)"#)
     .bind(parent_object_group_id)
     .bind(child_object_group_id)
     .bind(tenant_id)
@@ -685,9 +739,7 @@ async fn authorized_listing_supports_principal_and_object_groups() {
     .await
     .expect("insert object hierarchy");
 
-    atom::db::query(
-        "INSERT INTO object_group_entities (group_id, entity_id, tenant_id) VALUES ($1, $2, $3), ($4, $5, $6)",
-    )
+    crate::common::db::query("INSERT INTO object_group_entities (group_id, entity_id, tenant_id) VALUES ($1, $2, $3), ($4, $5, $6)", r#"INSERT INTO object_group_entities (group_id, entity_id, tenant_id) VALUES ($1, $2, $3), ($4, $5, $6)"#)
     .bind(parent_object_group_id)
     .bind(direct_device_id)
     .bind(tenant_id)
@@ -775,24 +827,27 @@ async fn authorized_listing_honours_ancestor_group_deny() {
     // Subject is a direct member of the child group; the parent is its ancestor.
     let parent_group = make_group(&pool, tenant_id, "principal", "parent").await;
     let child_group = make_group(&pool, tenant_id, "principal", "child").await;
-    atom::db::query(
-        "INSERT INTO principal_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
-    )
+    crate::common::db::query("INSERT INTO principal_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)", r#"INSERT INTO principal_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)"#)
     .bind(parent_group)
     .bind(child_group)
     .bind(tenant_id)
     .execute(&pool)
     .await
     .expect("principal hierarchy");
-    atom::db::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
-        .bind(child_group)
-        .bind(subject_id)
-        .execute(&pool)
-        .await
-        .expect("child membership");
+    crate::common::db::query(
+        "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)",
+        r#"INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)"#,
+    )
+    .bind(child_group)
+    .bind(subject_id)
+    .execute(&pool)
+    .await
+    .expect("child membership");
 
     // Deny read on the channel, assigned to the ancestor (parent) group.
-    let deny_block: Uuid = atom::db::query_scalar(
+    let deny_block: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
     )
@@ -801,15 +856,18 @@ async fn authorized_listing_honours_ancestor_group_deny() {
     .fetch_one(&pool)
     .await
     .expect("insert deny block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(deny_block)
     .bind(read_id)
     .execute(&pool)
     .await
     .expect("deny action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'group', $2, $3)"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'group', $2, $3)"#,
     )
@@ -834,10 +892,13 @@ async fn authorized_listing_honours_ancestor_group_deny() {
         "a deny on an ancestor principal group must remove the object from the listing, got: {ids:?}"
     );
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
-        .bind(channel_id)
-        .execute(&pool)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = $1",
+        r#"DELETE FROM resources WHERE id = $1"#,
+    )
+    .bind(channel_id)
+    .execute(&pool)
+    .await;
 }
 
 /// An exact-object block whose assignment is bounded to a different tenant than
@@ -855,7 +916,9 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     let read_id = action_id(&pool, "read").await;
 
     // Exact-object read allow on the owner_tenant object.
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_id, effect)
+           VALUES ('object', $1, 'allow') RETURNING id"#,
         r#"INSERT INTO permission_blocks (scope_mode, object_id, effect)
            VALUES ('object', $1, 'allow') RETURNING id"#,
     )
@@ -863,8 +926,9 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     .fetch_one(&pool)
     .await
     .expect("insert object block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(read_id)
@@ -872,7 +936,9 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     .await
     .expect("block action");
     // Assignment bounded to other_tenant — not the object's owner.
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -898,12 +964,15 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
     );
 
     // Control: rebind the assignment to the object's tenant → now listed.
-    atom::db::query("UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2")
-        .bind(owner_tenant)
-        .bind(block_id)
-        .execute(&pool)
-        .await
-        .expect("rebind");
+    crate::common::db::query(
+        "UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2",
+        r#"UPDATE direct_policies SET tenant_id = $1 WHERE permission_block_id = $2"#,
+    )
+    .bind(owner_tenant)
+    .bind(block_id)
+    .execute(&pool)
+    .await
+    .expect("rebind");
     let ids = authorized(
         &pool,
         subject_id,
@@ -918,10 +987,13 @@ async fn authorized_listing_honours_assignment_tenant_boundary() {
         "a same-tenant exact-object grant must surface the object"
     );
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
-        .bind(channel_id)
-        .execute(&pool)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = $1",
+        r#"DELETE FROM resources WHERE id = $1"#,
+    )
+    .bind(channel_id)
+    .execute(&pool)
+    .await;
 }
 
 async fn authorized_groups(
@@ -968,9 +1040,7 @@ async fn link_object_groups(
     parent_id: Uuid,
     child_id: Uuid,
 ) {
-    atom::db::query(
-        "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
-    )
+    crate::common::db::query("INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)", r#"INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)"#)
     .bind(parent_id)
     .bind(child_id)
     .bind(tenant_id)
@@ -1120,7 +1190,9 @@ async fn authorized_group_listing_object_deny_overrides_allow() {
     .await;
     assign_role_to_entity(&pool, tenant_id, subject_id, allow_role).await;
 
-    let deny_block: Uuid = atom::db::query_scalar(
+    let deny_block: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'deny') RETURNING id"#,
     )
@@ -1129,15 +1201,18 @@ async fn authorized_group_listing_object_deny_overrides_allow() {
     .fetch_one(&pool)
     .await
     .expect("insert deny block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(deny_block)
     .bind(read_id)
     .execute(&pool)
     .await
     .expect("deny action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -1155,4 +1230,104 @@ async fn authorized_group_listing_object_deny_overrides_allow() {
         "deny must remove only the denied group"
     );
     assert_eq!(listing.total, 1);
+}
+
+/// JSON object equality must be structural on both backends. SQLite keeps
+/// valid whitespace in stored JSON, whereas PostgreSQL JSONB normalizes it.
+#[tokio::test]
+#[ignore]
+async fn whitespace_empty_conditions_preserve_grant_and_ceiling_visibility() {
+    let pool = common::pool().await;
+    let tenant_id = make_tenant(&pool, "m16-json-conditions").await;
+    let subject_id = make_entity(&pool, tenant_id, "human", "reader").await;
+    let resource_id = make_resource(&pool, tenant_id, "channel", "channel").await;
+    let read_id = action_id(&pool, "read").await;
+    grant_resource_read(&pool, tenant_id, subject_id, resource_id, read_id).await;
+    common::db::query(
+        "UPDATE permission_blocks SET conditions = '{ }'::jsonb WHERE object_id = $1",
+        "UPDATE permission_blocks SET conditions = '{ }' WHERE object_id = $1",
+    )
+    .bind(resource_id)
+    .execute(&pool)
+    .await
+    .expect("store a structurally empty grant condition");
+
+    let credential_id = Uuid::new_v4();
+    let limit_id = Uuid::new_v4();
+    common::db::query(
+        "INSERT INTO credentials (id, entity_id, kind, scoped) VALUES ($1, $2, 'access_token', true)",
+        "INSERT INTO credentials (id, entity_id, kind, scoped) VALUES ($1, $2, 'access_token', true)",
+    )
+    .bind(credential_id)
+    .bind(subject_id)
+    .execute(&pool)
+    .await
+    .expect("create scoped credential");
+    common::db::query(
+        "INSERT INTO credential_permission_limits (id, credential_id, scope_mode, object_id, conditions) VALUES ($1, $2, 'object', $3, '{ }'::jsonb)",
+        "INSERT INTO credential_permission_limits (id, credential_id, scope_mode, object_id, conditions) VALUES ($1, $2, 'object', $3, '{ }')",
+    )
+    .bind(limit_id)
+    .bind(credential_id)
+    .bind(resource_id)
+    .execute(&pool)
+    .await
+    .expect("store a structurally empty ceiling condition");
+    common::db::query(
+        "INSERT INTO credential_permission_limit_actions (limit_id, action_id) VALUES ($1, $2)",
+        "INSERT INTO credential_permission_limit_actions (limit_id, action_id) VALUES ($1, $2)",
+    )
+    .bind(limit_id)
+    .bind(read_id)
+    .execute(&pool)
+    .await
+    .expect("add ceiling action");
+
+    let query = || AuthorizedObjectIdsQuery {
+        subject_id,
+        action: "read".into(),
+        object_kind: "resource".into(),
+        object_type: None,
+        tenant_id: Some(tenant_id),
+        id: None,
+        q: None,
+        attributes_contains: None,
+        external_id: None,
+        profile_id: None,
+        entity_status: None,
+        group_type: None,
+        parent_group_id: None,
+        include_descendants: false,
+        limit: 100,
+        offset: 0,
+        entity_order: Default::default(),
+        resource_order: Default::default(),
+        group_order: Default::default(),
+        dir: Default::default(),
+    };
+    for ceiling in [None, Some(credential_id)] {
+        let page = atom::authz::repo::authorized_object_ids_with_ceiling(&pool, query(), ceiling)
+            .await
+            .expect("list with structurally empty conditions");
+        assert_eq!(page.ids, vec![resource_id]);
+        assert_eq!(page.total, 1);
+    }
+
+    common::db::query(
+        r#"UPDATE credential_permission_limits SET conditions = '{"context.mfa":true}'::jsonb WHERE id = $1"#,
+        r#"UPDATE credential_permission_limits SET conditions = '{"context.mfa":true}' WHERE id = $1"#,
+    )
+    .bind(limit_id)
+    .execute(&pool)
+    .await
+    .expect("make the ceiling conditional");
+    let page =
+        atom::authz::repo::authorized_object_ids_with_ceiling(&pool, query(), Some(credential_id))
+            .await
+            .expect("list with conditional ceiling");
+    assert!(
+        page.ids.is_empty(),
+        "conditional ceilings must still fail closed"
+    );
+    assert_eq!(page.total, 0);
 }

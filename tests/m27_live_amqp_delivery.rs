@@ -39,13 +39,16 @@ fn amqp_url() -> String {
 }
 
 async fn insert_outbox_row(pool: &Database, payload: &DomainEventPayload) {
-    atom::db::query("INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)")
-        .bind(payload.event_id)
-        .bind(&payload.event)
-        .bind(serde_json::to_value(payload).expect("serialize payload"))
-        .execute(pool)
-        .await
-        .expect("insert event_outbox row");
+    crate::common::db::query(
+        "INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)",
+        r#"INSERT INTO event_outbox (id, event, payload) VALUES ($1, $2, $3)"#,
+    )
+    .bind(payload.event_id)
+    .bind(&payload.event)
+    .bind(serde_json::to_value(payload).expect("serialize payload"))
+    .execute(pool)
+    .await
+    .expect("insert event_outbox row");
 }
 
 fn sample_payload(event: &str) -> DomainEventPayload {
@@ -69,7 +72,7 @@ fn sample_payload(event: &str) -> DomainEventPayload {
 #[ignore]
 async fn a_published_event_is_actually_delivered_to_the_broker() {
     let pool = common::pool().await;
-    atom::db::query("TRUNCATE TABLE event_outbox")
+    crate::common::db::query("TRUNCATE TABLE event_outbox", r#"DELETE FROM event_outbox"#)
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -120,12 +123,14 @@ async fn a_published_event_is_actually_delivered_to_the_broker() {
         .expect("deliver batch");
     assert_eq!(delivered, 1, "the row must be delivered to the real broker");
 
-    let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
-            .bind(event_id)
-            .fetch_one(&pool)
-            .await
-            .expect("fetch delivered_at");
+    let delivered_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT delivered_at FROM event_outbox WHERE id = $1",
+        r#"SELECT delivered_at FROM event_outbox WHERE id = $1"#,
+    )
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch delivered_at");
     assert!(
         delivered_at.is_some(),
         "delivered_at must be set after a successful real-broker publish"
@@ -165,7 +170,7 @@ async fn a_published_event_is_actually_delivered_to_the_broker() {
 #[ignore]
 async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
     let pool = common::pool().await;
-    atom::db::query("TRUNCATE TABLE event_outbox")
+    crate::common::db::query("TRUNCATE TABLE event_outbox", r#"DELETE FROM event_outbox"#)
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -248,12 +253,14 @@ async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
     );
 
     for payload in &payloads {
-        let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-            atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
-                .bind(payload.event_id)
-                .fetch_one(&pool)
-                .await
-                .expect("fetch delivered_at");
+        let delivered_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+            "SELECT delivered_at FROM event_outbox WHERE id = $1",
+            r#"SELECT delivered_at FROM event_outbox WHERE id = $1"#,
+        )
+        .bind(payload.event_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch delivered_at");
         assert!(
             delivered_at.is_some(),
             "delivered_at must be set for event {}",
@@ -272,7 +279,7 @@ async fn a_multi_event_batch_is_pipelined_and_all_events_arrive() {
 #[ignore]
 async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
     let pool = common::pool().await;
-    atom::db::query("TRUNCATE TABLE event_outbox")
+    crate::common::db::query("TRUNCATE TABLE event_outbox", r#"DELETE FROM event_outbox"#)
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -304,23 +311,27 @@ async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
         "an unroutable publish must not be counted as delivered"
     );
 
-    let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
-            .bind(event_id)
-            .fetch_one(&pool)
-            .await
-            .expect("fetch delivered_at");
+    let delivered_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT delivered_at FROM event_outbox WHERE id = $1",
+        r#"SELECT delivered_at FROM event_outbox WHERE id = $1"#,
+    )
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch delivered_at");
     assert!(
         delivered_at.is_none(),
         "a message the broker never routed anywhere must not be marked delivered"
     );
 
-    let (attempts, last_error): (i32, Option<String>) =
-        atom::db::query_as("SELECT attempts, last_error FROM event_outbox WHERE id = $1")
-            .bind(event_id)
-            .fetch_one(&pool)
-            .await
-            .expect("fetch attempts/last_error");
+    let (attempts, last_error): (i32, Option<String>) = crate::common::db::query_as(
+        "SELECT attempts, last_error FROM event_outbox WHERE id = $1",
+        r#"SELECT attempts, last_error FROM event_outbox WHERE id = $1"#,
+    )
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch attempts/last_error");
     assert_eq!(attempts, 1);
     assert!(last_error.unwrap().contains("unroutable"));
 }
@@ -335,7 +346,7 @@ async fn publishing_to_an_unroutable_routing_key_is_not_marked_delivered() {
 #[ignore]
 async fn publishing_to_a_custom_topic_exchange_declares_and_routes_correctly() {
     let pool = common::pool().await;
-    atom::db::query("TRUNCATE TABLE event_outbox")
+    crate::common::db::query("TRUNCATE TABLE event_outbox", r#"DELETE FROM event_outbox"#)
         .execute(&pool)
         .await
         .expect("truncate event_outbox");
@@ -404,12 +415,14 @@ async fn publishing_to_a_custom_topic_exchange_declares_and_routes_correctly() {
         "the row must be delivered via the custom exchange"
     );
 
-    let delivered_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT delivered_at FROM event_outbox WHERE id = $1")
-            .bind(event_id)
-            .fetch_one(&pool)
-            .await
-            .expect("fetch delivered_at");
+    let delivered_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT delivered_at FROM event_outbox WHERE id = $1",
+        r#"SELECT delivered_at FROM event_outbox WHERE id = $1"#,
+    )
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch delivered_at");
     assert!(delivered_at.is_some());
 
     let message = tokio::time::timeout(std::time::Duration::from_secs(5), async {

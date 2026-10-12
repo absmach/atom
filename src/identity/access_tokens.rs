@@ -3,6 +3,8 @@
 //! (`auth_from_api_key`); ceiling evaluation lives in the PDP and the
 //! ceiling-aware listing readers.
 
+mod repository;
+
 use crate::db::Database;
 use argon2::password_hash::rand_core::OsRng;
 use chrono::Utc;
@@ -16,10 +18,9 @@ use crate::{
     db::DbTransaction,
     error::{db_err, AppError},
     models::{
-        enums::{CredentialKind, CredentialStatus},
+        enums::CredentialStatus,
         token::{
-            AccessTokenPermission, AccessTokenPermissionSummary, AccessTokenResponse,
-            AccessTokenSummary, CreateAccessToken,
+            AccessTokenPermission, AccessTokenResponse, AccessTokenSummary, CreateAccessToken,
         },
     },
 };
@@ -115,22 +116,20 @@ pub async fn create_access_token_in_tx(
     }
     // A scoped token's authority is capped by its ceiling; an unscoped token
     // (`scoped = false`) authenticates with the owner's full live grants.
-    crate::db::query(
-        r#"INSERT INTO credentials (id, entity_id, kind, identifier, secret_hash, secret_lookup_hash, scoped, expires_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+    repository::insert_token(
+        tx,
+        repository::NewToken {
+            id: cred_id,
+            entity_id,
+            key_prefix,
+            secret_hash,
+            secret_lookup_hash,
+            scoped,
+            expires_at: req.expires_at,
+            metadata,
+        },
     )
-    .bind(cred_id)
-    .bind(entity_id)
-    .bind(CredentialKind::AccessToken)
-    .bind(key_prefix)
-    .bind(secret_hash)
-    .bind(secret_lookup_hash)
-    .bind(scoped)
-    .bind(req.expires_at)
-    .bind(metadata)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
+    .await?;
 
     let action_ids = resolve_ceiling_action_ids(tx, &req.permissions).await?;
     for permission in &req.permissions {
@@ -182,17 +181,7 @@ pub async fn replace_access_token_permissions_in_tx(
     }
     // Look the token up once and reject config-managed rows with a 409
     // conflict — the same shape as the entity/capability guards.
-    let row: Option<(bool, Option<String>)> = crate::db::query_as(
-        r#"SELECT scoped, managed_by FROM credentials
-           WHERE id = $1 AND entity_id = $2 AND kind = $3 AND status = 'active'
-           FOR UPDATE"#,
-    )
-    .bind(cred_id)
-    .bind(entity_id)
-    .bind(CredentialKind::AccessToken)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let row = repository::lock_active_token(tx, entity_id, cred_id).await?;
     match row {
         None => return Err(AppError::not_found("access token not found")),
         Some((_, Some(mgr))) if mgr == "config" => {
@@ -208,11 +197,7 @@ pub async fn replace_access_token_permissions_in_tx(
         Some((true, _)) => {}
     }
 
-    crate::db::query("DELETE FROM credential_permission_limits WHERE credential_id = $1")
-        .bind(cred_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
+    repository::clear_ceiling(tx, cred_id).await?;
     let action_ids = resolve_ceiling_action_ids(tx, &permissions).await?;
     for permission in &permissions {
         write_ceiling_limit(tx, cred_id, permission, &action_ids).await?;
@@ -233,20 +218,7 @@ async fn resolve_ceiling_action_ids(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let rows = crate::db::query("SELECT name, id FROM actions WHERE name = ANY($1::text[])")
-        .bind(&names)
-        .fetch_all(tx.exec())
-        .await
-        .map_err(db_err)?;
-    let action_ids = rows
-        .into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get::<String, _>("name").map_err(db_err)?,
-                row.try_get::<Uuid, _>("id").map_err(db_err)?,
-            ))
-        })
-        .collect::<Result<std::collections::HashMap<_, _>, AppError>>()?;
+    let action_ids = repository::action_ids(tx, &names).await?;
     if let Some(unknown) = names.iter().find(|name| !action_ids.contains_key(*name)) {
         return Err(AppError::bad_request(format!("unknown action: {unknown}")));
     }
@@ -292,47 +264,18 @@ async fn write_ceiling_limit(
             "tenant_id is not supported for platform or object scope modes",
         ));
     }
-    let conditions = permission
-        .conditions
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let limit_id = Uuid::new_v4();
-    crate::db::query(
-        r#"INSERT INTO credential_permission_limits
-             (id, credential_id, scope_mode, tenant_id, object_kind, object_type, object_id, conditions)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
-    )
-    .bind(limit_id)
-    .bind(cred_id)
-    .bind(&permission.scope_mode)
-    .bind(permission.tenant_id)
-    .bind(&permission.object_kind)
-    .bind(&permission.object_type)
-    .bind(permission.object_id)
-    .bind(conditions)
-    .execute(tx.exec())
-    .await
-    .map_err(|e| match e {
-        e if crate::error::is_check_violation(&e) => {
-            AppError::bad_request("invalid permission scope for access token")
-        }
-        other => AppError::Database(other),
-    })?;
+    let ids = permission
+        .actions
+        .iter()
+        .map(|action| {
+            action_ids
+                .get(action)
+                .copied()
+                .ok_or_else(|| AppError::bad_request(format!("unknown action: {action}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    repository::insert_ceiling(tx, cred_id, permission, &ids).await?;
 
-    for action in &permission.actions {
-        let action_id = action_ids
-            .get(action)
-            .ok_or_else(|| AppError::bad_request(format!("unknown action: {action}")))?;
-        crate::db::query(
-            r#"INSERT INTO credential_permission_limit_actions (limit_id, action_id)
-               VALUES ($1, $2) ON CONFLICT DO NOTHING"#,
-        )
-        .bind(limit_id)
-        .bind(action_id)
-        .execute(tx.exec())
-        .await
-        .map_err(db_err)?;
-    }
     Ok(())
 }
 
@@ -349,144 +292,14 @@ pub async fn list_access_tokens(
     entity_id: Uuid,
     params: ListAccessTokens,
 ) -> Result<(Vec<AccessTokenSummary>, i64), AppError> {
-    let limit = params.limit.clamp(1, 100);
-    let offset = params.offset.max(0);
-    // Config-managed tokens are surfaced with `managed_by='config'` so the
-    // UI can flag them read-only; the mutation endpoints refuse to touch
-    // them with 409 conflict.
-    let total: i64 = crate::db::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM credentials
-           WHERE entity_id = $1
-             AND kind = $2
-             AND ($3::text IS NULL OR status = $3::text)"#,
-    )
-    .bind(entity_id)
-    .bind(CredentialKind::AccessToken)
-    .bind(params.status.clone())
-    .fetch_one(pool)
-    .await
-    .map_err(db_err)?;
-
-    let rows = crate::db::query(
-        r#"SELECT id,
-                  COALESCE(NULLIF(metadata->>'name', ''), identifier, 'Access token') AS name,
-                  NULLIF(metadata->>'description', '') AS description,
-                  identifier,
-                  status,
-                  scoped,
-                  expires_at,
-                  last_used_at,
-                  created_at,
-                  managed_by
-           FROM credentials
-           WHERE entity_id = $1
-             AND kind = $2
-             AND ($3::text IS NULL OR status = $3::text)
-           ORDER BY created_at DESC
-           LIMIT $4 OFFSET $5"#,
-    )
-    .bind(entity_id)
-    .bind(CredentialKind::AccessToken)
-    .bind(params.status)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let credential_ids: Vec<Uuid> = rows
-        .iter()
-        .map(|row| row.try_get("id").map_err(db_err))
-        .collect::<Result<Vec<_>, AppError>>()?;
-    let mut permissions = load_access_token_permissions(pool, &credential_ids).await?;
-
-    let items = rows
-        .into_iter()
-        .map(|row| {
-            let credential_id: Uuid = row.try_get("id").map_err(db_err)?;
-            Ok(AccessTokenSummary {
-                credential_id,
-                name: row.try_get("name").map_err(db_err)?,
-                description: row.try_get("description").map_err(db_err)?,
-                identifier: row.try_get("identifier").map_err(db_err)?,
-                status: row.try_get("status").map_err(db_err)?,
-                scoped: row.try_get("scoped").map_err(db_err)?,
-                permissions: permissions.remove(&credential_id).unwrap_or_default(),
-                expires_at: row.try_get("expires_at").map_err(db_err)?,
-                last_used_at: row.try_get("last_used_at").map_err(db_err)?,
-                created_at: row.try_get("created_at").map_err(db_err)?,
-                managed_by: row.try_get("managed_by").map_err(db_err)?,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
-    Ok((items, total))
+    repository::list_access_tokens(pool, entity_id, params).await
 }
 
 /// The owner (entity id) of an access-token credential; `NotFound` when the id
 /// does not exist or is not an access token. Used by the GraphQL layer to route
 /// owner vs delegated (admin) lifecycle operations.
 pub async fn access_token_owner(pool: &Database, cred_id: Uuid) -> Result<Uuid, AppError> {
-    crate::db::query_scalar(r#"SELECT entity_id FROM credentials WHERE id = $1 AND kind = $2"#)
-        .bind(cred_id)
-        .bind(CredentialKind::AccessToken)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_err)?
-        .ok_or_else(|| AppError::not_found("access token not found"))
-}
-
-/// Render token ceilings for display: one entry per limit row with its action
-/// names, grouped per credential in one query for the whole listing.
-async fn load_access_token_permissions(
-    pool: &Database,
-    credential_ids: &[Uuid],
-) -> Result<std::collections::HashMap<Uuid, Vec<AccessTokenPermissionSummary>>, AppError> {
-    let rows = crate::db::query(
-        r#"SELECT l.credential_id,
-                  l.scope_mode,
-                  l.tenant_id,
-                  l.object_kind,
-                  l.object_type,
-                  l.object_id,
-                  l.conditions,
-                  COALESCE(
-                      ARRAY_AGG(a.name ORDER BY a.name) FILTER (WHERE a.name IS NOT NULL),
-                      '{}'
-                  ) AS actions
-           FROM credential_permission_limits l
-           LEFT JOIN credential_permission_limit_actions la ON la.limit_id = l.id
-           LEFT JOIN actions a ON a.id = la.action_id
-           WHERE l.credential_id = ANY($1)
-           GROUP BY l.id
-           ORDER BY l.created_at"#,
-    )
-    .bind(credential_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let mut by_credential: std::collections::HashMap<Uuid, Vec<AccessTokenPermissionSummary>> =
-        std::collections::HashMap::new();
-    for row in rows {
-        let credential_id: Uuid = row.try_get("credential_id").map_err(db_err)?;
-        by_credential
-            .entry(credential_id)
-            .or_default()
-            .push(AccessTokenPermissionSummary {
-                actions: row
-                    .try_get::<crate::db::TextList, _>("actions")
-                    .map_err(db_err)?
-                    .0,
-                scope_mode: row.try_get("scope_mode").map_err(db_err)?,
-                tenant_id: row.try_get("tenant_id").map_err(db_err)?,
-                object_kind: row.try_get("object_kind").map_err(db_err)?,
-                object_type: row.try_get("object_type").map_err(db_err)?,
-                object_id: row.try_get("object_id").map_err(db_err)?,
-                conditions: row.try_get("conditions").map_err(db_err)?,
-            });
-    }
-    Ok(by_credential)
+    repository::access_token_owner(pool, cred_id).await
 }
 
 pub async fn revoke_access_token(
@@ -511,17 +324,7 @@ pub async fn revoke_access_token_in_tx(
     entity_id: Uuid,
     cred_id: Uuid,
 ) -> Result<(), AppError> {
-    let managed_by: Option<Option<String>> = crate::db::query_scalar(
-        r#"SELECT managed_by FROM credentials
-           WHERE id = $1 AND entity_id = $2 AND kind = $3
-           FOR UPDATE"#,
-    )
-    .bind(cred_id)
-    .bind(entity_id)
-    .bind(CredentialKind::AccessToken)
-    .fetch_optional(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let managed_by = repository::lock_token_owner(tx, entity_id, cred_id).await?;
     match managed_by {
         None => return Err(AppError::not_found("access token not found")),
         Some(Some(value)) if value == "config" => {
@@ -531,26 +334,7 @@ pub async fn revoke_access_token_in_tx(
         }
         _ => {}
     }
-    let result = crate::db::query(
-        r#"UPDATE credentials
-           SET status = 'revoked',
-               metadata = metadata - 'revoked_at' - 'revocation_reason'
-                          || jsonb_build_object(
-                              'revoked_at', now(),
-                              'revocation_reason', 'manual'
-                          )
-           WHERE id = $1
-             AND entity_id = $2
-             AND kind = $3"#,
-    )
-    .bind(cred_id)
-    .bind(entity_id)
-    .bind(CredentialKind::AccessToken)
-    .execute(tx.exec())
-    .await
-    .map_err(db_err)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::not_found("access token not found"));
-    }
+    repository::revoke(tx, entity_id, cred_id).await?;
+
     Ok(())
 }

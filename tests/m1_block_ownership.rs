@@ -22,20 +22,26 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn read_capability_id(pool: &atom::db::Database) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("read cap")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read cap")
 }
 
 async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("own-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("own-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
@@ -74,18 +80,19 @@ async fn make_block(pool: &atom::db::Database, tenant_id: Uuid, read_cap: Uuid) 
 }
 
 async fn block_exists(pool: &atom::db::Database, block_id: Uuid) -> bool {
-    let count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM permission_blocks WHERE id = $1")
-        .bind(block_id)
-        .fetch_one(pool)
-        .await
-        .expect("count blocks");
+    let count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM permission_blocks WHERE id = $1",
+        r#"SELECT COUNT(*) FROM permission_blocks WHERE id = $1"#,
+    )
+    .bind(block_id)
+    .fetch_one(pool)
+    .await
+    .expect("count blocks");
     count > 0
 }
 
 async fn role_links_block(pool: &atom::db::Database, role_id: Uuid, block_id: Uuid) -> bool {
-    let count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2",
-    )
+    let count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2", r#"SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2"#)
     .bind(role_id)
     .bind(block_id)
     .fetch_one(pool)
@@ -195,9 +202,7 @@ async fn delete_permission_block_refuses_referenced_block() {
 
 async fn make_human(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')"#)
     .bind(id)
     .bind(format!("own-ent-{id}"))
     .bind(tenant_id)
@@ -231,12 +236,14 @@ async fn make_direct_policy(
     )
     .await
     .expect("create policy");
-    let block_id: Uuid =
-        atom::db::query_scalar("SELECT permission_block_id FROM direct_policies WHERE id = $1")
-            .bind(policy.id)
-            .fetch_one(pool)
-            .await
-            .expect("policy block id");
+    let block_id: Uuid = crate::common::db::query_scalar(
+        "SELECT permission_block_id FROM direct_policies WHERE id = $1",
+        r#"SELECT permission_block_id FROM direct_policies WHERE id = $1"#,
+    )
+    .bind(policy.id)
+    .fetch_one(pool)
+    .await
+    .expect("policy block id");
     (policy.id, block_id)
 }
 
@@ -308,11 +315,14 @@ async fn tenant_delete_cascades_linked_blocks() {
         .await
         .expect("link");
 
-    atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(tenant_id)
-        .execute(&p)
-        .await
-        .expect("tenant delete must cascade through linked blocks");
+    crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(&p)
+    .await
+    .expect("tenant delete must cascade through linked blocks");
 
     assert!(
         !block_exists(&p, block_id).await,
@@ -347,11 +357,14 @@ async fn role_purge_collects_orphaned_block() {
 
     // Age the tombstone past retention and purge; the role is physically removed
     // and its now-orphaned block is collected.
-    atom::db::query("UPDATE roles SET deleted_at = now() - interval '100 days' WHERE id = $1")
-        .bind(role)
-        .execute(&p)
-        .await
-        .expect("age role tombstone");
+    crate::common::db::query(
+        "UPDATE roles SET deleted_at = now() - interval '100 days' WHERE id = $1",
+        r#"UPDATE roles SET deleted_at = atom_ts_add(now(), -(8640000)) WHERE id = $1"#,
+    )
+    .bind(role)
+    .execute(&p)
+    .await
+    .expect("age role tombstone");
     for _ in 0..20 {
         atom::purge::purge_expired(
             &p,
@@ -394,11 +407,14 @@ async fn role_purge_preserves_standalone_block() {
     atom::authz::repo::delete_role(&p, role, None)
         .await
         .expect("delete role");
-    atom::db::query("UPDATE roles SET deleted_at = now() - interval '100 days' WHERE id = $1")
-        .bind(role)
-        .execute(&p)
-        .await
-        .expect("age role tombstone");
+    crate::common::db::query(
+        "UPDATE roles SET deleted_at = now() - interval '100 days' WHERE id = $1",
+        r#"UPDATE roles SET deleted_at = atom_ts_add(now(), -(8640000)) WHERE id = $1"#,
+    )
+    .bind(role)
+    .execute(&p)
+    .await
+    .expect("age role tombstone");
 
     for _ in 0..20 {
         atom::purge::purge_expired(

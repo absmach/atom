@@ -90,7 +90,11 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         );
         tx.commit().await.unwrap();
         provisioned.commit_generated_key();
-        atom::db::query(
+        crate::common::db::query(
+            r#"UPDATE pki_authorities
+               SET ocsp_url = $2, ca_issuers_url = $3,
+                   crl_distribution_point_url = $4
+               WHERE id = $1"#,
             r#"UPDATE pki_authorities
                SET ocsp_url = $2, ca_issuers_url = $3,
                    crl_distribution_point_url = $4
@@ -401,7 +405,11 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         413,
     )
     .await;
-    let reenrollment_events_before: i64 = atom::db::query_scalar(
+    let reenrollment_events_before: i64 = crate::common::db::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->'details'->>'transport' = 'est'"#,
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -424,7 +432,11 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     .await
     .unwrap();
     assert_eq!(no_peer.status, 401, "{}", no_peer.body);
-    let reenrollment_events_after: i64 = atom::db::query_scalar(
+    let reenrollment_events_after: i64 = crate::common::db::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM event_outbox
+           WHERE event = 'certificate.reenroll'
+             AND payload->'details'->>'transport' = 'est'"#,
         r#"SELECT COUNT(*)
            FROM event_outbox
            WHERE event = 'certificate.reenroll'
@@ -483,9 +495,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         fs::read_to_string(&generated_cert_a).unwrap(),
         fs::read_to_string(&generated_cert_b).unwrap()
     );
-    let stored_metadata: Vec<String> = atom::db::query_scalar(
-        "SELECT metadata::text FROM credentials WHERE entity_id = $1 AND kind = 'certificate'",
-    )
+    let stored_metadata: Vec<String> = crate::common::db::query_scalar("SELECT metadata::text FROM credentials WHERE entity_id = $1 AND kind = 'certificate'", r#"SELECT atom_text(metadata) FROM credentials WHERE entity_id = $1 AND kind = 'certificate'"#)
     .bind(entity)
     .fetch_all(&pool)
     .await
@@ -547,8 +557,9 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         ),
     )
     .unwrap();
-    atom::db::query(
+    crate::common::db::query(
         "UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1",
+        r#"UPDATE credentials SET expires_at = atom_ts_add(now(), -(1)) WHERE id = $1"#,
     )
     .bind(renewed_id)
     .execute(&pool)
@@ -588,8 +599,7 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
     // rejects it with "near DO: syntax error" even though the statement is
     // otherwise valid SQL. Adding any WHERE clause resolves the ambiguity; `true`
     // keeps this one a no-op filter on both backends.
-    atom::db::query(
-        r#"WITH windows AS (
+    crate::common::db::query(r#"WITH windows AS (
                SELECT step,
                       to_timestamp(
                           floor(extract(epoch FROM now()) / $3) * $3
@@ -606,8 +616,22 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
             WHERE true
            ON CONFLICT (scope_kind, scope_id, window_start) DO UPDATE
            SET request_count = EXCLUDED.request_count,
-               updated_at = EXCLUDED.updated_at"#,
-    )
+               updated_at = EXCLUDED.updated_at"#, r#"WITH windows AS (
+               SELECT step,
+                      atom_ts_floor(now(), $3) AS current_start
+                 FROM (WITH RECURSIVE series(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM series WHERE i < 1) SELECT i AS step FROM series) AS step
+           )
+           INSERT INTO pki_enrollment_rate_windows (
+               scope_kind, scope_id, window_start, request_count, updated_at
+           )
+           SELECT 'entity', $1,
+                  atom_ts_add(current_start, ((step * $3) * 1)),
+                  $2, now()
+             FROM windows
+            WHERE true
+           ON CONFLICT (scope_kind, scope_id, window_start) DO UPDATE
+           SET request_count = EXCLUDED.request_count,
+               updated_at = EXCLUDED.updated_at"#)
     .bind(entity)
     .bind(i64::from(config.enrollment.entity_rate_limit.max_requests))
     .bind(i64::try_from(config.enrollment.entity_rate_limit.window_secs).unwrap())
@@ -637,7 +661,13 @@ async fn est_adapter_interoperates_and_enforces_the_pr014b_contract() {
         ("certificate.enroll", "serverkeygen", "error", 1_i64),
         ("certificate.reenroll", "reenroll", "deny", 2_i64),
     ] {
-        let observed: i64 = atom::db::query_scalar(
+        let observed: i64 = crate::common::db::query_scalar(
+            r#"SELECT COUNT(*)
+               FROM event_outbox
+               WHERE event = $1
+                 AND payload->>'outcome' = $3
+                 AND payload->'details'->>'transport' = 'est'
+                 AND payload->'details'->>'mode' = $2"#,
             r#"SELECT COUNT(*)
                FROM event_outbox
                WHERE event = $1
@@ -720,7 +750,12 @@ fn path_arg(path: &Path) -> String {
 }
 
 async fn latest_certificate_id(pool: &atom::db::Database, entity_id: Uuid) -> Uuid {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
+        r#"SELECT id
+           FROM credentials
+           WHERE entity_id = $1 AND kind = 'certificate'
+           ORDER BY created_at DESC, id DESC
+           LIMIT 1"#,
         r#"SELECT id
            FROM credentials
            WHERE entity_id = $1 AND kind = 'certificate'

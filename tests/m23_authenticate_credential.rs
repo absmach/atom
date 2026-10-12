@@ -98,8 +98,9 @@ async fn make_device(pool: &Database, tenant_id: Uuid) -> (Uuid, String, String,
     identity_service::create_password(pool, device.id, DEVICE_SECRET)
         .await
         .expect("create password");
-    let credential_id: Uuid = atom::db::query_scalar(
+    let credential_id: Uuid = crate::common::db::query_scalar(
         "SELECT id FROM credentials WHERE entity_id = $1 AND kind = 'password' LIMIT 1",
+        r#"SELECT id FROM credentials WHERE entity_id = $1 AND kind = 'password' LIMIT 1"#,
     )
     .bind(device.id)
     .fetch_one(pool)
@@ -151,12 +152,14 @@ async fn credential_authenticates_uuid_name_and_alias_without_session() {
         assert_eq!(authenticated.credential_id, credential_id);
     }
 
-    let sessions: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM sessions WHERE entity_id = $1")
-            .bind(entity_id)
-            .fetch_one(&pool)
-            .await
-            .expect("session count");
+    let sessions: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM sessions WHERE entity_id = $1",
+        r#"SELECT COUNT(*) FROM sessions WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .fetch_one(&pool)
+    .await
+    .expect("session count");
     assert_eq!(sessions, 0, "credential auth must not create sessions");
 }
 
@@ -179,11 +182,14 @@ async fn credential_authentication_rejects_wrong_secret_revoked_credential_and_b
     .expect_err("wrong secret must be rejected");
     assert!(wrong.to_string().contains("invalid credentials"));
 
-    atom::db::query("UPDATE credentials SET status = 'revoked' WHERE entity_id = $1")
-        .bind(entity_id)
-        .execute(&pool)
-        .await
-        .expect("revoke credential");
+    crate::common::db::query(
+        "UPDATE credentials SET status = 'revoked' WHERE entity_id = $1",
+        r#"UPDATE credentials SET status = 'revoked' WHERE entity_id = $1"#,
+    )
+    .bind(entity_id)
+    .execute(&pool)
+    .await
+    .expect("revoke credential");
     let revoked = identity_service::authenticate_password_credential_in_tenant(
         &pool,
         &cfg,
@@ -215,12 +221,15 @@ async fn credential_authentication_rejects_inactive_or_deleted_principals() {
 
     let (inactive_tenant_id, _) = make_tenant(&pool).await;
     let (_, inactive_name, _, _) = make_device(&pool, inactive_tenant_id).await;
-    atom::db::query("UPDATE entities SET status = 'inactive' WHERE name = $1 AND tenant_id = $2")
-        .bind(&inactive_name)
-        .bind(inactive_tenant_id)
-        .execute(&pool)
-        .await
-        .expect("deactivate entity");
+    crate::common::db::query(
+        "UPDATE entities SET status = 'inactive' WHERE name = $1 AND tenant_id = $2",
+        r#"UPDATE entities SET status = 'inactive' WHERE name = $1 AND tenant_id = $2"#,
+    )
+    .bind(&inactive_name)
+    .bind(inactive_tenant_id)
+    .execute(&pool)
+    .await
+    .expect("deactivate entity");
     let inactive = identity_service::authenticate_password_credential_in_tenant(
         &pool,
         &cfg,
@@ -234,12 +243,15 @@ async fn credential_authentication_rejects_inactive_or_deleted_principals() {
 
     let (deleted_entity_tenant_id, _) = make_tenant(&pool).await;
     let (_, deleted_entity_name, _, _) = make_device(&pool, deleted_entity_tenant_id).await;
-    atom::db::query("UPDATE entities SET deleted_at = now() WHERE name = $1 AND tenant_id = $2")
-        .bind(&deleted_entity_name)
-        .bind(deleted_entity_tenant_id)
-        .execute(&pool)
-        .await
-        .expect("soft delete entity");
+    crate::common::db::query(
+        "UPDATE entities SET deleted_at = now() WHERE name = $1 AND tenant_id = $2",
+        r#"UPDATE entities SET deleted_at = now() WHERE name = $1 AND tenant_id = $2"#,
+    )
+    .bind(&deleted_entity_name)
+    .bind(deleted_entity_tenant_id)
+    .execute(&pool)
+    .await
+    .expect("soft delete entity");
     let deleted_entity = identity_service::authenticate_password_credential_in_tenant(
         &pool,
         &cfg,
@@ -252,11 +264,14 @@ async fn credential_authentication_rejects_inactive_or_deleted_principals() {
     assert!(deleted_entity.to_string().contains("invalid credentials"));
 
     let (inactive_scope_id, _) = make_tenant(&pool).await;
-    atom::db::query("UPDATE tenants SET status = 'inactive' WHERE id = $1")
-        .bind(inactive_scope_id)
-        .execute(&pool)
-        .await
-        .expect("deactivate tenant");
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'inactive' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'inactive' WHERE id = $1"#,
+    )
+    .bind(inactive_scope_id)
+    .execute(&pool)
+    .await
+    .expect("deactivate tenant");
     let inactive_tenant =
         identity_service::resolve_credential_auth_tenant(&pool, Some(inactive_scope_id), None)
             .await
@@ -264,11 +279,14 @@ async fn credential_authentication_rejects_inactive_or_deleted_principals() {
     assert!(inactive_tenant.to_string().contains("tenant is not active"));
 
     let (deleted_scope_id, _) = make_tenant(&pool).await;
-    atom::db::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
-        .bind(deleted_scope_id)
-        .execute(&pool)
-        .await
-        .expect("soft delete tenant");
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1",
+        r#"UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1"#,
+    )
+    .bind(deleted_scope_id)
+    .execute(&pool)
+    .await
+    .expect("soft delete tenant");
     let deleted_tenant =
         identity_service::resolve_credential_auth_tenant(&pool, Some(deleted_scope_id), None)
             .await

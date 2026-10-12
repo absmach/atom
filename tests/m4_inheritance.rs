@@ -20,11 +20,14 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn capability_id(pool: &atom::db::Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .unwrap_or_else(|e| panic!("capability {name}: {e}"))
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1 LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = $1 LIMIT 1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("capability {name}: {e}"))
 }
 
 async fn tenant(pool: &atom::db::Database) -> Uuid {
@@ -46,7 +49,7 @@ async fn tenant(pool: &atom::db::Database) -> Uuid {
 
 async fn entity(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')")
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')"#)
         .bind(id)
         .bind(format!("m4-ent-{id}"))
         .bind(tenant_id)
@@ -58,8 +61,9 @@ async fn entity(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
 
 async fn channel(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)"#,
     )
     .bind(id)
     .bind(format!("m4-chan-{id}"))
