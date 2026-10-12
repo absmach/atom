@@ -560,11 +560,12 @@ pub(super) async fn insert_oauth_state(
         nonce,
         return_to,
         expires_at,
+        client_state,
     } = input;
     sqlx::query(
         r#"INSERT INTO oauth_login_states
-             (id, provider, state_hash, pkce_verifier, nonce, return_to, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+             (id, provider, state_hash, pkce_verifier, nonce, return_to, expires_at, client_state)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
     )
     .bind(state_id)
     .bind(name)
@@ -573,6 +574,7 @@ pub(super) async fn insert_oauth_state(
     .bind(nonce)
     .bind(return_to)
     .bind(expires_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    .bind(client_state)
     .execute(pool)
     .await
     .map(|r| r.rows_affected())
@@ -583,7 +585,7 @@ pub(super) async fn exchange_code(
     code_id: Uuid,
 ) -> Result<ExchangeCode, sqlx::Error> {
     sqlx::query_as::<_, ExchangeCode>(
-        r#"SELECT entity_id, secret_hash, expires_at, consumed_at
+        r#"SELECT entity_id, secret_hash, expires_at, consumed_at, client_state, email
            FROM auth_exchange_codes
            WHERE id = $1"#,
     )
@@ -894,7 +896,7 @@ pub(super) async fn oauth_state(
     provider: &str,
 ) -> Result<StoredOAuthState, sqlx::Error> {
     sqlx::query_as::<_, StoredOAuthState>(
-        r#"SELECT state_hash, pkce_verifier, nonce, return_to, expires_at, consumed_at
+        r#"SELECT state_hash, pkce_verifier, nonce, return_to, expires_at, consumed_at, client_state
            FROM oauth_login_states
            WHERE id = $1 AND provider = $2"#,
     )
@@ -1031,15 +1033,19 @@ pub(super) async fn insert_exchange_code(
     entity_id: Uuid,
     code_hash: String,
     expires_at: DateTime<Utc>,
+    client_state: Option<&str>,
+    email: Option<&str>,
 ) -> Result<u64, sqlx::Error> {
     sqlx::query(
-        r#"INSERT INTO auth_exchange_codes (id, entity_id, secret_hash, expires_at)
-           VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO auth_exchange_codes (id, entity_id, secret_hash, expires_at, client_state, email)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
     .bind(code_id)
     .bind(entity_id)
     .bind(code_hash)
     .bind(expires_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    .bind(client_state)
+    .bind(email)
     .execute(&mut *conn)
     .await
     .map(|r| r.rows_affected())

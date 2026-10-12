@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    Json,
+    Form, Json,
 };
 use chrono::Utc;
 use uuid::Uuid;
@@ -235,7 +235,14 @@ pub async fn oauth_start(
     if !state.config.self_registration_enabled {
         return Err(AppError::Forbidden);
     }
-    let url = service::oauth_start(state.pool(), &state.config, &provider, query.return_to).await?;
+    let url = service::oauth_start(
+        state.pool(),
+        &state.config,
+        &provider,
+        query.return_to,
+        query.client_state,
+    )
+    .await?;
     Ok(Redirect::temporary(&url))
 }
 
@@ -258,13 +265,47 @@ pub async fn oauth_callback(
     Ok(Redirect::temporary(&url))
 }
 
+// Apple sends an application/x-www-form-urlencoded POST when requesting email.
+// Provider state authenticates this callback; no browser cookie is required.
+pub async fn oauth_callback_post(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Form(query): Form<OAuthCallbackQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    if provider != "apple" {
+        return Err(AppError::not_found(
+            "POST callback is only supported for Apple",
+        ));
+    }
+    let keys = state.keys.read().await;
+    let url = service::oauth_callback(
+        state.pool(),
+        &state.config,
+        &keys.primary,
+        &provider,
+        query.code,
+        query.state,
+        query.error,
+    )
+    .await;
+    // A 303 turns Apple's POST into a GET on the frontend. A 307 would replay
+    // the provider form to the frontend, which is not a provider callback.
+    Ok(Redirect::to(&url))
+}
+
 pub async fn oauth_exchange(
     State(state): State<AppState>,
     Json(req): Json<OAuthExchangeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let keys = state.keys.read().await;
-    let resp =
-        service::oauth_exchange(state.pool(), &state.config, &keys.primary, &req.code).await?;
+    let resp = service::oauth_exchange(
+        state.pool(),
+        &state.config,
+        &keys.primary,
+        &req.code,
+        req.client_state.as_deref(),
+    )
+    .await?;
     Ok(Json(resp))
 }
 

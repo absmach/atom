@@ -126,7 +126,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/auth/oauth/:provider/start", get(identity::oauth_start))
         .route(
             "/auth/oauth/:provider/callback",
-            get(identity::oauth_callback),
+            get(identity::oauth_callback)
+                .post(identity::oauth_callback_post)
+                .layer(DefaultBodyLimit::max(auth_body_limit)),
         )
         .route(
             "/auth/oauth/exchange",
@@ -295,6 +297,36 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn apple_form_callback_redirects_with_get_and_other_post_callbacks_are_refused() {
+        for (provider, expected) in [
+            ("apple", StatusCode::SEE_OTHER),
+            ("github", StatusCode::NOT_FOUND),
+        ] {
+            let response = create_router(test_state())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/auth/oauth/{provider}/callback"))
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from("error=access_denied&state=unused"))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected);
+            if provider == "apple" {
+                assert!(response
+                    .headers()
+                    .get("location")
+                    .expect("location")
+                    .to_str()
+                    .expect("UTF-8")
+                    .contains("error="));
+            }
+        }
     }
 
     #[tokio::test]

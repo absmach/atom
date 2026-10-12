@@ -1,5 +1,7 @@
 pub mod access_tokens;
 pub mod handlers;
+pub(crate) mod oauth_apple;
+pub(crate) mod oauth_github;
 pub mod profile_repo;
 pub mod refresh_tokens;
 pub mod repo;

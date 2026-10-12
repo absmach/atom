@@ -36,6 +36,8 @@ pub(super) struct EntityEmailMirror {
 
 #[derive(sqlx::FromRow)]
 pub(super) struct ExchangeCode {
+    pub(super) client_state: Option<String>,
+    pub(super) email: Option<String>,
     pub(super) entity_id: Uuid,
     pub(super) secret_hash: String,
     pub(super) expires_at: DateTime<Utc>,
@@ -77,6 +79,7 @@ pub(super) struct StoredTenant {
 
 #[derive(sqlx::FromRow)]
 pub(super) struct StoredOAuthState {
+    pub(super) client_state: Option<String>,
     pub(super) state_hash: String,
     pub(super) pkce_verifier: String,
     pub(super) nonce: String,
@@ -601,6 +604,7 @@ pub(super) async fn revoke_email_change_sessions(
 }
 
 pub(super) struct InsertOauthState<'a> {
+    pub(super) client_state: Option<&'a str>,
     pub(super) state_id: Uuid,
     pub(super) name: &'a str,
     pub(super) state_hash: String,
@@ -944,13 +948,33 @@ pub(super) async fn insert_exchange_code(
     entity_id: Uuid,
     code_hash: String,
     expires_at: DateTime<Utc>,
+    client_state: Option<&str>,
+    email: Option<&str>,
 ) -> Result<u64, sqlx::Error> {
     match conn {
         DbTransaction::Postgres(c) => {
-            postgres::insert_exchange_code(c, code_id, entity_id, code_hash, expires_at).await
+            postgres::insert_exchange_code(
+                c,
+                code_id,
+                entity_id,
+                code_hash,
+                expires_at,
+                client_state,
+                email,
+            )
+            .await
         }
         DbTransaction::Sqlite(c) => {
-            sqlite::insert_exchange_code(c, code_id, entity_id, code_hash, expires_at).await
+            sqlite::insert_exchange_code(
+                c,
+                code_id,
+                entity_id,
+                code_hash,
+                expires_at,
+                client_state,
+                email,
+            )
+            .await
         }
     }
 }

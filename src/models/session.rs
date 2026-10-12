@@ -116,6 +116,7 @@ pub struct EmailChangeConfirmRequest {
 #[derive(Debug, Deserialize)]
 pub struct OAuthStartQuery {
     pub return_to: Option<String>,
+    pub client_state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +129,7 @@ pub struct OAuthCallbackQuery {
 #[derive(Debug, Deserialize)]
 pub struct OAuthExchangeRequest {
     pub code: String,
+    pub client_state: Option<String>,
 }
 
 fn default_kind() -> CredentialKind {
@@ -162,4 +164,12 @@ mod tests {
 
         assert_eq!(request.email, "alice@example.test");
     }
+}
+
+/// OAuth-only fields; ordinary password login responses remain unchanged.
+#[derive(Debug, Serialize)]
+pub struct OAuthLoginResponse {
+    #[serde(flatten)]
+    pub login: LoginResponse,
+    pub email: Option<String>,
 }
