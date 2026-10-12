@@ -11,7 +11,7 @@ use atom::{
         SystemStatus,
     },
     keys::{ActiveKeys, LoadedKey},
-    models::session::LoginResponse,
+    models::session::{LoginResponse, OAuthLoginResponse},
     rate_limit::{RateLimitCategory, RateLimitPolicyStatus, RateLimitStatus},
     state::AppState,
 };
@@ -44,6 +44,34 @@ fn contract_openapi_inventory_matches_explicitly_mounted_application_methods() {
         mounted_operations(),
         "apidocs/openapi.yaml must describe every explicitly mounted application method on the primary and enrollment HTTP routers"
     );
+}
+
+#[tokio::test]
+async fn contract_oauth_form_callback_documents_provider_rejection_and_redirect() {
+    let document = openapi_document();
+    for (provider, expected) in [
+        ("google", StatusCode::NOT_FOUND),
+        ("apple", StatusCode::SEE_OTHER),
+    ] {
+        let response = atom::routes::create_router(runtime_test_state())
+            .oneshot(
+                Request::post(format!("/auth/oauth/{provider}/callback"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("error=access_denied"))
+                    .expect("provider callback"),
+            )
+            .await
+            .expect("callback response");
+        assert_eq!(response.status(), expected);
+        assert!(
+            document["paths"]["/auth/oauth/{provider}/callback"]["post"]["responses"]
+                [expected.as_str()]
+            .is_mapping()
+        );
+        if expected == StatusCode::SEE_OTHER {
+            assert!(response.headers().contains_key(header::LOCATION));
+        }
+    }
 }
 
 #[tokio::test]
@@ -490,6 +518,19 @@ fn contract_public_runtime_dtos_validate_against_openapi_components() {
         refresh_token_expires_at: Some(instant),
     };
     assert_runtime_value_matches_component(&document, "LoginResponse", &login, true);
+    let mut oauth_login = OAuthLoginResponse {
+        login,
+        email: Some("verified@example.test".into()),
+    };
+    assert_runtime_value_matches_component(&document, "OAuthLoginResponse", &oauth_login, true);
+    oauth_login.email = None;
+    assert_runtime_value_matches_component(&document, "OAuthLoginResponse", &oauth_login, true);
+    assert_eq!(
+        document["paths"]["/auth/oauth/exchange"]["post"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"]
+            .as_str(),
+        Some("#/components/schemas/OAuthLoginResponse")
+    );
 
     let omitted_login_fields = serde_json::to_value(LoginResponse {
         token: "signed-token".into(),
@@ -780,8 +821,9 @@ fn assert_runtime_value_matches_component_value(
         assert_eq!(runtime_properties, documented_properties);
     }
 
-    let schemas = serde_json::to_value(&document["components"]["schemas"])
+    let mut schemas = serde_json::to_value(&document["components"]["schemas"])
         .expect("OpenAPI component schemas convert to JSON");
+    normalize_openapi_nullable(&mut schemas);
     let schema = json!({
         "$ref": format!("#/components/schemas/{component}"),
         "components": { "schemas": schemas },
@@ -792,6 +834,43 @@ fn assert_runtime_value_matches_component_value(
         let errors = errors.map(|error| error.to_string()).collect::<Vec<_>>();
         panic!("{component} runtime serialization violates OpenAPI: {errors:?}");
     };
+}
+
+// OpenAPI 3.0 uses `nullable`; the JSON Schema validator expects a null type.
+fn normalize_openapi_nullable(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("nullable") == Some(&json!(true)) {
+                if let Some(serde_json::Value::String(kind)) = object.get("type") {
+                    object.insert("type".into(), json!([kind, "null"]));
+                }
+            }
+            for child in object.values_mut() {
+                normalize_openapi_nullable(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                normalize_openapi_nullable(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn contract_nullable_schema_preserves_non_null_type_checks() {
+    let mut schema = json!({
+        "type": "object",
+        "properties": { "email": { "type": "string", "nullable": true } },
+        "required": ["email"]
+    });
+    normalize_openapi_nullable(&mut schema);
+    let validator = JSONSchema::compile(&schema).expect("nullable schema");
+    assert!(validator.is_valid(&json!({ "email": null })));
+    assert!(validator.is_valid(&json!({ "email": "verified@example.test" })));
+    assert!(!validator.is_valid(&json!({ "email": 42 })));
+    assert!(!validator.is_valid(&json!({})));
 }
 
 fn component_check(status: ComponentStatus) -> ComponentCheck {
