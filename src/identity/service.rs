@@ -28,7 +28,7 @@ use crate::{
         enums::{AuditOutcome, CredentialKind, CredentialStatus, EntityKind, EntityStatus},
         refresh_token::TokenPairResponse,
         session::{
-            EmailChangeConfirmRequest, EmailChangeRequest, LoginResponse,
+            EmailChangeConfirmRequest, EmailChangeRequest, LoginResponse, OAuthLoginResponse,
             PasswordResetConfirmRequest, PasswordResetRequest, SignupRequest, SignupResponse,
         },
         token::{CreateSharedKey, SharedKeyResponse},
@@ -1376,9 +1376,15 @@ pub async fn oauth_start(
     cfg: &Config,
     provider_name: &str,
     return_to: Option<String>,
+    client_state: Option<String>,
 ) -> Result<String, AppError> {
+    if client_state
+        .as_ref()
+        .is_some_and(|state| state.is_empty() || state.len() > 256)
+    {
+        return Err(AppError::bad_request("invalid client state"));
+    }
     let provider = oidc_provider(cfg, provider_name)?;
-    let client = oidc_client(cfg, provider).await?;
     let return_to = normalize_return_to(return_to)?;
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (state_id, state_secret, state_token) = new_secret_token("atoms");
@@ -1387,8 +1393,8 @@ pub async fn oauth_start(
 
     crate::db::query(
         r#"INSERT INTO oauth_login_states
-             (id, provider, state_hash, pkce_verifier, nonce, return_to, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+             (id, provider, state_hash, pkce_verifier, nonce, return_to, expires_at, client_state)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
     )
     .bind(state_id)
     .bind(&provider.name)
@@ -1400,17 +1406,30 @@ pub async fn oauth_start(
         "ATOM_OAUTH_STATE_EXPIRY_SECS",
         cfg.oauth_state_expiry_secs,
     )?)
+    .bind(client_state.as_deref())
     .execute(pool)
     .await
     .map_err(db_err)?;
 
-    let mut request = client
-        .authorize_url(
-            CoreAuthenticationFlow::AuthorizationCode,
-            || CsrfToken::new(state_token),
-            || nonce,
-        )
-        .set_pkce_challenge(pkce_challenge);
+    if github_provider(provider) {
+        return super::oauth_github::authorize_url(
+            cfg,
+            provider,
+            &state_token,
+            pkce_challenge.as_str(),
+        );
+    }
+    let client = oidc_client(cfg, provider).await?;
+    let mut request = client.authorize_url(
+        CoreAuthenticationFlow::AuthorizationCode,
+        || CsrfToken::new(state_token),
+        || nonce,
+    );
+    if provider.name == "apple" {
+        request = request.add_extra_param("response_mode", "form_post");
+    } else {
+        request = request.set_pkce_challenge(pkce_challenge);
+    }
     for scope in oidc_scopes(provider) {
         request = request.add_scope(Scope::new(scope));
     }
@@ -1429,7 +1448,7 @@ pub async fn oauth_callback(
 ) -> String {
     match oauth_callback_inner(pool, cfg, primary_key, provider_name, code, state, error).await {
         Ok(url) => url,
-        Err(err) => redirect_with_error(cfg, &err.to_string()),
+        Err(_) => redirect_with_error(cfg, "Sign-in failed. Please try again."),
     }
 }
 
@@ -1451,13 +1470,54 @@ async fn oauth_callback_inner(
     let state = state.ok_or_else(|| AppError::bad_request("missing oauth state"))?;
     let provider = oidc_provider(cfg, provider_name)?;
     let state_row = consume_oauth_state(pool, &provider.name, &state).await?;
+    let (subject, email) = if github_provider(provider) {
+        super::oauth_github::exchange(cfg, provider, &code, &state_row.pkce_verifier).await?
+    } else {
+        oidc_identity(cfg, provider, code, &state_row).await?
+    };
+    let profile = serde_json::json!({
+        "subject": subject,
+        "email": email,
+        "email_verified": true
+    });
+    let entity_id = upsert_oauth_identity(pool, &provider.name, &subject, &email, profile).await?;
+    let code = create_exchange_code(
+        pool,
+        entity_id,
+        cfg.auth_exchange_code_expiry_secs,
+        state_row.client_state.as_deref(),
+        Some(&email),
+    )
+    .await?;
+
+    Ok(redirect_with_code(
+        cfg,
+        &code,
+        state_row.return_to.as_deref(),
+    ))
+}
+
+fn github_provider(provider: &OidcProviderConfig) -> bool {
+    provider.name == "github" && provider.issuer == "https://github.com"
+}
+
+async fn oidc_identity(
+    cfg: &Config,
+    provider: &OidcProviderConfig,
+    code: String,
+    state: &OAuthStateRow,
+) -> Result<(String, String), AppError> {
+    if provider.name == "apple" {
+        return super::oauth_apple::exchange(cfg, provider, &code, &state.nonce).await;
+    }
     let client = oidc_client(cfg, provider).await?;
 
     let http_client = oidc_http_client()?;
-    let token_response = client
+    let request = client
         .exchange_code(AuthorizationCode::new(code))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("oauth code exchange setup: {e}")))?
-        .set_pkce_verifier(PkceCodeVerifier::new(state_row.pkce_verifier))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("oauth code exchange setup: {e}")))?;
+    let request = request.set_pkce_verifier(PkceCodeVerifier::new(state.pkce_verifier.clone()));
+    let token_response = request
         .request_async(&http_client)
         .await
         .map_err(|e| AppError::unauthorized(format!("oauth token exchange failed: {e}")))?;
@@ -1467,7 +1527,7 @@ async fn oauth_callback_inner(
         .id_token()
         .ok_or_else(|| AppError::unauthorized("oauth provider did not return id_token"))?;
     let verifier = client.id_token_verifier();
-    let nonce = Nonce::new(state_row.nonce);
+    let nonce = Nonce::new(state.nonce.clone());
     let claims = id_token
         .claims(&verifier, &nonce)
         .map_err(|e| AppError::unauthorized(format!("invalid id_token: {e}")))?;
@@ -1480,19 +1540,7 @@ async fn oauth_callback_inner(
         .map(|email| normalize_email_lossy(email.as_str()))
         .ok_or_else(|| AppError::unauthorized("oauth provider did not return email"))?;
     let subject = claims.subject().as_str().to_string();
-    let profile = serde_json::json!({
-        "subject": subject,
-        "email": email,
-        "email_verified": true
-    });
-    let entity_id = upsert_oauth_identity(pool, &provider.name, &subject, &email, profile).await?;
-    let code = create_exchange_code(pool, entity_id, cfg.auth_exchange_code_expiry_secs).await?;
-
-    Ok(redirect_with_code(
-        cfg,
-        &code,
-        state_row.return_to.as_deref(),
-    ))
+    Ok((subject, email))
 }
 
 pub async fn oauth_exchange(
@@ -1500,11 +1548,12 @@ pub async fn oauth_exchange(
     cfg: &Config,
     primary_key: &LoadedKey,
     code: &str,
-) -> Result<LoginResponse, AppError> {
+    client_state: Option<&str>,
+) -> Result<OAuthLoginResponse, AppError> {
     let (code_id, code_secret) = parse_secret_token(code, "atomx")
         .ok_or_else(|| AppError::bad_request("invalid exchange code"))?;
     let row = crate::db::query(
-        r#"SELECT entity_id, secret_hash, expires_at, consumed_at
+        r#"SELECT entity_id, secret_hash, expires_at, consumed_at, client_state, email
            FROM auth_exchange_codes
            WHERE id = $1"#,
     )
@@ -1516,6 +1565,11 @@ pub async fn oauth_exchange(
         other => AppError::Database(other),
     })?;
 
+    let bound_state: Option<String> = row.try_get("client_state").map_err(db_err)?;
+    if bound_state.as_deref() != client_state {
+        return Err(AppError::bad_request("invalid exchange binding"));
+    }
+    let email: Option<String> = row.try_get("email").map_err(db_err)?;
     let hash: String = row.try_get("secret_hash").map_err(db_err)?;
     let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(db_err)?;
     let consumed_at: Option<DateTime<Utc>> = row.try_get("consumed_at").unwrap_or(None);
@@ -1537,7 +1591,8 @@ pub async fn oauth_exchange(
         return Err(AppError::bad_request("invalid exchange code"));
     }
     let entity_id: Uuid = row.try_get("entity_id").map_err(db_err)?;
-    create_login_response(pool, cfg, primary_key, entity_id, Some(true)).await
+    let login = create_login_response(pool, cfg, primary_key, entity_id, Some(true)).await?;
+    Ok(OAuthLoginResponse { login, email })
 }
 
 pub async fn refresh_session(
@@ -2495,6 +2550,7 @@ async fn send_password_reset_email(
 }
 
 struct OAuthStateRow {
+    client_state: Option<String>,
     pkce_verifier: String,
     nonce: String,
     return_to: Option<String>,
@@ -2508,7 +2564,7 @@ async fn consume_oauth_state(
     let (state_id, state_secret) = parse_secret_token(state, "atoms")
         .ok_or_else(|| AppError::bad_request("invalid oauth state"))?;
     let row = crate::db::query(
-        r#"SELECT state_hash, pkce_verifier, nonce, return_to, expires_at, consumed_at
+        r#"SELECT state_hash, pkce_verifier, nonce, return_to, expires_at, consumed_at, client_state
            FROM oauth_login_states
            WHERE id = $1 AND provider = $2"#,
     )
@@ -2543,6 +2599,7 @@ async fn consume_oauth_state(
     }
 
     Ok(OAuthStateRow {
+        client_state: row.try_get("client_state").map_err(db_err)?,
         pkce_verifier: row.try_get("pkce_verifier").map_err(db_err)?,
         nonce: row.try_get("nonce").map_err(db_err)?,
         return_to: row.try_get("return_to").unwrap_or(None),
@@ -2678,6 +2735,8 @@ async fn create_exchange_code(
     pool: &Database,
     entity_id: Uuid,
     expiry_secs: u64,
+    client_state: Option<&str>,
+    email: Option<&str>,
 ) -> Result<String, AppError> {
     let (code_id, code_secret, code) = new_secret_token("atomx");
     let code_hash = hash_secret(code_secret.as_bytes())?;
@@ -2689,8 +2748,8 @@ async fn create_exchange_code(
         return Err(AppError::unauthorized("entity is not active"));
     }
     crate::db::query(
-        r#"INSERT INTO auth_exchange_codes (id, entity_id, secret_hash, expires_at)
-           VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO auth_exchange_codes (id, entity_id, secret_hash, expires_at, client_state, email)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
     .bind(code_id)
     .bind(entity_id)
@@ -2699,6 +2758,8 @@ async fn create_exchange_code(
         "ATOM_AUTH_EXCHANGE_CODE_EXPIRY_SECS",
         expiry_secs,
     )?)
+    .bind(client_state)
+    .bind(email)
     .execute(tx.exec())
     .await
     .map_err(db_err)?;
@@ -2744,9 +2805,10 @@ async fn oidc_client(
     Ok(client)
 }
 
-fn oidc_http_client() -> Result<reqwest::Client, AppError> {
+pub(super) fn oidc_http_client() -> Result<reqwest::Client, AppError> {
     reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("build oidc http client: {e}")))
 }
@@ -3728,5 +3790,203 @@ mod tests {
         .await
         .expect("verified address may link");
         assert_eq!(linked, entity_id);
+    }
+    #[tokio::test]
+    #[ignore]
+    async fn oauth_exchange_is_browser_bound_single_use_and_returns_verified_email() {
+        let pool = crate::db::testing::database().await;
+        let cfg = Config::for_tests();
+        let email = format!("social-{}@example.test", Uuid::new_v4());
+        let entity = upsert_oauth_identity(
+            &pool,
+            "test",
+            &Uuid::new_v4().to_string(),
+            &email,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("identity");
+        let code = create_exchange_code(&pool, entity, 600, Some("browser"), Some(&email))
+            .await
+            .expect("exchange code");
+        let (kid, public_key_pem, private_key_pem) = crate::keys::generate_key_pair().expect("key");
+        let key = LoadedKey {
+            kid,
+            public_key_pem,
+            private_key_pem,
+            x_b64: String::new(),
+            y_b64: String::new(),
+        };
+        assert!(oauth_exchange(&pool, &cfg, &key, &code, None)
+            .await
+            .is_err());
+        assert!(
+            oauth_exchange(&pool, &cfg, &key, &code, Some("other-browser"))
+                .await
+                .is_err()
+        );
+        let response = oauth_exchange(&pool, &cfg, &key, &code, Some("browser"))
+            .await
+            .expect("bound exchange");
+        assert_eq!(response.email.as_deref(), Some(email.as_str()));
+        assert_eq!(response.login.entity_id, entity);
+        assert_eq!(response.login.email_verified, Some(true));
+        assert!(!response.login.token.is_empty());
+        assert!(oauth_exchange(&pool, &cfg, &key, &code, Some("browser"))
+            .await
+            .is_err());
+        let old_client_code = create_exchange_code(&pool, entity, 600, None, None)
+            .await
+            .expect("legacy code");
+        assert!(oauth_exchange(&pool, &cfg, &key, &old_client_code, None)
+            .await
+            .is_ok());
+        let expired = create_exchange_code(&pool, entity, 600, Some("browser"), Some(&email))
+            .await
+            .expect("expiring code");
+        let (id, _) = parse_secret_token(&expired, "atomx").expect("code format");
+        crate::db::query("UPDATE auth_exchange_codes SET expires_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(Utc::now() - Duration::seconds(1))
+            .execute(&pool)
+            .await
+            .expect("expire");
+        assert!(oauth_exchange(&pool, &cfg, &key, &expired, Some("browser"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn github_state_is_provider_bound_and_single_use() {
+        let pool = crate::db::testing::database().await;
+        let mut cfg = Config::for_tests();
+        cfg.oidc_providers.push(OidcProviderConfig {
+            name: "github".into(),
+            issuer: "https://github.com".into(),
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            scopes: vec![],
+        });
+        let url = oauth_start(
+            &pool,
+            &cfg,
+            "github",
+            Some("/dashboard".into()),
+            Some("browser".into()),
+        )
+        .await
+        .expect("start");
+        let url = Url::parse(&url).expect("URL");
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .expect("state")
+            .1
+            .into_owned();
+        assert!(consume_oauth_state(&pool, "google", &state).await.is_err());
+        let consumed = consume_oauth_state(&pool, "github", &state)
+            .await
+            .expect("consume");
+        assert_eq!(consumed.client_state.as_deref(), Some("browser"));
+        assert_eq!(consumed.return_to.as_deref(), Some("/dashboard"));
+        assert!(consume_oauth_state(&pool, "github", &state).await.is_err());
+    }
+    #[tokio::test]
+    async fn google_and_apple_oidc_verify_tokens_and_use_correct_token_authentication() {
+        use axum::{
+            extract::Form,
+            http::HeaderMap,
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::collections::HashMap;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let issuer = format!("http://{}", listener.local_addr().expect("address"));
+        let discovery_issuer = issuer.clone();
+        let token_issuer = issuer.clone();
+        let app = Router::new()
+            .route("/.well-known/openid-configuration", get(move || {
+                let issuer = discovery_issuer.clone();
+                async move { Json(serde_json::json!({
+                    "issuer":issuer, "authorization_endpoint":format!("{issuer}/authorize"),
+                    "token_endpoint":format!("{issuer}/token"), "jwks_uri":format!("{issuer}/keys"),
+                    "response_types_supported":["code"], "subject_types_supported":["public"],
+                    "id_token_signing_alg_values_supported":["RS256"],
+                    "token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"]
+                })) }
+            }))
+            .route("/keys", get(|| async { Json(serde_json::from_str::<Value>(include_str!("testdata/oidc-test-jwks.json")).expect("JWKS")) }))
+            .route("/token", post(move |headers: HeaderMap, Form(body): Form<HashMap<String, String>>| {
+                let issuer = token_issuer.clone();
+                async move {
+                    let code = body.get("code").expect("code");
+                    let apple = code.starts_with("apple");
+                    if apple {
+                        assert_eq!(body.get("client_secret").map(String::as_str), Some("client-secret"));
+                        assert!(!body.contains_key("code_verifier"));
+                    } else {
+                        assert!(headers.contains_key("authorization"));
+                        assert_eq!(body.get("code_verifier").map(String::as_str), Some("verifier"));
+                    }
+                    let now = Utc::now().timestamp();
+                    let claims = serde_json::json!({
+                        "iss":issuer, "sub":"stable-subject",
+                        "aud":if code.contains("audience") {"other-client"} else {"client"},
+                        "iat":now, "exp":if code.contains("expired") {now-3600} else {now+600},
+                        "nonce":if code.contains("nonce") {"wrong-nonce"} else {"nonce"},
+                        "email":"verified@example.test",
+                        "email_verified":if code.contains("unverified") {Value::Bool(false)} else if apple {Value::String("true".into())} else {Value::Bool(true)}
+                    });
+                    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+                    header.kid = Some("test-only".into());
+                    let key = jsonwebtoken::EncodingKey::from_rsa_pem(include_bytes!("testdata/oidc-test-key.pem")).expect("test key");
+                    let mut id_token = jsonwebtoken::encode(&header, &claims, &key).expect("ID token");
+                    if code.contains("signature") {
+                        let start = id_token.rfind('.').expect("signature separator") + 1;
+                        let replacement = if &id_token[start..start + 1] == "A" { "B" } else { "A" };
+                        id_token.replace_range(start..start + 1, replacement);
+                    }
+                    Json(serde_json::json!({"access_token":"provider-token", "token_type":"bearer", "id_token":id_token}))
+                }
+            }));
+        let app = app.clone().merge(Router::new().nest("/auth", app));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server");
+        });
+        let cfg = Config::for_tests();
+        let state = OAuthStateRow {
+            client_state: None,
+            pkce_verifier: "verifier".into(),
+            nonce: "nonce".into(),
+            return_to: None,
+        };
+        for name in ["google", "apple"] {
+            let provider = OidcProviderConfig {
+                name: name.into(),
+                issuer: issuer.clone(),
+                client_id: "client".into(),
+                client_secret: "client-secret".into(),
+                scopes: vec!["openid".into(), "email".into()],
+            };
+            let identity = oidc_identity(&cfg, &provider, format!("{name}-valid"), &state)
+                .await
+                .expect("valid OIDC identity");
+            assert_eq!(
+                identity,
+                ("stable-subject".into(), "verified@example.test".into())
+            );
+            for invalid in ["nonce", "audience", "expired", "unverified", "signature"] {
+                assert!(
+                    oidc_identity(&cfg, &provider, format!("{name}-{invalid}"), &state)
+                        .await
+                        .is_err(),
+                    "{name}: {invalid}"
+                );
+            }
+        }
+        server.abort();
     }
 }
