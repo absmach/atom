@@ -1,16 +1,50 @@
 //! Native storage contract for authorization visibility.
 mod postgres;
+mod sql;
 mod sqlite;
 use super::super::*;
+
+#[derive(sqlx::FromRow)]
+struct CredentialCeilingRow {
+    limit_id: Uuid,
+    scope_kind: ScopeKind,
+    scope_ref: Option<String>,
+    tenant_id: Option<Uuid>,
+    conditions: Value,
+    action_id: Uuid,
+}
+
+impl From<CredentialCeilingRow> for EffectiveGrant {
+    fn from(row: CredentialCeilingRow) -> Self {
+        Self {
+            assignment_id: row.limit_id,
+            block_id: row.limit_id,
+            role_id: None,
+            role_name: None,
+            via: "access_token_ceiling".to_string(),
+            // Kind/type scopes can carry a tenant restriction that scope_ref
+            // alone does not encode. None leaves the entry unrestricted.
+            tenant_boundary: row.tenant_id,
+            scope_kind: row.scope_kind,
+            scope_ref: row.scope_ref,
+            capability_id: row.action_id,
+            effect: Effect::Allow,
+            conditions: row.conditions,
+        }
+    }
+}
 
 pub(in crate::authz::repo) async fn load_credential_ceiling(
     pool: &Database,
     credential_id: Uuid,
 ) -> Result<CredentialCeiling, AppError> {
-    match pool {
+    let rows = match pool {
         Database::Postgres(pool) => postgres::load_credential_ceiling(pool, credential_id).await,
         Database::Sqlite(db) => sqlite::load_credential_ceiling(&db.pool, credential_id).await,
-    }
+    }?;
+    Ok(CredentialCeiling {
+        entries: rows.into_iter().map(EffectiveGrant::from).collect(),
+    })
 }
 
 pub(in crate::authz::repo) async fn audit_logs(

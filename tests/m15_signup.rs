@@ -58,14 +58,12 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(response.email, email);
     assert!(response.verification_required);
 
-    let entity = crate::common::db::query(
-        "SELECT kind, tenant_id FROM entities WHERE id = $1",
-        r#"SELECT kind, tenant_id FROM entities WHERE id = $1"#,
-    )
-    .bind(response.entity_id)
-    .fetch_one(&pool)
-    .await
-    .expect("entity");
+    let entity =
+        crate::common::db::query_shared("SELECT kind, tenant_id FROM entities WHERE id = $1")
+            .bind(response.entity_id)
+            .fetch_one(&pool)
+            .await
+            .expect("entity");
     assert_eq!(entity.try_get::<String, _>("kind").expect("kind"), "human");
     assert_eq!(
         entity
@@ -82,9 +80,8 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     .expect("credential count");
     assert_eq!(credential_count, 1);
 
-    let email_row = crate::common::db::query(
+    let email_row = crate::common::db::query_shared(
         "SELECT verified_at FROM entity_emails WHERE entity_id = $1 AND email = $2",
-        r#"SELECT verified_at FROM entity_emails WHERE entity_id = $1 AND email = $2"#,
     )
     .bind(response.entity_id)
     .bind(&email)
@@ -159,9 +156,8 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(name_login.email_verified, Some(false));
     assert!(name_login.verification_required);
 
-    crate::common::db::query(
+    crate::common::db::query_shared(
         "UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1",
-        r#"UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1"#,
     )
     .bind(response.entity_id)
     .execute(&pool)
@@ -180,14 +176,11 @@ async fn signup_creates_global_unverified_human_password_email_and_dev_login() {
     assert_eq!(verified_name_login.email_verified, Some(true));
     assert!(!verified_name_login.verification_required);
 
-    crate::common::db::query(
-        "UPDATE entities SET status = 'suspended' WHERE id = $1",
-        r#"UPDATE entities SET status = 'suspended' WHERE id = $1"#,
-    )
-    .bind(response.entity_id)
-    .execute(&pool)
-    .await
-    .expect("suspend entity");
+    crate::common::db::query_shared("UPDATE entities SET status = 'suspended' WHERE id = $1")
+        .bind(response.entity_id)
+        .execute(&pool)
+        .await
+        .expect("suspend entity");
     let suspended_login = service::login_password(
         &pool,
         &config(true),

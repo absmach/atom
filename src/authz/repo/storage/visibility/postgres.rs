@@ -4,50 +4,12 @@ use sqlx::Row;
 pub(super) async fn load_credential_ceiling(
     pool: &sqlx::PgPool,
     credential_id: Uuid,
-) -> Result<CredentialCeiling, AppError> {
-    let rows = sqlx::query(
-        r#"SELECT l.id        AS limit_id,
-                  s.scope_kind AS scope_kind,
-                  s.scope_ref  AS scope_ref,
-                  l.tenant_id  AS tenant_id,
-                  l.conditions AS conditions,
-                  la.action_id AS action_id
-           FROM credential_permission_limits l
-           JOIN credential_permission_limit_scopes s ON s.limit_id = l.id
-           JOIN credential_permission_limit_actions la ON la.limit_id = l.id
-           WHERE l.credential_id = $1"#,
-    )
-    .bind(credential_id)
-    .fetch_all(pool)
-    .await
-    .map_err(db_err)?;
-
-    let entries = rows
-        .into_iter()
-        .map(|row| {
-            let limit_id: Uuid = row.try_get("limit_id").map_err(db_err)?;
-            Ok(EffectiveGrant {
-                assignment_id: limit_id,
-                block_id: limit_id,
-                role_id: None,
-                role_name: None,
-                via: "access_token_ceiling".to_string(),
-                // Honor the row's tenant restriction the same way an assignment
-                // tenant boundary does. `object_kind`/`object_type` ceilings can
-                // carry a `tenant_id` that the scope_ref alone does not encode; a
-                // NULL tenant_id (platform/object modes, or a tenant-agnostic kind)
-                // leaves the entry unrestricted, matching `match_grant`.
-                tenant_boundary: row.try_get("tenant_id").map_err(db_err)?,
-                scope_kind: row.try_get("scope_kind").map_err(db_err)?,
-                scope_ref: row.try_get("scope_ref").map_err(db_err)?,
-                capability_id: row.try_get("action_id").map_err(db_err)?,
-                effect: Effect::Allow,
-                conditions: row.try_get("conditions").map_err(db_err)?,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
-
-    Ok(CredentialCeiling { entries })
+) -> Result<Vec<CredentialCeilingRow>, AppError> {
+    sqlx::query_as::<_, CredentialCeilingRow>(super::sql::CREDENTIAL_CEILING)
+        .bind(credential_id)
+        .fetch_all(pool)
+        .await
+        .map_err(db_err)
 }
 
 pub(super) async fn audit_logs(

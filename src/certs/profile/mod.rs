@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 
 mod postgres;
+mod sql;
 mod sqlite;
 
 use crate::db::{Database, IntoTarget};

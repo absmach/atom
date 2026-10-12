@@ -1,5 +1,6 @@
 //! Signing-key persistence. Key generation, encryption, loading and rotation policy remain shared.
 mod postgres;
+mod sql;
 mod sqlite;
 use super::{KeyStorageValues, SigningKeyStorageSummary};
 use crate::{

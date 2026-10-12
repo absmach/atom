@@ -5,6 +5,15 @@ The domain repositories share business rules and transaction orchestration;
 each private backend adapter owns the SQL it executes. There is no runtime
 SQL translator or generic `db::query*` compatibility API.
 
+Identical SQL can live once in a private domain-local `sql.rs`, as in certificate
+profiles and signing keys. These modules contain only SQL text or SQL text
+construction; concrete driver calls remain in `postgres.rs` and `sqlite.rs`.
+Share the interpretation of typed storage rows in the domain module too: access
+token ceiling rows become grants through one conversion, preserving tenant
+boundaries and conditions for both backends. Keep backend-specific locking,
+encoding and transaction behavior explicit rather than forcing it into a shared
+query abstraction.
+
 ## Storage boundary
 
 The initial SQLite implementation translated PostgreSQL statements at runtime.
@@ -16,7 +25,9 @@ audit, events, endpoints, object coordination, ownership, cleanup, and health.
 `src/db/` now owns connection pools, transactions/savepoints, migrations,
 SQLite runtime functions, and value codecs. It does not decide domain behavior
 or rewrite SQL. `tests/common/db.rs` is a test-only fixture runner that requires
-explicit SQL for both backends; it is never linked into the service.
+explicit SQL for both backends; `query_shared` supplies the same unchanged SQL
+to both when a fixture needs no dialect differences. It is never linked into
+the service.
 
 ## The contract shape
 

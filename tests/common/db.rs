@@ -328,6 +328,11 @@ pub struct Query {
     body: Body,
 }
 
+/// Execute SQL that is deliberately identical on both backends; no translation.
+pub fn query_shared(sql: &str) -> Query {
+    query(sql, sql)
+}
+
 pub fn query(sql: &str, sqlite: &str) -> Query {
     Query {
         body: Body {
