@@ -378,37 +378,293 @@ async fn contract_axum_query_and_uuid_path_rejections_are_plain_text_bad_request
     }
 }
 
-#[tokio::test]
-async fn contract_graphql_authentication_failures_use_graphql_errors_with_http_200() {
-    for request in [
-        Request::post("/graphql")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::AUTHORIZATION, "Bearer not-a-token")
-            .body(Body::from(r#"{"query":"{ health }"}"#))
-            .expect("invalid bearer request"),
-        Request::post("/graphql")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::COOKIE, "atom_token=not-a-token")
-            .body(Body::from(r#"{"query":"{ health }"}"#))
-            .expect("untrusted cookie-origin request"),
-    ] {
-        let response = atom::routes::create_router(runtime_test_state())
-            .oneshot(request)
-            .await
-            .expect("GraphQL authentication error response");
+/// Issue #101: sends `request` through a fresh router, returns the parsed
+/// JSON body and the response's `X-Request-ID` header value.
+async fn graphql_response_json(request: Request<Body>) -> (serde_json::Value, String) {
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(request)
+        .await
+        .expect("GraphQL response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let request_id_header = response
+        .headers()
+        .get("x-request-id")
+        .expect("X-Request-ID response header")
+        .to_str()
+        .expect("X-Request-ID is ASCII")
+        .to_string();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("GraphQL response body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("GraphQL JSON body");
+    (body, request_id_header)
+}
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("GraphQL error body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("GraphQL JSON body");
+/// Every error in `errors` must carry `code`, `retryable`, and a
+/// `requestId` equal to `request_id_header` — the contract every
+/// Atom-generated and async-graphql-internal error must satisfy (issue
+/// #101, `api/v1/graphql-error-contract.md`). Returns the first error's
+/// `code` for callers that also want to assert the specific value.
+fn assert_every_error_carries_contract_extensions<'a>(
+    body: &'a serde_json::Value,
+    request_id_header: &str,
+) -> &'a str {
+    let errors = body["errors"]
+        .as_array()
+        .filter(|errors| !errors.is_empty())
+        .unwrap_or_else(|| panic!("GraphQL errors array must be non-empty: {body}"));
+    for error in errors {
+        let extensions = &error["extensions"];
         assert!(
-            body["errors"]
-                .as_array()
-                .is_some_and(|errors| !errors.is_empty()),
-            "GraphQL transport error must be returned in the errors array: {body}"
+            extensions["code"].is_string(),
+            "every error must carry extensions.code: {error}"
+        );
+        assert!(
+            extensions["retryable"].is_boolean(),
+            "every error must carry extensions.retryable: {error}"
+        );
+        assert_eq!(
+            extensions["requestId"].as_str(),
+            Some(request_id_header),
+            "extensions.requestId must match the X-Request-ID response header: {error}"
         );
     }
+    errors[0]["extensions"]["code"].as_str().unwrap()
+}
+
+#[tokio::test]
+async fn contract_graphql_authentication_failures_use_graphql_errors_with_http_200() {
+    let bad_bearer = Request::post("/graphql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer not-a-token")
+        .body(Body::from(r#"{"query":"{ health }"}"#))
+        .expect("invalid bearer request");
+    let (body, request_id_header) = graphql_response_json(bad_bearer).await;
+    assert_eq!(
+        assert_every_error_carries_contract_extensions(&body, &request_id_header),
+        "UNAUTHENTICATED"
+    );
+
+    let untrusted_origin = Request::post("/graphql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, "atom_token=not-a-token")
+        .body(Body::from(r#"{"query":"{ health }"}"#))
+        .expect("untrusted cookie-origin request");
+    let (body, request_id_header) = graphql_response_json(untrusted_origin).await;
+    assert_eq!(
+        assert_every_error_carries_contract_extensions(&body, &request_id_header),
+        "FORBIDDEN"
+    );
+}
+
+#[tokio::test]
+async fn contract_graphql_malformed_syntax_is_bad_request_with_extensions() {
+    let malformed = Request::post("/graphql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"query":"{ health "}"#))
+        .expect("malformed GraphQL syntax request");
+    let (body, request_id_header) = graphql_response_json(malformed).await;
+    assert_eq!(
+        assert_every_error_carries_contract_extensions(&body, &request_id_header),
+        "BAD_REQUEST",
+        "async-graphql's own parse failure must default to BAD_REQUEST: {body}"
+    );
+}
+
+#[tokio::test]
+async fn contract_x_request_id_is_echoed_when_valid_and_replaced_when_invalid() {
+    let with_valid_id = Request::post("/graphql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-request-id", "client-supplied-id-123")
+        .body(Body::from(r#"{"query":"{ health }"}"#))
+        .expect("valid client request id");
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(with_valid_id)
+        .await
+        .expect("response");
+    assert_eq!(
+        response.headers().get("x-request-id").unwrap(),
+        "client-supplied-id-123",
+        "a valid client-supplied X-Request-ID must be echoed back unchanged"
+    );
+
+    let with_invalid_id = Request::post("/graphql")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-request-id", "has a space and therefore is invalid")
+        .body(Body::from(r#"{"query":"{ health }"}"#))
+        .expect("invalid client request id");
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(with_invalid_id)
+        .await
+        .expect("response");
+    let generated = response
+        .headers()
+        .get("x-request-id")
+        .expect("a generated X-Request-ID must still be present")
+        .to_str()
+        .expect("ASCII header");
+    assert_ne!(
+        generated, "has a space and therefore is invalid",
+        "an invalid client-supplied X-Request-ID must never be echoed back"
+    );
+    assert!(!generated.is_empty());
+}
+
+#[tokio::test]
+async fn contract_browser_can_send_and_read_request_id() {
+    let mut state = runtime_test_state();
+    state.config.cors_allowed_origins = vec!["https://client.example".into()];
+    let app = atom::routes::create_router(state);
+    let preflight = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/graphql")
+                .header(header::ORIGIN, "https://client.example")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "content-type,x-request-id",
+                )
+                .body(Body::empty())
+                .expect("preflight"),
+        )
+        .await
+        .expect("preflight response");
+    assert!(preflight.status().is_success());
+    assert_eq!(
+        preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "https://client.example"
+    );
+    let allowed = preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()
+        .expect("allowed headers");
+    assert!(allowed
+        .split(',')
+        .any(|name| name.trim().eq_ignore_ascii_case("x-request-id")));
+
+    let response = app
+        .oneshot(
+            Request::post("/graphql")
+                .header(header::ORIGIN, "https://client.example")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-request-id", "browser-correlation")
+                .body(Body::from(r#"{"query":"{ invalidField }"}"#))
+                .expect("GraphQL request"),
+        )
+        .await
+        .expect("GraphQL response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-request-id"], "browser-correlation");
+    let exposed = response.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS]
+        .to_str()
+        .expect("exposed headers");
+    assert!(exposed
+        .split(',')
+        .any(|name| name.trim().eq_ignore_ascii_case("x-request-id")));
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+    assert_eq!(
+        assert_every_error_carries_contract_extensions(&payload, "browser-correlation"),
+        "BAD_REQUEST"
+    );
+}
+
+#[tokio::test]
+async fn contract_graphql_extensions_receive_request_id_in_context() {
+    use async_graphql::extensions::{ExtensionContext, ExtensionFactory, NextExecute};
+    use std::sync::{Arc, Mutex};
+
+    struct CaptureId(Arc<Mutex<Option<String>>>);
+
+    impl ExtensionFactory for CaptureId {
+        fn create(&self) -> Arc<dyn async_graphql::extensions::Extension> {
+            Arc::new(CaptureId(self.0.clone()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl async_graphql::extensions::Extension for CaptureId {
+        async fn execute(
+            &self,
+            ctx: &ExtensionContext<'_>,
+            operation_name: Option<&str>,
+            next: NextExecute<'_>,
+        ) -> async_graphql::Response {
+            let id = ctx
+                .data::<atom::request_id::RequestId>()
+                .expect("request ID in GraphQL context");
+            *self.0.lock().expect("captured ID") = Some(id.as_str().to_owned());
+            next.run(ctx, operation_name).await
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(None));
+    let state = runtime_test_state();
+    let schema = async_graphql::Schema::build(
+        atom::graphql::query::QueryRoot::default(),
+        atom::graphql::mutation::mutation_root(),
+        async_graphql::EmptySubscription,
+    )
+    .data(state.clone())
+    .extension(CaptureId(captured.clone()))
+    .finish();
+    let app = axum::Router::new()
+        .route(
+            "/graphql",
+            axum::routing::post(atom::graphql::graphql_handler),
+        )
+        .layer(axum::Extension(schema))
+        .layer(axum::middleware::from_fn(atom::request_id::middleware))
+        .with_state(state);
+    let response = app
+        .oneshot(
+            Request::post("/graphql")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-request-id", "graphql-context")
+                .body(Body::from(r#"{"query":"{ health }"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        captured.lock().expect("captured ID").as_deref(),
+        Some("graphql-context")
+    );
+}
+
+#[tokio::test]
+async fn contract_custom_endpoint_error_shape_is_unchanged_by_the_graphql_error_contract() {
+    // Issue #101 is explicitly scoped to the base /graphql endpoint; custom
+    // REST-shaped endpoints keep their own status/body mapping. A 404 here
+    // (no such endpoint configured) must stay a plain REST-shaped error,
+    // never a GraphQL {errors: [...]} envelope.
+    let response = atom::routes::create_router(runtime_test_state())
+        .oneshot(
+            Request::get("/api/custom/does-not-exist")
+                .body(Body::empty())
+                .expect("custom endpoint request"),
+        )
+        .await
+        .expect("custom endpoint response");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("custom endpoint body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "an unconfigured endpoint must not return 200"
+    );
+    assert!(
+        body.get("errors").is_none(),
+        "a custom endpoint response must not gain a GraphQL-shaped errors array: {body}"
+    );
 }
 
 /// A sole `refreshToken` call reaches the resolver even with an expired/

@@ -15,7 +15,7 @@ use tower_http::{
 
 use crate::{
     api_endpoints::handlers as api_endpoints, certs, graphql, health,
-    identity::handlers as identity, keys, rate_limit, state::AppState,
+    identity::handlers as identity, keys, rate_limit, request_id, state::AppState,
 };
 
 pub fn create_router(state: AppState) -> Router {
@@ -44,7 +44,13 @@ pub fn create_router(state: AppState) -> Router {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]);
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            axum::http::HeaderName::from_static(request_id::HEADER_NAME),
+        ])
+        .expose_headers([axum::http::HeaderName::from_static(request_id::HEADER_NAME)]);
     if !cors_origins.is_empty() {
         cors = cors.allow_origin(AllowOrigin::list(cors_origins));
     }
@@ -177,6 +183,9 @@ pub fn create_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::new(request_timeout))
         .layer(cors)
+        // Outermost: every response — including ones CORS, rate limiting, or
+        // the timeout reject — carries X-Request-ID. See `request_id.rs`.
+        .layer(middleware::from_fn(request_id::middleware))
 }
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
