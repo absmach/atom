@@ -4,25 +4,21 @@ use sqlx::{
     migrate::MigrateError,
     pool::PoolConnection,
     postgres::{PgConnectOptions, PgPoolOptions},
-    Acquire, PgConnection, PgPool, Postgres, Sqlite, Transaction,
+    Acquire, PgPool, Postgres, Sqlite, Transaction,
 };
 
 use crate::config::DbPoolConfig;
 
-mod arg;
+mod codecs;
+mod connection;
 pub mod native;
-mod query;
 pub mod sqlite;
 mod sqlite_functions;
 #[doc(hidden)]
 pub mod testing;
-pub mod translate;
 
-pub use arg::{enum_text, sqlite_timestamp, Arg, ArgKind, DbArg, TextList, UuidList};
-pub use query::{
-    query, query_as, query_scalar, DbExecutor, DbRow, DbScalar, ExecResult, IntoTarget, Query,
-    QueryAs, QueryBuilder, QueryScalar, Row, Target,
-};
+pub use codecs::{sqlite_timestamp, TextList, UuidList};
+pub use connection::{ConnectionRef, DbExecutor, IntoTarget, Target};
 pub use sqlite::SqliteDb;
 
 /// Identifies which storage backend a [`Database`] is backed by. `DATABASE_URL`'s
@@ -153,7 +149,7 @@ pub fn location(url: &str) -> anyhow::Result<DatabaseLocation> {
 ///
 /// Domain and transport code should hold this (or [`DbTransaction`]) rather
 /// than a concrete SQLx pool/connection type — see
-/// `product-docs/development/database-backends/RFC.md`.
+/// `product-docs/development/database-backends/REPOSITORY-PATTERN.md`.
 #[derive(Clone)]
 pub enum Database {
     Postgres(PgPool),
@@ -343,20 +339,9 @@ impl<'c> DbTransaction<'c> {
         }
     }
 
-    /// The handle to pass to a query's `execute`/`fetch_*`, whether this
-    /// transaction is held by value or by `&mut` reference.
+    /// Reborrow the caller-owned transaction for a nested storage operation.
     pub fn exec(&mut self) -> &mut Self {
         self
-    }
-
-    /// Transitional accessor: the concrete Postgres connection this
-    /// transaction runs on, for storage code that has not yet moved onto the
-    /// query layer. Panics on SQLite; see [`Database::as_postgres`].
-    pub fn as_postgres_mut(&mut self) -> &mut PgConnection {
-        match self {
-            DbTransaction::Postgres(tx) => tx,
-            DbTransaction::Sqlite(_) => panic!("as_postgres_mut() called on a SQLite transaction"),
-        }
     }
 }
 

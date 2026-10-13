@@ -25,21 +25,22 @@ use uuid::Uuid;
 
 async fn make_tenant(pool: &atom::db::Database, name: &str, alias: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, alias, status) VALUES ($1, $2, $3, 'active')")
-        .bind(id)
-        .bind(name)
-        .bind(alias)
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, alias, status) VALUES ($1, $2, $3, 'active')",
+        r#"INSERT INTO tenants (id, name, alias, status) VALUES ($1, $2, $3, 'active')"#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(alias)
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn make_entity(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')"#)
     .bind(id)
     .bind(name)
     .bind(tenant_id)
@@ -55,7 +56,9 @@ async fn grant_entity_read(
     subject_id: Uuid,
     object_id: Uuid,
 ) {
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
+           VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
         r#"INSERT INTO permission_blocks (tenant_id, scope_mode, object_id, effect)
            VALUES ($1, 'object', $2, 'allow') RETURNING id"#,
     )
@@ -64,7 +67,9 @@ async fn grant_entity_read(
     .fetch_one(pool)
     .await
     .expect("insert read block");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+           SELECT $1, id FROM actions WHERE name = 'read'"#,
         r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
            SELECT $1, id FROM actions WHERE name = 'read'"#,
     )
@@ -72,7 +77,9 @@ async fn grant_entity_read(
     .execute(pool)
     .await
     .expect("insert read action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -91,7 +98,7 @@ async fn make_updated_entity(
     days_ago: i64,
 ) -> Uuid {
     let id = make_entity(pool, tenant_id, name).await;
-    atom::db::query("UPDATE entities SET updated_at = now() - ($2::text::interval) WHERE id = $1")
+    crate::common::db::query("UPDATE entities SET updated_at = now() - ($2::text::interval) WHERE id = $1", r#"UPDATE entities SET updated_at = atom_ts_add(now(), -(atom_interval_secs($2))) WHERE id = $1"#)
         .bind(id)
         .bind(format!("{days_ago} days"))
         .execute(pool)
@@ -102,8 +109,9 @@ async fn make_updated_entity(
 
 async fn make_resource(pool: &atom::db::Database, tenant_id: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)"#,
     )
     .bind(id)
     .bind(name)
@@ -352,12 +360,15 @@ async fn descending_nullable_sorts_put_nulls_last() {
 
     make_resource(&pool, tenant_id, &format!("{prefix}-named")).await;
     let unnamed_resource_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, tenant_id) VALUES ($1, 'channel', $2)")
-        .bind(unnamed_resource_id)
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("insert unnamed resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, tenant_id) VALUES ($1, 'channel', $2)",
+        r#"INSERT INTO resources (id, kind, tenant_id) VALUES ($1, 'channel', $2)"#,
+    )
+    .bind(unnamed_resource_id)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("insert unnamed resource");
 
     let resources = atom::authz::resources::list_resources(
         &pool,
@@ -424,4 +435,79 @@ async fn tenant_lists_apply_order_before_pagination() {
         tenant_names,
         vec![format!("{prefix}-a"), format!("{prefix}-b")]
     );
+}
+
+/// Nullable sort keys must paginate identically on PostgreSQL and SQLite.
+#[tokio::test]
+#[ignore]
+async fn resource_lists_sort_nulls_last_in_both_directions() {
+    let pool = common::pool().await;
+    let suffix = Uuid::new_v4();
+    let tenant_id = make_tenant(
+        &pool,
+        &format!("null-sort-{suffix}"),
+        &format!("null-sort-{suffix}"),
+    )
+    .await;
+    let mut named = [
+        make_resource(&pool, tenant_id, "Alpha").await,
+        make_resource(&pool, tenant_id, "alpha").await,
+    ];
+    let mut unnamed = [
+        make_resource(&pool, tenant_id, "temporary-a").await,
+        make_resource(&pool, tenant_id, "temporary-b").await,
+    ];
+    crate::common::db::query(
+        "UPDATE resources SET name = NULL, updated_at = NULL WHERE id IN ($1, $2)",
+        "UPDATE resources SET name = NULL, updated_at = NULL WHERE id IN ($1, $2)",
+    )
+    .bind(unnamed[0])
+    .bind(unnamed[1])
+    .execute(&pool)
+    .await
+    .expect("clear nullable fields");
+    crate::common::db::query(
+        "UPDATE resources SET updated_at = $3 WHERE id IN ($1, $2)",
+        "UPDATE resources SET updated_at = $3 WHERE id IN ($1, $2)",
+    )
+    .bind(named[0])
+    .bind(named[1])
+    .bind(chrono::Utc::now())
+    .execute(&pool)
+    .await
+    .expect("give both resources the same update time");
+    // Both equal non-null keys and equal NULL keys use the stable UUID tie-breaker.
+    named.sort();
+    unnamed.sort();
+    let expected_ids = [named[0], named[1], unnamed[0], unnamed[1]];
+    for order in [ResourceOrderField::Name, ResourceOrderField::UpdatedAt] {
+        for dir in [SortDir::Asc, SortDir::Desc] {
+            for (offset, expected) in expected_ids.into_iter().enumerate() {
+                let result = atom::authz::resources::list_resources(
+                    &pool,
+                    ListResources {
+                        q: None,
+                        kind: None,
+                        tenant_id: Some(tenant_id),
+                        attributes_contains: None,
+                        parent_group_id: None,
+                        include_descendants: false,
+                        deleted: DeletedFilter::Live,
+                        limit: 1,
+                        offset: offset as i64,
+                        order,
+                        dir,
+                    },
+                )
+                .await
+                .expect("list resources with nullable sort fields");
+                assert_eq!(result.total, 4);
+                assert_eq!(result.items.len(), 1);
+                assert_eq!(
+                    result.items[0].id, expected,
+                    "{order:?} {dir:?} offset {offset}"
+                );
+            }
+        }
+    }
 }

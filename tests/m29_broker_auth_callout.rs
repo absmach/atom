@@ -200,7 +200,11 @@ async fn make_channel(pool: &Database, tenant_id: Option<Uuid>) -> (Uuid, String
     // file trips the "unknown action" deny path. Seeded inline (idempotent
     // via ON CONFLICT) so the file stays product-agnostic without another
     // shared fixture.
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           SELECT id, 'resource', 'resource:channel'
+             FROM actions WHERE name IN ('publish', 'subscribe')
+           ON CONFLICT DO NOTHING"#,
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            SELECT id, 'resource', 'resource:channel'
              FROM actions WHERE name IN ('publish', 'subscribe')
@@ -247,15 +251,20 @@ async fn grant(
     .await
     .expect("create role");
 
-    let action_id: Uuid = atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-        .bind(action)
-        .fetch_one(pool)
-        .await
-        .expect("seeded action");
+    let action_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1",
+        r#"SELECT id FROM actions WHERE name = $1"#,
+    )
+    .bind(action)
+    .fetch_one(pool)
+    .await
+    .expect("seeded action");
 
-    let block: Uuid = atom::db::query_scalar(
+    let block: Uuid = crate::common::db::query_scalar(
         "INSERT INTO permission_blocks (scope_mode, tenant_id, object_id, effect)
          VALUES ('object', $1, $2, 'allow') RETURNING id",
+        r#"INSERT INTO permission_blocks (scope_mode, tenant_id, object_id, effect)
+         VALUES ('object', $1, $2, 'allow') RETURNING id"#,
     )
     .bind(tenant_id)
     .bind(object)
@@ -263,8 +272,9 @@ async fn grant(
     .await
     .expect("permission block");
 
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(action_id)

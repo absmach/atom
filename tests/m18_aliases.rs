@@ -321,24 +321,20 @@ async fn database_rejects_uuid_shaped_aliases() {
     let uuid_alias = "465358f9-07f4-4ea0-8cbb-2abc654442bd";
 
     for result in [
-        atom::db::query("INSERT INTO tenants (name, alias) VALUES ($1, $2)")
+        crate::common::db::query("INSERT INTO tenants (name, alias) VALUES ($1, $2)", r#"INSERT INTO tenants (name, alias) VALUES ($1, $2)"#)
             .bind(slug("bad-tenant"))
             .bind(uuid_alias)
             .execute(&p)
             .await,
-        atom::db::query(
-            "INSERT INTO entities (kind, name, alias, tenant_id) \
-             VALUES ('device', $1, $2, $3)",
-        )
+        crate::common::db::query("INSERT INTO entities (kind, name, alias, tenant_id) \
+             VALUES ('device', $1, $2, $3)", r#"INSERT INTO entities (kind, name, alias, tenant_id) VALUES ('device', $1, $2, $3)"#)
         .bind(slug("bad-entity"))
         .bind(uuid_alias)
         .bind(tenant_id)
         .execute(&p)
         .await,
-        atom::db::query(
-            "INSERT INTO resources (kind, name, alias, tenant_id) \
-             VALUES ('resource:channel', $1, $2, $3)",
-        )
+        crate::common::db::query("INSERT INTO resources (kind, name, alias, tenant_id) \
+             VALUES ('resource:channel', $1, $2, $3)", r#"INSERT INTO resources (kind, name, alias, tenant_id) VALUES ('resource:channel', $1, $2, $3)"#)
         .bind("bad resource")
         .bind(uuid_alias)
         .bind(tenant_id)

@@ -54,16 +54,22 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     // The same serial may exist under two managed issuers because the unique
     // index is `(issuer_id, identifier)`. A duplicate inside one issuer is
     // still a database-level conflict.
-    atom::db::query("UPDATE credentials SET identifier = $1 WHERE id = $2")
-        .bind(&leaf_a.serial_number)
-        .bind(leaf_b.credential_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let same_issuer_conflict = atom::db::query(
+    crate::common::db::query(
+        "UPDATE credentials SET identifier = $1 WHERE id = $2",
+        r#"UPDATE credentials SET identifier = $1 WHERE id = $2"#,
+    )
+    .bind(&leaf_a.serial_number)
+    .bind(leaf_b.credential_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let same_issuer_conflict = crate::common::db::query(
         "INSERT INTO credentials
              (id, entity_id, kind, identifier, issuer_id, metadata, expires_at)
          VALUES ($1, $2, 'certificate', $3, $4, $5, now() + interval '1 hour')",
+        r#"INSERT INTO credentials
+             (id, entity_id, kind, identifier, issuer_id, metadata, expires_at)
+         VALUES ($1, $2, 'certificate', $3, $4, $5, atom_ts_add(now(), (3600)))"#,
     )
     .bind(Uuid::new_v4())
     .bind(entity_a)
@@ -219,33 +225,43 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     .await;
     set_issuer_status(&pool, issuer_a.id, "active", true).await;
 
-    atom::db::query("UPDATE credentials SET status = 'revocation_pending' WHERE id = $1")
-        .bind(leaf_a.credential_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    atom::db::query("UPDATE credentials SET status = 'active' WHERE id = $1")
-        .bind(leaf_a.credential_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let original_expiry = leaf_a.expires_at.as_ref().unwrap();
-    atom::db::query(
-        "UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1",
+    crate::common::db::query(
+        "UPDATE credentials SET status = 'revocation_pending' WHERE id = $1",
+        r#"UPDATE credentials SET status = 'revocation_pending' WHERE id = $1"#,
     )
     .bind(leaf_a.credential_id)
     .execute(&pool)
     .await
     .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    atom::db::query("UPDATE credentials SET expires_at = $2 WHERE id = $1")
-        .bind(leaf_a.credential_id)
-        .bind(original_expiry)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE credentials SET status = 'active' WHERE id = $1",
+        r#"UPDATE credentials SET status = 'active' WHERE id = $1"#,
+    )
+    .bind(leaf_a.credential_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let original_expiry = leaf_a.expires_at.as_ref().unwrap();
+    crate::common::db::query(
+        "UPDATE credentials SET expires_at = now() - interval '1 second' WHERE id = $1",
+        r#"UPDATE credentials SET expires_at = atom_ts_add(now(), -(1)) WHERE id = $1"#,
+    )
+    .bind(leaf_a.credential_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
+    crate::common::db::query(
+        "UPDATE credentials SET expires_at = $2 WHERE id = $1",
+        r#"UPDATE credentials SET expires_at = $2 WHERE id = $1"#,
+    )
+    .bind(leaf_a.credential_id)
+    .bind(original_expiry)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     set_issuer_status(&pool, issuer_a.id, "failed", false).await;
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
@@ -255,51 +271,75 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
     set_issuer_status(&pool, issuer_a.id, "active", true).await;
 
-    atom::db::query("UPDATE entities SET status = 'inactive' WHERE id = $1")
-        .bind(entity_a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE entities SET status = 'inactive' WHERE id = $1",
+        r#"UPDATE entities SET status = 'inactive' WHERE id = $1"#,
+    )
+    .bind(entity_a)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    atom::db::query("UPDATE entities SET status = 'active' WHERE id = $1")
-        .bind(entity_a)
-        .execute(&pool)
-        .await
-        .unwrap();
-    atom::db::query("UPDATE entities SET status = 'inactive', deleted_at = now() WHERE id = $1")
-        .bind(entity_a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE entities SET status = 'active' WHERE id = $1",
+        r#"UPDATE entities SET status = 'active' WHERE id = $1"#,
+    )
+    .bind(entity_a)
+    .execute(&pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        "UPDATE entities SET status = 'inactive', deleted_at = now() WHERE id = $1",
+        r#"UPDATE entities SET status = 'inactive', deleted_at = now() WHERE id = $1"#,
+    )
+    .bind(entity_a)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    atom::db::query("UPDATE entities SET status = 'active', deleted_at = NULL WHERE id = $1")
-        .bind(entity_a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE entities SET status = 'active', deleted_at = NULL WHERE id = $1",
+        r#"UPDATE entities SET status = 'active', deleted_at = NULL WHERE id = $1"#,
+    )
+    .bind(entity_a)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    atom::db::query("UPDATE tenants SET status = 'frozen' WHERE id = $1")
-        .bind(tenant_a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'frozen' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'frozen' WHERE id = $1"#,
+    )
+    .bind(tenant_a)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    atom::db::query("UPDATE tenants SET status = 'active' WHERE id = $1")
-        .bind(tenant_a)
-        .execute(&pool)
-        .await
-        .unwrap();
-    atom::db::query("UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1")
-        .bind(tenant_a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'active' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'active' WHERE id = $1"#,
+    )
+    .bind(tenant_a)
+    .execute(&pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1",
+        r#"UPDATE tenants SET status = 'deleted', deleted_at = now() WHERE id = $1"#,
+    )
+    .bind(tenant_a)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_fingerprint_denied(&pool, &leaf_a.fingerprint_sha256).await;
-    atom::db::query("UPDATE tenants SET status = 'active', deleted_at = NULL WHERE id = $1")
-        .bind(tenant_a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'active', deleted_at = NULL WHERE id = $1",
+        r#"UPDATE tenants SET status = 'active', deleted_at = NULL WHERE id = $1"#,
+    )
+    .bind(tenant_a)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Existing certificate lifecycle events are the stable cache-invalidation
     // contract. Revoke through the public GraphQL transaction and prove the
@@ -319,9 +359,11 @@ async fn runtime_resolver_v2_enforces_issuer_scoped_identity() {
         )
         .await;
     assert!(revoked.errors.is_empty(), "{:?}", revoked.errors);
-    let lifecycle_event: Value = atom::db::query_scalar(
+    let lifecycle_event: Value = crate::common::db::query_scalar(
         "SELECT payload FROM event_outbox
          WHERE event = 'certificate.revoke' AND (payload->>'target_id')::uuid = $1",
+        r#"SELECT payload FROM event_outbox
+         WHERE event = 'certificate.revoke' AND atom_uuid((payload->>'target_id')) = $1"#,
     )
     .bind(leaf_b.credential_id)
     .fetch_one(&pool)
@@ -563,7 +605,7 @@ fn csr(label: &str) -> String {
 }
 
 async fn set_issuer_status(pool: &Database, issuer_id: Uuid, status: &str, enabled: bool) {
-    atom::db::query(
+    crate::common::db::query(
         "UPDATE pki_authorities
          SET status = $2, issuance_enabled = $3,
              retiring_at = CASE WHEN $2 = 'retiring' THEN now() ELSE NULL END,
@@ -573,6 +615,15 @@ async fn set_issuer_status(pool: &Database, issuer_id: Uuid, status: &str, enabl
                  ELSE NULL
              END
          WHERE id = $1",
+        r#"UPDATE pki_authorities
+         SET status = $2, issuance_enabled = $3,
+             retiring_at = CASE WHEN $2 = 'retiring' THEN now() ELSE NULL END,
+             retired_at = CASE WHEN $2 = 'retired' THEN now() ELSE NULL END,
+             failure_reason = CASE
+                 WHEN $2 = 'failed' THEN 'PR-011 lifecycle test'
+                 ELSE NULL
+             END
+         WHERE id = $1"#,
     )
     .bind(issuer_id)
     .bind(status)

@@ -123,7 +123,9 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
     assert_chain_with_openssl(&leaf_pem, &chain_pem, &root.pem);
 
     let persisted: (Option<Uuid>, Uuid, Value, Option<String>, Option<Vec<u8>>) =
-        atom::db::query_as(
+        crate::common::db::query_as(
+            r#"SELECT issuer_id, entity_id, metadata, secret_hash, secret_ciphertext
+               FROM credentials WHERE id = $1"#,
             r#"SELECT issuer_id, entity_id, metadata, secret_hash, secret_ciphertext
                FROM credentials WHERE id = $1"#,
         )
@@ -182,7 +184,9 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
         "failed managed CSR issuance must publish one error observation"
     );
 
-    let ledger: (String, String, Option<Uuid>) = atom::db::query_as(
+    let ledger: (String, String, Option<Uuid>) = crate::common::db::query_as(
+        r#"SELECT request_key_hash, request_fingerprint_sha256, credential_id
+           FROM certificate_issuance_requests WHERE entity_id = $1"#,
         r#"SELECT request_key_hash, request_fingerprint_sha256, credential_id
            FROM certificate_issuance_requests WHERE entity_id = $1"#,
     )
@@ -224,7 +228,10 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
 
     // The same issuer mismatch is rejected if an internal/import path attempts
     // to bypass the service boundary.
-    let db_scope_error = atom::db::query(
+    let db_scope_error = crate::common::db::query(
+        r#"INSERT INTO credentials (
+               id, entity_id, kind, identifier, issuer_id, metadata
+           ) VALUES ($1, $2, 'certificate', $3, $4, '{}')"#,
         r#"INSERT INTO credentials (
                id, entity_id, kind, identifier, issuer_id, metadata
            ) VALUES ($1, $2, 'certificate', $3, $4, '{}')"#,
@@ -317,11 +324,13 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
             ))
             .await;
         assert!(collision.errors.is_empty(), "{:?}", collision.errors);
-        let collision_attempts: i64 =
-            atom::db::query_scalar("SELECT last_value FROM pki_test_serial_collision_seq")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let collision_attempts: i64 = crate::common::db::query_scalar(
+            "SELECT last_value FROM pki_test_serial_collision_seq",
+            r#"SELECT last_value FROM pki_test_serial_collision_seq"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(collision_attempts, 2);
         remove_serial_collision_trigger(&pool).await;
         assert_eq!(certificate_count(&pool, entity_a).await, 2);
@@ -359,9 +368,12 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
     // Both expired and retiring issuers are excluded by the internal selector.
     let original_not_before = issuer.not_before.unwrap();
     let original_not_after = issuer.not_after.unwrap();
-    atom::db::query(
+    crate::common::db::query(
         r#"UPDATE pki_authorities
            SET not_before = $2, not_after = now() - interval '1 second'
+           WHERE id = $1"#,
+        r#"UPDATE pki_authorities
+           SET not_before = $2, not_after = atom_ts_add(now(), -(1))
            WHERE id = $1"#,
     )
     .bind(issuer.id)
@@ -383,14 +395,20 @@ async fn managed_csr_issuance_enforces_the_pr005_contract() {
         &expired.errors,
         "no active issuing authority"
     ));
-    atom::db::query("UPDATE pki_authorities SET not_before = $2, not_after = $3 WHERE id = $1")
-        .bind(issuer.id)
-        .bind(original_not_before)
-        .bind(original_not_after)
-        .execute(&pool)
-        .await
-        .unwrap();
-    atom::db::query(
+    crate::common::db::query(
+        "UPDATE pki_authorities SET not_before = $2, not_after = $3 WHERE id = $1",
+        r#"UPDATE pki_authorities SET not_before = $2, not_after = $3 WHERE id = $1"#,
+    )
+    .bind(issuer.id)
+    .bind(original_not_before)
+    .bind(original_not_after)
+    .execute(&pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        r#"UPDATE pki_authorities
+           SET status = 'retiring', issuance_enabled = false, retiring_at = now()
+           WHERE id = $1"#,
         r#"UPDATE pki_authorities
            SET status = 'retiring', issuance_enabled = false, retiring_at = now()
            WHERE id = $1"#,
@@ -526,7 +544,11 @@ async fn provision_tenant_issuer(
     tenant_id: Uuid,
 ) -> AuthorityRecord {
     let record = common::pki::provision_tenant_issuer(pool, config, root, tenant_id).await;
-    atom::db::query(
+    crate::common::db::query(
+        r#"UPDATE pki_authorities
+           SET ocsp_url = $2, ca_issuers_url = $3,
+               crl_distribution_point_url = $4
+           WHERE id = $1"#,
         r#"UPDATE pki_authorities
            SET ocsp_url = $2, ca_issuers_url = $3,
                crl_distribution_point_url = $4
@@ -546,20 +568,21 @@ async fn provision_tenant_issuer(
 
 async fn create_tenant(pool: &Database, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("{prefix}-{id}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("{prefix}-{id}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
 async fn create_entity(pool: &Database, tenant_id: Uuid, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'device', $2, $3, 'active')"#)
     .bind(id)
     .bind(format!("{prefix}-{id}"))
     .bind(tenant_id)
@@ -570,8 +593,9 @@ async fn create_entity(pool: &Database, tenant_id: Uuid, prefix: &str) -> Uuid {
 }
 
 async fn certificate_count(pool: &Database, entity_id: Uuid) -> i64 {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'certificate'",
+        r#"SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = 'certificate'"#,
     )
     .bind(entity_id)
     .fetch_one(pool)
@@ -580,8 +604,9 @@ async fn certificate_count(pool: &Database, entity_id: Uuid) -> i64 {
 }
 
 async fn issuance_request_count(pool: &Database, entity_id: Uuid) -> i64 {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM certificate_issuance_requests WHERE entity_id = $1",
+        r#"SELECT COUNT(*) FROM certificate_issuance_requests WHERE entity_id = $1"#,
     )
     .bind(entity_id)
     .fetch_one(pool)
@@ -597,7 +622,12 @@ async fn event_count(pool: &Database, table: &str, event: &str, target_id: Uuid)
         }
         _ => panic!("unsupported event table"),
     };
-    atom::db::query_scalar(query)
+    let sqlite_query = match table {
+        "audit_logs" => query,
+        "event_outbox" => "SELECT COUNT(*) FROM event_outbox WHERE event = $1 AND atom_uuid(payload->>'target_id') = $2 AND payload->>'outcome' = 'allow'",
+        _ => panic!("unsupported event table"),
+    };
+    crate::common::db::query_scalar(query, sqlite_query)
         .bind(event)
         .bind(target_id)
         .fetch_one(pool)
@@ -606,10 +636,15 @@ async fn event_count(pool: &Database, table: &str, event: &str, target_id: Uuid)
 }
 
 async fn error_event_count(pool: &Database, event: &str, target_id: Uuid) -> i64 {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         r#"SELECT COUNT(*) FROM event_outbox
            WHERE event = $1
              AND (payload->>'target_id')::uuid = $2
+             AND payload->>'outcome' = 'error'
+             AND payload->'details'->>'transport' = 'graphql'"#,
+        r#"SELECT COUNT(*) FROM event_outbox
+           WHERE event = $1
+             AND atom_uuid((payload->>'target_id')) = $2
              AND payload->>'outcome' = 'error'
              AND payload->'details'->>'transport' = 'graphql'"#,
     )
@@ -621,12 +656,16 @@ async fn error_event_count(pool: &Database, event: &str, target_id: Uuid) -> i64
 }
 
 async fn install_serial_collision_trigger(pool: &Database, entity_id: Uuid) {
-    atom::db::query("CREATE SEQUENCE pki_test_serial_collision_seq")
-        .execute(pool)
-        .await
-        .unwrap();
-    atom::db::query(&format!(
-        r#"CREATE FUNCTION pki_test_serial_collision() RETURNS trigger AS $$
+    crate::common::db::query(
+        "CREATE SEQUENCE pki_test_serial_collision_seq",
+        r#"CREATE SEQUENCE pki_test_serial_collision_seq"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        &format!(
+            r#"CREATE FUNCTION pki_test_serial_collision() RETURNS trigger AS $$
         BEGIN
             IF NEW.entity_id = '{entity_id}'::uuid
                AND NEW.kind = 'certificate'
@@ -637,31 +676,52 @@ async fn install_serial_collision_trigger(pool: &Database, entity_id: Uuid) {
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql"#,
-    ))
+        ),
+        &format!(
+            r#"CREATE FUNCTION pki_test_serial_collision() RETURNS trigger AS $$
+        BEGIN
+            IF NEW.entity_id = '{entity_id}'::uuid
+               AND NEW.kind = 'certificate'
+               AND NEW.issuer_id IS NOT NULL
+               AND nextval('pki_test_serial_collision_seq') = 1 THEN
+                RAISE EXCEPTION 'synthetic serial collision' USING ERRCODE = '23505';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql"#,
+        ),
+    )
     .execute(pool)
     .await
     .unwrap();
-    atom::db::query(
-        "CREATE TRIGGER trg_pki_test_serial_collision BEFORE INSERT ON credentials FOR EACH ROW EXECUTE FUNCTION pki_test_serial_collision()",
-    )
+    crate::common::db::query("CREATE TRIGGER trg_pki_test_serial_collision BEFORE INSERT ON credentials FOR EACH ROW EXECUTE FUNCTION pki_test_serial_collision()", r#"CREATE TRIGGER trg_pki_test_serial_collision BEFORE INSERT ON credentials FOR EACH ROW EXECUTE FUNCTION pki_test_serial_collision()"#)
     .execute(pool)
     .await
     .unwrap();
 }
 
 async fn remove_serial_collision_trigger(pool: &Database) {
-    atom::db::query("DROP TRIGGER trg_pki_test_serial_collision ON credentials")
-        .execute(pool)
-        .await
-        .unwrap();
-    atom::db::query("DROP FUNCTION pki_test_serial_collision()")
-        .execute(pool)
-        .await
-        .unwrap();
-    atom::db::query("DROP SEQUENCE pki_test_serial_collision_seq")
-        .execute(pool)
-        .await
-        .unwrap();
+    crate::common::db::query(
+        "DROP TRIGGER trg_pki_test_serial_collision ON credentials",
+        r#"DROP TRIGGER trg_pki_test_serial_collision ON credentials"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        "DROP FUNCTION pki_test_serial_collision()",
+        r#"DROP FUNCTION pki_test_serial_collision()"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    crate::common::db::query(
+        "DROP SEQUENCE pki_test_serial_collision_seq",
+        r#"DROP SEQUENCE pki_test_serial_collision_seq"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn install_persistence_failure_trigger(pool: &Database, entity_id: Uuid) {
@@ -670,7 +730,12 @@ async fn install_persistence_failure_trigger(pool: &Database, entity_id: Uuid) {
         "trg_pki_test_persistence_failure",
         "credentials",
         &format!(
-            "NEW.entity_id = '{entity_id}'::uuid AND NEW.kind = 'certificate' AND NEW.issuer_id IS NOT NULL"
+            "NEW.entity_id = {} AND NEW.kind = 'certificate' AND NEW.issuer_id IS NOT NULL",
+            if pool.kind() == atom::db::DatabaseKind::Sqlite {
+                format!("atom_uuid('{entity_id}')")
+            } else {
+                format!("'{entity_id}'::uuid")
+            }
         ),
         "synthetic managed credential failure",
     )

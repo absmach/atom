@@ -41,7 +41,7 @@ async fn tenant(pool: &atom::db::Database) -> Uuid {
 
 async fn human(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')")
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'human', $2, $3, 'active')"#)
         .bind(id)
         .bind(format!("m7-human-{id}"))
         .bind(tenant_id)
@@ -52,11 +52,14 @@ async fn human(pool: &atom::db::Database, tenant_id: Option<Uuid>) -> Uuid {
 }
 
 async fn capability_id(pool: &atom::db::Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("capability")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1 LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = $1 LIMIT 1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("capability")
 }
 
 #[tokio::test]
@@ -81,9 +84,7 @@ async fn audit_write_persists_tenant_id() {
     )
     .await;
 
-    let stored: Uuid = atom::db::query_scalar(
-        "SELECT tenant_id FROM audit_logs WHERE target_kind = 'entity' AND target_id = $1 AND event = 'm7.test' ORDER BY created_at DESC LIMIT 1",
-    )
+    let stored: Uuid = crate::common::db::query_scalar("SELECT tenant_id FROM audit_logs WHERE target_kind = 'entity' AND target_id = $1 AND event = 'm7.test' ORDER BY created_at DESC LIMIT 1", r#"SELECT tenant_id FROM audit_logs WHERE target_kind = 'entity' AND target_id = $1 AND event = 'm7.test' ORDER BY created_at DESC LIMIT 1"#)
     .bind(e)
     .fetch_one(&p)
     .await
@@ -201,9 +202,7 @@ async fn hot_path_allow_skips_db_audit_by_default() {
     )
     .await;
 
-    let details: Option<serde_json::Value> = atom::db::query_scalar(
-        "SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1",
-    )
+    let details: Option<serde_json::Value> = crate::common::db::query_scalar("SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1", r#"SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1"#)
     .bind(entity_id)
     .fetch_optional(&p)
     .await
@@ -234,9 +233,7 @@ async fn hot_path_deny_keeps_db_audit_by_default() {
     )
     .await;
 
-    let details: serde_json::Value = atom::db::query_scalar(
-        "SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'resource' AND event = 'authz.check' AND outcome = 'deny' ORDER BY created_at DESC LIMIT 1",
-    )
+    let details: serde_json::Value = crate::common::db::query_scalar("SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'resource' AND event = 'authz.check' AND outcome = 'deny' ORDER BY created_at DESC LIMIT 1", r#"SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'resource' AND event = 'authz.check' AND outcome = 'deny' ORDER BY created_at DESC LIMIT 1"#)
     .bind(entity_id)
     .fetch_one(&p)
     .await
@@ -269,9 +266,7 @@ async fn hot_path_allow_db_audit_can_be_enabled() {
     )
     .await;
 
-    let details: serde_json::Value = atom::db::query_scalar(
-        "SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1",
-    )
+    let details: serde_json::Value = crate::common::db::query_scalar("SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1", r#"SELECT details FROM audit_logs WHERE actor_entity_id = $1 AND target_kind = 'entity' AND target_id = $1 AND event = 'auth.login' AND outcome = 'allow' ORDER BY created_at DESC LIMIT 1"#)
     .bind(entity_id)
     .fetch_one(&p)
     .await
@@ -301,16 +296,15 @@ async fn read_role(
     )
     .await
     .expect("create role");
-    let block: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, tenant_id, effect) VALUES ('tenant', $1, $2) RETURNING id",
-    )
+    let block: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, tenant_id, effect) VALUES ('tenant', $1, $2) RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect) VALUES ('tenant', $1, $2) RETURNING id"#)
     .bind(tenant_id)
     .bind(effect)
     .fetch_one(pool)
     .await
     .expect("block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(read)

@@ -18,33 +18,42 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn read_capability_id(pool: &atom::db::Database) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("read cap")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read cap")
 }
 
 async fn make_tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("m1-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("m1-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn make_resource(pool: &atom::db::Database, tenant_id: Option<Uuid>, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("m1-res-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("m1-res-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
@@ -54,7 +63,7 @@ async fn make_active_entity(
     kind: &str,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')")
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')"#)
         .bind(id)
         .bind(kind)
         .bind(format!("m1-ent-{id}"))
@@ -88,10 +97,13 @@ async fn admin_platform_binding_authorises() {
         resp.reason
     );
 
-    let _ = atom::db::query("DELETE FROM resources WHERE id = $1")
-        .bind(resource_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = $1",
+        r#"DELETE FROM resources WHERE id = $1"#,
+    )
+    .bind(resource_id)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -155,18 +167,27 @@ async fn object_type_binding_matches_namespaced_resource_subkind() {
     );
 
     // Cleanup
-    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(binding.id)
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
-        .bind(&[channel_id, other_id][..])
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
-        .bind(entity_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM direct_policies WHERE id = $1",
+        r#"DELETE FROM direct_policies WHERE id = $1"#,
+    )
+    .bind(binding.id)
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = ANY($1::uuid[])",
+        r#"DELETE FROM resources WHERE id IN (SELECT unhex(value) FROM json_each($1))"#,
+    )
+    .bind(&[channel_id, other_id][..])
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE id = $1",
+        r#"DELETE FROM entities WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -225,18 +246,27 @@ async fn object_binding_matches_specific_resource_uuid() {
             .allowed
     );
 
-    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(binding.id)
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
-        .bind(&[resource_id, other_id][..])
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
-        .bind(entity_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM direct_policies WHERE id = $1",
+        r#"DELETE FROM direct_policies WHERE id = $1"#,
+    )
+    .bind(binding.id)
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = ANY($1::uuid[])",
+        r#"DELETE FROM resources WHERE id IN (SELECT unhex(value) FROM json_each($1))"#,
+    )
+    .bind(&[resource_id, other_id][..])
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE id = $1",
+        r#"DELETE FROM entities WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -285,16 +315,25 @@ async fn object_kind_binding_matches_every_resource_kind() {
         );
     }
 
-    let _ = atom::db::query("DELETE FROM direct_policies WHERE id = $1")
-        .bind(binding.id)
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM resources WHERE id = ANY($1::uuid[])")
-        .bind(&[chan, cfg][..])
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
-        .bind(entity_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM direct_policies WHERE id = $1",
+        r#"DELETE FROM direct_policies WHERE id = $1"#,
+    )
+    .bind(binding.id)
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM resources WHERE id = ANY($1::uuid[])",
+        r#"DELETE FROM resources WHERE id IN (SELECT unhex(value) FROM json_each($1))"#,
+    )
+    .bind(&[chan, cfg][..])
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE id = $1",
+        r#"DELETE FROM entities WHERE id = $1"#,
+    )
+    .bind(entity_id)
+    .execute(&p)
+    .await;
 }

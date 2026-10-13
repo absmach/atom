@@ -20,8 +20,9 @@ use uuid::Uuid;
 
 async fn make_entity(pool: &Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')"#,
     )
     .bind(id)
     .bind(name)
@@ -33,19 +34,20 @@ async fn make_entity(pool: &Database, name: &str) -> Uuid {
 
 async fn make_tenant(pool: &Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(name)
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn add_email(pool: &Database, entity_id: Uuid, email: &str) {
-    atom::db::query(
-        "INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())",
-    )
+    crate::common::db::query("INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())", r#"INSERT INTO entity_emails (id, entity_id, email, verified_at) VALUES ($1, $2, $3, now())"#)
     .bind(Uuid::new_v4())
     .bind(entity_id)
     .bind(email)
@@ -55,13 +57,16 @@ async fn add_email(pool: &Database, entity_id: Uuid, email: &str) {
 }
 
 async fn add_unverified_email(pool: &Database, entity_id: Uuid, email: &str) {
-    atom::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
-        .bind(Uuid::new_v4())
-        .bind(entity_id)
-        .bind(email)
-        .execute(pool)
-        .await
-        .expect("insert unverified entity email");
+    crate::common::db::query(
+        "INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)",
+        r#"INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(entity_id)
+    .bind(email)
+    .execute(pool)
+    .await
+    .expect("insert unverified entity email");
 }
 
 async fn insert_user_invitation(
@@ -70,10 +75,14 @@ async fn insert_user_invitation(
     inviter_id: Uuid,
     invitee_id: Uuid,
 ) -> Uuid {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
         r#"INSERT INTO tenant_invitations
              (id, tenant_id, invitee_user_id, invited_by, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 hour')
+           RETURNING id"#,
+        r#"INSERT INTO tenant_invitations
+             (id, tenant_id, invitee_user_id, invited_by, expires_at)
+           VALUES ($1, $2, $3, $4, atom_ts_add(now(), (3600)))
            RETURNING id"#,
     )
     .bind(Uuid::new_v4())
@@ -122,7 +131,16 @@ async fn set_invitation_state(pool: &Database, invitation_id: Uuid, state: &str)
         }
         _ => panic!("unknown invitation state {state}"),
     };
-    atom::db::query(query)
+    let sqlite_query = match state {
+        "accepted" => "UPDATE tenant_invitations SET accepted_at = now() WHERE id = $1",
+        "rejected" => "UPDATE tenant_invitations SET rejected_at = now() WHERE id = $1",
+        "revoked" => "UPDATE tenant_invitations SET revoked_at = now() WHERE id = $1",
+        "expired" => {
+            "UPDATE tenant_invitations SET expires_at = atom_ts_add(now(), -3600) WHERE id = $1"
+        }
+        _ => panic!("unknown invitation state {state}"),
+    };
+    crate::common::db::query(query, sqlite_query)
         .bind(invitation_id)
         .execute(pool)
         .await
@@ -240,12 +258,14 @@ async fn email_invitation_token_proves_and_records_address_ownership() {
     let tenant = make_tenant(&pool, &format!("verified-tenant-{}", Uuid::new_v4())).await;
     let (invitation_id, token) = create_email_invitation(&pool, tenant, inviter, &email).await;
 
-    let bound_invitee: Option<Uuid> =
-        atom::db::query_scalar("SELECT invitee_user_id FROM tenant_invitations WHERE id = $1")
-            .bind(invitation_id)
-            .fetch_one(&pool)
-            .await
-            .expect("invitation binding");
+    let bound_invitee: Option<Uuid> = crate::common::db::query_scalar(
+        "SELECT invitee_user_id FROM tenant_invitations WHERE id = $1",
+        r#"SELECT invitee_user_id FROM tenant_invitations WHERE id = $1"#,
+    )
+    .bind(invitation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("invitation binding");
     assert_eq!(
         bound_invitee, None,
         "an unverified address must not bind an invitation to an entity"
@@ -273,12 +293,14 @@ async fn email_invitation_token_proves_and_records_address_ownership() {
         tenant_repo::accept_invitation_token(&pool, &replace_token_secret(&token), claimant).await,
         "invalid invitation token",
     );
-    let still_unverified: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
-            .bind(claimant)
-            .fetch_one(&pool)
-            .await
-            .expect("verification state after invalid token");
+    let still_unverified: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT verified_at FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT verified_at FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(claimant)
+    .fetch_one(&pool)
+    .await
+    .expect("verification state after invalid token");
     assert!(still_unverified.is_none());
 
     let accepted_tenant = tenant_repo::accept_invitation_token(&pool, &token, claimant)
@@ -286,16 +308,19 @@ async fn email_invitation_token_proves_and_records_address_ownership() {
         .expect("mailbox token proves the claimant owns the address");
     assert_eq!(accepted_tenant, tenant);
 
-    let verified_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT verified_at FROM entity_emails WHERE entity_id = $1")
-            .bind(claimant)
-            .fetch_one(&pool)
-            .await
-            .expect("verification timestamp after token acceptance");
+    let verified_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT verified_at FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT verified_at FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(claimant)
+    .fetch_one(&pool)
+    .await
+    .expect("verification timestamp after token acceptance");
     assert!(verified_at.is_some());
 
-    let accepted_by: Option<Uuid> = atom::db::query_scalar(
+    let accepted_by: Option<Uuid> = crate::common::db::query_scalar(
         "SELECT accepted_by FROM tenant_invitations WHERE id = $1 AND invitee_user_id = $2",
+        r#"SELECT accepted_by FROM tenant_invitations WHERE id = $1 AND invitee_user_id = $2"#,
     )
     .bind(invitation_id)
     .bind(claimant)

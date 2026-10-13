@@ -16,7 +16,6 @@ use crate::{
     state::AppState,
 };
 
-const LIFECYCLE_SWEEP_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_504b_493f;
 const MAX_BULK_BATCH_SIZE: i64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,11 +132,7 @@ pub async fn sweep_once(
     }
 
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(LIFECYCLE_SWEEP_ADVISORY_LOCK_ID)
-        .fetch_one(tx.exec())
-        .await
-        .map_err(AppError::Database)?;
+    let acquired = repo::claim_sweep(&mut tx).await?;
     if !acquired {
         return Ok(SweepSummary::default());
     }

@@ -1,0 +1,8 @@
+/// Native SQLite grant relation. `subject` must be a trusted bind placeholder.
+pub(crate) fn subject_effective_grants(subject: &str) -> String {
+    include_str!("subject_effective_grants.sql").replace("{subject}", subject)
+}
+/// Canonical unconditional access-token ceiling used by authorized listings.
+pub(crate) fn ceiling_cte(parameter: &str) -> String {
+    format!("ceiling AS (SELECT s.scope_kind, s.scope_ref, l.tenant_id, la.action_id FROM credential_permission_limits l JOIN credential_permission_limit_scopes s ON s.limit_id = l.id JOIN credential_permission_limit_actions la ON la.limit_id = l.id WHERE l.credential_id = {parameter} AND atom_json_eq(l.conditions, '{{}}'))")
+}

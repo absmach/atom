@@ -59,20 +59,21 @@ fn authed(query: impl Into<String>) -> Request {
 
 async fn tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("reverse-lookup-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("reverse-lookup-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn entity(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')"#)
     .bind(id)
     .bind(kind)
     .bind(format!("reverse-lookup-{kind}-{id}"))
@@ -85,33 +86,37 @@ async fn entity(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
 
 async fn resource(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("reverse-lookup-{kind}-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("reverse-lookup-{kind}-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
 async fn object_group(pool: &Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(id)
-        .bind(format!("reverse-lookup-group-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert object group");
+    crate::common::db::query(
+        "INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(id)
+    .bind(format!("reverse-lookup-group-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert object group");
     id
 }
 
 async fn set_group_parent(pool: &Database, tenant_id: Uuid, child_id: Uuid, parent_id: Uuid) {
-    atom::db::query(
-        "INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)",
-    )
+    crate::common::db::query("INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)", r#"INSERT INTO object_group_hierarchy (parent_id, child_id, tenant_id) VALUES ($1, $2, $3)"#)
     .bind(parent_id)
     .bind(child_id)
     .bind(tenant_id)
@@ -121,8 +126,9 @@ async fn set_group_parent(pool: &Database, tenant_id: Uuid, child_id: Uuid, pare
 }
 
 async fn add_entity_to_group(pool: &Database, tenant_id: Uuid, group_id: Uuid, entity_id: Uuid) {
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO object_group_entities (group_id, entity_id, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO object_group_entities (group_id, entity_id, tenant_id) VALUES ($1, $2, $3)"#,
     )
     .bind(group_id)
     .bind(entity_id)
@@ -138,9 +144,7 @@ async fn add_resource_to_group(
     group_id: Uuid,
     resource_id: Uuid,
 ) {
-    atom::db::query(
-        "INSERT INTO object_group_resources (group_id, resource_id, tenant_id) VALUES ($1, $2, $3)",
-    )
+    crate::common::db::query("INSERT INTO object_group_resources (group_id, resource_id, tenant_id) VALUES ($1, $2, $3)", r#"INSERT INTO object_group_resources (group_id, resource_id, tenant_id) VALUES ($1, $2, $3)"#)
     .bind(group_id)
     .bind(resource_id)
     .bind(tenant_id)
@@ -192,7 +196,11 @@ impl BlockSpec {
 }
 
 async fn block(pool: &Database, spec: BlockSpec) -> Uuid {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks
+             (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect)
+           VALUES ($1, $2, $3, $4, $5, $6, 'allow')
+           RETURNING id"#,
         r#"INSERT INTO permission_blocks
              (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect)
            VALUES ($1, $2, $3, $4, $5, $6, 'allow')
@@ -215,7 +223,10 @@ async fn policy(
     subject_id: Uuid,
     block_id: Uuid,
 ) -> Uuid {
-    atom::db::query_scalar(
+    crate::common::db::query_scalar(
+        r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
+           VALUES ($1, 'entity', $2, $3)
+           RETURNING id"#,
         r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id)
            VALUES ($1, 'entity', $2, $3)
            RETURNING id"#,
@@ -229,16 +240,20 @@ async fn policy(
 }
 
 async fn seeded_action(pool: &Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("seeded action")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1 LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = $1 LIMIT 1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("seeded action")
 }
 
 async fn attach_action(pool: &Database, block_id: Uuid, action_id: Uuid) {
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(action_id)

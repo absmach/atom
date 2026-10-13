@@ -24,9 +24,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn count_active_credentials(pool: &atom::db::Database, entity_id: Uuid, kind: &str) -> i64 {
-    atom::db::query_scalar(
-        "SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active'",
-    )
+    crate::common::db::query_scalar("SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active'", r#"SELECT COUNT(*) FROM credentials WHERE entity_id = $1 AND kind = $2 AND status = 'active'"#)
     .bind(entity_id)
     .bind(kind)
     .fetch_one(pool)
@@ -84,18 +82,24 @@ async fn bootstrap_creates_entities_and_credentials() {
         .await
         .expect("apply bootstrap");
 
-    let human_kind: String = atom::db::query_scalar("SELECT kind FROM entities WHERE id = $1")
-        .bind(human)
-        .fetch_one(&p)
-        .await
-        .expect("human entity exists");
+    let human_kind: String = crate::common::db::query_scalar(
+        "SELECT kind FROM entities WHERE id = $1",
+        r#"SELECT kind FROM entities WHERE id = $1"#,
+    )
+    .bind(human)
+    .fetch_one(&p)
+    .await
+    .expect("human entity exists");
     assert_eq!(human_kind, "human");
 
-    let service_kind: String = atom::db::query_scalar("SELECT kind FROM entities WHERE id = $1")
-        .bind(service)
-        .fetch_one(&p)
-        .await
-        .expect("service entity exists");
+    let service_kind: String = crate::common::db::query_scalar(
+        "SELECT kind FROM entities WHERE id = $1",
+        r#"SELECT kind FROM entities WHERE id = $1"#,
+    )
+    .bind(service)
+    .fetch_one(&p)
+    .await
+    .expect("service entity exists");
     assert_eq!(service_kind, "service");
 
     assert_eq!(count_active_credentials(&p, human, "password").await, 1);
@@ -133,11 +137,14 @@ async fn bootstrap_is_idempotent() {
     apply(&p, &signing_keys, &cfg).await.expect("first apply");
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
-    let entity_count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM entities WHERE id = $1")
-        .bind(human)
-        .fetch_one(&p)
-        .await
-        .expect("count human");
+    let entity_count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM entities WHERE id = $1",
+        r#"SELECT COUNT(*) FROM entities WHERE id = $1"#,
+    )
+    .bind(human)
+    .fetch_one(&p)
+    .await
+    .expect("count human");
     assert_eq!(entity_count, 1);
 
     assert_eq!(count_active_credentials(&p, human, "password").await, 1);
@@ -171,7 +178,11 @@ async fn concurrent_identical_bootstrap_reconciles_each_credential_once() {
 
     assert_eq!(count_active_credentials(&p, human, "password").await, 1);
     assert_eq!(count_active_credentials(&p, service, "shared_key").await, 1);
-    let access_token_count: i64 = atom::db::query_scalar(
+    let access_token_count: i64 = crate::common::db::query_scalar(
+        r#"SELECT COUNT(*)
+           FROM credentials
+           WHERE id = $1 AND entity_id = $2
+             AND kind = 'access_token' AND status = 'active'"#,
         r#"SELECT COUNT(*)
            FROM credentials
            WHERE id = $1 AND entity_id = $2
@@ -208,12 +219,14 @@ async fn bootstrap_human_email_is_canonical_and_semantic_drift_is_rejected() {
     };
 
     apply(&p, &signing_keys, &cfg).await.expect("first apply");
-    let canonical: String =
-        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-            .bind(human)
-            .fetch_one(&p)
-            .await
-            .expect("canonical email");
+    let canonical: String = crate::common::db::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT email FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(human)
+    .fetch_one(&p)
+    .await
+    .expect("canonical email");
     assert_eq!(canonical, normalized_email);
 
     // Reusing an ID with changed stored semantics is not idempotency.
@@ -222,12 +235,14 @@ async fn bootstrap_human_email_is_canonical_and_semantic_drift_is_rejected() {
         .await
         .expect_err("semantic drift");
     assert!(err.to_string().contains("different semantics"));
-    let after: String =
-        atom::db::query_scalar("SELECT email FROM entity_emails WHERE entity_id = $1")
-            .bind(human)
-            .fetch_one(&p)
-            .await
-            .expect("canonical email after rerun");
+    let after: String = crate::common::db::query_scalar(
+        "SELECT email FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT email FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(human)
+    .fetch_one(&p)
+    .await
+    .expect("canonical email after rerun");
     assert_eq!(after, normalized_email);
 }
 
@@ -266,12 +281,14 @@ async fn bootstrap_duplicate_human_email_fails_without_inserting_second_entity()
         .await
         .expect_err("duplicate email must fail");
     assert!(err.to_string().contains("email"));
-    let second_exists: bool =
-        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM entities WHERE id = $1)")
-            .bind(second)
-            .fetch_one(&p)
-            .await
-            .expect("second entity lookup");
+    let second_exists: bool = crate::common::db::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM entities WHERE id = $1)",
+        r#"SELECT EXISTS (SELECT 1 FROM entities WHERE id = $1)"#,
+    )
+    .bind(second)
+    .fetch_one(&p)
+    .await
+    .expect("second entity lookup");
     assert!(!second_exists, "entity and email must roll back together");
 }
 
@@ -287,12 +304,14 @@ async fn bootstrap_does_not_clobber_existing_credentials() {
         .await
         .expect("first apply");
 
-    let original_hash: String =
-        atom::db::query_scalar("SELECT secret_hash FROM credentials WHERE entity_id = $1")
-            .bind(human)
-            .fetch_one(&p)
-            .await
-            .expect("password hash");
+    let original_hash: String = crate::common::db::query_scalar(
+        "SELECT secret_hash FROM credentials WHERE entity_id = $1",
+        r#"SELECT secret_hash FROM credentials WHERE entity_id = $1"#,
+    )
+    .bind(human)
+    .fetch_one(&p)
+    .await
+    .expect("password hash");
 
     // A second run declaring a different secret for the same entity must fail
     // closed and leave the config-managed credential unchanged.
@@ -304,12 +323,14 @@ async fn bootstrap_does_not_clobber_existing_credentials() {
         .await
         .expect_err("credential drift must reject bootstrap");
 
-    let after_hash: String =
-        atom::db::query_scalar("SELECT secret_hash FROM credentials WHERE entity_id = $1")
-            .bind(human)
-            .fetch_one(&p)
-            .await
-            .expect("password hash after");
+    let after_hash: String = crate::common::db::query_scalar(
+        "SELECT secret_hash FROM credentials WHERE entity_id = $1",
+        r#"SELECT secret_hash FROM credentials WHERE entity_id = $1"#,
+    )
+    .bind(human)
+    .fetch_one(&p)
+    .await
+    .expect("password hash after");
     assert_eq!(
         original_hash, after_hash,
         "existing password must be preserved"
@@ -338,9 +359,7 @@ async fn bootstrap_rejects_one_matching_and_one_drifted_active_singleton_credent
         (drift_password_id, "different-password-123"),
     ] {
         let hash = atom::identity::service::hash_secret(secret.as_bytes()).expect("hash password");
-        atom::db::query(
-            "INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)",
-        )
+        crate::common::db::query("INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)", r#"INSERT INTO credentials (id, entity_id, kind, secret_hash) VALUES ($1, $2, 'password', $3)"#)
         .bind(id)
         .bind(human)
         .bind(hash)
@@ -354,7 +373,10 @@ async fn bootstrap_rejects_one_matching_and_one_drifted_active_singleton_credent
     ] {
         let hash =
             atom::identity::service::hash_secret(secret.as_bytes()).expect("hash shared key");
-        atom::db::query(
+        crate::common::db::query(
+            r#"INSERT INTO credentials
+                 (id, entity_id, kind, secret_hash, metadata)
+               VALUES ($1, $2, 'shared_key', $3, $4)"#,
             r#"INSERT INTO credentials
                  (id, entity_id, kind, secret_hash, metadata)
                VALUES ($1, $2, 'shared_key', $3, $4)"#,
@@ -373,27 +395,26 @@ async fn bootstrap_rejects_one_matching_and_one_drifted_active_singleton_credent
         .await
         .expect_err("multiple active password rows must fail");
     assert!(err.to_string().contains("password"));
-    let managed: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM credentials WHERE entity_id = ANY($1) AND managed_by = 'config'",
-    )
+    let managed: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM credentials WHERE entity_id = ANY($1) AND managed_by = 'config'", r#"SELECT COUNT(*) FROM credentials WHERE entity_id IN (SELECT unhex(value) FROM json_each($1)) AND managed_by = 'config'"#)
     .bind(vec![human, service])
     .fetch_one(&p)
     .await
     .expect("managed credential count");
     assert_eq!(managed, 0, "failed reconciliation must stamp no credential");
 
-    atom::db::query("UPDATE credentials SET status = 'revoked' WHERE id = $1")
-        .bind(drift_password_id)
-        .execute(&p)
-        .await
-        .expect("revoke drifted password");
+    crate::common::db::query(
+        "UPDATE credentials SET status = 'revoked' WHERE id = $1",
+        r#"UPDATE credentials SET status = 'revoked' WHERE id = $1"#,
+    )
+    .bind(drift_password_id)
+    .execute(&p)
+    .await
+    .expect("revoke drifted password");
     let err = apply(&p, &signing_keys, &cfg)
         .await
         .expect_err("multiple active shared-key rows must fail");
     assert!(err.to_string().contains("shared key"));
-    atom::db::query(
-        "UPDATE credentials SET status = 'revoked' WHERE entity_id = $1 AND kind = 'shared_key' AND metadata->>'description' = 'drift'",
-    )
+    crate::common::db::query("UPDATE credentials SET status = 'revoked' WHERE entity_id = $1 AND kind = 'shared_key' AND metadata->>'description' = 'drift'", r#"UPDATE credentials SET status = 'revoked' WHERE entity_id = $1 AND kind = 'shared_key' AND metadata->>'description' = 'drift'"#)
     .bind(service)
     .execute(&p)
     .await
@@ -445,9 +466,7 @@ async fn late_bootstrap_failure_rolls_back_earlier_sections() {
     apply(&p, &signing_keys, &cfg)
         .await
         .expect_err("late missing permission block must fail bootstrap");
-    let rows: i64 = atom::db::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM tenants WHERE id = $1) + (SELECT COUNT(*) FROM entities WHERE id = $2) + (SELECT COUNT(*) FROM credentials WHERE entity_id = $2)",
-    )
+    let rows: i64 = crate::common::db::query_scalar("SELECT (SELECT COUNT(*) FROM tenants WHERE id = $1) + (SELECT COUNT(*) FROM entities WHERE id = $2) + (SELECT COUNT(*) FROM credentials WHERE entity_id = $2)", r#"SELECT (SELECT COUNT(*) FROM tenants WHERE id = $1) + (SELECT COUNT(*) FROM entities WHERE id = $2) + (SELECT COUNT(*) FROM credentials WHERE entity_id = $2)"#)
     .bind(tenant)
     .bind(entity)
     .fetch_one(&p)
@@ -553,17 +572,17 @@ async fn bootstrap_provisions_full_rbac_graph() {
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
     // Rows exist and are linked.
-    let entity_tenant: Option<Uuid> =
-        atom::db::query_scalar("SELECT tenant_id FROM entities WHERE id = $1")
-            .bind(device)
-            .fetch_one(&p)
-            .await
-            .expect("device entity");
+    let entity_tenant: Option<Uuid> = crate::common::db::query_scalar(
+        "SELECT tenant_id FROM entities WHERE id = $1",
+        r#"SELECT tenant_id FROM entities WHERE id = $1"#,
+    )
+    .bind(device)
+    .fetch_one(&p)
+    .await
+    .expect("device entity");
     assert_eq!(entity_tenant, Some(tenant));
 
-    let link_count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2",
-    )
+    let link_count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2", r#"SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1 AND permission_block_id = $2"#)
     .bind(role)
     .bind(block)
     .fetch_one(&p)
@@ -571,8 +590,9 @@ async fn bootstrap_provisions_full_rbac_graph() {
     .expect("role/block link");
     assert_eq!(link_count, 1, "block linked to role exactly once");
 
-    let action_count: i64 = atom::db::query_scalar(
+    let action_count: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM permission_block_actions WHERE permission_block_id = $1",
+        r#"SELECT COUNT(*) FROM permission_block_actions WHERE permission_block_id = $1"#,
     )
     .bind(block)
     .fetch_one(&p)
@@ -585,12 +605,85 @@ async fn bootstrap_provisions_full_rbac_graph() {
 
     // End-to-end: the assigned device now effectively holds `publish` via the
     // canonical grant expansion the PDP consumes.
-    let publish_grants: i64 = atom::db::query_scalar(
-        r#"SELECT COUNT(*)
+    let publish_grants: i64 = crate::common::db::query_scalar(r#"SELECT COUNT(*)
            FROM subject_effective_grants($1) g
            JOIN actions a ON a.id = g.capability_id
-           WHERE a.name = 'publish' AND g.effect = 'allow'"#,
-    )
+           WHERE a.name = 'publish' AND g.effect = 'allow'"#, r#"SELECT COUNT(*)
+           FROM (WITH RECURSIVE subject_groups(group_id, path) AS (
+    SELECT gm.group_id, g.name
+    FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.deleted_at IS NULL
+    WHERE gm.entity_id = $1
+    UNION ALL
+    SELECT gh.parent_id, parent.name || ' -> ' || sg.path
+    FROM group_hierarchy gh
+    JOIN subject_groups sg ON sg.group_id = gh.child_id
+    JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.deleted_at IS NULL
+)
+SELECT dp.id AS assignment_id,
+       pb.id AS block_id,
+       NULL AS role_id,
+       NULL AS role_name,
+       CASE WHEN dp.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
+       dp.tenant_id AS tenant_boundary,
+       pbs.scope_kind AS scope_kind,
+       pbs.scope_ref AS scope_ref,
+       pba.action_id AS capability_id,
+       pb.effect AS effect,
+       pb.conditions AS conditions
+FROM direct_policies dp
+JOIN permission_blocks pb ON pb.id = dp.permission_block_id
+JOIN permission_block_scopes pbs ON pbs.permission_block_id = pb.id
+JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+LEFT JOIN subject_groups sg ON dp.subject_kind = 'group' AND sg.group_id = dp.subject_id
+WHERE (dp.subject_kind = 'entity' AND dp.subject_id = $1)
+   OR (dp.subject_kind = 'group' AND sg.group_id IS NOT NULL)
+UNION ALL
+SELECT ra.id,
+       pb.id,
+       ra.role_id,
+       r.name,
+       CASE WHEN ra.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END,
+       ra.tenant_id,
+       pbs.scope_kind,
+       pbs.scope_ref,
+       pba.action_id,
+       pb.effect,
+       pb.conditions
+FROM role_assignments ra
+JOIN roles r ON r.id = ra.role_id AND r.deleted_at IS NULL
+JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
+JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+JOIN permission_block_scopes pbs ON pbs.permission_block_id = pb.id
+JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+LEFT JOIN subject_groups sg ON ra.subject_kind = 'group' AND sg.group_id = ra.subject_id
+WHERE (ra.subject_kind = 'entity' AND ra.subject_id = $1)
+   OR (ra.subject_kind = 'group' AND sg.group_id IS NOT NULL)
+UNION ALL
+SELECT unhex(md5('tenant_membership_assignment:' || atom_text(tm.tenant_id) || ':' || atom_text(tm.entity_id))),
+       unhex(md5('tenant_membership_block:' || atom_text(tm.tenant_id) || ':' || atom_text(tm.entity_id))),
+       NULL,
+       NULL,
+       'tenant_membership',
+       tm.tenant_id,
+       'object',
+       atom_text(tm.tenant_id),
+       a.id,
+       'allow',
+       '{}'
+FROM tenant_memberships tm
+JOIN entities e ON e.id = tm.entity_id
+JOIN tenants t ON t.id = tm.tenant_id
+JOIN actions a ON a.name = 'read'
+WHERE tm.entity_id = $1
+  AND tm.status = 'active'
+  AND e.kind = 'human'
+  AND e.status = 'active'
+  AND e.deleted_at IS NULL
+  AND t.status = 'active'
+  AND t.deleted_at IS NULL) g
+           JOIN actions a ON a.id = g.capability_id
+           WHERE a.name = 'publish' AND g.effect = 'allow'"#)
     .bind(device)
     .fetch_one(&p)
     .await
@@ -666,8 +759,9 @@ async fn bootstrap_supports_group_subjects_and_direct_policies() {
 
     apply(&p, &signing_keys, &cfg).await.expect("apply");
 
-    let member_count: i64 = atom::db::query_scalar(
+    let member_count: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM principal_group_members WHERE group_id = $1 AND entity_id = $2",
+        r#"SELECT COUNT(*) FROM principal_group_members WHERE group_id = $1 AND entity_id = $2"#,
     )
     .bind(group)
     .bind(device)
@@ -678,12 +772,85 @@ async fn bootstrap_supports_group_subjects_and_direct_policies() {
 
     // The device inherits the group's direct policy: it should effectively hold
     // an allow-read grant through group membership.
-    let read_grants: i64 = atom::db::query_scalar(
-        r#"SELECT COUNT(*)
+    let read_grants: i64 = crate::common::db::query_scalar(r#"SELECT COUNT(*)
            FROM subject_effective_grants($1) g
            JOIN actions a ON a.id = g.capability_id
-           WHERE a.name = 'read' AND g.effect = 'allow'"#,
-    )
+           WHERE a.name = 'read' AND g.effect = 'allow'"#, r#"SELECT COUNT(*)
+           FROM (WITH RECURSIVE subject_groups(group_id, path) AS (
+    SELECT gm.group_id, g.name
+    FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active' AND g.deleted_at IS NULL
+    WHERE gm.entity_id = $1
+    UNION ALL
+    SELECT gh.parent_id, parent.name || ' -> ' || sg.path
+    FROM group_hierarchy gh
+    JOIN subject_groups sg ON sg.group_id = gh.child_id
+    JOIN groups parent ON parent.id = gh.parent_id AND parent.status = 'active' AND parent.deleted_at IS NULL
+)
+SELECT dp.id AS assignment_id,
+       pb.id AS block_id,
+       NULL AS role_id,
+       NULL AS role_name,
+       CASE WHEN dp.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END AS via,
+       dp.tenant_id AS tenant_boundary,
+       pbs.scope_kind AS scope_kind,
+       pbs.scope_ref AS scope_ref,
+       pba.action_id AS capability_id,
+       pb.effect AS effect,
+       pb.conditions AS conditions
+FROM direct_policies dp
+JOIN permission_blocks pb ON pb.id = dp.permission_block_id
+JOIN permission_block_scopes pbs ON pbs.permission_block_id = pb.id
+JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+LEFT JOIN subject_groups sg ON dp.subject_kind = 'group' AND sg.group_id = dp.subject_id
+WHERE (dp.subject_kind = 'entity' AND dp.subject_id = $1)
+   OR (dp.subject_kind = 'group' AND sg.group_id IS NOT NULL)
+UNION ALL
+SELECT ra.id,
+       pb.id,
+       ra.role_id,
+       r.name,
+       CASE WHEN ra.subject_kind = 'entity' THEN 'direct' ELSE 'group:' || sg.path END,
+       ra.tenant_id,
+       pbs.scope_kind,
+       pbs.scope_ref,
+       pba.action_id,
+       pb.effect,
+       pb.conditions
+FROM role_assignments ra
+JOIN roles r ON r.id = ra.role_id AND r.deleted_at IS NULL
+JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
+JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+JOIN permission_block_scopes pbs ON pbs.permission_block_id = pb.id
+JOIN permission_block_actions pba ON pba.permission_block_id = pb.id
+LEFT JOIN subject_groups sg ON ra.subject_kind = 'group' AND sg.group_id = ra.subject_id
+WHERE (ra.subject_kind = 'entity' AND ra.subject_id = $1)
+   OR (ra.subject_kind = 'group' AND sg.group_id IS NOT NULL)
+UNION ALL
+SELECT unhex(md5('tenant_membership_assignment:' || atom_text(tm.tenant_id) || ':' || atom_text(tm.entity_id))),
+       unhex(md5('tenant_membership_block:' || atom_text(tm.tenant_id) || ':' || atom_text(tm.entity_id))),
+       NULL,
+       NULL,
+       'tenant_membership',
+       tm.tenant_id,
+       'object',
+       atom_text(tm.tenant_id),
+       a.id,
+       'allow',
+       '{}'
+FROM tenant_memberships tm
+JOIN entities e ON e.id = tm.entity_id
+JOIN tenants t ON t.id = tm.tenant_id
+JOIN actions a ON a.name = 'read'
+WHERE tm.entity_id = $1
+  AND tm.status = 'active'
+  AND e.kind = 'human'
+  AND e.status = 'active'
+  AND e.deleted_at IS NULL
+  AND t.status = 'active'
+  AND t.deleted_at IS NULL) g
+           JOIN actions a ON a.id = g.capability_id
+           WHERE a.name = 'read' AND g.effect = 'allow'"#)
     .bind(device)
     .fetch_one(&p)
     .await
@@ -793,8 +960,9 @@ async fn bootstrap_provisions_resources_and_object_group_scoped_grant() {
     apply(&p, &signing_keys, &cfg).await.expect("second apply");
 
     // Resource + object-group membership landed.
-    let membership: i64 = atom::db::query_scalar(
+    let membership: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_resources WHERE group_id = $1 AND resource_id = $2",
+        r#"SELECT COUNT(*) FROM object_group_resources WHERE group_id = $1 AND resource_id = $2"#,
     )
     .bind(object_group)
     .bind(channel)
@@ -824,8 +992,9 @@ async fn bootstrap_provisions_resources_and_object_group_scoped_grant() {
 
     // A different channel outside the object group must NOT be allowed.
     let other_channel = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', 'other', $2)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', 'other', $2)"#,
     )
     .bind(other_channel)
     .bind(tenant)
@@ -895,12 +1064,14 @@ async fn bootstrap_rejects_capability_that_is_not_applicable_to_block_scope() {
         .await
         .expect_err("inapplicable capability");
     assert!(err.to_string().contains("not applicable"));
-    let block_exists: bool =
-        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM permission_blocks WHERE id = $1)")
-            .bind(block)
-            .fetch_one(&p)
-            .await
-            .expect("block lookup");
+    let block_exists: bool = crate::common::db::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM permission_blocks WHERE id = $1)",
+        r#"SELECT EXISTS (SELECT 1 FROM permission_blocks WHERE id = $1)"#,
+    )
+    .bind(block)
+    .fetch_one(&p)
+    .await
+    .expect("block lookup");
     assert!(!block_exists, "invalid block must not be inserted");
 }
 
@@ -924,12 +1095,17 @@ async fn bootstrap_rejects_undeclared_persisted_capability_applicability() {
     apply(&p, &signing_keys, &cfg)
         .await
         .expect("initial exact capability");
-    let action_id: Uuid = atom::db::query_scalar("SELECT id FROM actions WHERE name = $1")
-        .bind(&name)
-        .fetch_one(&p)
-        .await
-        .expect("action id");
-    atom::db::query(
+    let action_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1",
+        r#"SELECT id FROM actions WHERE name = $1"#,
+    )
+    .bind(&name)
+    .fetch_one(&p)
+    .await
+    .expect("action id");
+    crate::common::db::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           VALUES ($1, 'entity', 'entity:device')"#,
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            VALUES ($1, 'entity', 'entity:device')"#,
     )
@@ -942,12 +1118,14 @@ async fn bootstrap_rejects_undeclared_persisted_capability_applicability() {
         .await
         .expect_err("undeclared applicability must fail");
     assert!(err.to_string().contains("not declared in config"));
-    let description: Option<String> =
-        atom::db::query_scalar("SELECT description FROM actions WHERE id = $1")
-            .bind(action_id)
-            .fetch_one(&p)
-            .await
-            .expect("rolled-back action description");
+    let description: Option<String> = crate::common::db::query_scalar(
+        "SELECT description FROM actions WHERE id = $1",
+        r#"SELECT description FROM actions WHERE id = $1"#,
+    )
+    .bind(action_id)
+    .fetch_one(&p)
+    .await
+    .expect("rolled-back action description");
     assert_eq!(description.as_deref(), Some("original"));
 }
 
@@ -1035,12 +1213,14 @@ async fn bootstrap_role_assignment_obeys_assignment_guardrails() {
         .await
         .expect_err("guardrail must reject assignment");
     assert!(err.to_string().contains("guardrail rejected"));
-    let assignment_exists: bool =
-        atom::db::query_scalar("SELECT EXISTS (SELECT 1 FROM role_assignments WHERE id = $1)")
-            .bind(assignment)
-            .fetch_one(&p)
-            .await
-            .expect("assignment lookup");
+    let assignment_exists: bool = crate::common::db::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM role_assignments WHERE id = $1)",
+        r#"SELECT EXISTS (SELECT 1 FROM role_assignments WHERE id = $1)"#,
+    )
+    .bind(assignment)
+    .fetch_one(&p)
+    .await
+    .expect("assignment lookup");
     assert!(
         !assignment_exists,
         "rejected assignment must not be persisted"
@@ -1180,7 +1360,11 @@ async fn bootstrap_object_group_child_before_parent_works_with_one_connection() 
     .expect("single-connection bootstrap must not deadlock")
     .expect("child-before-parent bootstrap");
 
-    let linked: bool = atom::db::query_scalar(
+    let linked: bool = crate::common::db::query_scalar(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM object_group_hierarchy
+               WHERE child_id = $1 AND parent_id = $2
+           )"#,
         r#"SELECT EXISTS (
                SELECT 1 FROM object_group_hierarchy
                WHERE child_id = $1 AND parent_id = $2
@@ -1297,15 +1481,13 @@ async fn bootstrap_object_group_late_failure_rolls_back_the_whole_batch() {
     assert!(err.to_string().contains("platform entity"));
 
     let group_count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])")
+        crate::common::db::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])", r#"SELECT COUNT(*) FROM object_groups WHERE id IN (SELECT unhex(value) FROM json_each($1))"#)
             .bind(vec![valid_group, invalid_group])
             .fetch_one(&p)
             .await
             .expect("count rolled-back object groups");
     assert_eq!(group_count, 0, "all object-group rows must roll back");
-    let membership_count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM object_group_entities WHERE group_id = ANY($1::uuid[])",
-    )
+    let membership_count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM object_group_entities WHERE group_id = ANY($1::uuid[])", r#"SELECT COUNT(*) FROM object_group_entities WHERE group_id IN (SELECT unhex(value) FROM json_each($1))"#)
     .bind(vec![valid_group, invalid_group])
     .fetch_one(&p)
     .await
@@ -1390,11 +1572,14 @@ async fn bootstrap_object_group_rejects_deleted_resource_membership() {
         ..Default::default()
     };
     apply(&p, &signing_keys, &base).await.expect("base apply");
-    atom::db::query("UPDATE resources SET deleted_at = now() WHERE id = $1")
-        .bind(resource)
-        .execute(&p)
-        .await
-        .expect("delete resource");
+    crate::common::db::query(
+        "UPDATE resources SET deleted_at = now() WHERE id = $1",
+        r#"UPDATE resources SET deleted_at = now() WHERE id = $1"#,
+    )
+    .bind(resource)
+    .execute(&p)
+    .await
+    .expect("delete resource");
     let cfg = BootstrapConfig {
         object_groups: vec![BootstrapObjectGroup {
             id: group,
@@ -1450,15 +1635,13 @@ async fn bootstrap_object_group_hierarchy_rejects_cycle() {
     assert!(err.to_string().contains("cycle"));
 
     let group_count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])")
+        crate::common::db::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = ANY($1::uuid[])", r#"SELECT COUNT(*) FROM object_groups WHERE id IN (SELECT unhex(value) FROM json_each($1))"#)
             .bind(vec![first, second])
             .fetch_one(&p)
             .await
             .expect("count cycle object groups");
     assert_eq!(group_count, 0, "cycle must roll back inserted groups");
-    let hierarchy_count: i64 = atom::db::query_scalar(
-        "SELECT COUNT(*) FROM object_group_hierarchy WHERE child_id = ANY($1::uuid[])",
-    )
+    let hierarchy_count: i64 = crate::common::db::query_scalar("SELECT COUNT(*) FROM object_group_hierarchy WHERE child_id = ANY($1::uuid[])", r#"SELECT COUNT(*) FROM object_group_hierarchy WHERE child_id IN (SELECT unhex(value) FROM json_each($1))"#)
     .bind(vec![first, second])
     .fetch_one(&p)
     .await
@@ -1592,4 +1775,46 @@ async fn bootstrap_existing_object_group_parent_must_match_declaration() {
         .await
         .expect_err("parent A to B drift");
     assert!(err.to_string().contains("parent declaration differs"));
+}
+
+/// SQLite stores JSON text; reconciliation must compare JSON values rather than
+/// textual key order or whitespace, just as PostgreSQL's jsonb comparison does.
+#[tokio::test]
+#[ignore]
+async fn bootstrap_replay_compares_json_semantics_on_both_backends() {
+    let p = pool().await;
+    let signing_keys = Config::for_tests().signing_keys;
+    let tenant_id = Uuid::new_v4();
+    let cfg = BootstrapConfig {
+        tenants: vec![BootstrapTenant {
+            id: tenant_id,
+            name: format!("bootstrap-json-{tenant_id}"),
+            alias: None,
+            tags: vec![],
+            attributes: Some(json!({ "alpha": 1, "nested": { "enabled": true } })),
+            status: TenantStatus::Active,
+        }],
+        ..Default::default()
+    };
+    apply(&p, &signing_keys, &cfg)
+        .await
+        .expect("initial bootstrap");
+    crate::common::db::query(
+        "UPDATE tenants SET attributes = $2::jsonb WHERE id = $1",
+        "UPDATE tenants SET attributes = $2 WHERE id = $1",
+    )
+    .bind(tenant_id)
+    .bind(r#"{ "nested": { "enabled": true }, "alpha": 1 }"#)
+    .execute(&p)
+    .await
+    .expect("equivalent JSON with different text encoding");
+    apply(&p, &signing_keys, &cfg)
+        .await
+        .expect("equivalent JSON is idempotent");
+
+    let mut drifted = cfg;
+    drifted.tenants[0].attributes = Some(json!({ "alpha": 2, "nested": { "enabled": true } }));
+    apply(&p, &signing_keys, &drifted)
+        .await
+        .expect_err("different JSON remains drift");
 }

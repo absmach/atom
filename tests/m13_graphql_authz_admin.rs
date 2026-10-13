@@ -63,9 +63,7 @@ async fn latest_entity_audit_details(
     entity_id: Uuid,
     event: &str,
 ) -> serde_json::Value {
-    atom::db::query_scalar(
-        "SELECT details FROM audit_logs WHERE target_kind = 'entity' AND target_id = $1 AND event = $2 ORDER BY created_at DESC LIMIT 1",
-    )
+    crate::common::db::query_scalar("SELECT details FROM audit_logs WHERE target_kind = 'entity' AND target_id = $1 AND event = $2 ORDER BY created_at DESC LIMIT 1", r#"SELECT details FROM audit_logs WHERE target_kind = 'entity' AND target_id = $1 AND event = $2 ORDER BY created_at DESC LIMIT 1"#)
     .bind(entity_id)
     .bind(event)
     .fetch_one(pool)
@@ -78,9 +76,7 @@ async fn latest_resource_audit_details(
     resource_id: Uuid,
     event: &str,
 ) -> serde_json::Value {
-    atom::db::query_scalar(
-        "SELECT details FROM audit_logs WHERE target_kind = 'resource' AND target_id = $1 AND event = $2 ORDER BY created_at DESC LIMIT 1",
-    )
+    crate::common::db::query_scalar("SELECT details FROM audit_logs WHERE target_kind = 'resource' AND target_id = $1 AND event = $2 ORDER BY created_at DESC LIMIT 1", r#"SELECT details FROM audit_logs WHERE target_kind = 'resource' AND target_id = $1 AND event = $2 ORDER BY created_at DESC LIMIT 1"#)
     .bind(resource_id)
     .bind(event)
     .fetch_one(pool)
@@ -90,20 +86,24 @@ async fn latest_resource_audit_details(
 
 async fn entity(pool: &Database, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("graphql-authz-{kind}-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert entity");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("graphql-authz-{kind}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert entity");
     id
 }
 
 async fn channel(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, attributes) VALUES ($1, 'channel', $2, '{}')",
+        r#"INSERT INTO resources (id, kind, name, attributes) VALUES ($1, 'channel', $2, '{}')"#,
     )
     .bind(id)
     .bind(format!("graphql-channel-{id}"))
@@ -114,7 +114,11 @@ async fn channel(pool: &Database) -> Uuid {
     // product-specific and provisioned via the deployment bootstrap YAML;
     // tests that model a channel need to declare it inline so the guardrail
     // check on `createPermissionBlock` passes.
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
+           SELECT id, 'resource', 'resource:channel'
+             FROM actions WHERE name IN ('publish', 'subscribe')
+           ON CONFLICT DO NOTHING"#,
         r#"INSERT INTO action_applicability (action_id, object_kind, object_type)
            SELECT id, 'resource', 'resource:channel'
              FROM actions WHERE name IN ('publish', 'subscribe')
@@ -127,28 +131,36 @@ async fn channel(pool: &Database) -> Uuid {
 }
 
 async fn seeded_action(pool: &Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("seeded action")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1 LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = $1 LIMIT 1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("seeded action")
 }
 
 async fn tenant(pool: &Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("graphql-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("graphql-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn add_tenant_membership(pool: &Database, tenant_id: Uuid, entity_id: Uuid) {
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id, status)
          VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status)
+         VALUES ($1, $2, 'active')"#,
     )
     .bind(tenant_id)
     .bind(entity_id)
@@ -159,9 +171,7 @@ async fn add_tenant_membership(pool: &Database, tenant_id: Uuid, entity_id: Uuid
 
 async fn tenant_entity(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')"#)
     .bind(id)
     .bind(kind)
     .bind(format!("graphql-tenant-{kind}-{id}"))
@@ -174,9 +184,7 @@ async fn tenant_entity(pool: &Database, tenant_id: Uuid, kind: &str) -> Uuid {
 
 async fn tenant_group(pool: &Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO principal_groups (id, name, tenant_id, attributes) VALUES ($1, $2, $3, '{}')",
-    )
+    crate::common::db::query("INSERT INTO principal_groups (id, name, tenant_id, attributes) VALUES ($1, $2, $3, '{}')", r#"INSERT INTO principal_groups (id, name, tenant_id, attributes) VALUES ($1, $2, $3, '{}')"#)
     .bind(id)
     .bind(format!("graphql-group-{id}"))
     .bind(tenant_id)
@@ -194,13 +202,16 @@ async fn scoped_role(
     _scope_ref: &str,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(id)
-        .bind(format!("{name}-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(id)
+    .bind(format!("{name}-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert role");
     id
 }
 
@@ -212,11 +223,15 @@ async fn attach_role_action(
     object_kind: &str,
     action_id: Uuid,
 ) {
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
         "INSERT INTO permission_blocks
            (tenant_id, scope_mode, object_kind, object_id, effect)
          VALUES ($1, 'object', $2, $3, 'allow')
          RETURNING id",
+        r#"INSERT INTO permission_blocks
+           (tenant_id, scope_mode, object_kind, object_id, effect)
+         VALUES ($1, 'object', $2, $3, 'allow')
+         RETURNING id"#,
     )
     .bind(tenant_id)
     .bind(object_kind)
@@ -224,18 +239,22 @@ async fn attach_role_action(
     .fetch_one(pool)
     .await
     .expect("insert permission block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id)
          VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id)
+         VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(action_id)
     .execute(pool)
     .await
     .expect("insert permission block action");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id)
          VALUES ($1, $2)",
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id)
+         VALUES ($1, $2)"#,
     )
     .bind(role_id)
     .bind(block_id)
@@ -600,31 +619,38 @@ async fn create_policy_and_authz_check_allow_and_deny() {
 async fn deleted_role_listing_accepts_platform_manage_without_role_read() {
     let pool = common::pool().await;
     let actor = entity(&pool, "human").await;
-    let role_id: Uuid = atom::db::query_scalar(
+    let role_id: Uuid = crate::common::db::query_scalar(
         "INSERT INTO roles (name, deleted_at) VALUES ($1, NOW()) RETURNING id",
+        r#"INSERT INTO roles (name, deleted_at) VALUES ($1, NOW()) RETURNING id"#,
     )
     .bind(format!("deleted-role-{role_id}", role_id = Uuid::new_v4()))
     .fetch_one(&pool)
     .await
     .expect("insert deleted role");
     let manage_id = seeded_action(&pool, "manage").await;
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
         r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
            VALUES ('platform', 'allow', '{}'::jsonb)
+           RETURNING id"#,
+        r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
+           VALUES ('platform', 'allow', '{}')
            RETURNING id"#,
     )
     .fetch_one(&pool)
     .await
     .expect("insert platform manage block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(manage_id)
     .execute(&pool)
     .await
     .expect("attach manage action");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
+           VALUES ('entity', $1, $2)"#,
         r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
            VALUES ('entity', $1, $2)"#,
     )
@@ -654,11 +680,14 @@ async fn deleted_role_listing_accepts_platform_manage_without_role_read() {
 async fn role_lookup_masks_existence_but_preserves_admin_not_found() {
     let pool = common::pool().await;
     let outsider = entity(&pool, "human").await;
-    let role_id: Uuid = atom::db::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
-        .bind(format!("role-oracle-{}", Uuid::new_v4()))
-        .fetch_one(&pool)
-        .await
-        .expect("insert role");
+    let role_id: Uuid = crate::common::db::query_scalar(
+        "INSERT INTO roles (name) VALUES ($1) RETURNING id",
+        r#"INSERT INTO roles (name) VALUES ($1) RETURNING id"#,
+    )
+    .bind(format!("role-oracle-{}", Uuid::new_v4()))
+    .fetch_one(&pool)
+    .await
+    .expect("insert role");
     let missing_id = Uuid::new_v4();
     let schema = build_schema(state(pool));
 
@@ -704,25 +733,29 @@ async fn policy_deletion_takes_effect_within_same_graphql_request() {
     let actor = entity(&pool, "human").await;
     let manage_id = seeded_action(&pool, "manage").await;
     let policy_manage_id = seeded_action(&pool, "policy.manage").await;
-    let block_id: Uuid = atom::db::query_scalar(
+    let block_id: Uuid = crate::common::db::query_scalar(
         r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
            VALUES ('platform', 'allow', '{}'::jsonb)
+           RETURNING id"#,
+        r#"INSERT INTO permission_blocks (scope_mode, effect, conditions)
+           VALUES ('platform', 'allow', '{}')
            RETURNING id"#,
     )
     .fetch_one(&pool)
     .await
     .expect("insert permission block");
     for action_id in [manage_id, policy_manage_id] {
-        atom::db::query(
-            "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
-        )
+        crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#)
         .bind(block_id)
         .bind(action_id)
         .execute(&pool)
         .await
         .expect("insert permission block action");
     }
-    let policy_id: Uuid = atom::db::query_scalar(
+    let policy_id: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
+           VALUES ('entity', $1, $2)
+           RETURNING id"#,
         r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id)
            VALUES ('entity', $1, $2)
            RETURNING id"#,
@@ -769,11 +802,14 @@ async fn policy_deletion_takes_effect_within_same_graphql_request() {
         !errors.is_empty(),
         "the post-deletion mutation must be denied"
     );
-    let after_count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM tenants WHERE name = $1")
-        .bind(after_name)
-        .fetch_one(&pool)
-        .await
-        .expect("count after tenant");
+    let after_count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM tenants WHERE name = $1",
+        r#"SELECT COUNT(*) FROM tenants WHERE name = $1"#,
+    )
+    .bind(after_name)
+    .fetch_one(&pool)
+    .await
+    .expect("count after tenant");
     assert_eq!(after_count, 0);
 }
 
@@ -784,12 +820,15 @@ async fn subject_role_assignments_list_group_composites_and_authorize_members() 
     let tenant_id = tenant(&pool).await;
     let user_id = tenant_entity(&pool, tenant_id, "human").await;
     let group_id = tenant_group(&pool, tenant_id).await;
-    atom::db::query("INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)")
-        .bind(group_id)
-        .bind(user_id)
-        .execute(&pool)
-        .await
-        .expect("insert group member");
+    crate::common::db::query(
+        "INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)",
+        r#"INSERT INTO principal_group_members (group_id, entity_id) VALUES ($1, $2)"#,
+    )
+    .bind(group_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .expect("insert group member");
     let read_id = seeded_action(&pool, "read").await;
     let role_id = scoped_role(
         &pool,
@@ -1224,8 +1263,9 @@ async fn entity_and_resource_lifecycle_mutations_write_audit_events() {
         entity_details["updated_fields"],
         serde_json::json!(["name"])
     );
-    let entity_update_count: i64 = atom::db::query_scalar(
+    let entity_update_count: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM audit_logs WHERE target_id = $1 AND event = 'entity.update'",
+        r#"SELECT COUNT(*) FROM audit_logs WHERE target_id = $1 AND event = 'entity.update'"#,
     )
     .bind(device_id)
     .fetch_one(&pool)
@@ -1272,7 +1312,9 @@ async fn entity_and_resource_lifecycle_mutations_write_audit_events() {
 async fn deleting_role_assignment_works_with_a_single_connection_pool() {
     let pool = atom::db::testing::single_connection_database().await;
     let assignment_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO role_assignments (id, subject_kind, subject_id, role_id)
+           VALUES ($1, 'entity', $2, $3)"#,
         r#"INSERT INTO role_assignments (id, subject_kind, subject_id, role_id)
            VALUES ($1, 'entity', $2, $3)"#,
     )
@@ -1304,13 +1346,16 @@ async fn creating_role_assignment_works_with_a_single_connection_pool() {
     let tenant_id = tenant(&setup_pool).await;
     let subject_id = tenant_entity(&setup_pool, tenant_id, "human").await;
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(role_id)
-        .bind(format!("single-connection-role-{role_id}"))
-        .bind(tenant_id)
-        .execute(&setup_pool)
-        .await
-        .expect("insert role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(role_id)
+    .bind(format!("single-connection-role-{role_id}"))
+    .bind(tenant_id)
+    .execute(&setup_pool)
+    .await
+    .expect("insert role");
     drop(setup_pool);
 
     let pool = atom::db::testing::single_connection_database().await;
@@ -1349,30 +1394,24 @@ async fn graphql_entity_read_object_deny_overrides_tenant_allow() {
     let read = seeded_action(&pool, "read").await;
 
     // Tenant-wide read allow + exact-object read deny on the target, both to the subject.
-    let allow_block: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions) VALUES ('tenant', $1, 'allow', '{}') RETURNING id",
-    )
+    let allow_block: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions) VALUES ('tenant', $1, 'allow', '{}') RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions) VALUES ('tenant', $1, 'allow', '{}') RETURNING id"#)
     .bind(tenant_id)
     .fetch_one(&pool)
     .await
     .expect("allow block");
-    let deny_block: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions) VALUES ('object', $1, 'deny', '{}') RETURNING id",
-    )
+    let deny_block: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions) VALUES ('object', $1, 'deny', '{}') RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, object_id, effect, conditions) VALUES ('object', $1, 'deny', '{}') RETURNING id"#)
     .bind(target)
     .fetch_one(&pool)
     .await
     .expect("deny block");
     for block in [allow_block, deny_block] {
-        atom::db::query(
-            "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
-        )
+        crate::common::db::query("INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)", r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#)
         .bind(block)
         .bind(read)
         .execute(&pool)
         .await
         .expect("block action");
-        atom::db::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+        crate::common::db::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)", r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)"#)
             .bind(tenant_id)
             .bind(subject)
             .bind(block)
@@ -1407,22 +1446,21 @@ async fn graphql_entity_read_allowed_via_object_type_manage() {
     let target = tenant_entity(&pool, tenant_id, "human").await;
     let manage = seeded_action(&pool, "manage").await;
 
-    let block: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, object_kind, object_type, tenant_id, effect, conditions) VALUES ('object_type', 'entity', 'entity:human', $1, 'allow', '{}') RETURNING id",
-    )
+    let block: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, object_kind, object_type, tenant_id, effect, conditions) VALUES ('object_type', 'entity', 'entity:human', $1, 'allow', '{}') RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, object_kind, object_type, tenant_id, effect, conditions) VALUES ('object_type', 'entity', 'entity:human', $1, 'allow', '{}') RETURNING id"#)
     .bind(tenant_id)
     .fetch_one(&pool)
     .await
     .expect("manage block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(manage)
     .execute(&pool)
     .await
     .expect("block action");
-    atom::db::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)")
+    crate::common::db::query("INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)", r#"INSERT INTO direct_policies (tenant_id, subject_kind, subject_id, permission_block_id) VALUES ($1, 'entity', $2, $3)"#)
         .bind(tenant_id)
         .bind(subject)
         .bind(block)
@@ -1457,28 +1495,36 @@ async fn graphql_tenant_read_matches_listing_object_kind_grant() {
     let subject = tenant_entity(&pool, tenant_id, "human").await;
     let read = seeded_action(&pool, "read").await;
 
-    let block: Uuid = atom::db::query_scalar(
+    let block: Uuid = crate::common::db::query_scalar(
         "INSERT INTO permission_blocks
            (scope_mode, tenant_id, object_kind, effect, conditions)
          VALUES ('object_kind', $1, 'tenant', 'allow', '{}')
          RETURNING id",
+        r#"INSERT INTO permission_blocks
+           (scope_mode, tenant_id, object_kind, effect, conditions)
+         VALUES ('object_kind', $1, 'tenant', 'allow', '{}')
+         RETURNING id"#,
     )
     .bind(tenant_id)
     .fetch_one(&pool)
     .await
     .expect("tenant object-kind read block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(read)
     .execute(&pool)
     .await
     .expect("block action");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO direct_policies
            (tenant_id, subject_kind, subject_id, permission_block_id)
          VALUES ($1, 'entity', $2, $3)",
+        r#"INSERT INTO direct_policies
+           (tenant_id, subject_kind, subject_id, permission_block_id)
+         VALUES ($1, 'entity', $2, $3)"#,
     )
     .bind(tenant_id)
     .bind(subject)

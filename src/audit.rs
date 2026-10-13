@@ -1,3 +1,5 @@
+mod repository;
+
 use crate::db::Database;
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -394,21 +396,8 @@ async fn insert_audit_log<'e, E>(
 where
     E: crate::db::IntoTarget<'e>,
 {
-    crate::db::query(
-        "INSERT INTO audit_logs (id, actor_entity_id, tenant_id, target_kind, target_id, event, outcome, details)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(event.actor_entity_id)
-    .bind(event.tenant_id)
-    .bind(event.target_kind)
-    .bind(event.target_id)
-    .bind(event.event)
-    .bind(event.outcome.clone())
-    .bind(&event.details)
-    .execute(executor)
-    .await
-    .map_err(crate::error::AppError::Database)?;
+    repository::append(executor, event).await?;
+
     Ok(())
 }
 
@@ -521,28 +510,13 @@ pub fn spawn_retention_cleanup_with_shutdown(
 pub async fn cleanup_expired(
     pool: &Database,
     cfg: AuditRetentionConfig,
-) -> Result<AuditCleanupSummary, sqlx::Error> {
+) -> Result<AuditCleanupSummary, crate::error::AppError> {
     let cutoff = Utc::now() - Duration::days(cfg.days);
     let mut deleted_rows = 0_i64;
 
     loop {
-        let result = crate::db::query(
-            r#"WITH doomed AS (
-                   SELECT id
-                   FROM audit_logs
-                   WHERE created_at < $1
-                   ORDER BY created_at ASC
-                   LIMIT $2
-               )
-               DELETE FROM audit_logs
-               WHERE id IN (SELECT id FROM doomed)"#,
-        )
-        .bind(cutoff)
-        .bind(cfg.cleanup_batch_size)
-        .execute(pool)
-        .await?;
-
-        let batch = i64::try_from(result.rows_affected()).unwrap_or(i64::MAX);
+        let removed = repository::purge_batch(pool, cutoff, cfg.cleanup_batch_size).await?;
+        let batch = i64::try_from(removed).unwrap_or(i64::MAX);
         deleted_rows += batch;
         if batch < cfg.cleanup_batch_size {
             break;

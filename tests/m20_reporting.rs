@@ -15,20 +15,25 @@ use uuid::Uuid;
 
 async fn tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(id)
-        .bind(format!("m20-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(id)
+    .bind(format!("m20-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn human(pool: &atom::db::Database, tenant_id: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, tenant_id, status)
          VALUES ($1, 'human', $2, $3, 'active')",
+        r#"INSERT INTO entities (id, kind, name, tenant_id, status)
+         VALUES ($1, 'human', $2, $3, 'active')"#,
     )
     .bind(id)
     .bind(format!("m20-human-{id}"))
@@ -85,22 +90,27 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
     )
     .await
     .expect("create conditional deny role");
-    let read_action: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("read action");
-    let block: Uuid = atom::db::query_scalar(
+    let read_action: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read action");
+    let block: Uuid = crate::common::db::query_scalar(
         "INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions)
          VALUES ('tenant', $1, 'deny', $2) RETURNING id",
+        r#"INSERT INTO permission_blocks (scope_mode, tenant_id, effect, conditions)
+         VALUES ('tenant', $1, 'deny', $2) RETURNING id"#,
     )
     .bind(target_tenant)
     .bind(json!({"context.region": {"eq": "eu"}}))
     .fetch_one(&pool)
     .await
     .expect("insert conditional deny block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(read_action)
@@ -158,9 +168,11 @@ async fn tenant_role_report_is_assignment_metadata_with_recursive_groups() {
     )
     .await
     .expect("create foreign role");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO role_assignments (tenant_id, subject_kind, subject_id, role_id)
          VALUES ($1, 'entity', $2, $3)",
+        r#"INSERT INTO role_assignments (tenant_id, subject_kind, subject_id, role_id)
+         VALUES ($1, 'entity', $2, $3)"#,
     )
     .bind(other_tenant)
     .bind(entity_id)

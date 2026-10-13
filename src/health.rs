@@ -1,3 +1,4 @@
+mod storage;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -169,10 +170,7 @@ fn readiness_ok(
 }
 
 async fn database_check(state: &AppState) -> ComponentCheck {
-    match crate::db::query_scalar::<i32>("SELECT 1")
-        .fetch_one(state.pool())
-        .await
-    {
+    match database_ping(state.pool()).await {
         Ok(_) => ComponentCheck {
             status: ComponentStatus::Ok,
             message: "database reachable".to_string(),
@@ -185,12 +183,7 @@ async fn database_check(state: &AppState) -> ComponentCheck {
 }
 
 async fn migrations_check(state: &AppState) -> ComponentCheck {
-    match crate::db::query_scalar::<i64>(
-        "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE",
-    )
-    .fetch_one(state.pool())
-    .await
-    {
+    match storage::migration_count(state.pool()).await {
         Ok(count) if count > 0 => ComponentCheck {
             status: ComponentStatus::Ok,
             message: format!("{count} migrations applied"),
@@ -434,17 +427,10 @@ fn db_pool_status(state: &AppState) -> DbPoolStatus {
 
 async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
     let cfg = state.config.audit_retention;
-    let last_cleanup = crate::db::query_scalar::<serde_json::Value>(
-        r#"SELECT details
-           FROM audit_logs
-           WHERE event = 'audit.retention_cleanup'
-           ORDER BY created_at DESC
-           LIMIT 1"#,
-    )
-    .fetch_optional(state.pool())
-    .await
-    .ok()
-    .flatten();
+    let last_cleanup = storage::last_audit_cleanup(state.pool())
+        .await
+        .ok()
+        .flatten();
 
     AuditRetentionStatus {
         enabled: cfg.enabled,
@@ -453,6 +439,11 @@ async fn audit_retention_status(state: &AppState) -> AuditRetentionStatus {
         cleanup_batch_size: cfg.cleanup_batch_size,
         last_cleanup,
     }
+}
+
+/// Checks database reachability using the configured native backend.
+pub(crate) async fn database_ping(pool: &crate::db::Database) -> Result<(), sqlx::Error> {
+    storage::ping(pool).await
 }
 
 #[cfg(test)]

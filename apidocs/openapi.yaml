@@ -432,7 +432,7 @@ paths:
     get:
       tags: [Authentication]
       operationId: oauthStart
-      summary: Start an enabled OIDC authorization flow
+      summary: Start an enabled OAuth or OIDC authorization flow
       parameters:
         - $ref: "#/components/parameters/OauthProvider"
         - name: return_to
@@ -440,6 +440,14 @@ paths:
           required: false
           schema:
             type: string
+        - name: client_state
+          in: query
+          required: false
+          description: Browser-generated binding that must be supplied again when exchanging the result code; limited to 256 UTF-8 bytes.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       responses:
         "307":
           description: Redirect to the provider authorization endpoint
@@ -461,7 +469,7 @@ paths:
     get:
       tags: [Authentication]
       operationId: oauthCallback
-      summary: Complete an OIDC provider callback
+      summary: Complete an OAuth or OIDC provider callback
       parameters:
         - $ref: "#/components/parameters/OauthProvider"
         - name: code
@@ -489,6 +497,46 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+    post:
+      tags: [Authentication]
+      operationId: oauthCallbackPost
+      summary: Complete an Apple form-post callback
+      description: Apple submits this callback as a form. Provider state authenticates the request; no Atom session is required. Other providers return 404.
+      parameters:
+        - $ref: "#/components/parameters/OauthProvider"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                state: { type: string }
+                error: { type: string }
+      responses:
+        "303":
+          description: Redirect to the configured frontend with a GET, without replaying the provider form
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          description: Content-Type must be application/x-www-form-urlencoded
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /auth/oauth/exchange:
     post:
       tags: [Authentication]
@@ -506,7 +554,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/LoginResponse"
+                $ref: "#/components/schemas/OAuthLoginResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "408":
@@ -1921,6 +1969,27 @@ components:
         refresh_token: { type: string }
         refresh_token_expires_at: { type: string, format: date-time }
 
+    OAuthLoginResponse:
+      type: object
+      additionalProperties: false
+      required: [token, entity_id, session_id, expires_at, access_token, access_token_expires_at, email]
+      properties:
+        email: { type: string, format: email, nullable: true }
+        token: { type: string }
+        entity_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        email_verified: { type: boolean }
+        verification_required: { type: boolean }
+        # issue #100: access_token/access_token_expires_at always mirror
+        # token/expires_at (compatibility aliases). refresh_token and
+        # refresh_token_expires_at are present only when
+        # ATOM_REFRESH_TOKENS_ENABLED=true.
+        access_token: { type: string }
+        access_token_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_token_expires_at: { type: string, format: date-time }
+
     NativeEnrollmentRequest:
       type: object
       additionalProperties: false
@@ -2021,6 +2090,10 @@ components:
       required: [code]
       properties:
         code: { type: string }
+        client_state:
+          type: string
+          nullable: true
+          description: Must match the client_state supplied to the start endpoint; missing or different bindings are rejected for bound codes.
 
     IntrospectionResponse:
       type: object

@@ -14,6 +14,7 @@
 //! spawned, so existing deployments see zero behavior change.
 
 pub mod publisher;
+mod repository;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -86,28 +87,10 @@ where
         request_id: None,
     };
 
-    crate::db::query(
-        "INSERT INTO event_outbox (id, event, actor_entity_id, tenant_id, payload)
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(payload.event_id)
-    .bind(&payload.event)
-    .bind(payload.actor_entity_id)
-    .bind(payload.tenant_id)
-    .bind(serde_json::to_value(&payload).map_err(|e| AppError::Internal(e.into()))?)
-    .execute(executor)
-    .await
-    .map_err(db_err)?;
+    repository::append(executor, &payload).await?;
 
     Ok(())
 }
-
-/// Distinct from [`crate::purge::PURGE_ADVISORY_LOCK_ID`] — guards the
-/// event-outbox delivery batch specifically, so a multi-instance deployment
-/// never has two instances publishing (and marking delivered) the same rows
-/// concurrently. Transaction-scoped (`pg_try_advisory_xact_lock`), so it
-/// releases automatically on commit or rollback — no explicit unlock needed.
-const EVENT_OUTBOX_ADVISORY_LOCK_ID: i64 = 0x4154_4f4d_4556_4e54;
 
 /// Starts the background outbox-delivery loop, modeled on
 /// [`crate::audit::spawn_retention_cleanup`] and
@@ -160,12 +143,6 @@ pub fn spawn_event_publisher_with_shutdown(
     }))
 }
 
-#[derive(sqlx::FromRow)]
-struct OutboxRow {
-    id: Uuid,
-    payload: serde_json::Value,
-}
-
 /// Delivers (at most) one batch of undelivered `event_outbox` rows and
 /// returns how many were marked delivered. Public so tests can drive
 /// delivery deterministically instead of waiting on the poller's interval,
@@ -176,16 +153,6 @@ pub async fn deliver_outbox_batch(
     cfg: &crate::config::EventsConfig,
 ) -> Result<usize, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let acquired: bool = crate::db::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(EVENT_OUTBOX_ADVISORY_LOCK_ID)
-        .fetch_one(tx.exec())
-        .await
-        .map_err(db_err)?;
-    if !acquired {
-        // Another instance's poller is already delivering this tick.
-        return Ok(0);
-    }
-
     // `outbox_max_attempts` only ever excludes an `unparseable` row: whether
     // a row's payload deserializes into the current `DomainEventPayload` is
     // a fixed, structural fact about that row (the `payload` column is never
@@ -197,17 +164,8 @@ pub async fn deliver_outbox_batch(
     // the outage lasts or how high its `attempts` climbs — capping those
     // too would silently and permanently drop otherwise-valid events the
     // moment an outage outlasts `outbox_max_attempts` polls.
-    let rows: Vec<OutboxRow> = crate::db::query_as(
-        "SELECT id, payload FROM event_outbox
-         WHERE delivered_at IS NULL AND (NOT unparseable OR attempts < $2)
-         ORDER BY created_at ASC
-         LIMIT $1",
-    )
-    .bind(cfg.outbox_batch_size)
-    .bind(cfg.outbox_max_attempts)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let rows =
+        repository::claim_delivery(&mut tx, cfg.outbox_batch_size, cfg.outbox_max_attempts).await?;
 
     if rows.is_empty() {
         return Ok(0);
@@ -290,27 +248,13 @@ pub async fn deliver_outbox_batch(
                     }
                     Err(err) => {
                         failed_count += 1;
-                        crate::db::query(
-                            "UPDATE event_outbox
-                             SET attempts = attempts + 1,
-                                 last_error = $2
-                             WHERE id = $1",
-                        )
-                        .bind(id)
-                        .bind(&err.0)
-                        .execute(tx.exec())
-                        .await
-                        .map_err(db_err)?;
+                        repository::record_delivery_failure(&mut tx, &[*id], &err.0).await?;
                     }
                 }
             }
 
             if !delivered_ids.is_empty() {
-                crate::db::query("UPDATE event_outbox SET delivered_at = now() WHERE id = ANY($1)")
-                    .bind(&delivered_ids)
-                    .execute(tx.exec())
-                    .await
-                    .map_err(db_err)?;
+                repository::mark_delivered(&mut tx, &delivered_ids).await?;
             }
 
             if failed_count > 0 {
@@ -322,17 +266,7 @@ pub async fn deliver_outbox_batch(
         }
         Err(err) => {
             crate::metrics::record_outbox_publish_failure(ids.len() as u64);
-            crate::db::query(
-                "UPDATE event_outbox
-                 SET attempts = attempts + 1,
-                     last_error = $2
-                 WHERE id = ANY($1)",
-            )
-            .bind(&ids)
-            .bind(&err.0)
-            .execute(tx.exec())
-            .await
-            .map_err(db_err)?;
+            repository::record_delivery_failure(&mut tx, &ids, &err.0).await?;
             tx.commit().await.map_err(db_err)?;
             Ok(0)
         }
@@ -351,26 +285,8 @@ pub async fn cleanup_expired_outbox(
     let mut deleted_rows = 0_i64;
 
     loop {
-        let result = crate::db::query(
-            r#"WITH doomed AS (
-                   SELECT id
-                   FROM event_outbox
-                   WHERE (delivered_at IS NOT NULL OR (unparseable = true AND attempts >= $2))
-                     AND created_at < $1
-                   ORDER BY created_at ASC
-                   LIMIT $3
-               )
-               DELETE FROM event_outbox
-               WHERE id IN (SELECT id FROM doomed)"#,
-        )
-        .bind(cutoff)
-        .bind(max_attempts)
-        .bind(batch_size)
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
-
-        let batch = i64::try_from(result.rows_affected()).unwrap_or(0);
+        let removed = repository::purge_batch(pool, cutoff, max_attempts, batch_size).await?;
+        let batch = i64::try_from(removed).unwrap_or(0);
         deleted_rows += batch;
         if batch < batch_size {
             break;
@@ -393,17 +309,7 @@ async fn record_unparseable_failure(
     error: &str,
     max_attempts: i32,
 ) -> Result<(), AppError> {
-    let updated: Vec<(Uuid, i32)> = crate::db::query_as(
-        "UPDATE event_outbox
-         SET attempts = attempts + 1, last_error = $2, unparseable = true
-         WHERE id = ANY($1)
-         RETURNING id, attempts",
-    )
-    .bind(ids)
-    .bind(error)
-    .fetch_all(tx.exec())
-    .await
-    .map_err(db_err)?;
+    let updated = repository::quarantine(tx, ids, error).await?;
 
     for (id, attempts) in updated {
         if attempts >= max_attempts {

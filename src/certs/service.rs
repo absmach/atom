@@ -31,7 +31,6 @@ use super::{
     normalize_serial, pki_core, profile, repo,
 };
 
-const ISSUER_CRL_LOCK_DOMAIN: i64 = 0x504b_4939_4352_4c00;
 const CRL_TTL_HOURS: i64 = 24;
 const SERIAL_INSERT_ATTEMPTS: usize = 3;
 pub const OCSP_REQUEST_MAX_BYTES: usize = 16 * 1024;
@@ -1037,12 +1036,7 @@ pub async fn issuer_crl(
     validate_crl_authority_retention(&authority, false, now)?;
 
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let lock_id = issuer_crl_lock_id(issuer_id);
-    crate::db::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_id)
-        .execute(tx.exec())
-        .await
-        .map_err(AppError::Database)?;
+    repo::lock_crl_publication(&mut tx, issuer_id).await?;
 
     // Hold the authority lifecycle row stable until signing and persistence
     // commit. Retirement remains allowed for later requests, while revocation
@@ -2038,13 +2032,6 @@ fn validate_crl_authority_retention(
             "authority has no publishable CRL for this lifecycle state",
         ))
     }
-}
-
-fn issuer_crl_lock_id(issuer_id: Uuid) -> i64 {
-    let bytes = issuer_id.as_bytes();
-    let first = i64::from_be_bytes(bytes[..8].try_into().expect("UUID first half"));
-    let second = i64::from_be_bytes(bytes[8..].try_into().expect("UUID second half"));
-    first ^ second ^ ISSUER_CRL_LOCK_DOMAIN
 }
 
 fn crl_revocation_reason(reason: &str) -> RevocationReason {

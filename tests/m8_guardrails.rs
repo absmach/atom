@@ -18,30 +18,34 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn capability_id(pool: &atom::db::Database, name: &str) -> Uuid {
-    atom::db::query_scalar("SELECT id FROM actions WHERE name = $1 LIMIT 1")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("action")
+    crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = $1 LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = $1 LIMIT 1"#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("action")
 }
 
 async fn entity(pool: &atom::db::Database, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("m8-{kind}-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert entity");
+    crate::common::db::query(
+        "INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, $2, $3, 'active')"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("m8-{kind}-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert entity");
     id
 }
 
 async fn tenant_entity(pool: &atom::db::Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query(
-        "INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')",
-    )
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, $2, $3, $4, 'active')"#)
     .bind(id)
     .bind(kind)
     .bind(format!("m8-tenant-{kind}-{id}"))
@@ -54,25 +58,31 @@ async fn tenant_entity(pool: &atom::db::Database, tenant_id: Uuid, kind: &str) -
 
 async fn tenant(pool: &atom::db::Database) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(format!("m8-tenant-{id}"))
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(format!("m8-tenant-{id}"))
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
 async fn resource(pool: &atom::db::Database, tenant_id: Uuid, kind: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)")
-        .bind(id)
-        .bind(kind)
-        .bind(format!("m8-{kind}-{id}"))
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, $2, $3, $4)"#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(format!("m8-{kind}-{id}"))
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("insert resource");
     id
 }
 
@@ -98,12 +108,14 @@ async fn direct_policy_rejects_device_manage_resource_and_persists_no_row() {
         .expect_err("guardrail should reject");
     assert!(err.to_string().contains("guardrail rejected"));
 
-    let count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1")
-            .bind(device)
-            .fetch_one(&p)
-            .await
-            .expect("count");
+    let count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1",
+        r#"SELECT COUNT(*) FROM direct_policies WHERE subject_id = $1"#,
+    )
+    .bind(device)
+    .fetch_one(&p)
+    .await
+    .expect("count");
     assert_eq!(count, 0);
 }
 
@@ -364,18 +376,24 @@ async fn role_capability_addition_rejects_device_via_parent_group() {
     // assignment edge carries, which is what `validate_role_capability` reads.
     // The rule is global (no tenant), so clear any copy left by a previous run
     // against the same database before inserting (idx_aar_unique_rule).
-    atom::db::query(
+    crate::common::db::query(
         "DELETE FROM action_assignment_rules
          WHERE tenant_id IS NULL AND entity_kind = 'device'
            AND action_name = 'manage' AND object_kind = 'tenant' AND object_type IS NULL",
+        r#"DELETE FROM action_assignment_rules
+         WHERE tenant_id IS NULL AND entity_kind = 'device'
+           AND action_name = 'manage' AND object_kind = 'tenant' AND object_type IS NULL"#,
     )
     .execute(&p)
     .await
     .expect("clear stale rule");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO action_assignment_rules
             (entity_kind, action_name, object_kind, object_type, decision, is_absolute)
          VALUES ('device', 'manage', 'tenant', NULL, 'deny', TRUE)",
+        r#"INSERT INTO action_assignment_rules
+            (entity_kind, action_name, object_kind, object_type, decision, is_absolute)
+         VALUES ('device', 'manage', 'tenant', NULL, 'deny', TRUE)"#,
     )
     .execute(&p)
     .await
@@ -443,10 +461,13 @@ async fn role_capability_addition_rejects_device_via_parent_group() {
     );
 
     // The rule is global and absolute; don't leak it into later suites.
-    let _ = atom::db::query(
+    let _ = crate::common::db::query(
         "DELETE FROM action_assignment_rules
          WHERE tenant_id IS NULL AND entity_kind = 'device'
            AND action_name = 'manage' AND object_kind = 'tenant' AND object_type IS NULL",
+        r#"DELETE FROM action_assignment_rules
+         WHERE tenant_id IS NULL AND entity_kind = 'device'
+           AND action_name = 'manage' AND object_kind = 'tenant' AND object_type IS NULL"#,
     )
     .execute(&p)
     .await;
@@ -480,12 +501,18 @@ async fn concurrent_block_link_and_role_assignment_serialize() {
     // (manage on resource) in an open transaction — an in-flight block-link
     // mutation that has not committed yet.
     let mut tx = p.begin().await.expect("begin tx");
-    atom::db::query("SELECT id FROM roles WHERE id = $1 FOR UPDATE")
-        .bind(role.id)
-        .fetch_one(&mut tx)
-        .await
-        .expect("lock role");
-    let block: Uuid = atom::db::query_scalar(
+    crate::common::db::query(
+        "SELECT id FROM roles WHERE id = $1 FOR UPDATE",
+        r#"SELECT id FROM roles WHERE id = $1"#,
+    )
+    .locked()
+    .bind(role.id)
+    .fetch_one(&mut tx)
+    .await
+    .expect("lock role");
+    let block: Uuid = crate::common::db::query_scalar(
+        r#"INSERT INTO permission_blocks (scope_mode, object_kind, tenant_id, effect)
+           VALUES ('object_kind', 'resource', $1, 'allow') RETURNING id"#,
         r#"INSERT INTO permission_blocks (scope_mode, object_kind, tenant_id, effect)
            VALUES ('object_kind', 'resource', $1, 'allow') RETURNING id"#,
     )
@@ -493,16 +520,18 @@ async fn concurrent_block_link_and_role_assignment_serialize() {
     .fetch_one(&mut tx)
     .await
     .expect("insert block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block)
     .bind(manage)
     .execute(&mut tx)
     .await
     .expect("block action");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)"#,
     )
     .bind(role.id)
     .bind(block)

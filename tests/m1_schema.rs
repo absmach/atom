@@ -33,10 +33,9 @@ async fn final_access_tables_have_tenant_boundaries() {
         "principal_groups",
         "object_groups",
     ] {
-        let row = atom::db::query(
-            "SELECT column_name FROM information_schema.columns
-             WHERE table_name = $1 AND column_name = 'tenant_id'",
-        )
+        let row = crate::common::db::query("SELECT column_name FROM information_schema.columns
+             WHERE table_name = $1 AND column_name = 'tenant_id'", r#"SELECT column_name FROM (SELECT m.name AS table_name, p.name AS column_name FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table')
+             WHERE table_name = $1 AND column_name = 'tenant_id'"#)
         .bind(table)
         .fetch_optional(&p)
         .await
@@ -49,10 +48,9 @@ async fn final_access_tables_have_tenant_boundaries() {
 #[ignore]
 async fn audit_logs_has_tenant_id_column() {
     let p = pool().await;
-    let row = atom::db::query(
-        "SELECT column_name FROM information_schema.columns
-         WHERE table_name = 'audit_logs' AND column_name = 'tenant_id'",
-    )
+    let row = crate::common::db::query("SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'audit_logs' AND column_name = 'tenant_id'", r#"SELECT column_name FROM (SELECT m.name AS table_name, p.name AS column_name FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table')
+         WHERE table_name = 'audit_logs' AND column_name = 'tenant_id'"#)
     .fetch_optional(&p)
     .await
     .expect("query column");
@@ -67,14 +65,18 @@ async fn tenant_memberships_table_exists_and_supports_insert() {
     // Create a throwaway tenant + entity so we have something to link.
     let t_id = uuid::Uuid::new_v4();
     let e_id = uuid::Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(t_id)
-        .bind(format!("m1-mem-{t_id}"))
-        .execute(&p)
-        .await
-        .expect("insert tenant");
-    atom::db::query(
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(t_id)
+    .bind(format!("m1-mem-{t_id}"))
+    .execute(&p)
+    .await
+    .expect("insert tenant");
+    crate::common::db::query(
         "INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')",
+        r#"INSERT INTO entities (id, kind, name, status) VALUES ($1, 'human', $2, 'active')"#,
     )
     .bind(e_id)
     .bind(format!("m1-mem-{e_id}"))
@@ -82,9 +84,11 @@ async fn tenant_memberships_table_exists_and_supports_insert() {
     .await
     .expect("insert entity");
 
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id, status, local_name, attributes)
          VALUES ($1, $2, 'active', 'alice', '{}'::jsonb)",
+        r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status, local_name, attributes)
+         VALUES ($1, $2, 'active', 'alice', '{}')"#,
     )
     .bind(t_id)
     .bind(e_id)
@@ -92,8 +96,9 @@ async fn tenant_memberships_table_exists_and_supports_insert() {
     .await
     .expect("insert membership");
 
-    let count: i64 = atom::db::query_scalar(
+    let count: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = $1 AND entity_id = $2",
+        r#"SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = $1 AND entity_id = $2"#,
     )
     .bind(t_id)
     .bind(e_id)
@@ -103,9 +108,11 @@ async fn tenant_memberships_table_exists_and_supports_insert() {
     assert_eq!(count, 1);
 
     // Idempotency: PRIMARY KEY rejects duplicate.
-    let dup = atom::db::query(
+    let dup = crate::common::db::query(
         "INSERT INTO tenant_memberships (tenant_id, entity_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
+        r#"INSERT INTO tenant_memberships (tenant_id, entity_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING"#,
     )
     .bind(t_id)
     .bind(e_id)
@@ -114,14 +121,20 @@ async fn tenant_memberships_table_exists_and_supports_insert() {
     .expect("insert with on-conflict");
     assert_eq!(dup.rows_affected(), 0, "PK should reject duplicate");
 
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(t_id)
-        .execute(&p)
-        .await;
-    let _ = atom::db::query("DELETE FROM entities WHERE id = $1")
-        .bind(e_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(t_id)
+    .execute(&p)
+    .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM entities WHERE id = $1",
+        r#"DELETE FROM entities WHERE id = $1"#,
+    )
+    .bind(e_id)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
@@ -129,20 +142,18 @@ async fn tenant_memberships_table_exists_and_supports_insert() {
 async fn action_assignment_rules_table_exists_with_object_type() {
     let p = pool().await;
 
-    let row = atom::db::query(
-        "SELECT column_name FROM information_schema.columns
-         WHERE table_name = 'action_assignment_rules' AND column_name = 'object_type'",
-    )
+    let row = crate::common::db::query("SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'action_assignment_rules' AND column_name = 'object_type'", r#"SELECT column_name FROM (SELECT m.name AS table_name, p.name AS column_name FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table')
+         WHERE table_name = 'action_assignment_rules' AND column_name = 'object_type'"#)
     .fetch_optional(&p)
     .await
     .expect("query column");
     assert!(row.is_some(), "action_assignment_rules.object_type missing");
 
     // The PRD-incorrect column 'resource_kind' should NOT exist.
-    let bad = atom::db::query(
-        "SELECT column_name FROM information_schema.columns
-         WHERE table_name = 'action_assignment_rules' AND column_name = 'resource_kind'",
-    )
+    let bad = crate::common::db::query("SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'action_assignment_rules' AND column_name = 'resource_kind'", r#"SELECT column_name FROM (SELECT m.name AS table_name, p.name AS column_name FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type = 'table')
+         WHERE table_name = 'action_assignment_rules' AND column_name = 'resource_kind'"#)
     .fetch_optional(&p)
     .await
     .expect("query column");
@@ -153,28 +164,36 @@ async fn action_assignment_rules_table_exists_with_object_type() {
 
     // Insert and read back a default rule.
     let id = uuid::Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO action_assignment_rules
            (id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
          VALUES ($1, 'device', 'publish', 'resource', 'resource:channel', 'allow', true)",
+        r#"INSERT INTO action_assignment_rules
+           (id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
+         VALUES ($1, 'device', 'publish', 'resource', 'resource:channel', 'allow', true)"#,
     )
     .bind(id)
     .execute(&p)
     .await
     .expect("insert rule");
 
-    let decision: String =
-        atom::db::query_scalar("SELECT decision FROM action_assignment_rules WHERE id = $1")
-            .bind(id)
-            .fetch_one(&p)
-            .await
-            .expect("read decision");
+    let decision: String = crate::common::db::query_scalar(
+        "SELECT decision FROM action_assignment_rules WHERE id = $1",
+        r#"SELECT decision FROM action_assignment_rules WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(&p)
+    .await
+    .expect("read decision");
     assert_eq!(decision, "allow");
 
-    let dup = atom::db::query(
+    let dup = crate::common::db::query(
         "INSERT INTO action_assignment_rules
            (id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
          VALUES ($1, 'device', 'publish', 'resource', 'resource:channel', 'allow', true)",
+        r#"INSERT INTO action_assignment_rules
+           (id, entity_kind, action_name, object_kind, object_type, decision, is_absolute)
+         VALUES ($1, 'device', 'publish', 'resource', 'resource:channel', 'allow', true)"#,
     )
     .bind(uuid::Uuid::new_v4())
     .execute(&p)
@@ -185,17 +204,25 @@ async fn action_assignment_rules_table_exists_with_object_type() {
         "expected a unique violation, got {dup}"
     );
 
-    let _ = atom::db::query("DELETE FROM action_assignment_rules WHERE id = $1")
-        .bind(id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM action_assignment_rules WHERE id = $1",
+        r#"DELETE FROM action_assignment_rules WHERE id = $1"#,
+    )
+    .bind(id)
+    .execute(&p)
+    .await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn admin_seed_uses_platform_scope() {
     let p = pool().await;
-    let scope: String = atom::db::query_scalar(
+    let scope: String = crate::common::db::query_scalar(
+        r#"SELECT pb.scope_mode
+           FROM role_assignments ra
+           JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
+           JOIN permission_blocks pb ON pb.id = rpb.permission_block_id
+           WHERE ra.subject_id = $1 AND ra.role_id = $2"#,
         r#"SELECT pb.scope_mode
            FROM role_assignments ra
            JOIN role_permission_blocks rpb ON rpb.role_id = ra.role_id
@@ -233,11 +260,14 @@ async fn all_canonical_actions_are_seeded() {
         "authz.check",
     ];
     for name in expected {
-        let count: i64 = atom::db::query_scalar("SELECT COUNT(*) FROM actions WHERE name = $1")
-            .bind(name)
-            .fetch_one(&p)
-            .await
-            .expect("query");
+        let count: i64 = crate::common::db::query_scalar(
+            "SELECT COUNT(*) FROM actions WHERE name = $1",
+            r#"SELECT COUNT(*) FROM actions WHERE name = $1"#,
+        )
+        .bind(name)
+        .fetch_one(&p)
+        .await
+        .expect("query");
         assert!(count >= 1, "action {name} not seeded");
     }
 }
@@ -247,9 +277,11 @@ async fn all_canonical_actions_are_seeded() {
 async fn check_constraint_rejects_invalid_scope_mode() {
     let p = pool().await;
 
-    let result = atom::db::query(
+    let result = crate::common::db::query(
         "INSERT INTO permission_blocks (scope_mode, effect)
          VALUES ('all', 'allow')",
+        r#"INSERT INTO permission_blocks (scope_mode, effect)
+         VALUES ('all', 'allow')"#,
     )
     .execute(&p)
     .await;
@@ -266,15 +298,20 @@ async fn check_constraint_accepts_all_new_scope_modes() {
     let p = pool().await;
     let tenant_id = uuid::Uuid::new_v4();
     let group_id = uuid::Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')")
-        .bind(tenant_id)
-        .bind(format!("m1-scope-{tenant_id}"))
-        .execute(&p)
-        .await
-        .expect("insert tenant");
-    atom::db::query(
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')",
+        r#"INSERT INTO tenants (id, name, status) VALUES ($1, $2, 'active')"#,
+    )
+    .bind(tenant_id)
+    .bind(format!("m1-scope-{tenant_id}"))
+    .execute(&p)
+    .await
+    .expect("insert tenant");
+    crate::common::db::query(
         "INSERT INTO object_groups (id, name, tenant_id)
          VALUES ($1, 'm1-scope-group', $2)",
+        r#"INSERT INTO object_groups (id, name, tenant_id)
+         VALUES ($1, 'm1-scope-group', $2)"#,
     )
     .bind(group_id)
     .bind(tenant_id)
@@ -354,10 +391,13 @@ async fn check_constraint_accepts_all_new_scope_modes() {
     ];
 
     for (mode, tenant, object_kind, object_type, object_id, group) in inserts {
-        atom::db::query(
+        crate::common::db::query(
             "INSERT INTO permission_blocks
                (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect)
              VALUES ($1, $2, $3, $4, $5, $6, 'allow')",
+            r#"INSERT INTO permission_blocks
+               (scope_mode, tenant_id, object_kind, object_type, object_id, group_id, effect)
+             VALUES ($1, $2, $3, $4, $5, $6, 'allow')"#,
         )
         .bind(mode)
         .bind(tenant)
@@ -370,8 +410,11 @@ async fn check_constraint_accepts_all_new_scope_modes() {
         .unwrap_or_else(|e| panic!("scope_mode={mode} should be accepted: {e}"));
     }
 
-    let _ = atom::db::query("DELETE FROM tenants WHERE id = $1")
-        .bind(tenant_id)
-        .execute(&p)
-        .await;
+    let _ = crate::common::db::query(
+        "DELETE FROM tenants WHERE id = $1",
+        r#"DELETE FROM tenants WHERE id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(&p)
+    .await;
 }

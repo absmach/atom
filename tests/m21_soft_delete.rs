@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 async fn make_entity(pool: &atom::db::Database, name: &str, tenant_id: Option<Uuid>) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')")
+    crate::common::db::query("INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')", r#"INSERT INTO entities (id, kind, name, tenant_id, status) VALUES ($1, 'service', $2, $3, 'active')"#)
         .bind(id)
         .bind(name)
         .bind(tenant_id)
@@ -38,12 +38,15 @@ async fn make_entity(pool: &atom::db::Database, name: &str, tenant_id: Option<Uu
 
 async fn make_tenant(pool: &atom::db::Database, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    atom::db::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
-        .bind(id)
-        .bind(name)
-        .execute(pool)
-        .await
-        .expect("insert tenant");
+    crate::common::db::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO tenants (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(id)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("insert tenant");
     id
 }
 
@@ -53,7 +56,7 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
     let pool = common::pool().await;
     let id = make_entity(&pool, &format!("sd-entity-{}", Uuid::new_v4()), None).await;
     let cred_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')")
+    crate::common::db::query("INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')", r#"INSERT INTO credentials (id, entity_id, kind, identifier, status) VALUES ($1, $2, 'access_token', $3, 'active')"#)
         .bind(cred_id)
         .bind(id)
         .bind(format!("key-{cred_id}"))
@@ -74,28 +77,35 @@ async fn soft_delete_entity_hides_it_and_revokes_access() {
 
     // Tombstone set; credential revoked; session revoked — all immediately.
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        atom::db::query_as("SELECT status, deleted_at FROM entities WHERE id = $1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .expect("entity row still present");
+        crate::common::db::query_as(
+            "SELECT status, deleted_at FROM entities WHERE id = $1",
+            r#"SELECT status, deleted_at FROM entities WHERE id = $1"#,
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("entity row still present");
     assert_eq!(status, "inactive", "deleted entities must be disabled");
     assert!(deleted_at.is_some(), "entity should carry a tombstone");
 
-    let cred_status: String =
-        atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
-            .bind(cred_id)
-            .fetch_one(&pool)
-            .await
-            .expect("credential");
+    let cred_status: String = crate::common::db::query_scalar(
+        "SELECT status FROM credentials WHERE id = $1",
+        r#"SELECT status FROM credentials WHERE id = $1"#,
+    )
+    .bind(cred_id)
+    .fetch_one(&pool)
+    .await
+    .expect("credential");
     assert_eq!(cred_status, "revoked");
 
-    let revoked: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_one(&pool)
-            .await
-            .expect("session");
+    let revoked: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT revoked_at FROM sessions WHERE id = $1",
+        r#"SELECT revoked_at FROM sessions WHERE id = $1"#,
+    )
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("session");
     assert!(revoked.is_some(), "session should be revoked");
 
     assert!(
@@ -150,13 +160,16 @@ async fn deleted_entity_cannot_consume_existing_password_reset_token() {
     let id = make_entity(&pool, &format!("sd-reset-{}", Uuid::new_v4()), None).await;
     let email_id = Uuid::new_v4();
     let email = format!("{id}@example.com");
-    atom::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
-        .bind(email_id)
-        .bind(id)
-        .bind(&email)
-        .execute(&pool)
-        .await
-        .expect("insert email");
+    crate::common::db::query(
+        "INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)",
+        r#"INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)"#,
+    )
+    .bind(email_id)
+    .bind(id)
+    .bind(&email)
+    .execute(&pool)
+    .await
+    .expect("insert email");
 
     let token_id = Uuid::new_v4();
     let token_secret = "ab".repeat(32);
@@ -166,10 +179,13 @@ async fn deleted_entity_cannot_consume_existing_password_reset_token() {
         token_secret
     );
     let token_hash = service::hash_secret(token_secret.as_bytes()).expect("hash token");
-    atom::db::query(
+    crate::common::db::query(
         r#"INSERT INTO password_reset_tokens
              (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 hour')"#,
+        r#"INSERT INTO password_reset_tokens
+             (id, entity_id, email_id, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, atom_ts_add(now(), (3600)))"#,
     )
     .bind(token_id)
     .bind(id)
@@ -198,12 +214,14 @@ async fn deleted_entity_cannot_consume_existing_password_reset_token() {
         "deleted entity must not reset its password"
     );
 
-    let consumed_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT consumed_at FROM password_reset_tokens WHERE id = $1")
-            .bind(token_id)
-            .fetch_one(&pool)
-            .await
-            .expect("reset token");
+    let consumed_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT consumed_at FROM password_reset_tokens WHERE id = $1",
+        r#"SELECT consumed_at FROM password_reset_tokens WHERE id = $1"#,
+    )
+    .bind(token_id)
+    .fetch_one(&pool)
+    .await
+    .expect("reset token");
     assert!(
         consumed_at.is_none(),
         "rejected reset token must remain unconsumed"
@@ -217,16 +235,21 @@ async fn config_managed_password_cannot_be_reset() {
     let id = make_entity(&pool, &format!("managed-reset-{}", Uuid::new_v4()), None).await;
     let email_id = Uuid::new_v4();
     let email = format!("{id}@example.com");
-    atom::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
-        .bind(email_id)
-        .bind(id)
-        .bind(&email)
-        .execute(&pool)
-        .await
-        .expect("insert email");
+    crate::common::db::query(
+        "INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)",
+        r#"INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)"#,
+    )
+    .bind(email_id)
+    .bind(id)
+    .bind(&email)
+    .execute(&pool)
+    .await
+    .expect("insert email");
     let managed_id = Uuid::new_v4();
     let managed_hash = service::hash_secret(b"managed-password-123").expect("hash password");
-    atom::db::query(
+    crate::common::db::query(
+        r#"INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
+           VALUES ($1, $2, 'password', $3, 'config')"#,
         r#"INSERT INTO credentials (id, entity_id, kind, secret_hash, managed_by)
            VALUES ($1, $2, 'password', $3, 'config')"#,
     )
@@ -243,12 +266,14 @@ async fn config_managed_password_cannot_be_reset() {
     )
     .await
     .expect("managed reset request remains enumeration-safe");
-    let generated_tokens: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM password_reset_tokens WHERE entity_id = $1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .expect("managed reset token count");
+    let generated_tokens: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM password_reset_tokens WHERE entity_id = $1",
+        r#"SELECT COUNT(*) FROM password_reset_tokens WHERE entity_id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("managed reset token count");
     assert_eq!(generated_tokens, 0);
     let session = atom::identity::repo::create_session(&pool, id, 3600)
         .await
@@ -262,10 +287,13 @@ async fn config_managed_password_cannot_be_reset() {
         token_secret
     );
     let token_hash = service::hash_secret(token_secret.as_bytes()).expect("hash token");
-    atom::db::query(
+    crate::common::db::query(
         r#"INSERT INTO password_reset_tokens
              (id, entity_id, email_id, secret_hash, expires_at)
            VALUES ($1, $2, $3, $4, now() + interval '1 hour')"#,
+        r#"INSERT INTO password_reset_tokens
+             (id, entity_id, email_id, secret_hash, expires_at)
+           VALUES ($1, $2, $3, $4, atom_ts_add(now(), (3600)))"#,
     )
     .bind(token_id)
     .bind(id)
@@ -288,26 +316,33 @@ async fn config_managed_password_cannot_be_reset() {
     .expect_err("config-managed password must reject reset");
     assert!(matches!(err, atom::error::AppError::Conflict(_)));
 
-    let unchanged: (String, String, Option<chrono::DateTime<chrono::Utc>>) = atom::db::query_as(
-        r#"SELECT c.status, c.secret_hash, reset.consumed_at
+    let unchanged: (String, String, Option<chrono::DateTime<chrono::Utc>>) =
+        crate::common::db::query_as(
+            r#"SELECT c.status, c.secret_hash, reset.consumed_at
            FROM credentials c
            CROSS JOIN password_reset_tokens reset
            WHERE c.id = $1 AND reset.id = $2"#,
-    )
-    .bind(managed_id)
-    .bind(token_id)
-    .fetch_one(&pool)
-    .await
-    .expect("unchanged managed credential and token");
+            r#"SELECT c.status, c.secret_hash, reset.consumed_at
+           FROM credentials c
+           CROSS JOIN password_reset_tokens reset
+           WHERE c.id = $1 AND reset.id = $2"#,
+        )
+        .bind(managed_id)
+        .bind(token_id)
+        .fetch_one(&pool)
+        .await
+        .expect("unchanged managed credential and token");
     assert_eq!(unchanged.0, "active");
     assert_eq!(unchanged.1, managed_hash);
     assert!(unchanged.2.is_none());
-    let revoked_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
-            .bind(session.id)
-            .fetch_one(&pool)
-            .await
-            .expect("session status");
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT revoked_at FROM sessions WHERE id = $1",
+        r#"SELECT revoked_at FROM sessions WHERE id = $1"#,
+    )
+    .bind(session.id)
+    .fetch_one(&pool)
+    .await
+    .expect("session status");
     assert!(revoked_at.is_none());
 }
 
@@ -333,25 +368,30 @@ async fn email_is_reusable_after_soft_delete() {
     let email = format!("sd-reuse-{}@example.com", Uuid::new_v4());
 
     let first = make_entity(&pool, &format!("sd-email-{}", Uuid::new_v4()), None).await;
-    atom::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
-        .bind(Uuid::new_v4())
-        .bind(first)
-        .bind(&email)
-        .execute(&pool)
-        .await
-        .expect("insert first email");
+    crate::common::db::query(
+        "INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)",
+        r#"INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(first)
+    .bind(&email)
+    .execute(&pool)
+    .await
+    .expect("insert first email");
 
     atom::identity::repo::delete_entity(&pool, first, None)
         .await
         .expect("soft delete first");
 
     // The email row is tombstoned alongside the entity.
-    let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT deleted_at FROM entity_emails WHERE entity_id = $1")
-            .bind(first)
-            .fetch_one(&pool)
-            .await
-            .expect("first email row");
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT deleted_at FROM entity_emails WHERE entity_id = $1",
+        r#"SELECT deleted_at FROM entity_emails WHERE entity_id = $1"#,
+    )
+    .bind(first)
+    .fetch_one(&pool)
+    .await
+    .expect("first email row");
     assert!(
         deleted_at.is_some(),
         "soft delete must tombstone the entity's email"
@@ -359,8 +399,9 @@ async fn email_is_reusable_after_soft_delete() {
 
     // The OAuth lookup (which filters deleted rows) no longer resolves the address
     // to the tombstoned entity, so a returning user re-onboards as a new entity.
-    let resolved: Option<Uuid> = atom::db::query_scalar(
+    let resolved: Option<Uuid> = crate::common::db::query_scalar(
         "SELECT entity_id FROM entity_emails WHERE email = $1 AND deleted_at IS NULL",
+        r#"SELECT entity_id FROM entity_emails WHERE email = $1 AND deleted_at IS NULL"#,
     )
     .bind(&email)
     .fetch_optional(&pool)
@@ -371,13 +412,16 @@ async fn email_is_reusable_after_soft_delete() {
     // Re-registering the same address on a fresh entity must succeed now that the
     // unique index is partial on deleted_at IS NULL.
     let second = make_entity(&pool, &format!("sd-email-{}", Uuid::new_v4()), None).await;
-    atom::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
-        .bind(Uuid::new_v4())
-        .bind(second)
-        .bind(&email)
-        .execute(&pool)
-        .await
-        .expect("re-register email on a fresh entity");
+    crate::common::db::query(
+        "INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)",
+        r#"INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(second)
+    .bind(&email)
+    .execute(&pool)
+    .await
+    .expect("re-register email on a fresh entity");
     assert_ne!(first, second);
 }
 
@@ -390,13 +434,16 @@ async fn invitation_by_email_does_not_resolve_to_soft_deleted_user() {
 
     let email = format!("sd-inv-{}@example.com", Uuid::new_v4());
     let stale = make_entity(&pool, &format!("sd-inv-stale-{}", Uuid::new_v4()), None).await;
-    atom::db::query("INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)")
-        .bind(Uuid::new_v4())
-        .bind(stale)
-        .bind(&email)
-        .execute(&pool)
-        .await
-        .expect("insert stale email");
+    crate::common::db::query(
+        "INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)",
+        r#"INSERT INTO entity_emails (id, entity_id, email) VALUES ($1, $2, $3)"#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(stale)
+    .bind(&email)
+    .execute(&pool)
+    .await
+    .expect("insert stale email");
     atom::identity::repo::delete_entity(&pool, stale, None)
         .await
         .expect("soft delete stale user");
@@ -448,18 +495,22 @@ async fn create_group_requires_explicit_group_type() {
         "unexpected error: {err}"
     );
 
-    let principal_count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM principal_groups WHERE id = $1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .expect("principal group count");
-    let object_count: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM object_groups WHERE id = $1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .expect("object group count");
+    let principal_count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM principal_groups WHERE id = $1",
+        r#"SELECT COUNT(*) FROM principal_groups WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("principal group count");
+    let object_count: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM object_groups WHERE id = $1",
+        r#"SELECT COUNT(*) FROM object_groups WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("object group count");
     assert_eq!(principal_count, 0);
     assert_eq!(object_count, 0);
 }
@@ -470,24 +521,30 @@ async fn soft_deleted_role_and_resource_are_hidden() {
     let pool = common::pool().await;
 
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
-        .bind(role_id)
-        .bind(format!("sd-role-{role_id}"))
-        .execute(&pool)
-        .await
-        .expect("insert role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO roles (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(role_id)
+    .bind(format!("sd-role-{role_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert role");
     atom::authz::repo::delete_role(&pool, role_id, None)
         .await
         .expect("delete role");
     assert!(atom::authz::repo::get_role(&pool, role_id).await.is_err());
 
     let resource_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
-        .bind(resource_id)
-        .bind(format!("sd-res-{resource_id}"))
-        .execute(&pool)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)",
+        r#"INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)"#,
+    )
+    .bind(resource_id)
+    .bind(format!("sd-res-{resource_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert resource");
     atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
@@ -532,12 +589,15 @@ async fn soft_deleted_objects_are_read_only() {
     );
 
     let group_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO object_groups (id, name) VALUES ($1, $2)")
-        .bind(group_id)
-        .bind(format!("sd-readonly-group-{group_id}"))
-        .execute(&pool)
-        .await
-        .expect("insert group");
+    crate::common::db::query(
+        "INSERT INTO object_groups (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO object_groups (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(group_id)
+    .bind(format!("sd-readonly-group-{group_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert group");
     atom::identity::repo::delete_group(&pool, group_id, None)
         .await
         .expect("delete group");
@@ -558,12 +618,15 @@ async fn soft_deleted_objects_are_read_only() {
     );
 
     let resource_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
-        .bind(resource_id)
-        .bind(format!("sd-readonly-resource-{resource_id}"))
-        .execute(&pool)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)",
+        r#"INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)"#,
+    )
+    .bind(resource_id)
+    .bind(format!("sd-readonly-resource-{resource_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert resource");
     atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
@@ -583,12 +646,15 @@ async fn soft_deleted_objects_are_read_only() {
     );
 
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
-        .bind(role_id)
-        .bind(format!("sd-readonly-role-{role_id}"))
-        .execute(&pool)
-        .await
-        .expect("insert role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO roles (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(role_id)
+    .bind(format!("sd-readonly-role-{role_id}"))
+    .execute(&pool)
+    .await
+    .expect("insert role");
     atom::authz::repo::delete_role(&pool, role_id, None)
         .await
         .expect("delete role");
@@ -724,12 +790,15 @@ async fn deleted_filter_lists_soft_deleted_objects() {
 
     let group_name = format!("sd-filter-group-{}", Uuid::new_v4());
     let group_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO object_groups (id, name) VALUES ($1, $2)")
-        .bind(group_id)
-        .bind(&group_name)
-        .execute(&pool)
-        .await
-        .expect("insert group");
+    crate::common::db::query(
+        "INSERT INTO object_groups (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO object_groups (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(group_id)
+    .bind(&group_name)
+    .execute(&pool)
+    .await
+    .expect("insert group");
     atom::identity::repo::delete_group(&pool, group_id, None)
         .await
         .expect("delete group");
@@ -777,12 +846,15 @@ async fn deleted_filter_lists_soft_deleted_objects() {
 
     let resource_name = format!("sd-filter-resource-{}", Uuid::new_v4());
     let resource_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)")
-        .bind(resource_id)
-        .bind(&resource_name)
-        .execute(&pool)
-        .await
-        .expect("insert resource");
+    crate::common::db::query(
+        "INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)",
+        r#"INSERT INTO resources (id, kind, name) VALUES ($1, 'channel', $2)"#,
+    )
+    .bind(resource_id)
+    .bind(&resource_name)
+    .execute(&pool)
+    .await
+    .expect("insert resource");
     atom::authz::resources::delete_resource(&pool, resource_id, None)
         .await
         .expect("delete resource");
@@ -833,12 +905,15 @@ async fn deleted_filter_lists_soft_deleted_objects() {
 
     let role_name = format!("sd-filter-role-{}", Uuid::new_v4());
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name) VALUES ($1, $2)")
-        .bind(role_id)
-        .bind(&role_name)
-        .execute(&pool)
-        .await
-        .expect("insert role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name) VALUES ($1, $2)",
+        r#"INSERT INTO roles (id, name) VALUES ($1, $2)"#,
+    )
+    .bind(role_id)
+    .bind(&role_name)
+    .execute(&pool)
+    .await
+    .expect("insert role");
     atom::authz::repo::delete_role(&pool, role_id, None)
         .await
         .expect("delete role");
@@ -880,16 +955,22 @@ async fn purge_physically_removes_expired_tombstones_only() {
     let recent = make_entity(&pool, &format!("sd-recent-{}", Uuid::new_v4()), None).await;
 
     // Tombstone both, but age only `old` past the retention window.
-    atom::db::query("UPDATE entities SET deleted_at = now() - interval '100 days' WHERE id = $1")
-        .bind(old)
-        .execute(&pool)
-        .await
-        .expect("age old");
-    atom::db::query("UPDATE entities SET deleted_at = now() WHERE id = $1")
-        .bind(recent)
-        .execute(&pool)
-        .await
-        .expect("tombstone recent");
+    crate::common::db::query(
+        "UPDATE entities SET deleted_at = now() - interval '100 days' WHERE id = $1",
+        r#"UPDATE entities SET deleted_at = atom_ts_add(now(), -(8640000)) WHERE id = $1"#,
+    )
+    .bind(old)
+    .execute(&pool)
+    .await
+    .expect("age old");
+    crate::common::db::query(
+        "UPDATE entities SET deleted_at = now() WHERE id = $1",
+        r#"UPDATE entities SET deleted_at = now() WHERE id = $1"#,
+    )
+    .bind(recent)
+    .execute(&pool)
+    .await
+    .expect("tombstone recent");
 
     let cfg = PurgeConfig {
         enabled: true,
@@ -900,22 +981,27 @@ async fn purge_physically_removes_expired_tombstones_only() {
     let mut old_exists = true;
     for _ in 0..20 {
         atom::purge::purge_expired(&pool, cfg).await.expect("purge");
-        old_exists = atom::db::query_scalar("SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)")
-            .bind(old)
-            .fetch_one(&pool)
-            .await
-            .expect("check old");
+        old_exists = crate::common::db::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)",
+            r#"SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)"#,
+        )
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .expect("check old");
         if !old_exists {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let recent_exists: bool =
-        atom::db::query_scalar("SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)")
-            .bind(recent)
-            .fetch_one(&pool)
-            .await
-            .expect("check recent");
+    let recent_exists: bool = crate::common::db::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)",
+        r#"SELECT EXISTS(SELECT 1 FROM entities WHERE id = $1)"#,
+    )
+    .bind(recent)
+    .fetch_one(&pool)
+    .await
+    .expect("check recent");
     assert!(!old_exists, "expired tombstone must be purged");
     assert!(recent_exists, "tombstone within retention must survive");
 }
@@ -939,13 +1025,19 @@ async fn purge_limits_each_table_to_one_configured_batch_per_run() {
         let first = make_entity(&pool, &format!("sd-batch-a-{}", Uuid::new_v4()), None).await;
         let second = make_entity(&pool, &format!("sd-batch-b-{}", Uuid::new_v4()), None).await;
         let ids = vec![first, second];
-        atom::db::query(
+        crate::common::db::query(
             r#"UPDATE entities
                SET deleted_at = CASE
                    WHEN id = $1 THEN now() - interval '1001 days'
                    ELSE now() - interval '1000 days'
                END
                WHERE id = ANY($2)"#,
+            r#"UPDATE entities
+               SET deleted_at = CASE
+                   WHEN id = $1 THEN atom_ts_add(now(), -(86486400))
+                   ELSE atom_ts_add(now(), -(86400000))
+               END
+               WHERE id IN (SELECT unhex(value) FROM json_each($2))"#,
         )
         .bind(first)
         .bind(&ids)
@@ -958,7 +1050,7 @@ async fn purge_limits_each_table_to_one_configured_batch_per_run() {
                 .await
                 .expect("first purge");
             let remaining: i64 =
-                atom::db::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1)")
+                crate::common::db::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1)", r#"SELECT COUNT(*) FROM entities WHERE id IN (SELECT unhex(value) FROM json_each($1))"#)
                     .bind(&ids)
                     .fetch_one(&pool)
                     .await
@@ -980,12 +1072,14 @@ async fn purge_limits_each_table_to_one_configured_batch_per_run() {
         atom::purge::purge_expired(&pool, cfg)
             .await
             .expect("second purge");
-        let remaining: i64 =
-            atom::db::query_scalar("SELECT COUNT(*) FROM entities WHERE id = ANY($1)")
-                .bind(&ids)
-                .fetch_one(&pool)
-                .await
-                .expect("count after second purge");
+        let remaining: i64 = crate::common::db::query_scalar(
+            "SELECT COUNT(*) FROM entities WHERE id = ANY($1)",
+            r#"SELECT COUNT(*) FROM entities WHERE id IN (SELECT unhex(value) FROM json_each($1))"#,
+        )
+        .bind(&ids)
+        .fetch_one(&pool)
+        .await
+        .expect("count after second purge");
         if remaining == 0 {
             return;
         }
@@ -1012,46 +1106,55 @@ async fn soft_deleted_role_stops_granting_in_the_pdp() {
         Some(tenant_id),
     )
     .await;
-    let read_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("read action");
+    let read_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read action");
 
     // Role granting read on entities in the tenant, assigned to the subject.
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(role_id)
-        .bind(format!("sd-grant-role-{role_id}"))
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("role");
-    let block_id: Uuid = atom::db::query_scalar(
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(role_id)
+    .bind(format!("sd-grant-role-{role_id}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("role");
+    let block_id: Uuid = crate::common::db::query_scalar(
         "INSERT INTO permission_blocks (scope_mode, object_kind, tenant_id, effect)
          VALUES ('object_kind', 'entity', $1, 'allow') RETURNING id",
+        r#"INSERT INTO permission_blocks (scope_mode, object_kind, tenant_id, effect)
+         VALUES ('object_kind', 'entity', $1, 'allow') RETURNING id"#,
     )
     .bind(tenant_id)
     .fetch_one(&pool)
     .await
     .expect("block");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(read_id)
     .execute(&pool)
     .await
     .expect("block action");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)",
+        r#"INSERT INTO role_permission_blocks (role_id, permission_block_id) VALUES ($1, $2)"#,
     )
     .bind(role_id)
     .bind(block_id)
     .execute(&pool)
     .await
     .expect("link");
-    atom::db::query("INSERT INTO role_assignments (tenant_id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)")
+    crate::common::db::query("INSERT INTO role_assignments (tenant_id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)", r#"INSERT INTO role_assignments (tenant_id, subject_kind, subject_id, role_id) VALUES ($1, 'entity', $2, $3)"#)
         .bind(tenant_id)
         .bind(subject)
         .bind(role_id)
@@ -1100,9 +1203,7 @@ async fn soft_deleted_role_is_not_assignable_or_listed() {
     )
     .await;
     // Make the subject a tenant member so the subject boundary passes.
-    atom::db::query(
-        "INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')",
-    )
+    crate::common::db::query("INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')", r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')"#)
     .bind(tenant_id)
     .bind(subject)
     .execute(&pool)
@@ -1110,13 +1211,16 @@ async fn soft_deleted_role_is_not_assignable_or_listed() {
     .expect("membership");
 
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(role_id)
-        .bind(format!("sd-asg-role-{role_id}"))
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(role_id)
+    .bind(format!("sd-asg-role-{role_id}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("role");
 
     let req = || CreateRoleAssignment {
         tenant_id: Some(tenant_id),
@@ -1176,22 +1280,23 @@ async fn assignment_to_soft_deleted_subject_is_rejected_and_unlisted() {
         Some(tenant_id),
     )
     .await;
-    atom::db::query(
-        "INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')",
-    )
+    crate::common::db::query("INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')", r#"INSERT INTO tenant_memberships (tenant_id, entity_id, status) VALUES ($1, $2, 'active')"#)
     .bind(tenant_id)
     .bind(subject)
     .execute(&pool)
     .await
     .expect("membership");
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(role_id)
-        .bind(format!("sd-subj-role-{role_id}"))
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(role_id)
+    .bind(format!("sd-subj-role-{role_id}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("role");
 
     let req = || CreateRoleAssignment {
         tenant_id: Some(tenant_id),
@@ -1239,15 +1344,18 @@ async fn composite_role_helpers_reject_deleted_child_roles() {
     let tenant_id = make_tenant(&pool, &format!("sd-comp-ten-{}", Uuid::new_v4())).await;
     let parent_role = Uuid::new_v4();
     let child_role = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3), ($4, $5, $3)")
-        .bind(parent_role)
-        .bind(format!("sd-comp-parent-{parent_role}"))
-        .bind(tenant_id)
-        .bind(child_role)
-        .bind(format!("sd-comp-child-{child_role}"))
-        .execute(&pool)
-        .await
-        .expect("roles");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3), ($4, $5, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3), ($4, $5, $3)"#,
+    )
+    .bind(parent_role)
+    .bind(format!("sd-comp-parent-{parent_role}"))
+    .bind(tenant_id)
+    .bind(child_role)
+    .bind(format!("sd-comp-child-{child_role}"))
+    .execute(&pool)
+    .await
+    .expect("roles");
     atom::authz::repo::delete_role(&pool, child_role, None)
         .await
         .expect("delete child role");
@@ -1264,12 +1372,14 @@ async fn composite_role_helpers_reject_deleted_child_roles() {
             .is_err(),
         "deleted replacement children must not be copied into live parents"
     );
-    let copied_blocks: i64 =
-        atom::db::query_scalar("SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1")
-            .bind(parent_role)
-            .fetch_one(&pool)
-            .await
-            .expect("parent block count");
+    let copied_blocks: i64 = crate::common::db::query_scalar(
+        "SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1",
+        r#"SELECT COUNT(*) FROM role_permission_blocks WHERE role_id = $1"#,
+    )
+    .bind(parent_role)
+    .fetch_one(&pool)
+    .await
+    .expect("parent block count");
     assert_eq!(copied_blocks, 0);
 }
 
@@ -1282,9 +1392,11 @@ async fn set_group_parent_rejects_deleted_parent_or_child() {
     let deleted_parent = Uuid::new_v4();
     let live_child = Uuid::new_v4();
     let deleted_child = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO object_groups (id, name, tenant_id)
          VALUES ($1, $2, $5), ($3, $4, $5), ($6, $7, $5), ($8, $9, $5)",
+        r#"INSERT INTO object_groups (id, name, tenant_id)
+         VALUES ($1, $2, $5), ($3, $4, $5), ($6, $7, $5), ($8, $9, $5)"#,
     )
     .bind(live_parent)
     .bind(format!("sd-live-parent-{live_parent}"))
@@ -1317,9 +1429,11 @@ async fn set_group_parent_rejects_deleted_parent_or_child() {
             .is_err(),
         "deleted group must not be moved under a live parent"
     );
-    let hierarchy_rows: i64 = atom::db::query_scalar(
+    let hierarchy_rows: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_hierarchy
          WHERE child_id = $1 OR child_id = $2 OR parent_id = $3",
+        r#"SELECT COUNT(*) FROM object_group_hierarchy
+         WHERE child_id = $1 OR child_id = $2 OR parent_id = $3"#,
     )
     .bind(live_child)
     .bind(deleted_child)
@@ -1339,9 +1453,11 @@ async fn add_resource_to_object_group_rejects_deleted_resource_or_group() {
     let deleted_resource = Uuid::new_v4();
     let live_group = Uuid::new_v4();
     let deleted_group = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id)
          VALUES ($1, 'channel', $2, $5), ($3, 'channel', $4, $5)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id)
+         VALUES ($1, 'channel', $2, $5), ($3, 'channel', $4, $5)"#,
     )
     .bind(live_resource)
     .bind(format!("sd-live-resource-{live_resource}"))
@@ -1351,9 +1467,11 @@ async fn add_resource_to_object_group_rejects_deleted_resource_or_group() {
     .execute(&pool)
     .await
     .expect("resources");
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO object_groups (id, name, tenant_id)
          VALUES ($1, $2, $5), ($3, $4, $5)",
+        r#"INSERT INTO object_groups (id, name, tenant_id)
+         VALUES ($1, $2, $5), ($3, $4, $5)"#,
     )
     .bind(live_group)
     .bind(format!("sd-live-res-group-{live_group}"))
@@ -1382,9 +1500,11 @@ async fn add_resource_to_object_group_rejects_deleted_resource_or_group() {
             .is_err(),
         "deleted resource must not be attached to a live object group"
     );
-    let edges: i64 = atom::db::query_scalar(
+    let edges: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM object_group_resources
          WHERE resource_id = $1 OR resource_id = $2 OR group_id = $3",
+        r#"SELECT COUNT(*) FROM object_group_resources
+         WHERE resource_id = $1 OR resource_id = $2 OR group_id = $3"#,
     )
     .bind(live_resource)
     .bind(deleted_resource)
@@ -1407,16 +1527,18 @@ async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
     )
     .await;
     let session_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')")
+    crate::common::db::query("INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')", r#"INSERT INTO sessions (id, entity_id, expires_at) VALUES ($1, $2, atom_ts_add(now(), (3600)))"#)
         .bind(session_id)
         .bind(entity_id)
         .execute(&pool)
         .await
         .expect("insert session");
     let api_key_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO credentials (id, entity_id, kind, identifier, status)
          VALUES ($1, $2, 'access_token', $3, 'active')",
+        r#"INSERT INTO credentials (id, entity_id, kind, identifier, status)
+         VALUES ($1, $2, 'access_token', $3, 'active')"#,
     )
     .bind(api_key_id)
     .bind(entity_id)
@@ -1429,26 +1551,34 @@ async fn soft_delete_tenant_marks_and_revokes_child_credentials_and_sessions() {
         .expect("soft delete tenant");
 
     let (status, deleted_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
-        atom::db::query_as("SELECT status, deleted_at FROM tenants WHERE id = $1")
-            .bind(tenant_id)
-            .fetch_one(&pool)
-            .await
-            .expect("tenant row");
+        crate::common::db::query_as(
+            "SELECT status, deleted_at FROM tenants WHERE id = $1",
+            r#"SELECT status, deleted_at FROM tenants WHERE id = $1"#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("tenant row");
     assert_eq!(status, "deleted");
     assert!(deleted_at.is_some());
 
-    let revoked: Option<chrono::DateTime<chrono::Utc>> =
-        atom::db::query_scalar("SELECT revoked_at FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_one(&pool)
-            .await
-            .expect("session");
+    let revoked: Option<chrono::DateTime<chrono::Utc>> = crate::common::db::query_scalar(
+        "SELECT revoked_at FROM sessions WHERE id = $1",
+        r#"SELECT revoked_at FROM sessions WHERE id = $1"#,
+    )
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("session");
     assert!(revoked.is_some(), "child session should be revoked");
-    let api_status: String = atom::db::query_scalar("SELECT status FROM credentials WHERE id = $1")
-        .bind(api_key_id)
-        .fetch_one(&pool)
-        .await
-        .expect("api credential");
+    let api_status: String = crate::common::db::query_scalar(
+        "SELECT status FROM credentials WHERE id = $1",
+        r#"SELECT status FROM credentials WHERE id = $1"#,
+    )
+    .bind(api_key_id)
+    .fetch_one(&pool)
+    .await
+    .expect("api credential");
     assert_eq!(api_status, "revoked");
 
     // Tenant is hidden from reads.
@@ -1466,22 +1596,26 @@ async fn invitation_acceptance_rejects_deleted_tenant_subject_and_role_atomicall
         tenant_id: Uuid,
         invitee_id: Uuid,
     ) -> (Option<chrono::DateTime<chrono::Utc>>, i64, i64) {
-        let accepted_at =
-            atom::db::query_scalar("SELECT accepted_at FROM tenant_invitations WHERE id = $1")
-                .bind(invitation_id)
-                .fetch_one(pool)
-                .await
-                .expect("invitation accepted_at");
-        let memberships = atom::db::query_scalar(
+        let accepted_at = crate::common::db::query_scalar(
+            "SELECT accepted_at FROM tenant_invitations WHERE id = $1",
+            r#"SELECT accepted_at FROM tenant_invitations WHERE id = $1"#,
+        )
+        .bind(invitation_id)
+        .fetch_one(pool)
+        .await
+        .expect("invitation accepted_at");
+        let memberships = crate::common::db::query_scalar(
             "SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = $1 AND entity_id = $2",
+            r#"SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = $1 AND entity_id = $2"#,
         )
         .bind(tenant_id)
         .bind(invitee_id)
         .fetch_one(pool)
         .await
         .expect("membership count");
-        let assignments = atom::db::query_scalar(
+        let assignments = crate::common::db::query_scalar(
             "SELECT COUNT(*) FROM role_assignments WHERE tenant_id = $1 AND subject_id = $2",
+            r#"SELECT COUNT(*) FROM role_assignments WHERE tenant_id = $1 AND subject_id = $2"#,
         )
         .bind(tenant_id)
         .bind(invitee_id)
@@ -1497,10 +1631,13 @@ async fn invitation_acceptance_rejects_deleted_tenant_subject_and_role_atomicall
     let deleted_tenant = make_tenant(&pool, &format!("sd-inv-del-ten-{}", Uuid::new_v4())).await;
     let tenant_invitee = make_entity(&pool, &format!("sd-inv-user-{}", Uuid::new_v4()), None).await;
     let deleted_tenant_invitation = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO tenant_invitations
            (id, tenant_id, invitee_user_id, invited_by, expires_at)
          VALUES ($1, $2, $3, $4, now() + interval '1 hour')",
+        r#"INSERT INTO tenant_invitations
+           (id, tenant_id, invitee_user_id, invited_by, expires_at)
+         VALUES ($1, $2, $3, $4, atom_ts_add(now(), (3600)))"#,
     )
     .bind(deleted_tenant_invitation)
     .bind(deleted_tenant)
@@ -1538,10 +1675,13 @@ async fn invitation_acceptance_rejects_deleted_tenant_subject_and_role_atomicall
     )
     .await;
     let deleted_subject_invitation = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO tenant_invitations
            (id, tenant_id, invitee_user_id, invited_by, expires_at)
          VALUES ($1, $2, $3, $4, now() + interval '1 hour')",
+        r#"INSERT INTO tenant_invitations
+           (id, tenant_id, invitee_user_id, invited_by, expires_at)
+         VALUES ($1, $2, $3, $4, atom_ts_add(now(), (3600)))"#,
     )
     .bind(deleted_subject_invitation)
     .bind(deleted_subject_tenant)
@@ -1575,18 +1715,24 @@ async fn invitation_acceptance_rejects_deleted_tenant_subject_and_role_atomicall
     let role_invitee =
         make_entity(&pool, &format!("sd-inv-role-user-{}", Uuid::new_v4()), None).await;
     let deleted_role = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(deleted_role)
-        .bind(format!("sd-inv-role-{deleted_role}"))
-        .bind(deleted_role_tenant)
-        .execute(&pool)
-        .await
-        .expect("role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(deleted_role)
+    .bind(format!("sd-inv-role-{deleted_role}"))
+    .bind(deleted_role_tenant)
+    .execute(&pool)
+    .await
+    .expect("role");
     let deleted_role_invitation = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO tenant_invitations
            (id, tenant_id, invitee_user_id, invited_by, role_id, expires_at)
          VALUES ($1, $2, $3, $4, $5, now() + interval '1 hour')",
+        r#"INSERT INTO tenant_invitations
+           (id, tenant_id, invitee_user_id, invited_by, role_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5, atom_ts_add(now(), (3600)))"#,
     )
     .bind(deleted_role_invitation)
     .bind(deleted_role_tenant)
@@ -1632,26 +1778,27 @@ async fn listing_excludes_objects_under_soft_deleted_tenant() {
     .await;
 
     // Platform read grant: subject can read entities across all tenants.
-    let block_id: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id",
-    )
+    let block_id: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id"#)
     .fetch_one(&pool)
     .await
     .expect("block");
-    let read_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("read action");
-    atom::db::query(
+    let read_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read action");
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(read_id)
     .execute(&pool)
     .await
     .expect("block action");
-    atom::db::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)")
+    crate::common::db::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)", r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)"#)
         .bind(subject)
         .bind(block_id)
         .execute(&pool)
@@ -1729,26 +1876,27 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
     )
     .await;
 
-    let block_id: Uuid = atom::db::query_scalar(
-        "INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id",
-    )
+    let block_id: Uuid = crate::common::db::query_scalar("INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id", r#"INSERT INTO permission_blocks (scope_mode, effect) VALUES ('platform', 'allow') RETURNING id"#)
     .fetch_one(&pool)
     .await
     .expect("block");
-    let read_id: Uuid =
-        atom::db::query_scalar("SELECT id FROM actions WHERE name = 'read' LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("read action");
-    atom::db::query(
+    let read_id: Uuid = crate::common::db::query_scalar(
+        "SELECT id FROM actions WHERE name = 'read' LIMIT 1",
+        r#"SELECT id FROM actions WHERE name = 'read' LIMIT 1"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read action");
+    crate::common::db::query(
         "INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)",
+        r#"INSERT INTO permission_block_actions (permission_block_id, action_id) VALUES ($1, $2)"#,
     )
     .bind(block_id)
     .bind(read_id)
     .execute(&pool)
     .await
     .expect("block action");
-    atom::db::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)")
+    crate::common::db::query("INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)", r#"INSERT INTO direct_policies (subject_kind, subject_id, permission_block_id) VALUES ('entity', $1, $2)"#)
         .bind(subject)
         .bind(block_id)
         .execute(&pool)
@@ -1821,11 +1969,14 @@ async fn tombstoned_tenant_cannot_be_reactivated_or_authorized() {
     );
 
     // Simulate the historical bug shape: status active, tombstone still present.
-    atom::db::query("UPDATE tenants SET status = 'active' WHERE id = $1")
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("force inconsistent status");
+    crate::common::db::query(
+        "UPDATE tenants SET status = 'active' WHERE id = $1",
+        r#"UPDATE tenants SET status = 'active' WHERE id = $1"#,
+    )
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("force inconsistent status");
 
     assert!(
         !lists_target().await,
@@ -1861,10 +2012,13 @@ async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
         Some(tenant_id),
     )
     .await;
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO pki_enrollment_rate_windows
          (scope_kind, scope_id, window_start, request_count)
          VALUES ('tenant', $1, now(), 1), ('entity', $2, now(), 1)",
+        r#"INSERT INTO pki_enrollment_rate_windows
+         (scope_kind, scope_id, window_start, request_count)
+         VALUES ('tenant', $1, now(), 1), ('entity', $2, now(), 1)"#,
     )
     .bind(tenant_id)
     .bind(entity_id)
@@ -1872,16 +2026,20 @@ async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
     .await
     .expect("enrollment rate windows");
     let role_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(role_id)
-        .bind(format!("sd-purge-role-{role_id}"))
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("role");
+    crate::common::db::query(
+        "INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(role_id)
+    .bind(format!("sd-purge-role-{role_id}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("role");
     let resource_id = Uuid::new_v4();
-    atom::db::query(
+    crate::common::db::query(
         "INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)",
+        r#"INSERT INTO resources (id, kind, name, tenant_id) VALUES ($1, 'channel', $2, $3)"#,
     )
     .bind(resource_id)
     .bind(format!("sd-purge-res-{resource_id}"))
@@ -1890,13 +2048,16 @@ async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
     .await
     .expect("resource");
     let group_id = Uuid::new_v4();
-    atom::db::query("INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)")
-        .bind(group_id)
-        .bind(format!("sd-purge-grp-{group_id}"))
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .expect("group");
+    crate::common::db::query(
+        "INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)",
+        r#"INSERT INTO object_groups (id, name, tenant_id) VALUES ($1, $2, $3)"#,
+    )
+    .bind(group_id)
+    .bind(format!("sd-purge-grp-{group_id}"))
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .expect("group");
 
     atom::tenants::repo::soft_delete_tenant(&pool, tenant_id, None)
         .await
@@ -1911,9 +2072,10 @@ async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
         ("resources", resource_id),
         ("object_groups", group_id),
     ] {
-        let exists: bool = atom::db::query_scalar(&format!(
-            "SELECT EXISTS(SELECT 1 FROM {table} WHERE id = $1)"
-        ))
+        let exists: bool = crate::common::db::query_scalar(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = $1)"),
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = $1)"),
+        )
         .bind(id)
         .fetch_one(&pool)
         .await
@@ -1923,10 +2085,13 @@ async fn purge_tenant_removes_owned_objects_instead_of_orphaning_them() {
             "{table} row must be purged with the tenant, not orphaned"
         );
     }
-    let abandoned_rate_windows: i64 = atom::db::query_scalar(
+    let abandoned_rate_windows: i64 = crate::common::db::query_scalar(
         "SELECT COUNT(*) FROM pki_enrollment_rate_windows
          WHERE (scope_kind = 'tenant' AND scope_id = $1)
             OR (scope_kind = 'entity' AND scope_id = $2)",
+        r#"SELECT COUNT(*) FROM pki_enrollment_rate_windows
+         WHERE (scope_kind = 'tenant' AND scope_id = $1)
+            OR (scope_kind = 'entity' AND scope_id = $2)"#,
     )
     .bind(tenant_id)
     .bind(entity_id)

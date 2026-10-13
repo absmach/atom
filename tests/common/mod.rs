@@ -16,6 +16,7 @@
 
 #![allow(dead_code)]
 
+pub mod db;
 pub mod pki;
 
 use atom::{cache::CacheClient, config::CacheConfig, db::Database};
