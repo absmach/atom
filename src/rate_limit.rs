@@ -194,7 +194,8 @@ fn category_for_path(path: &str) -> Option<RateLimitCategory> {
     if path == "/health" || path == "/health/live" || path == "/health/ready" {
         return None;
     }
-    if path == "/graphql" {
+    // MCP tools execute GraphQL operations, so they draw from the same bucket.
+    if path == "/graphql" || path == "/mcp" {
         return Some(RateLimitCategory::Graphql);
     }
     // Files are application traffic, like custom endpoints, and share their
@@ -376,6 +377,11 @@ mod tests {
             );
         }
         assert_eq!(category_for_path("/filesystem"), None);
+    }
+
+    #[test]
+    fn mcp_shares_the_graphql_rate_limit() {
+        assert_eq!(category_for_path("/mcp"), Some(RateLimitCategory::Graphql));
     }
 
     #[test]
