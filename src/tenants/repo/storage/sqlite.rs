@@ -1254,7 +1254,7 @@ pub(super) async fn list_tenants_for_entity_with_ceiling(
             SELECT 1 FROM access_caps c
             WHERE EXISTS (
                 SELECT 1 FROM grants g
-                WHERE g.effect = 'allow' AND g.conditions = '{{}}'
+                WHERE g.effect = 'allow' AND atom_json_eq(g.conditions, '{{}}')
                   AND {scope_match}
             )
             AND NOT EXISTS (

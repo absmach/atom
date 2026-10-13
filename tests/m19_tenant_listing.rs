@@ -505,6 +505,46 @@ async fn direct_block(
         .expect("direct policy");
 }
 
+#[tokio::test]
+#[ignore]
+async fn tenant_visibility_compares_conditions_as_json() {
+    let p = pool().await;
+    let target = make_tenant(&p).await;
+    let caller = make_human(&p, None).await;
+    direct_block(
+        &p,
+        target,
+        caller,
+        "tenant",
+        None,
+        "allow",
+        read_id(&p).await,
+    )
+    .await;
+
+    for (conditions, visible) in [
+        ("{}", true),
+        ("{ }", true),
+        ("{\n  }", true),
+        (r#"{"context.mfa":true}"#, false),
+    ] {
+        crate::common::db::query(
+            "UPDATE permission_blocks SET conditions = $2::jsonb WHERE tenant_id = $1",
+            "UPDATE permission_blocks SET conditions = $2 WHERE tenant_id = $1",
+        )
+        .bind(target)
+        .bind(conditions)
+        .execute(&p)
+        .await
+        .expect("set grant conditions");
+        assert_eq!(
+            visible_tenant_ids(&p, caller).await.contains(&target),
+            visible,
+            "tenant visibility must use JSON meaning for {conditions:?}"
+        );
+    }
+}
+
 /// A manage deny must not hide a tenant the caller can read: deny-override is
 /// per-action. Before the fix the listing checked allow(read|manage) then
 /// deny(read|manage) uncorrelated, so the manage deny removed the tenant.

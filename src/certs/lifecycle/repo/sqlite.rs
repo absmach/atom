@@ -190,7 +190,7 @@ pub(super) async fn authority_metrics(
     sqlx::query_as::<_, AuthorityMetricRow>(
         r#"
         SELECT kind,
-               max(MIN(atom_ts_diff(not_after, $1)), 0.0) AS seconds
+               COALESCE(max(MIN(atom_ts_diff(not_after, $1)), 0.0), 0.0) AS seconds
         FROM pki_authorities
         WHERE status IN ('active', 'retiring')
         GROUP BY kind
