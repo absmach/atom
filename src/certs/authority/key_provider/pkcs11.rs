@@ -1099,22 +1099,37 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn executor_wait_does_not_starve_the_async_runtime() {
         let mut config = executor_config("runtime-progress");
-        config.operation_timeout_ms = 200;
+        config.operation_timeout_ms = 10_000;
         let provider = Pkcs11KeyProvider::new(config);
-        let progressed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observed = Arc::clone(&progressed);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            observed.store(true, Ordering::SeqCst);
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (progressed, observed) = std::sync::mpsc::channel();
+        let progress = tokio::spawn(async move {
+            waiting.await.expect("native worker started");
+            progressed.send(()).expect("native worker waiting");
         });
+        let handshake = std::sync::Mutex::new(Some((started, observed)));
 
-        provider
-            .execute("test_runtime", OperationClass::ReadOnly, |_| {
-                thread::sleep(Duration::from_millis(50));
-                Ok(())
-            })
-            .expect("worker completes");
-
-        assert!(progressed.load(Ordering::SeqCst));
+        // Run the synchronous caller on the sole runtime worker. The native
+        // operation cannot complete until an async task progresses, proving
+        // block_in_place releases that worker without racing two short sleeps.
+        tokio::spawn(async move {
+            provider
+                .execute("test_runtime", OperationClass::ReadOnly, move |_| {
+                    let (started, observed) = handshake
+                        .lock()
+                        .expect("handshake lock")
+                        .take()
+                        .expect("operation runs once");
+                    started.send(()).expect("async observer alive");
+                    observed
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("async runtime progressed while the caller waited");
+                    Ok(())
+                })
+                .expect("worker completes");
+        })
+        .await
+        .expect("caller completes");
+        progress.await.expect("observer completes");
     }
 }

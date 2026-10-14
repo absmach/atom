@@ -30,6 +30,7 @@ pub mod identity;
 pub mod keys;
 pub mod mail;
 pub mod managed_by;
+pub mod mcp;
 pub mod metrics;
 pub mod models;
 pub mod object_changes;
