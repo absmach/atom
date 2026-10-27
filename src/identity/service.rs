@@ -1261,7 +1261,11 @@ async fn oauth_callback_inner(
     let state = state.ok_or_else(|| AppError::bad_request("missing oauth state"))?;
     let provider = oidc_provider(cfg, provider_name)?;
     let state_row = consume_oauth_state(pool, &provider.name, &state).await?;
-    let (subject, email) = if github_provider(provider) {
+    let ProviderIdentity {
+        subject,
+        email,
+        picture,
+    } = if github_provider(provider) {
         super::oauth_github::exchange(cfg, provider, &code, &state_row.pkce_verifier).await?
     } else {
         oidc_identity(cfg, provider, code, &state_row).await?
@@ -1269,7 +1273,8 @@ async fn oauth_callback_inner(
     let profile = serde_json::json!({
         "subject": subject,
         "email": email,
-        "email_verified": true
+        "email_verified": true,
+        "picture": picture
     });
     let entity_id =
         match upsert_oauth_identity(pool, &provider.name, &subject, &email, profile).await? {
@@ -1297,6 +1302,29 @@ async fn oauth_callback_inner(
     ))
 }
 
+/// Who a provider says signed in: its stable subject, the verified email, and
+/// the profile picture it offers, if any.
+#[derive(Debug, PartialEq)]
+pub(super) struct ProviderIdentity {
+    pub(super) subject: String,
+    pub(super) email: String,
+    pub(super) picture: Option<String>,
+}
+
+const MAX_PICTURE_URL_LEN: usize = 2048;
+
+/// A provider's picture URL as Atom keeps it: an absolute `https` URL of
+/// bounded length, or nothing. Atom only records the address; whether to show
+/// it, link to it or copy it is the relying application's choice.
+pub(super) fn provider_picture(url: Option<&str>) -> Option<String> {
+    let url = url?.trim();
+    if url.is_empty() || url.len() > MAX_PICTURE_URL_LEN {
+        return None;
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    (parsed.scheme() == "https" && parsed.host_str().is_some()).then(|| parsed.into())
+}
+
 fn github_provider(provider: &OidcProviderConfig) -> bool {
     provider.name == "github" && provider.issuer == "https://github.com"
 }
@@ -1306,9 +1334,16 @@ async fn oidc_identity(
     provider: &OidcProviderConfig,
     code: String,
     state: &OAuthStateRow,
-) -> Result<(String, String), AppError> {
+) -> Result<ProviderIdentity, AppError> {
     if provider.name == "apple" {
-        return super::oauth_apple::exchange(cfg, provider, &code, &state.nonce).await;
+        // Apple's ID token carries no picture.
+        let (subject, email) =
+            super::oauth_apple::exchange(cfg, provider, &code, &state.nonce).await?;
+        return Ok(ProviderIdentity {
+            subject,
+            email,
+            picture: None,
+        });
     }
     let client = oidc_client(cfg, provider).await?;
 
@@ -1340,7 +1375,17 @@ async fn oidc_identity(
         .map(|email| normalize_email_lossy(email.as_str()))
         .ok_or_else(|| AppError::unauthorized("oauth provider did not return email"))?;
     let subject = claims.subject().as_str().to_string();
-    Ok((subject, email))
+    let picture = provider_picture(
+        claims
+            .picture()
+            .and_then(|picture| picture.get(None))
+            .map(|picture| picture.as_str()),
+    );
+    Ok(ProviderIdentity {
+        subject,
+        email,
+        picture,
+    })
 }
 
 pub async fn oauth_exchange(
@@ -1381,7 +1426,16 @@ pub async fn oauth_exchange(
     }
     let entity_id: Uuid = row.entity_id;
     let login = create_login_response(pool, cfg, primary_key, entity_id, Some(true)).await?;
-    Ok(OAuthLoginResponse { login, email })
+    // The callback that minted this code has just refreshed the identity it
+    // signed in with, so the most recently refreshed one is that identity.
+    let picture = storage::latest_oauth_picture(pool, entity_id)
+        .await
+        .map_err(db_err)?;
+    Ok(OAuthLoginResponse {
+        login,
+        email,
+        picture,
+    })
 }
 
 pub async fn refresh_session(
@@ -3373,7 +3427,7 @@ mod tests {
             "test",
             &Uuid::new_v4().to_string(),
             &email,
-            serde_json::json!({}),
+            serde_json::json!({"picture": "https://avatars.githubusercontent.com/u/42?v=4"}),
         )
         .await
         .expect("identity") else {
@@ -3411,6 +3465,10 @@ mod tests {
             .await
             .expect("bound exchange");
         assert_eq!(response.email.as_deref(), Some(email.as_str()));
+        assert_eq!(
+            response.picture.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/42?v=4")
+        );
         assert_eq!(response.login.entity_id, entity);
         assert_eq!(response.login.email_verified, Some(true));
         assert!(!response.login.token.is_empty());
@@ -3523,6 +3581,7 @@ mod tests {
                         "iat":now, "exp":if code.contains("expired") {now-3600} else {now+600},
                         "nonce":if code.contains("nonce") {"wrong-nonce"} else {"nonce"},
                         "email":"verified@example.test",
+                        "picture":"https://lh3.googleusercontent.com/a/photo",
                         "email_verified":if code.contains("unverified") {Value::Bool(false)} else if apple {Value::String("true".into())} else {Value::Bool(true)}
                     });
                     let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
@@ -3561,7 +3620,13 @@ mod tests {
                 .expect("valid OIDC identity");
             assert_eq!(
                 identity,
-                ("stable-subject".into(), "verified@example.test".into())
+                ProviderIdentity {
+                    subject: "stable-subject".into(),
+                    email: "verified@example.test".into(),
+                    // Apple's ID token is read without its picture.
+                    picture: (name == "google")
+                        .then(|| "https://lh3.googleusercontent.com/a/photo".into()),
+                }
             );
             for invalid in ["nonce", "audience", "expired", "unverified", "signature"] {
                 assert!(
@@ -3573,5 +3638,25 @@ mod tests {
             }
         }
         server.abort();
+    }
+
+    #[test]
+    fn provider_picture_keeps_only_bounded_https_urls() {
+        assert_eq!(
+            provider_picture(Some(" https://avatars.githubusercontent.com/u/42?v=4 ")),
+            Some("https://avatars.githubusercontent.com/u/42?v=4".into())
+        );
+        for refused in [
+            None,
+            Some(""),
+            Some("http://example.test/photo.png"),
+            Some("javascript:alert(1)"),
+            Some("data:image/png;base64,AAAA"),
+            Some("/relative/photo.png"),
+        ] {
+            assert_eq!(provider_picture(refused), None, "{refused:?}");
+        }
+        let long = format!("https://example.test/{}", "a".repeat(MAX_PICTURE_URL_LEN));
+        assert_eq!(provider_picture(Some(&long)), None);
     }
 }

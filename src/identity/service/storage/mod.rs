@@ -857,6 +857,17 @@ pub(super) async fn consume_oauth_state(
     }
 }
 
+/// The picture the entity's most recently refreshed provider identity offered.
+pub(super) async fn latest_oauth_picture(
+    pool: &Database,
+    entity_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    match pool {
+        Database::Postgres(p) => postgres::latest_oauth_picture(p, entity_id).await,
+        Database::Sqlite(d) => sqlite::latest_oauth_picture(&d.pool, entity_id).await,
+    }
+}
+
 pub(super) async fn linked_oauth_entity(
     conn: &mut DbTransaction<'_>,
     provider: &str,

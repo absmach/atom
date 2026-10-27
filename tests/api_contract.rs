@@ -908,9 +908,11 @@ fn contract_public_runtime_dtos_validate_against_openapi_components() {
     let mut oauth_login = OAuthLoginResponse {
         login,
         email: Some("verified@example.test".into()),
+        picture: Some("https://avatars.githubusercontent.com/u/42?v=4".into()),
     };
     assert_runtime_value_matches_component(&document, "OAuthLoginResponse", &oauth_login, true);
     oauth_login.email = None;
+    oauth_login.picture = None;
     assert_runtime_value_matches_component(&document, "OAuthLoginResponse", &oauth_login, true);
     assert_eq!(
         document["paths"]["/auth/oauth/exchange"]["post"]["responses"]["200"]["content"]
