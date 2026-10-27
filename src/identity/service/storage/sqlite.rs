@@ -927,6 +927,22 @@ pub(super) async fn linked_oauth_entity(
     .await
 }
 
+pub(super) async fn latest_oauth_picture(
+    pool: &sqlx::SqlitePool,
+    entity_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, Option<String>>(
+        r#"SELECT json_extract(profile, '$.picture') FROM oauth_identities
+           WHERE entity_id = $1
+           ORDER BY updated_at DESC
+           LIMIT 1"#,
+    )
+    .bind(entity_id)
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+}
+
 pub(super) async fn update_oauth_identity(
     conn: &mut sqlx::SqliteConnection,
     provider: &str,

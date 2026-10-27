@@ -1,4 +1,5 @@
 //! GitHub OAuth uses a verified email from the API rather than an OIDC ID token.
+use super::service::{provider_picture, ProviderIdentity};
 use crate::{
     config::{Config, OidcProviderConfig},
     error::AppError,
@@ -39,6 +40,8 @@ struct Token {
 #[derive(Deserialize)]
 struct User {
     id: u64,
+    #[serde(default)]
+    avatar_url: Option<String>,
 }
 #[derive(Deserialize)]
 struct Email {
@@ -61,7 +64,7 @@ pub(super) async fn exchange(
     provider: &OidcProviderConfig,
     code: &str,
     verifier: &str,
-) -> Result<(String, String), AppError> {
+) -> Result<ProviderIdentity, AppError> {
     let client = super::service::oidc_http_client()?;
     exchange_at(
         &client,
@@ -83,7 +86,7 @@ async fn exchange_at(
     verifier: &str,
     token_url: &str,
     api_url: &str,
-) -> Result<(String, String), AppError> {
+) -> Result<ProviderIdentity, AppError> {
     // Do not echo provider responses or transport errors: they can carry secrets.
     let refused = |_| AppError::unauthorized("GitHub authentication failed");
     let token: Token = client
@@ -136,7 +139,11 @@ async fn exchange_at(
     if user.id == 0 {
         return Err(AppError::unauthorized("invalid GitHub user"));
     }
-    Ok((user.id.to_string(), verified_email(emails)?))
+    Ok(ProviderIdentity {
+        subject: user.id.to_string(),
+        email: verified_email(emails)?,
+        picture: provider_picture(user.avatar_url.as_deref()),
+    })
 }
 
 #[cfg(test)]
@@ -210,7 +217,11 @@ mod tests {
             }))
             .route("/user", get(|headers: HeaderMap| async move {
                 assert_eq!(headers.get("authorization").expect("bearer"), "Bearer provider-token");
-                Json(serde_json::json!({"id":42,"email":null}))
+                Json(serde_json::json!({
+                    "id": 42,
+                    "email": null,
+                    "avatar_url": "https://avatars.githubusercontent.com/u/42?v=4"
+                }))
             }))
             .route("/user/emails", get(|| async {
                 Json(serde_json::json!([{"email":"private@example.test","primary":true,"verified":true}]))
@@ -243,7 +254,11 @@ mod tests {
         server.abort();
         assert_eq!(
             result.expect("GitHub identity"),
-            ("42".into(), "private@example.test".into())
+            ProviderIdentity {
+                subject: "42".into(),
+                email: "private@example.test".into(),
+                picture: Some("https://avatars.githubusercontent.com/u/42?v=4".into()),
+            }
         );
     }
 }

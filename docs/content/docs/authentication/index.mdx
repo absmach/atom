@@ -88,7 +88,12 @@ and the single-use exchange code, rejecting missing or mismatched values before
 consuming the code. This prevents an attacker substituting their own code into
 another browser's login. Existing clients that omit `client_state` at both ends
 continue to work. The exchange response preserves the usual login fields and
-adds nullable `email`, taken from the provider's verified identity.
+adds nullable `email`, taken from the provider's verified identity, and
+nullable `picture`: the profile picture URL the provider offered (GitHub's
+`avatar_url`, an OIDC `picture` claim; Apple offers none). Atom keeps only an
+absolute `https` URL of at most 2048 characters, refreshed on every provider
+sign-in, and stores no image: whether to show it, link to it or copy it is the
+relying application's choice.
 
 A new provider can link by email only to an already verified account email;
 unverified password accounts must verify their email first. Repeated provider

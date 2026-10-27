@@ -172,4 +172,6 @@ pub struct OAuthLoginResponse {
     #[serde(flatten)]
     pub login: LoginResponse,
     pub email: Option<String>,
+    /// The profile picture URL the sign-in provider offered, if any.
+    pub picture: Option<String>,
 }

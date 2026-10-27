@@ -2087,9 +2087,14 @@ components:
     OAuthLoginResponse:
       type: object
       additionalProperties: false
-      required: [token, entity_id, session_id, expires_at, access_token, access_token_expires_at, email]
+      required: [token, entity_id, session_id, expires_at, access_token, access_token_expires_at, email, picture]
       properties:
         email: { type: string, format: email, nullable: true }
+        # The https profile picture URL the sign-in provider offered (GitHub
+        # avatar_url, an OIDC `picture` claim), or null. Atom records the
+        # address only; the relying application decides whether to show,
+        # link or copy it.
+        picture: { type: string, format: uri, nullable: true, maxLength: 2048 }
         token: { type: string }
         entity_id: { type: string, format: uuid }
         session_id: { type: string, format: uuid }
