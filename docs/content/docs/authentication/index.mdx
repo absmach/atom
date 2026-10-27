@@ -93,3 +93,13 @@ adds nullable `email`, taken from the provider's verified identity.
 A new provider can link by email only to an already verified account email;
 unverified password accounts must verify their email first. Repeated provider
 logins use the stable provider subject and active-entity checks.
+
+New social accounts use the provider's verified email and do not need a second
+local verification email. When a verified provider email matches an existing
+unverified account, the callback redirects to `ATOM_OAUTH_ERROR_REDIRECT` with
+`error_code=email_verification_required`, a fixed explanatory `error`, and the
+original `client_state` if one was supplied. It does not link the account,
+mark its email verified, create an exchange code, or send verification mail.
+No email address, provider token or provider error response is included in this
+redirect. Frontends should validate the browser binding and direct the user to
+their existing email-verification flow. Other callback failures remain generic.
