@@ -1271,7 +1271,16 @@ async fn oauth_callback_inner(
         "email": email,
         "email_verified": true
     });
-    let entity_id = upsert_oauth_identity(pool, &provider.name, &subject, &email, profile).await?;
+    let entity_id =
+        match upsert_oauth_identity(pool, &provider.name, &subject, &email, profile).await? {
+            OAuthIdentityOutcome::Linked(entity_id) => entity_id,
+            OAuthIdentityOutcome::EmailVerificationRequired => {
+                return Ok(redirect_for_oauth_verification(
+                    cfg,
+                    state_row.client_state.as_deref(),
+                ));
+            }
+        };
     let code = create_exchange_code(
         pool,
         entity_id,
@@ -2237,13 +2246,19 @@ async fn consume_oauth_state(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OAuthIdentityOutcome {
+    Linked(Uuid),
+    EmailVerificationRequired,
+}
+
 async fn upsert_oauth_identity(
     pool: &Database,
     provider: &str,
     subject: &str,
     email: &str,
     profile: Value,
-) -> Result<Uuid, AppError> {
+) -> Result<OAuthIdentityOutcome, AppError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     if let Some(row) = storage::linked_oauth_entity(&mut tx, provider, subject)
         .await
@@ -2260,7 +2275,7 @@ async fn upsert_oauth_identity(
             .await
             .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
-        return Ok(entity_id);
+        return Ok(OAuthIdentityOutcome::Linked(entity_id));
     }
 
     // Locks both the matched `entity_emails` row and its `entities` row.
@@ -2280,9 +2295,7 @@ async fn upsert_oauth_identity(
         Some(row) => {
             let verified_at: Option<DateTime<Utc>> = row.verified_at;
             if verified_at.is_none() {
-                return Err(AppError::unauthorized(
-                    "email address is pending verification; automatic OAuth linking is not allowed",
-                ));
+                return Ok(OAuthIdentityOutcome::EmailVerificationRequired);
             }
             let entity_id = row.entity_id;
             if super::repo::lock_active_entity(&mut tx, entity_id)
@@ -2322,7 +2335,7 @@ async fn upsert_oauth_identity(
     .await
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
-    Ok(entity_id)
+    Ok(OAuthIdentityOutcome::Linked(entity_id))
 }
 
 async fn create_exchange_code(
@@ -2432,6 +2445,22 @@ fn redirect_with_code(cfg: &Config, code: &str, return_to: Option<&str>) -> Stri
 
 fn redirect_with_error(cfg: &Config, error: &str) -> String {
     url_with_params(&cfg.oauth_error_redirect, &[("error", error)])
+}
+
+fn redirect_for_oauth_verification(cfg: &Config, client_state: Option<&str>) -> String {
+    // This is an actionable outcome only after provider authentication. Return
+    // no identity information, and let the client bind it to its browser flow.
+    let mut params = vec![
+        (
+            "error",
+            "Verify your existing account email before linking social sign-in.",
+        ),
+        ("error_code", "email_verification_required"),
+    ];
+    if let Some(state) = client_state {
+        params.push(("client_state", state));
+    }
+    url_with_params(&cfg.oauth_error_redirect, &params)
 }
 
 fn url_with_params(base: &str, params: &[(&str, &str)]) -> String {
@@ -3210,6 +3239,41 @@ pub struct CredentialSummary {
 mod tests {
     use super::*;
 
+    #[test]
+    fn oauth_verification_redirect_has_only_fixed_reason_and_browser_binding() {
+        let mut cfg = Config::for_tests();
+        cfg.oauth_error_redirect = "https://builder.example.test/auth/callback".into();
+        let url = Url::parse(&redirect_for_oauth_verification(
+            &cfg,
+            Some("browser&state"),
+        ))
+        .expect("redirect URL");
+        assert_eq!(url.host_str(), Some("builder.example.test"));
+        assert_eq!(url.path(), "/auth/callback");
+        let params = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(params.len(), 3);
+        assert_eq!(params["error_code"], "email_verification_required");
+        assert_eq!(params["client_state"], "browser&state");
+        assert_eq!(
+            params["error"],
+            "Verify your existing account email before linking social sign-in."
+        );
+    }
+
+    #[test]
+    fn oauth_verification_redirect_supports_clients_without_browser_binding() {
+        let cfg = Config::for_tests();
+        let url = Url::parse(&redirect_for_oauth_verification(&cfg, None)).expect("redirect URL");
+        let params = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params["error_code"], "email_verification_required");
+        assert!(!params.contains_key("client_state"));
+    }
+
     #[tokio::test]
     #[ignore]
     async fn oidc_auto_link_requires_a_previously_verified_email() {
@@ -3247,11 +3311,10 @@ mod tests {
             serde_json::json!({}),
         )
         .await;
-        assert!(matches!(
-            result,
-            Err(AppError::Unauthorized(message))
-                if message.contains("pending verification")
-        ));
+        assert_eq!(
+            result.expect("verification outcome"),
+            OAuthIdentityOutcome::EmailVerificationRequired
+        );
         let links: i64 = crate::test_db::query_scalar(
             "SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1",
             r#"SELECT COUNT(*) FROM oauth_identities WHERE entity_id = $1"#,
@@ -3261,6 +3324,24 @@ mod tests {
         .await
         .expect("count rejected links");
         assert_eq!(links, 0);
+        let verified: bool = crate::test_db::query_scalar(
+            "SELECT verified_at IS NOT NULL FROM entity_emails WHERE entity_id = $1",
+            "SELECT verified_at IS NOT NULL FROM entity_emails WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("pending email remains unverified");
+        assert!(!verified);
+        let codes: i64 = crate::test_db::query_scalar(
+            "SELECT COUNT(*) FROM auth_exchange_codes WHERE entity_id = $1",
+            "SELECT COUNT(*) FROM auth_exchange_codes WHERE entity_id = $1",
+        )
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count exchange codes");
+        assert_eq!(codes, 0);
 
         crate::test_db::query(
             "UPDATE entity_emails SET verified_at = now() WHERE entity_id = $1",
@@ -3279,7 +3360,7 @@ mod tests {
         )
         .await
         .expect("verified address may link");
-        assert_eq!(linked, entity_id);
+        assert_eq!(linked, OAuthIdentityOutcome::Linked(entity_id));
     }
     #[tokio::test]
     #[ignore]
@@ -3287,7 +3368,7 @@ mod tests {
         let pool = crate::db::testing::database().await;
         let cfg = Config::for_tests();
         let email = format!("social-{}@example.test", Uuid::new_v4());
-        let entity = upsert_oauth_identity(
+        let OAuthIdentityOutcome::Linked(entity) = upsert_oauth_identity(
             &pool,
             "test",
             &Uuid::new_v4().to_string(),
@@ -3295,7 +3376,18 @@ mod tests {
             serde_json::json!({}),
         )
         .await
-        .expect("identity");
+        .expect("identity") else {
+            panic!("a new verified provider identity must not require local verification");
+        };
+        let verified: bool = crate::test_db::query_scalar(
+            "SELECT verified_at IS NOT NULL FROM entity_emails WHERE entity_id = $1",
+            "SELECT verified_at IS NOT NULL FROM entity_emails WHERE entity_id = $1",
+        )
+        .bind(entity)
+        .fetch_one(&pool)
+        .await
+        .expect("new provider email is verified");
+        assert!(verified);
         let code = create_exchange_code(&pool, entity, 600, Some("browser"), Some(&email))
             .await
             .expect("exchange code");
