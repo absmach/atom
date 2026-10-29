@@ -175,3 +175,10 @@ pub struct OAuthLoginResponse {
     /// The profile picture URL the sign-in provider offered, if any.
     pub picture: Option<String>,
 }
+
+/// Identifies an account needing verification without authenticating it.
+#[derive(Debug, Serialize)]
+pub struct OAuthVerificationResponse {
+    pub entity_id: Uuid,
+    pub email: String,
+}
